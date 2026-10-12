@@ -74,6 +74,8 @@ pub struct Library {
     /// The library is a real directory: photos can be copied into `Originals/` and thumbnails are
     /// cached in `thumbs/`.
     pub on_disk: bool,
+    /// Device-local cache root, independent of catalog storage and original file management.
+    pub cache_dir: Option<PathBuf>,
     journal: Journal,
     /// presets.json, view.json, prefs.json.
     files: Box<dyn Store>,
@@ -137,6 +139,32 @@ struct ViewFile {
 }
 
 impl Library {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn cloud_connections(&mut self) -> Result<Vec<crate::assets::s3::S3Connection>> {
+        let Some(bytes) =
+            self.files.read("cloud-connections.json").map_err(|e| EngineError::Other(format!("cloud settings could not be read: {e}")))?
+        else {
+            return Ok(Vec::new());
+        };
+        if bytes.len() > 1 << 20 {
+            return Err(EngineError::Other("cloud settings exceed 1 MiB; file left unchanged".into()));
+        }
+        let connections: Vec<crate::assets::s3::S3Connection> = serde_json::from_slice(&bytes)
+            .map_err(|_| EngineError::Other("cloud settings are damaged or from a newer version; file left unchanged".into()))?;
+        if connections.len() > 64 {
+            return Err(EngineError::Other("at most 64 cloud connections are supported".into()));
+        }
+        for c in &connections {
+            c.validate().map_err(|e| EngineError::Other(e.to_string()))?;
+        }
+        Ok(connections)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn save_cloud_connections(&mut self, connections: &[crate::assets::s3::S3Connection]) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(connections).map_err(|e| EngineError::Other(e.to_string()))?;
+        self.files.write_atomic("cloud-connections.json", &bytes).map_err(|e| EngineError::Other(format!("cloud settings were not saved: {e}")))
+    }
     pub fn journal(&self) -> &Journal {
         &self.journal
     }
@@ -145,7 +173,7 @@ impl Library {
         &mut self.journal
     }
     pub fn thumbs_dir(&self) -> PathBuf {
-        self.dir.join("thumbs")
+        self.cache_dir.as_ref().unwrap_or(&self.dir).join("thumbs")
     }
     pub fn originals_dir(&self) -> PathBuf {
         self.dir.join("Originals")
@@ -324,7 +352,7 @@ impl Session {
             Some(l) => Some(l),
             None => Some(LibraryLock::acquire(&dir, &program_name()).map_err(|e| EngineError::LibraryInUse(e.to_string()))?),
         };
-        if let Err(e) = self.open_stores(stores, seed_demo, &mut lock) {
+        if let Err(e) = self.open_stores(stores, seed_demo, &mut lock, None) {
             if reusing && let Some(lib) = self.library.as_mut() {
                 lib.lock = lock.take();
             }
@@ -337,7 +365,19 @@ impl Session {
     /// this session's catalog. Not locked: the host guards against a second opener (see
     /// [`Session::open_library`] for directories).
     pub fn open_library_in(&mut self, stores: LibraryStores, seed_demo: bool) -> Result<&LoadReport> {
-        self.open_stores(stores, seed_demo, &mut None)?;
+        self.open_stores(stores, seed_demo, &mut None, None)?;
+        self.loaded_report()
+    }
+
+    /// Native hosts can give any catalog store a separate device-local cache, without enabling
+    /// filesystem original copies or moves. The browser supplies its own cache adapter instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_library_in_with_cache(&mut self, stores: LibraryStores, seed_demo: bool, cache_dir: PathBuf) -> Result<&LoadReport> {
+        if cache_dir.as_os_str().is_empty() {
+            return Err(EngineError::Other("cache directory is empty".into()));
+        }
+        std::fs::create_dir_all(&cache_dir).map_err(|e| EngineError::Other(format!("could not create local cache: {e}")))?;
+        self.open_stores(stores, seed_demo, &mut None, Some(cache_dir))?;
         self.loaded_report()
     }
 
@@ -349,9 +389,10 @@ impl Session {
     }
 
     /// Open `stores`; the new library takes `lock` once nothing can fail any more.
-    fn open_stores(&mut self, stores: LibraryStores, seed_demo: bool, lock: &mut Option<LibraryLock>) -> Result<()> {
+    fn open_stores(&mut self, stores: LibraryStores, seed_demo: bool, lock: &mut Option<LibraryLock>, cache_dir: Option<PathBuf>) -> Result<()> {
         let LibraryStores { dir, catalog, mut files, on_disk } = stores;
-        self.media.smart_dir = on_disk.then(|| crate::smart::dir(&dir));
+        let cache_dir = cache_dir.or_else(|| on_disk.then(|| dir.clone()));
+        self.media.smart_dir = cache_dir.as_ref().map(|d| crate::smart::dir(d));
         // the current library may be these same files: let its background snapshot land first
         if let Some(old) = self.library.as_mut()
             && let Err(e) = old.journal.wait()
@@ -405,7 +446,7 @@ impl Session {
         self.import_defaults = prefs.import;
         self.cache_mb = prefs.cache_mb;
         self.forget_local_days = prefs.forget_local_days.unwrap_or(lightcraft_catalog::DEFAULT_FORGET_DAYS);
-        self.smart_previews_dir = prefs.smart_previews_dir.filter(|_| on_disk).map(PathBuf::from);
+        self.smart_previews_dir = prefs.smart_previews_dir.filter(|_| cache_dir.is_some()).map(PathBuf::from);
         if let Some(d) = &self.smart_previews_dir {
             self.media.smart_dir = Some(d.clone());
         }
@@ -450,13 +491,16 @@ impl Session {
         let presets_written = presets_json(self);
         // photo ids are per library: drop decoded sources of the previous one
         self.media.clear_sources();
-        if on_disk {
-            self.media.attach_disk_cache(&dir.join("thumbs"), self.cache_bytes());
+        self.media.managed_assets = self.catalog.assets().clone();
+        self.media.asset_resolver = cache_dir.as_ref().map(|d| std::sync::Arc::new(crate::assets::AssetResolver::new(d.join("assets-cache"))));
+        if let Some(cache_dir) = &cache_dir {
+            self.media.attach_disk_cache(&cache_dir.join("thumbs"), self.cache_bytes());
         }
         let view_written = self.view_json();
         self.library = Some(Library {
             dir,
             on_disk,
+            cache_dir,
             journal,
             files,
             report,
@@ -485,10 +529,25 @@ impl Session {
         }
         // smart previews written by an older camera-look fit are brought up to date in the background
         #[cfg(not(target_arch = "wasm32"))]
-        if on_disk {
+        if self.library.as_ref().is_some_and(|l| l.cache_dir.is_some()) {
             crate::cmd::previews::refresh_stale_smart_previews(self);
         }
         self.library_identity = std::sync::Arc::new(());
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(lib) = &mut self.library {
+            match lib.cloud_connections() {
+                Ok(connections) => {
+                    if let Some(resolver) = &self.media.asset_resolver {
+                        for connection in connections {
+                            resolver
+                                .connect(connection.id.clone(), std::sync::Arc::new(connection))
+                                .map_err(|e| EngineError::Other(e.to_string()))?;
+                        }
+                    }
+                }
+                Err(e) => lib.settings_warnings.push(e.to_string()),
+            }
+        }
         Ok(())
     }
 
@@ -670,7 +729,7 @@ impl Session {
     /// Saved with the library preferences.
     pub fn set_cache_mb(&mut self, mb: u32) -> Result<()> {
         self.cache_mb = mb;
-        if let Some(lib) = self.library.as_ref().filter(|l| l.on_disk) {
+        if let Some(lib) = self.library.as_ref().filter(|l| l.cache_dir.is_some()) {
             let dir = lib.thumbs_dir();
             self.media.set_disk_cache_bytes(&dir, self.cache_bytes());
         }

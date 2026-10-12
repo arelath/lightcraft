@@ -74,6 +74,7 @@ pub fn find_sidecar(original: &str, naming: SidecarNaming) -> Option<PathBuf> {
             [p, upper]
         })
         .find(|p| p.is_file())
+        .map(|p| crate::rename::MoveFs::spelling(&crate::rename::RealFs, &p))
 }
 
 /// What a sidecar (or embedded XMP packet) says about a photo. `None` = not stated.
@@ -453,7 +454,7 @@ fn stem_key(original: &str) -> String {
 fn file_path(p: &Photo) -> Option<&str> {
     match &p.source {
         Source::File { path } => Some(path),
-        Source::Demo { .. } => None,
+        Source::Demo { .. } | Source::Managed { .. } => None,
     }
 }
 
@@ -475,10 +476,10 @@ pub fn read_packet(original: &str, kind: MediaKind, naming: SidecarNaming) -> Op
 /// Photo ids touched by an op (for auto-write).
 pub(crate) fn op_photos(op: &Op, out: &mut Vec<PhotoId>) {
     match op {
-        Op::SetRating { id, .. } | Op::SetFlag { id, .. } | Op::SetLabel { id, .. } | Op::SetDevelop { id, .. } | Op::SetMeta { id, .. } => {
-            if !out.contains(id) {
-                out.push(*id);
-            }
+        Op::SetRating { id, .. } | Op::SetFlag { id, .. } | Op::SetLabel { id, .. } | Op::SetDevelop { id, .. } | Op::SetMeta { id, .. }
+            if !out.contains(id) =>
+        {
+            out.push(*id);
         }
         Op::Batch { ops } => ops.iter().for_each(|o| op_photos(o, out)),
         _ => {}
@@ -566,7 +567,11 @@ impl Session {
             .map_err(|e| EngineError::Other(format!("{}: unfinished XMP repair: {e}", preferred.display())))?;
         // Keep an existing packet's spelling/style so foreign properties survive this save and
         // subsequent Undo/Redo writes. Shared stems owned by another photo were excluded above.
-        let path = candidates.into_iter().find(|path| path.is_file()).unwrap_or(preferred);
+        let path = candidates
+            .into_iter()
+            .find(|path| path.is_file())
+            .map(|p| crate::rename::MoveFs::spelling(&crate::rename::RealFs, &p))
+            .unwrap_or(preferred);
         self.validate_sidecar_packets_for_paths(std::slice::from_ref(&path), &crate::rename::RealFs)?;
         let p = self.catalog.photo(id).ok_or(lightcraft_catalog::CatalogError::NoPhoto(id))?;
         let err = |e: std::io::Error| EngineError::Other(format!("{}: {e}", path.display()));

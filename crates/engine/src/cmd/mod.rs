@@ -7,6 +7,8 @@
 mod activity;
 mod before;
 pub(crate) mod browse;
+#[cfg(not(target_arch = "wasm32"))]
+mod cloud;
 mod color;
 pub(crate) mod convert;
 mod cull;
@@ -166,6 +168,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(face_detect::specs());
         v.extend(face_recognize::specs());
         v.extend(activity::specs());
+        #[cfg(not(target_arch = "wasm32"))]
+        v.extend(cloud::specs());
         v
     })
 }

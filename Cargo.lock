@@ -1206,6 +1206,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "deranged"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+
+[[package]]
 name = "dhat"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3118,14 +3124,17 @@ version = "0.6.0"
 dependencies = [
  "dhat",
  "lightcraft-codecs",
+ "lightcraft-color",
  "lightcraft-denoise",
  "lightcraft-engine",
  "lightcraft-mcp",
  "lightcraft-merge",
  "lightcraft-raster",
+ "lightcraft-raw",
  "lightcraft-sysmem",
  "lightcraft-ui-egui",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -3216,6 +3225,7 @@ version = "0.6.0"
 dependencies = [
  "ab_glyph",
  "harfrust",
+ "hmac",
  "jxl-oxide",
  "libc",
  "lightcraft-catalog",
@@ -3245,7 +3255,9 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
+ "time",
  "unicode-segmentation",
  "web-time",
 ]
@@ -3877,6 +3889,12 @@ dependencies = [
  "bytemuck",
  "num-traits",
 ]
+
+[[package]]
+name = "num-conv"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
 name = "num-derive"
@@ -4655,6 +4673,12 @@ checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
 dependencies = [
  "portable-atomic",
 ]
+
+[[package]]
+name = "powerfmt"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "ppv-lite86"
@@ -5826,6 +5850,25 @@ dependencies = [
  "weezl",
  "zune-jpeg",
 ]
+
+[[package]]
+name = "time"
+version = "0.3.55"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
+dependencies = [
+ "deranged",
+ "num-conv",
+ "powerfmt",
+ "serde_core",
+ "time-core",
+]
+
+[[package]]
+name = "time-core"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "tokio"

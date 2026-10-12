@@ -272,7 +272,7 @@ pub fn expand_tokens(template: &str, p: &Photo, seq: usize, seq_width: usize) ->
                 Source::File { path } => {
                     Path::new(path).parent().and_then(Path::file_name).map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
                 }
-                Source::Demo { .. } => String::new(),
+                Source::Demo { .. } | Source::Managed { .. } => String::new(),
             },
             "camera" => p.meta.camera.clone(),
             "lens" => p.meta.lens.clone(),
@@ -301,6 +301,24 @@ fn sidecars(path: &str) -> Vec<(PathBuf, SidecarNaming, bool)> {
     v
 }
 
+fn same_physical_file(fs: &dyn MoveFs, a: &Path, b: &Path) -> bool {
+    a == b || fs.same_file(a, b) || fs.same_file(b, a)
+}
+
+/// Case aliases are one operation; distinct packets on a sensitive volume stay distinct.
+fn existing_sidecars(fs: &dyn MoveFs, path: &str) -> Vec<(PathBuf, SidecarNaming, bool)> {
+    let mut found: Vec<(PathBuf, SidecarNaming, bool)> = Vec::new();
+    for (candidate, naming, _) in sidecars(path) {
+        if !fs.is_file(&candidate) || found.iter().any(|(p, _, _)| same_physical_file(fs, p, &candidate)) {
+            continue;
+        }
+        let candidate = fs.spelling(&candidate);
+        let upper = candidate.extension().is_some_and(|ext| ext == "XMP");
+        found.push((candidate, naming, upper));
+    }
+    found
+}
+
 /// The file-system primitives renaming uses. [`RealFs`] is the disk; tests substitute a model of
 /// a case-insensitive or case-sensitive volume (and inject failures).
 pub(crate) trait MoveFs {
@@ -311,6 +329,10 @@ pub(crate) trait MoveFs {
     /// volume). Decided by file identity, never by comparing names: on a case-sensitive volume
     /// they are two different photos. When in doubt: `false`.
     fn same_file(&self, a: &Path, b: &Path) -> bool;
+    /// Preserve a file's actual directory spelling when a case alias was queried.
+    fn spelling(&self, path: &Path) -> PathBuf {
+        path.to_path_buf()
+    }
     /// Rename `a` to `b`, failing (never replacing) when `b` exists.
     fn rename_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()>;
     /// Copy `a` to a new file `b` (an independent copy, never a link), failing when `b` exists.
@@ -366,6 +388,9 @@ impl MoveFs for RealFs {
         }
         #[cfg(not(unix))]
         {
+            if folded_path(&a.to_string_lossy()) != folded_path(&b.to_string_lossy()) {
+                return false;
+            }
             // no stable file id in std here: `b` is `a` under another spelling when they look
             // alike and the folder has no entry spelled exactly like `b` (on a case-sensitive
             // folder holding both `IMG.JPG` and `img.jpg`, both entries are listed)
@@ -376,6 +401,28 @@ impl MoveFs for RealFs {
             let Ok(entries) = std::fs::read_dir(dir) else { return false };
             !entries.flatten().any(|e| e.file_name() == name)
         }
+    }
+
+    fn spelling(&self, path: &Path) -> PathBuf {
+        #[cfg(windows)]
+        if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+            && let Ok(entries) = std::fs::read_dir(parent)
+        {
+            let mut alias = None;
+            for entry in entries.take(200_000).flatten() {
+                let found = entry.file_name();
+                if found == name {
+                    return parent.join(found);
+                }
+                if alias.is_none() && found.to_string_lossy().eq_ignore_ascii_case(&name.to_string_lossy()) {
+                    alias = Some(found);
+                }
+            }
+            if let Some(alias) = alias {
+                return parent.join(alias);
+            }
+        }
+        path.to_path_buf()
     }
 
     fn rename_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
@@ -467,7 +514,7 @@ fn read_full(r: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<usiz
 /// `from` → `to` differs only in letter case and `to` is that very file (a case-insensitive
 /// volume): the rename must go through a temporary name.
 fn is_respelling(fs: &dyn MoveFs, from: &Path, to: &Path) -> bool {
-    from != to && folded_path(&from.to_string_lossy()) == folded_path(&to.to_string_lossy()) && fs.exists(to) && fs.same_file(from, to)
+    from != to && folded_path(&from.to_string_lossy()) == folded_path(&to.to_string_lossy()) && fs.exists(to) && same_physical_file(fs, from, to)
 }
 
 /// Windows accepts both separators; spelling differences must not hide file identity.
@@ -554,7 +601,7 @@ fn advance_packets(packets: &mut Vec<RetainedPacket>, aliases: &[PathBuf], to: &
 }
 
 fn packet_aliases(packets: &[RetainedPacket], fs: &dyn MoveFs, from: &Path) -> Vec<PathBuf> {
-    packets.iter().filter(|p| p.path == from || fs.same_file(&p.path, from)).map(|p| p.path.clone()).collect()
+    packets.iter().filter(|p| p.path == from || same_physical_file(fs, &p.path, from)).map(|p| p.path.clone()).collect()
 }
 
 impl SidecarMove {
@@ -584,9 +631,9 @@ impl SidecarMove {
     fn touches(&self, fs: &dyn MoveFs, path: &Path) -> bool {
         let same_path = |endpoint: &Path| {
             endpoint == path
-                || fs.same_file(endpoint, path)
+                || same_physical_file(fs, endpoint, path)
                 || (endpoint.file_name() == path.file_name()
-                    && endpoint.parent().zip(path.parent()).is_some_and(|(a, b)| a == b || fs.same_file(a, b)))
+                    && endpoint.parent().zip(path.parent()).is_some_and(|(a, b)| a == b || same_physical_file(fs, a, b)))
         };
         same_path(&self.from) || same_path(&self.to)
     }
@@ -642,9 +689,9 @@ pub(crate) fn retry_sidecars_for_paths(fs: &dyn MoveFs, pending: &mut Vec<Sideca
             // content. A newly occupied, previously absent peer destination is a collision.
             if let Some(path) = paths.iter().find(|path| {
                 fs.exists(path)
-                    && !fs.same_file(path, &m.from)
-                    && !fs.same_file(path, &m.to)
-                    && !m.companions.iter().any(|known| fs.same_file(path, &known.path))
+                    && !same_physical_file(fs, path, &m.from)
+                    && !same_physical_file(fs, path, &m.to)
+                    && !m.companions.iter().any(|known| same_physical_file(fs, path, &known.path))
             }) {
                 return Err(format!("{} already exists while repairing {} → {}", path.display(), m.from.display(), m.to.display()));
             }
@@ -699,15 +746,12 @@ pub(crate) fn move_file_with(fs: &dyn MoveFs, from: &str, to: &str) -> std::resu
     if fs.exists(t) && !is_respelling(fs, f, t) {
         return Err(fail(format!("{to} already exists")));
     }
-    let mut packets: Vec<RetainedPacket> = sidecars(from)
-        .into_iter()
-        .map(|(p, _, _)| p)
-        .filter(|p| fs.is_file(p))
-        .map(|path| RetainedPacket { version: fs.packet_version(&path).ok(), path })
-        .collect();
+    let sidecars = existing_sidecars(fs, from);
+    let mut packets: Vec<RetainedPacket> =
+        sidecars.iter().map(|(p, _, _)| p.clone()).map(|path| RetainedPacket { version: fs.packet_version(&path).ok(), path }).collect();
     move_one(fs, f, t).map_err(|e| fail(format!("rename {from}: {e}")))?;
     let mut done: Vec<SidecarMove> = Vec::new();
-    let mut remaining = sidecars(from).into_iter().filter(|(sc, _, _)| fs.is_file(sc)).map(|(sc, naming, upper)| {
+    let mut remaining = sidecars.into_iter().map(|(sc, naming, upper)| {
         let mut dst = crate::sidecar::sidecar_path(to, naming);
         if upper {
             dst = dst.with_extension("XMP");
@@ -737,7 +781,7 @@ pub(crate) fn move_file_with(fs: &dyn MoveFs, from: &str, to: &str) -> std::resu
                     let alias = pending_sidecars.iter().any(|p| {
                         folded_path(&p.from.to_string_lossy()) == folded_path(&m.from.to_string_lossy())
                             && folded_path(&p.to.to_string_lossy()) == folded_path(&m.to.to_string_lossy())
-                            && fs.same_file(&p.from, &m.from)
+                            && same_physical_file(fs, &p.from, &m.from)
                     });
                     if !alias {
                         pending_sidecars.push(m);
@@ -896,7 +940,7 @@ fn plan_rename_core(
                     k += 1;
                 }
             }
-            Source::Demo { .. } => {
+            Source::Demo { .. } | Source::Managed { .. } => {
                 let mut k = 0;
                 loop {
                     let name = candidate(k);
@@ -924,7 +968,7 @@ impl Session {
 
     /// [`Session::plan_rename`] on the file system `fs`.
     pub(crate) fn plan_rename_with(&self, fs: &dyn MoveFs, ids: &[PhotoId], template: &str, start: usize) -> Vec<RenamePlan> {
-        plan_rename_core(&rename_photos(&self.catalog, ids), template, start, &|p| fs.exists(p), &|a, b| fs.same_file(a, b))
+        plan_rename_core(&rename_photos(&self.catalog, ids), template, start, &|p| fs.exists(p), &|a, b| same_physical_file(fs, a, b))
     }
 
     /// Carry out `plans`: move the files (rolled back on failure), then commit one undoable op
@@ -966,7 +1010,7 @@ impl Session {
                 repair.validate_repair(fs).map_err(EngineError::Other)?;
             } else {
                 for packet in &repair.companions {
-                    if paths.iter().any(|path| fs.same_file(path, &packet.path)) {
+                    if paths.iter().any(|path| same_physical_file(fs, path, &packet.path)) {
                         packet.validate(fs).map_err(EngineError::Other)?;
                     }
                 }
@@ -1005,7 +1049,7 @@ impl Session {
         for p in self.catalog.photos() {
             let plan = match &p.source {
                 Source::File { path } => by_path.get(path.as_str()).copied(),
-                Source::Demo { .. } => plans.iter().find(|x| x.id == p.id.0 && x.from_path.is_none()),
+                Source::Demo { .. } | Source::Managed { .. } => plans.iter().find(|x| x.id == p.id.0 && x.from_path.is_none()),
             };
             let Some(plan) = plan else { continue };
             let source = match &plan.to_path {
@@ -1181,6 +1225,28 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn existing_sidecars_deduplicate_physical_case_aliases_only() {
+        let fs = FakeFs::new(true, &[("/p/a.xmp", "stem"), ("/p/a.jpg.xmp", "full")]);
+        assert_eq!(existing_sidecars(&fs, "/p/a.jpg").len(), 2);
+        let fs = FakeFs::new(false, &[("/p/a.xmp", "lower"), ("/p/a.XMP", "upper"), ("/p/a.jpg.xmp", "full")]);
+        assert_eq!(existing_sidecars(&fs, "/p/a.jpg").len(), 3, "distinct packets on a sensitive volume survive");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_case_alias_detection_never_claims_an_unrelated_packet() {
+        let root = crate::tests_xmp::temp_dir("same-file-unrelated-alias");
+        let a = root.join("a.xmp");
+        let b = root.join("b.xmp");
+        std::fs::write(&a, b"same length").unwrap();
+        std::fs::write(&b, b"same length").unwrap();
+        let time = std::fs::metadata(&a).unwrap().modified().unwrap();
+        std::fs::OpenOptions::new().write(true).open(&b).unwrap().set_times(std::fs::FileTimes::new().set_modified(time)).unwrap();
+        assert!(!same_physical_file(&RealFs, &a, &b.with_extension("XMP")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     impl MoveFs for FakeFs {
         fn packet_version(&self, path: &Path) -> std::io::Result<PacketVersion> {
             let i = self.idx(path).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such packet"))?;
@@ -1195,8 +1261,11 @@ pub(crate) mod tests {
         fn same_file(&self, a: &Path, b: &Path) -> bool {
             self.idx(a).is_some() && self.idx(a) == self.idx(b)
         }
+        fn spelling(&self, path: &Path) -> PathBuf {
+            self.idx(path).and_then(|i| self.files.borrow().get(i).map(|(p, _)| PathBuf::from(p))).unwrap_or_else(|| path.to_path_buf())
+        }
         fn rename_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
-            if self.fail.borrow().iter().any(|f| Self::norm(a).contains(f.as_str())) {
+            if self.fail.borrow().iter().any(|f| Self::norm(a).contains(&Self::norm(Path::new(f)))) {
                 return Err(std::io::Error::other("injected failure"));
             }
             if self.exists(b) {
@@ -1207,7 +1276,7 @@ pub(crate) mod tests {
             Ok(())
         }
         fn copy_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
-            if self.fail.borrow().iter().any(|f| Self::norm(a).contains(f.as_str())) {
+            if self.fail.borrow().iter().any(|f| Self::norm(a).contains(&Self::norm(Path::new(f)))) {
                 return Err(std::io::Error::other("injected failure"));
             }
             if self.exists(b) {
@@ -1293,7 +1362,7 @@ pub(crate) mod tests {
                     } else {
                         serde_json::json!({"path": from, "into": root.join("Archive")})
                     };
-                    let to = if command == "folder.rename" { root.join("Holiday") } else { root.join("Archive/Trip") };
+                    let to = if command == "folder.rename" { root.join("Holiday") } else { root.join("Archive").join("Trip") };
                     let before = s.catalog.to_snapshot();
                     let history = (s.undo.len(), s.redo.len());
                     assert!(s.execute(command, &params).is_err());
@@ -1450,7 +1519,7 @@ pub(crate) mod tests {
         // the catalog matches the disk
         let path = |s: &Session, id: u64| match &s.catalog.photo(PhotoId(id)).unwrap().source {
             Source::File { path } => path.replace('\\', "/"),
-            Source::Demo { .. } => String::new(),
+            Source::Demo { .. } | Source::Managed { .. } => String::new(),
         };
         assert_eq!(path(&s, 1), "/p/Trip-1.jpg");
         assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().file_name, "Trip-1.jpg");

@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod assets;
 pub mod dates;
 pub mod folders;
 pub mod journal;
@@ -74,6 +75,10 @@ pub const HISTORY_LIMIT: usize = 200;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum Op {
+    SetAsset {
+        id: assets::AssetId,
+        asset: Option<Box<assets::Asset>>,
+    },
     AddPhoto {
         photo: Box<Photo>,
     },
@@ -252,6 +257,8 @@ pub enum Op {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    assets: BTreeMap<assets::AssetId, assets::Asset>,
     photos: BTreeMap<PhotoId, Arc<Photo>>,
     albums: BTreeMap<AlbumId, Album>,
     next_photo: u64,
@@ -278,6 +285,13 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn asset(&self, id: &assets::AssetId) -> Option<&assets::Asset> {
+        self.assets.get(id)
+    }
+
+    pub fn assets(&self) -> &BTreeMap<assets::AssetId, assets::Asset> {
+        &self.assets
+    }
     pub fn new() -> Catalog {
         Catalog { next_photo: 1, next_album: 1, next_stack: 1, ..Default::default() }
     }
@@ -286,7 +300,7 @@ impl Catalog {
 
     pub fn alloc_photo_id(&mut self) -> PhotoId {
         let id = PhotoId(self.next_photo.max(1));
-        self.next_photo = id.0 + 1;
+        self.next_photo = id.0.saturating_add(1);
         id
     }
     pub fn alloc_album_id(&mut self) -> AlbumId {
@@ -486,12 +500,35 @@ impl Catalog {
 
     fn apply_inner(&mut self, op: Op) -> Result<Op> {
         Ok(match op {
+            Op::SetAsset { id, asset } => {
+                if !assets::identifier(&id.0) {
+                    return Err(CatalogError::Invalid("invalid asset identity".into()));
+                }
+                let old = if let Some(asset) = asset {
+                    asset.validate().map_err(CatalogError::Invalid)?;
+                    if self.assets.get(&id).is_some_and(|old| old.original.id != asset.original.id || old.original.size != asset.original.size) {
+                        return Err(CatalogError::Invalid("an asset's original is immutable; create a new asset identity for changed bytes".into()));
+                    }
+                    self.assets.insert(id.clone(), *asset)
+                } else {
+                    if self.photos.values().any(|p| matches!(&p.source, Source::Managed { asset_id } if *asset_id == id)) {
+                        return Err(CatalogError::Invalid("asset is still referenced by a photo".into()));
+                    }
+                    self.assets.remove(&id)
+                };
+                Op::SetAsset { id, asset: old.map(Box::new) }
+            }
             Op::AddPhoto { photo } => {
+                if let Source::Managed { asset_id } = &photo.source
+                    && !self.assets.contains_key(asset_id)
+                {
+                    return Err(CatalogError::Invalid("managed photo refers to an absent asset".into()));
+                }
                 if self.photos.contains_key(&photo.id) {
                     return Err(CatalogError::Invalid(format!("photo {:?} exists", photo.id)));
                 }
                 let id = photo.id;
-                self.next_photo = self.next_photo.max(id.0 + 1);
+                self.next_photo = self.next_photo.max(id.0.checked_add(1).ok_or_else(|| CatalogError::Invalid("photo identity exhausted".into()))?);
                 self.photos.insert(id, Arc::new(*photo));
                 Op::RemovePhoto { id }
             }

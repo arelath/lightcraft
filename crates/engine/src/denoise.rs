@@ -757,7 +757,7 @@ pub(crate) struct Active {
 
 /// The photos whose files can be denoised at all: raw files developed from their sensor data and read from disk.
 pub(crate) fn eligible(p: &Photo) -> bool {
-    p.develops_raw() && matches!(p.source, Source::File { .. }) && !p.deleted
+    p.develops_raw() && matches!(p.source, Source::File { .. } | Source::Managed { .. }) && !p.deleted
 }
 
 /// A product's name: what it was made from and with.
@@ -1152,7 +1152,7 @@ impl Session {
 
     /// The folder the products of the open library are kept in; `None` without a library on disk.
     pub(crate) fn denoise_products_dir(&self) -> Option<PathBuf> {
-        self.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.join(DIR))
+        self.library.as_ref().and_then(|l| l.cache_dir.as_ref()).map(|d| d.join(DIR))
     }
 
     /// Read which model is in use (at most every couple of seconds): the manifest and file of the model the settings
@@ -1360,12 +1360,12 @@ impl Session {
     }
 
     fn denoise_job_spec(&self, p: &Photo, parallel: usize) -> Option<JobSpec> {
-        let Source::File { path } = &p.source else { return None };
+        let path = crate::assets::source_path(&p.source).ok()?;
         let (spec, _) = self.denoise_spec(p)?;
         let active = self.denoise.active.as_ref()?;
         Some(JobSpec {
-            path: path.clone(),
-            read: self.media.file_bytes.clone(),
+            path,
+            read: Some(self.original_reader_for(std::slice::from_ref(&p.source))),
             product: spec.product,
             key: spec.key,
             manifest: active.manifest.clone(),

@@ -174,6 +174,7 @@ pub struct Renderer {
     /// Requests made before this id belong to a library or preview cache that is gone.
     epoch: u64,
     preview_generation: Option<(std::sync::Weak<lightcraft_preview::PreviewCache>, u64)>,
+    asset_generation: Option<(std::sync::Weak<lightcraft_engine::assets::AssetResolver>, u64)>,
     /// Last thumbnail inputs; weak identities do not retain photo histories or force deep clones.
     /// (photo, size bucket, job key, whether the request went through an embedded stand-in)
     thumb_inputs: HashMap<PhotoId, (std::sync::Weak<lightcraft_catalog::Photo>, usize, u64, bool)>,
@@ -254,6 +255,7 @@ impl Renderer {
             shown_ids: HashMap::new(),
             epoch: 0,
             preview_generation: None,
+            asset_generation: None,
             pool: JobPool::new(threads),
             thumb_inputs: HashMap::new(),
             embedded_thumbs: HashMap::new(),
@@ -631,6 +633,22 @@ impl Renderer {
 
     /// Collect finished jobs into textures. Returns true if anything changed.
     pub fn poll(&mut self, ctx: &egui::Context, session: &mut Session) -> bool {
+        let assets = session.media.asset_resolver.clone();
+        let next = assets.as_ref().map(|r| (Arc::downgrade(r), r.generation()));
+        let changed = match (&self.asset_generation, &next) {
+            (Some((old, old_gen)), Some((new, new_gen))) => old.as_ptr() != new.as_ptr() || old_gen != new_gen,
+            (None, None) => false,
+            _ => true,
+        };
+        if changed {
+            self.forget_all();
+            session.media.clear_sources();
+            if let Some(resolver) = assets {
+                let repaint = ctx.clone();
+                resolver.set_waker(Arc::new(move || repaint.request_repaint()));
+            }
+        }
+        self.asset_generation = next;
         let cache = &session.media.rendered;
         let generation = cache.generation();
         if self.preview_generation.as_ref().is_some_and(|(old, g)| old.as_ptr() != Arc::as_ptr(cache) || *g != generation) {
@@ -872,6 +890,45 @@ impl Renderer {
 mod thumbnail_tests {
     use super::*;
     use lightcraft_catalog::{Catalog, Op, Photo, Source};
+
+    #[test]
+    fn completed_cloud_download_retries_a_failed_render_without_a_catalog_edit() {
+        use lightcraft_catalog::assets::{Blob, RemoteLocation};
+        use lightcraft_engine::assets::{AssetError, AssetResolver, BlobStore, TransferManager};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Bytes;
+        impl BlobStore for Bytes {
+            fn download(&self, _: &Blob, out: &mut dyn std::io::Write, _: &AtomicBool, _: &mut dyn FnMut(u64)) -> Result<(), AssetError> {
+                out.write_all(b"original").map_err(|e| AssetError::Disk(e.to_string()))
+            }
+        }
+        let root = std::env::temp_dir().join(format!("lightcraft-cloud-render-retry-{}", std::process::id()));
+        let resolver = Arc::new(AssetResolver::new(root.clone()));
+        resolver.connect("test".into(), Arc::new(Bytes)).unwrap();
+        let mut session = Session::new();
+        session.media.asset_resolver = Some(resolver.clone());
+        let mut renderer = Renderer::with_worker_threads(1);
+        let ctx = egui::Context::default();
+        renderer.poll(&ctx, &mut session);
+        let revision = session.catalog.revision;
+        renderer.failed.insert(Slot::Main, (42, "not downloaded".into(), revision));
+        assert!(!renderer.request_needed(Slot::Main, 42, 0));
+        let woke = Arc::new(AtomicBool::new(false));
+        let signal = woke.clone();
+        resolver.set_waker(Arc::new(move || signal.store(true, Ordering::Relaxed)));
+        let blob = Blob {
+            id: lightcraft_engine::assets::sha256(b"original"),
+            size: 8,
+            remote: RemoteLocation { connection: "test".into(), key: "library/original".into(), version: None },
+        };
+        let lease = resolver.acquire(&blob, &AtomicBool::new(false)).unwrap();
+        assert!(woke.load(Ordering::Relaxed));
+        renderer.poll(&ctx, &mut session);
+        assert_eq!(session.catalog.revision, revision);
+        assert!(renderer.request_needed(Slot::Main, 42, 0));
+        drop(lease);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     struct Blocked;
     impl RenderOffload for Blocked {

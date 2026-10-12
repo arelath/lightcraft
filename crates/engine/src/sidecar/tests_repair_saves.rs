@@ -15,18 +15,28 @@ impl MoveFs for PartialRename {
     fn is_file(&self, path: &Path) -> bool {
         RealFs.is_file(path)
     }
+
     fn same_file(&self, a: &Path, b: &Path) -> bool {
         RealFs.same_file(a, b)
     }
+    fn spelling(&self, path: &Path) -> PathBuf {
+        RealFs.spelling(path)
+    }
     fn rename_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
-        if a == self.sidecar || a == self.photo {
+        if a == self.sidecar
+            || a == self.photo
+            || RealFs.same_file(&self.sidecar, a)
+            || RealFs.same_file(&self.photo, a)
+            || RealFs.same_file(a, &self.sidecar)
+            || RealFs.same_file(a, &self.photo)
+        {
             Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "transient rename fault"))
         } else {
             RealFs.rename_no_replace(a, b)
         }
     }
     fn copy_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
-        if a == self.sidecar {
+        if a == self.sidecar || RealFs.same_file(&self.sidecar, a) || RealFs.same_file(a, &self.sidecar) {
             Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "transient copy fault"))
         } else {
             RealFs.copy_no_replace(a, b)
@@ -151,7 +161,11 @@ fn autowrite_repairs_partial_rename_before_merging_foreign_xmp_across_library_sw
                     assert_eq!(parsed.title.as_deref(), Some("Final title"));
                     assert!(parsed.keywords.as_ref().unwrap().contains(&"café".to_string()));
                     if upper {
-                        assert!(!preferred.exists(), "merge uses the repaired uppercase packet");
+                        let names = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>();
+                        assert!(
+                            !names.iter().any(|name| Some(name.as_os_str()) == preferred.file_name()),
+                            "merge uses the repaired uppercase packet"
+                        );
                     }
                     for (step, title) in [("edit.undo", "Fresh title"), ("edit.redo", "Final title")] {
                         s.execute(step, &json!({})).unwrap();

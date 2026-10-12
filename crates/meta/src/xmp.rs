@@ -252,9 +252,8 @@ fn parse_tree(s: &str) -> Result<Node, XmpError> {
                     stack.push(node);
                 }
             }
-            Event::End(_) => {
-                if stack.len() > 1 {
-                    let n = stack.pop().expect("len > 1");
+            Event::End(_) if stack.len() > 1 => {
+                if let Some(n) = stack.pop() {
                     scopes.pop();
                     if let Some(parent) = stack.last_mut() {
                         parent.children.push(n);

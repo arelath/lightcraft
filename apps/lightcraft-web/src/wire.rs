@@ -64,7 +64,7 @@ impl WireJob {
     /// `view`: the slot name, for jobs that keep a stage cache.
     pub fn from_job(job: &RenderJob, thumb_cached: bool, view: &str) -> WireJob {
         let max_edge = match &job.source {
-            SourceRef::Demo { max_edge, .. } | SourceRef::File { max_edge, .. } => *max_edge,
+            SourceRef::Demo { max_edge, .. } | SourceRef::File { max_edge, .. } | SourceRef::Managed { max_edge, .. } => *max_edge,
             SourceRef::Loaded(img) => img.image.width.max(img.image.height),
             SourceRef::Smart { .. } => 2560,
         };
@@ -126,6 +126,7 @@ impl WireJob {
         match &self.origin {
             Source::File { path } => format!("{}:{:?}:{}:{path}", self.cache_generation, self.source_identity, self.max_edge),
             Source::Demo { scene } => format!("{}:{:?}:{}:demo:{scene}", self.cache_generation, self.source_identity, self.max_edge),
+            Source::Managed { asset_id } => format!("{}:{:?}:{}:asset:{}", self.cache_generation, self.source_identity, self.max_edge, asset_id.0),
         }
     }
 
@@ -164,7 +165,7 @@ impl WorkerCore {
         }
         match &job.origin {
             Source::File { path } => hash_of_path(path).map(str::to_string),
-            Source::Demo { .. } => None,
+            Source::Demo { .. } | Source::Managed { .. } => None,
         }
     }
 
@@ -180,6 +181,7 @@ impl WorkerCore {
                         DecodedSource::new(Arc::new(image), Some(info))
                     }
                     (Source::File { path }, None) => return Err(format!("{path}: original not found in browser storage")),
+                    (Source::Managed { .. }, _) => return Err("cloud asset transfers are not supported in this browser build yet".into()),
                     (origin @ Source::Demo { .. }, _) => self.media.origin_ref(origin, job.max_edge).load_source()?,
                 };
                 let cost = src.image.width * src.image.height * 12 + 64;

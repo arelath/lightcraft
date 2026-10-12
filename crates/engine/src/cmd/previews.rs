@@ -414,7 +414,7 @@ fn refresh_stale(dir: &std::path::Path, jobs: Vec<SmartJob>) {
 #[cfg(not(target_arch = "wasm32"))]
 fn location_json(s: &Session) -> Value {
     let dir = s.media.smart_dir.clone();
-    let default = s.library.as_ref().filter(|l| l.on_disk).map(|l| crate::smart::dir(&l.dir));
+    let default = s.library.as_ref().and_then(|l| l.cache_dir.as_ref()).map(|d| crate::smart::dir(d));
     let (count, bytes) = dir.as_deref().map_or((0, 0), crate::smart::stats);
     json!({
         "path": dir.as_ref().map(|d| d.to_string_lossy()),
@@ -436,7 +436,7 @@ fn smart_location(s: &mut Session, p: &Value) -> Result<Value> {
     if !reset && chosen.is_none() {
         return Ok(location_json(s));
     }
-    let lib_dir = s.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.clone()).ok_or_else(|| bad(C, "smart previews need a library on disk"))?;
+    let lib_dir = s.library.as_ref().and_then(|l| l.cache_dir.clone()).ok_or_else(|| bad(C, "smart previews need a local cache directory"))?;
     let default = crate::smart::dir(&lib_dir);
     let (new_dir, custom) = match chosen {
         Some(x) if !reset => {

@@ -17,6 +17,7 @@ extern crate lightcraft_denoise_core as lightcraft_denoise;
 pub mod activity;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod apple_photos;
+pub mod assets;
 pub mod availability;
 pub(crate) mod camera_preview;
 pub mod camera_profiles;
@@ -500,6 +501,10 @@ impl Session {
             match op {
                 Op::SetFile { id, .. } | Op::Relink { id, .. } | Op::SetContent { id, .. } | Op::RemovePhoto { id } => self.media.forget(*id),
                 Op::AddPhoto { photo } => self.media.forget(photo.id),
+                Op::SetAsset { .. } => {
+                    self.media.managed_assets = self.catalog.assets().clone();
+                    self.media.clear_sources();
+                }
                 Op::Batch { ops } => pending.extend(ops),
                 _ => {}
             }

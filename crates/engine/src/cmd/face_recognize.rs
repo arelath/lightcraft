@@ -224,7 +224,7 @@ mod imp {
         let tag = format!("{id}@{}", installed.manifest.sha256.as_deref().unwrap_or("unknown"));
         s.faces.checked = Some(Instant::now());
         // which photos the detector has searched is kept beside the library (or in memory when it is not on disk)
-        let scan_path = s.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.join("face-scanned.bin"));
+        let scan_path = s.library.as_ref().and_then(|l| l.cache_dir.as_ref()).map(|d| d.join("face-scanned.bin"));
         if s.faces.scanned.path() != scan_path.as_deref() {
             s.faces.scanned.reset(scan_path);
         }
@@ -238,7 +238,7 @@ mod imp {
             lightcraft_faces::OutputSpec::Embedding { dim } => dim as usize,
             _ => return Err(bad(cmd, "the chosen model is not a recognition model")),
         };
-        let cache = s.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.join(format!("face-embeddings-{id}.bin")));
+        let cache = s.library.as_ref().and_then(|l| l.cache_dir.as_ref()).map(|d| d.join(format!("face-embeddings-{id}.bin")));
         s.faces.index.reset(&tag, dim, cache);
         s.faces.queue.clear();
         s.faces.queue_stamp = None;

@@ -765,6 +765,13 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                     if rendered {
                         export_size(ui, full_size, resize, &mut opts.ppi);
+                        if app.session.targets(&json!({})).iter().any(|id| app.session.catalog.photo(*id).is_some_and(|p| matches!(p.source, lightcraft_catalog::Source::Managed { .. }))) {
+                            let c = ui.checkbox(&mut opts.allow_smart_preview, crate::i18n::tr("Allow smart preview export"))
+                                .on_hover_text(crate::i18n::tr("Use a smart preview when the original is not downloaded. Output is limited to the preview's pixel size."));
+                            crate::widgets::register(ui.ctx(), "check:exportAllowSmartPreview", c.rect);
+                        }
+                    } else {
+                        opts.allow_smart_preview = false;
                     }
                     if rendered {
                     choices(

@@ -302,3 +302,5 @@ are untouched. A failed export is an `isError` tool result. Transport mutexes re
 
 Connect mode and exports inside `command_batch` remain synchronous and do not report MCP
 progress or cancellation. Use a direct headless export call for this behavior.
+
+Cloud-managed exports require originals by default. Set `allowSmartPreview: true` to explicitly permit an editable proxy; rendered output is capped to the proxy's native pixel size. Original-file and DNG exports always require original bytes. Storage commands and credential configuration are described in [cloud-storage-implementation.md](cloud-storage-implementation.md).

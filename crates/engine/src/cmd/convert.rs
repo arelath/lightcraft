@@ -176,9 +176,9 @@ fn edit_copy(s: &mut Session, p: &Value, id: lightcraft_catalog::PhotoId, opts: 
     let ph = s.catalog.photo(id).cloned().ok_or_else(|| bad(C, format!("no photo {}", id.0)))?;
     let dir = match &ph.source {
         Source::File { path } => Path::new(path).parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default(),
-        Source::Demo { .. } => match super::str_param(p, "dir") {
+        Source::Demo { .. } | Source::Managed { .. } => match super::str_param(p, "dir") {
             Some(d) => d.to_string(),
-            None => return Err(bad(C, "a generated demo photo has no folder: give `dir`")),
+            None => return Err(bad(C, "this photo has no local original folder: give `dir`")),
         },
     };
     let mut written = Vec::new();

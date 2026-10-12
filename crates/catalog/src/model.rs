@@ -89,6 +89,8 @@ impl ColorLabel {
 pub enum Source {
     /// A file on disk (native) or in the browser's storage (web).
     File { path: String },
+    /// An immutable asset independent of any device's paths.
+    Managed { asset_id: crate::assets::AssetId },
     /// A procedurally generated demo scene (by `lightcraft-scenes` id).
     Demo { scene: u32 },
 }

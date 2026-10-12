@@ -348,16 +348,15 @@ impl Session {
             let p = self.catalog.photo(*id).ok_or(lightcraft_catalog::CatalogError::NoPhoto(*id))?;
             match &p.source {
                 Source::File { path } => sources.push((*id, path.clone())),
+                Source::Managed { .. } => sources.push((*id, crate::assets::source_path(&p.source).map_err(EngineError::Other)?)),
                 Source::Demo { .. } => return Err(EngineError::Other(format!("{} is a demo photo; Photo Merge needs photo files", p.file_name))),
             }
         }
         if sources.len() < kind.min_photos() {
             return Err(EngineError::Other(format!("select at least {} photos to merge", kind.min_photos())));
         }
-        let read: ByteReader = match &self.media.file_bytes {
-            Some(r) => r.clone(),
-            None => Arc::new(|path: &str| std::fs::read(path).map_err(|e| format!("{path}: {e}"))),
-        };
+        let origins: Vec<_> = ids.iter().filter_map(|id| self.catalog.photo(*id).map(|p| p.source.clone())).collect();
+        let read = self.original_reader_for(&origins);
         Ok(MergeJob { kind, finish, sources, preview: preview.then_some(PREVIEW_EDGE), read })
     }
 

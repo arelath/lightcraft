@@ -1,6 +1,6 @@
 # Lightroom parity checklist
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (rapid slider entry; LR-PROF-CAMERACOLOR: tone curve from black-and-white camera JPEGs; LR-VIEW-ZOOM, LR-VIEW-COMPARE: Compare and Reference zoom windows; LR-IMP-FORMATS, LR-IMP-CAMERA-COVERAGE: EOS R5 Mark II CR3 decodes; renamed from `parity.md`; Top gaps moved to gaps.md, shortcut notes to ui-parity.md; filesystem history retry/Undo/Redo evidence; renamed from `parity.md`; Top gaps moved to gaps.md, shortcut notes to ui-parity.md) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (rapid slider entry; LR-PROF-CAMERACOLOR: tone curve from black-and-white camera JPEGs; LR-VIEW-ZOOM, LR-VIEW-COMPARE: Compare and Reference zoom windows; LR-IMP-FORMATS, LR-IMP-CAMERA-COVERAGE: EOS R5 Mark II CR3 decodes; renamed from `parity.md`; Top gaps moved to gaps.md, shortcut notes to ui-parity.md; filesystem history retry/Undo/Redo evidence; renamed from `parity.md`; Top gaps moved to gaps.md, shortcut notes to ui-parity.md) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 The measured, row-by-row checklist: one row per Lightroom feature, menu item and shortcut, what we
 have and what is missing. It answers *does the feature exist?* (feature breadth). Whether it is good
@@ -439,7 +439,7 @@ differences and missing bindings are in [ui-parity.md](ui-parity.md#shortcuts).
 
 | Id | Feature | Tier | Status | Evidence | Missing / notes |
 |---|---|---|---|---|---|
-| LR-CLOUD-SYNC | Cloud sync | OOS | 🚫 | | |
+| LR-CLOUD-SYNC | Cloud sync | OOS | 🚫 | `cmd:cloud.configure`, `cmd:cloud.attach`, `cmd:cloud.fetch`, `cmd:cloud.status`; [cloud storage implementation](cloud-storage-implementation.md) | Native read/cache foundation only; uploads, multi-device synchronization and browser transfers remain open. No cloud-sync parity claim. |
 | LR-CLOUD-SMARTPREVIEW | Editable proxies | P2 | ✅ | `cmd:library.smartPreviews`, `cmd:library.smartPreviewsLocation`, `cmd:photo.smartPreview`, `crates/engine/src/smart.rs`, `crates/ui-egui/src/panels/settings.rs` | File ▸ Previews ▸ Build / Discard Smart Previews (on a worker thread, progress and Stop like Build Previews): ~1 MB proxies in the library; with the original offline the photo renders, edits and exports (at proxy size) from its proxy; Info shows the status; the proxy folder is chosen per library (Settings → Performance → Smart previews, saved in the library): the effective path, count and size are shown, changing it needs a choice for the proxies already built (move / leave / delete), and an unavailable or unwritable folder is an error, never a fallback to the library drive; proxies are written atomically and a damaged one (cut short by a crash or a full drive) doesn't count as built, is rebuilt (`repaired`) and is never moved over a good one (issue #106). Each proxy records the version of the camera-look fit that wrote it (`look_version`, `LOOK_VERSION` in `crates/engine/src/camera_preview.rs`, bumped whenever the fit changes); only raws with the per-file camera look go stale (JPEG / PNG / DNG proxies are never rebuilt for it); one from an older fit is rebuilt from its original by a background scan the first time the library is opened at a new version (a `look-version` marker in the proxy folder keeps it to once per version) and by Build Smart Previews, and kept as it is while the original is offline (`docs/camera-preview-colour.md`). The thumbnail cache stays in the library |
 | LR-AI-UPDATE-INDICATOR | AI-settings update indicator | P2 | ⬜ | | |
 | LR-AI-CREDITS | Generative credits | OOS | 🚫 | | |
@@ -787,6 +787,7 @@ Latin stays upright. Advanced Japanese composition remains open. Regression cove
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | minor | LR-CLOUD-SYNC: record native managed-original read/cache evidence; synchronization remains OOS and counts are unchanged |
 | 2026-10-11 | minor | KEY-SLIDER-TYPE: honor immediate Return/Escape and keep typed keys in the value editor; add regression references |
 | 2026-10-11 | minor | LR-PROF-CAMERACOLOR: raws with a black-and-white camera JPEG take its tone curve (issue #577) |
 | 2026-10-11 | minor | LR-VIEW-ZOOM and LR-VIEW-COMPARE: Compare and Reference are sharp at 1:1 (zoom windows per pane, two originals kept decoded while they are open); statuses unchanged |

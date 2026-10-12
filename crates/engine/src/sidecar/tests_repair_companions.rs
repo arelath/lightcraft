@@ -12,11 +12,15 @@ impl MoveFs for Faults {
     fn is_file(&self, p: &Path) -> bool {
         RealFs.is_file(p)
     }
+
     fn same_file(&self, a: &Path, b: &Path) -> bool {
         RealFs.same_file(a, b)
     }
+    fn spelling(&self, path: &Path) -> PathBuf {
+        RealFs.spelling(path)
+    }
     fn rename_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
-        if self.0.iter().any(|p| p == a) {
+        if self.0.iter().any(|p| p == a || RealFs.same_file(p, a) || RealFs.same_file(a, p)) {
             Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected partial move"))
         } else {
             RealFs.rename_no_replace(a, b)

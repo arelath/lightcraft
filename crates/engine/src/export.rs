@@ -626,6 +626,8 @@ pub enum MetadataPolicy {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ExportOptions {
+    /// Explicit consent to use a smart preview, with output capped to its native pixel size.
+    pub allow_smart_preview: bool,
     pub format: ExportFormat,
     /// 1–100 (JPEG, AVIF, lossy JPEG XL).
     pub quality: u8,
@@ -686,6 +688,7 @@ pub struct ExportOptions {
 impl Default for ExportOptions {
     fn default() -> Self {
         Self {
+            allow_smart_preview: false,
             format: ExportFormat::Jpeg,
             quality: 90,
             resize: None,
@@ -720,6 +723,7 @@ pub const TARGET_PARAMS: &[&str] = &["id", "ids", "path", "dir", "preset", "back
 
 /// The export option params [`ExportOptions::from_json`] reads (and [`ExportOptions::to_json`] writes).
 pub const OPTION_PARAMS: &[&str] = &[
+    "allowSmartPreview",
     "format",
     "quality",
     "resize",
@@ -903,7 +907,7 @@ impl ExportOptions {
                     }
                     serde_json::from_value::<Resize>(v.clone()).map_err(|e| bad(format!("`{k}`: {e}")))?;
                 }
-                "dontEnlarge" | "removeLocation" | "background" | "hdr" | "jxlLossless" | "jxlProgressive" => {
+                "dontEnlarge" | "removeLocation" | "background" | "hdr" | "jxlLossless" | "jxlProgressive" | "allowSmartPreview" => {
                     boolean(k, v)?;
                 }
                 "addToPhotos" => {
@@ -1027,6 +1031,7 @@ impl ExportOptions {
             p.get(k).cloned().and_then(|v| serde_json::from_value(v).ok())
         }
         Self {
+            allow_smart_preview: p.get("allowSmartPreview").and_then(Value::as_bool).unwrap_or(d.allow_smart_preview),
             format: s("format").and_then(ExportFormat::parse).unwrap_or(d.format),
             quality: u("quality").map_or(d.quality, |q| q.clamp(1, 100) as u8),
             resize: Self::resize_from_json(p),
@@ -1622,24 +1627,33 @@ fn prepare_guarded(
         o
     };
     let (full_px, long) = ((p.width as usize).saturating_mul(p.height as usize), p.width.max(p.height) as usize);
+    if o.allow_smart_preview && !o.format.is_rendered() {
+        return Err("smart-preview export requires a rendered output format".into());
+    }
     let (work, weight) = if o.format.is_rendered() {
         let (w, h) = output_size(p, o);
         let meta = export_metadata(p, &session.catalog, o);
         let gain_map = o.hdr_output() && o.format == ExportFormat::Jpeg;
-        let job = session.export_job(id, w, h, o.effective_space(), o.effective_depth())?;
+        let mut job = session.export_job(id, w, h, o.effective_space(), o.effective_depth())?;
+        if o.allow_smart_preview {
+            job = job.allow_proxy_export();
+        }
         let weight = render_weight(full_px, long, job.level, w.saturating_mul(h));
-        let hdr_job = if gain_map { Some(session.export_job(id, w, h, o.effective_space(), OutputDepth::F32Hdr)?) } else { None };
+        let hdr_job = if gain_map {
+            let job = session.export_job(id, w, h, o.effective_space(), OutputDepth::F32Hdr)?;
+            Some(if o.allow_smart_preview { job.allow_proxy_export() } else { job })
+        } else {
+            None
+        };
         (Work::Render(Box::new(RenderWork { job, hdr_job, meta, opts: o.clone() })), weight)
     } else {
-        let lightcraft_catalog::Source::File { path } = &p.source else {
-            return Err(format!("{} is a generated demo photo: it has no original file to export", p.file_name));
-        };
+        let path = crate::assets::source_path(&p.source)?;
         let dng = (o.format == ExportFormat::Dng).then_some(o.dng_compression);
         // the file's bytes; a DNG also decodes the raw data (16-bit samples) and writes it again
         let weight = (p.file_size as usize).saturating_add(if dng.is_some() { full_px.saturating_mul(6) } else { 0 });
         let work = Work::File {
-            path: path.clone(),
-            read: session.media.file_bytes.clone(),
+            path,
+            read: Some(session.original_reader_for(std::slice::from_ref(&p.source))),
             packet: crate::sidecar::sidecar_packet_with(p, &session.catalog, removes_location(p, &session.catalog, o)),
             dng,
             remove_location: removes_location(p, &session.catalog, o),

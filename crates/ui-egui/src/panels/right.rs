@@ -606,6 +606,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             let path = match &p.source {
                 lightcraft_catalog::Source::File { path } => path.clone(),
                 lightcraft_catalog::Source::Demo { .. } => crate::i18n::tr("Generated demo photo").into(),
+                lightcraft_catalog::Source::Managed { .. } => crate::i18n::tr("Cloud storage").into(),
             };
             ui.add(egui::Label::new(egui::RichText::new(path).size(12.0).color(t.text_label)).truncate());
             if crate::menus::ui_enabled(app, "app.showInFinder") {
@@ -690,6 +691,29 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             ui.label(egui::RichText::new(line).color(t.text_dim));
         }
         // offline originals / smart previews
+        if let lightcraft_catalog::Source::Managed { asset_id } = &p.source {
+            let availability = app.session.catalog.asset(asset_id).and_then(|asset| {
+                app.session.media.asset_resolver.as_ref().map(|resolver| {
+                    use lightcraft_engine::assets::TransferManager;
+                    resolver.availability(&asset.original.id)
+                })
+            });
+            use lightcraft_engine::assets::AssetAvailability;
+            let text = match availability {
+                Some(AssetAvailability::Cached) => "Original downloaded",
+                Some(AssetAvailability::Downloading { .. }) => "Downloading original…",
+                Some(AssetAvailability::Missing) => "Cloud original is missing",
+                Some(AssetAvailability::Failed { .. }) => "Cloud download failed · retry when connected",
+                _ => "Original in cloud storage",
+            };
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(crate::i18n::tr(text)).color(t.text_dim));
+            if !matches!(availability, Some(AssetAvailability::Cached | AssetAvailability::Downloading { .. }))
+                && text_button(ui, "cloudDownloadOriginal", crate::i18n::tr("Download original"), false).clicked()
+            {
+                let _ = app.run("cloud.fetch", json!({"ids": [id.0], "original": true}));
+            }
+        }
         // (cached answers, checked off the UI thread: unknown counts as online / no smart preview)
         if let lightcraft_catalog::Source::File { path } = &p.source {
             let avail = &app.session.media.availability;

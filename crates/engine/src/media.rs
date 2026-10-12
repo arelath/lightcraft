@@ -165,6 +165,8 @@ impl Twin {
 /// Pixels and the source interpretation learned while decoding; they must be cached together.
 #[derive(Clone)]
 pub struct DecodedSource {
+    /// Explicit provenance: these pixels came from an editable source proxy.
+    pub proxy: bool,
     pub image: Arc<Rgb32f>,
     pub info: Option<SourceInfo>,
     /// A smart preview's stored camera tone curve: the one decoder fact its pixels need that the
@@ -176,7 +178,7 @@ pub struct DecodedSource {
 
 impl DecodedSource {
     pub fn new(image: Arc<Rgb32f>, info: Option<SourceInfo>) -> Self {
-        DecodedSource { image, info, camera_tone: None, denoised: None }
+        DecodedSource { proxy: false, image, info, camera_tone: None, denoised: None }
     }
 
     /// The picture to develop for a Denoise `amount` (0 to 1, see [`DevelopSettings::denoise_amount`]): the plain one,
@@ -222,6 +224,14 @@ impl DecodedSource {
 
 #[derive(Clone)]
 pub enum SourceRef {
+    Managed {
+        asset: Option<Box<lightcraft_catalog::assets::Asset>>,
+        resolver: Option<Arc<crate::assets::AssetResolver>>,
+        requirement: crate::assets::SourceRequirement,
+        max_edge: usize,
+        loader: Option<FileLoader>,
+        denoise: Option<(DenoiseSpec, PairLoader)>,
+    },
     Loaded(Box<DecodedSource>),
     Demo {
         scene: Box<lightcraft_scenes::Scene>,
@@ -250,6 +260,19 @@ impl SourceRef {
 
     pub fn load_source(&self) -> Result<DecodedSource, String> {
         let image = match self {
+            SourceRef::Managed { asset, resolver, requirement, max_edge, loader, denoise } => {
+                let asset = asset.as_ref().ok_or("managed asset record is missing from the catalog")?;
+                let resolver = resolver.as_ref().ok_or("cloud storage is not configured on this device")?;
+                let (lease, preview) =
+                    resolver.acquire_asset(asset, *requirement, &std::sync::atomic::AtomicBool::new(false)).map_err(|e| e.to_string())?;
+                if preview {
+                    let bytes = lease.read_bytes().map_err(|e| e.to_string())?;
+                    let (image, tone) = crate::smart::decode(&bytes)?;
+                    return Ok(DecodedSource { proxy: true, image: Arc::new(image), info: None, camera_tone: tone, denoised: None });
+                }
+                let path = lease.path().to_string_lossy().to_string();
+                return SourceRef::File { path, max_edge: *max_edge, loader: loader.clone(), fallback: None, denoise: denoise.clone() }.load_source();
+            }
             SourceRef::Loaded(a) => return Ok((**a).clone()),
             SourceRef::Demo { scene, max_edge } => crate::demo::scene_pixels(scene, *max_edge)?,
             SourceRef::File { path, max_edge, loader, fallback, denoise } => {
@@ -273,6 +296,7 @@ impl SourceRef {
                                     return Err("the cached AI Denoise picture could not be read; clear the denoise cache and retry".into());
                                 }
                                 Ok(DecodedSource {
+                                    proxy: false,
                                     image: Arc::new(image),
                                     info: Some(info),
                                     camera_tone: None,
@@ -304,6 +328,8 @@ impl SourceRef {
 }
 
 pub struct MediaCache {
+    pub asset_resolver: Option<Arc<crate::assets::AssetResolver>>,
+    pub managed_assets: std::collections::BTreeMap<lightcraft_catalog::assets::AssetId, lightcraft_catalog::assets::Asset>,
     settings_hashes: SettingsHashes,
     /// Decoded thumbnail-level sources (LRU by bytes).
     thumbs: Lru<PhotoId, DecodedSource>,
@@ -386,6 +412,8 @@ impl Default for MediaCache {
     fn default() -> Self {
         let budget = crate::memory::cache_share(crate::memory::budget());
         MediaCache {
+            asset_resolver: None,
+            managed_assets: Default::default(),
             settings_hashes: SettingsHashes::default(),
             thumbs: Lru::new(THUMB_SOURCE_BYTES.min(budget)),
             previews: Vec::new(),
@@ -412,6 +440,13 @@ fn rendered_budget(share: usize) -> usize {
 }
 
 impl MediaCache {
+    fn asset_salt(&self, p: &Photo) -> u64 {
+        if matches!(p.source, Source::Managed { .. }) {
+            self.asset_resolver.as_ref().map_or(0, |r| r.generation()).wrapping_mul(0x1656_67b1_9e37_79f9)
+        } else {
+            0
+        }
+    }
     /// Keep rendered thumbnails on disk in `dir` as well. The cache this replaces is retired
     /// (its files stay): render jobs still holding it can't write through it any more, even
     /// into a directory a later clear emptied (`dir` may be the same one).
@@ -615,7 +650,7 @@ impl MediaCache {
 
     fn source_ref_with(&mut self, p: &Photo, level: SourceLevel, cached: bool) -> SourceRef {
         let mut r = self.source_ref_plain(p, level, cached);
-        if let (SourceRef::File { denoise, .. }, Some((spec, loader))) = (&mut r, self.denoise.get(p.id)) {
+        if let (SourceRef::File { denoise, .. } | SourceRef::Managed { denoise, .. }, Some((spec, loader))) = (&mut r, self.denoise.get(p.id)) {
             *denoise = Some((spec.clone(), loader.clone()));
         }
         r
@@ -656,6 +691,18 @@ impl MediaCache {
     /// render worker in another wasm instance builds its sources from this).
     pub fn origin_ref(&mut self, origin: &Source, max_edge: usize) -> SourceRef {
         match origin {
+            Source::Managed { asset_id } => SourceRef::Managed {
+                asset: self.managed_assets.get(asset_id).cloned().map(Box::new),
+                resolver: self.asset_resolver.clone(),
+                requirement: if max_edge > SourceLevel::Preview.max_edge() {
+                    crate::assets::SourceRequirement::OriginalRequired
+                } else {
+                    crate::assets::SourceRequirement::PreviewAllowed
+                },
+                max_edge,
+                loader: self.file_loader.clone(),
+                denoise: None,
+            },
             Source::Demo { scene } => {
                 if self.scenes.is_empty() {
                     self.scenes = lightcraft_scenes::demo_library();
@@ -675,6 +722,8 @@ impl MediaCache {
 /// Everything needed to render one photo, detached from the session.
 #[derive(Clone)]
 pub struct RenderJob {
+    /// Explicit proxy exports are capped after decoding to the proxy's cropped native size.
+    pub proxy_export: bool,
     /// Assigned by a frontend to distinguish late completions, even for an identical render key.
     pub request_id: u64,
     pub cache_generation: u64,
@@ -722,6 +771,15 @@ pub struct RenderResult {
 }
 
 impl RenderJob {
+    pub fn allow_proxy_export(mut self) -> Self {
+        self.proxy_export = true;
+        if let SourceRef::Managed { requirement, .. } = &mut self.source {
+            *requirement = crate::assets::SourceRequirement::PreviewAllowed;
+        }
+        self.cache = None;
+        self.view_cache = None;
+        self
+    }
     /// Render at draft quality (interactive drags). Gets its own result key.
     pub fn draft(mut self) -> Self {
         if self.request.quality != Quality::Draft {
@@ -838,7 +896,16 @@ impl RenderJob {
                 // Thumbnails (many small jobs side by side) stay on the CPU; views and exports use
                 // the GPU when there is one.
                 let gpu = self.cache.is_none();
-                let (mut rendered, gpu_fallback) = develop_reporting(src, &info, &self.settings, &self.request, self.stages.as_deref(), gpu);
+                let mut request = self.request;
+                if self.proxy_export && source.proxy {
+                    let (w, h) = lightcraft_pipeline::native_output_size(src.width, src.height, &self.settings);
+                    let dimension = |v: f64, fallback: usize| {
+                        if v.is_finite() && v > 0.0 { v.floor().clamp(1.0, 65_535.0) as usize } else { fallback.clamp(1, 65_535) }
+                    };
+                    request.max_w = request.max_w.min(dimension(w, src.width));
+                    request.max_h = request.max_h.min(dimension(h, src.height));
+                }
+                let (mut rendered, gpu_fallback) = develop_reporting(src, &info, &self.settings, &request, self.stages.as_deref(), gpu);
                 // for a display profile: the image goes to the display's values, the histogram
                 // and the cached view preview stay sRGB
                 let mut srgb = None;
@@ -1019,6 +1086,7 @@ pub fn content_key(p: &Photo) -> String {
         (Some(h), _) => h.clone(),
         (None, Source::Demo { scene }) => format!("demo:{scene}"),
         (None, Source::File { path }) => format!("file:{path}:{}", p.file_size),
+        (None, Source::Managed { asset_id }) => format!("asset:{}:{}", asset_id.0, p.file_size),
     }
 }
 
@@ -1070,6 +1138,13 @@ impl crate::Session {
         thumb_bucket: Option<usize>,
     ) -> Option<RenderJob> {
         let p = self.catalog.photo(id)?.clone();
+        if let Source::Managed { asset_id } = &p.source {
+            if let Some(asset) = self.catalog.asset(asset_id) {
+                self.media.managed_assets.insert(asset_id.clone(), asset.clone());
+            } else {
+                self.media.managed_assets.remove(asset_id);
+            }
+        }
         let settings = if before { Arc::new(self.before_settings(&p)) } else { p.develop.clone() };
         let level = SourceLevel::for_size(if thumb_bucket.is_some() {
             max_w.max(max_h) // (grid thumbnails of tight crops stay cheap)
@@ -1086,7 +1161,7 @@ impl crate::Session {
         let content = source_key.0 as u64;
         // Temporary "before" settings must not replace the photo's cached develop hash.
         let settings_hash = if before { settings.hash64() } else { self.media.settings_hashes.get(id, &settings) };
-        let salt = self.media.denoise_salt(id, &settings);
+        let salt = self.media.denoise_salt(id, &settings) ^ self.media.asset_salt(&p);
         let key = settings_hash
             ^ ((max_w as u64) << 40)
             ^ ((max_h as u64) << 20)
@@ -1105,6 +1180,7 @@ impl crate::Session {
             (self.media.rendered.clone(), k.finish())
         });
         Some(RenderJob {
+            proxy_export: false,
             request_id: 0,
             cache_generation: self.media.rendered.generation(),
             source_key: Some(source_key),
@@ -1156,6 +1232,7 @@ impl crate::Session {
         let source = self.media.source_ref(&p, level);
         let ck = Self::variant_key(&p, settings, edge);
         Some(RenderJob {
+            proxy_export: false,
             request_id: 0,
             cache_generation: self.media.rendered.generation(),
             source_key: Some(Hasher128::new().str(&content_key(&p)).finish()),
@@ -1202,6 +1279,7 @@ impl crate::Session {
         let source = self.media.source_ref(&p, level);
         let ck = Self::variant_key(&p, &settings, edge);
         Some(RenderJob {
+            proxy_export: false,
             request_id: 0,
             cache_generation: self.media.rendered.generation(),
             source_key: Some(Hasher128::new().str(&content_key(&p)).finish()),
@@ -1221,15 +1299,18 @@ impl crate::Session {
     }
 
     /// Size-independent cache key of a photo's view render (loupe) for its current settings.
-    fn view_key(p: &Photo, apply_crop: bool) -> Hash128 {
-        Hasher128::new()
-            .str(&content_key(p))
+    fn view_key(&self, p: &Photo, apply_crop: bool) -> Hash128 {
+        let mut key = Hasher128::new();
+        key.str(&content_key(p))
             .str("view")
             .u64(p.develop.hash64())
             .u64(apply_crop as u64)
             .u64(RENDER_CACHE_VERSION)
-            .u64(crate::camera_profiles::cache_key())
-            .finish()
+            .u64(crate::camera_profiles::cache_key());
+        if matches!(p.source, Source::Managed { .. }) {
+            key.u64(self.media.asset_salt(p));
+        }
+        key.finish()
     }
 
     /// The loupe's render job: like [`Self::render_job`], and a full-quality result is kept as the
@@ -1237,7 +1318,7 @@ impl crate::Session {
     pub fn loupe_job(&mut self, id: PhotoId, max_w: usize, max_h: usize, apply_crop: bool) -> Option<RenderJob> {
         let mut job = self.render_job(id, max_w, max_h, false, apply_crop)?;
         let p = self.catalog.photo(id)?;
-        job.view_cache = Some((self.media.rendered.clone(), Self::view_key(p, apply_crop)));
+        job.view_cache = Some((self.media.rendered.clone(), self.view_key(p, apply_crop)));
         Some(job)
     }
 
@@ -1305,7 +1386,28 @@ impl crate::Session {
     }
 
     /// The embedded preview of an unedited raw (path, loader), when the app installed a loader.
+    fn managed_preview(&self, p: &Photo) -> Option<(String, PreviewLoader)> {
+        let Source::Managed { asset_id } = &p.source else { return None };
+        let asset = self.catalog.asset(asset_id)?.clone();
+        let resolver = self.media.asset_resolver.clone()?;
+        if crate::assets::TransferManager::availability(resolver.as_ref(), &asset.original.id) != crate::assets::AssetAvailability::Cached {
+            return None;
+        }
+        let loader = self.media.preview_loader.clone()?;
+        let path = crate::assets::source_path(&p.source).ok()?;
+        Some((
+            path,
+            Arc::new(move |_, max_edge| {
+                let lease = resolver.acquire_cached(&asset.original, &std::sync::atomic::AtomicBool::new(false)).ok()??;
+                loader(&lease.path().to_string_lossy(), max_edge)
+            }),
+        ))
+    }
+
     fn embedded_of(&self, p: &Photo) -> Option<(String, PreviewLoader)> {
+        if p.kind == MediaKind::Raw && crate::import::has_import_look(p) && matches!(p.source, Source::Managed { .. }) {
+            return self.managed_preview(p);
+        }
         match (&p.source, &self.media.preview_loader) {
             (Source::File { path }, Some(l)) if p.kind == MediaKind::Raw && crate::import::has_import_look(p) => Some((path.clone(), l.clone())),
             _ => None,
@@ -1334,6 +1436,9 @@ impl crate::Session {
     /// raw. `None` for anything else, and where the host installed no loader.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn scan_preview_of(&self, p: &Photo) -> Option<(String, PreviewLoader)> {
+        if p.kind == MediaKind::Raw && matches!(p.source, Source::Managed { .. }) {
+            return self.managed_preview(p);
+        }
         match (&p.source, &self.media.preview_loader) {
             (Source::File { path }, Some(l)) if p.kind == MediaKind::Raw => Some((path.clone(), l.clone())),
             _ => None,
@@ -1346,7 +1451,7 @@ impl crate::Session {
         let p = self.catalog.photo(id)?.clone();
         let small = self.thumb_job(id, THUMB_SIZES[THUMB_SIZES.len() - 1])?;
         // (the thumbnail job itself starts with the cached thumbnail, after the sharper embedded preview)
-        let cached = vec![(self.media.rendered.clone(), Self::view_key(&p, apply_crop))];
+        let cached = vec![(self.media.rendered.clone(), self.view_key(&p, apply_crop))];
         let h = Hasher128::new().str(&content_key(&p)).str("quick").u64(p.develop.hash64()).u64(apply_crop as u64).finish();
         let key = h.0 as u64;
         let embedded = self.embedded_of(&p).map(|(path, l)| (path, l, max_edge.clamp(1, SourceLevel::Preview.max_edge())));
@@ -1391,7 +1496,7 @@ impl crate::Session {
     /// says and what a smart preview renders with. Only for raws edited in Kelvin.
     fn learn_as_shot_wb(&mut self, id: PhotoId, info: &SourceInfo) {
         let Some(p) = self.catalog.photo(id) else { return };
-        if !(info.raw && !info.relative_wb && p.develops_raw() && !p.relative_wb()) {
+        if !info.raw || info.relative_wb || !p.develops_raw() || p.relative_wb() {
             return;
         }
         let read = (info.as_shot_temp, info.as_shot_tint);
@@ -1436,12 +1541,19 @@ impl crate::Session {
         depth: lightcraft_pipeline::OutputDepth,
     ) -> Result<RenderJob, String> {
         let mut job = self.render_job(id, max_w, max_h, false, true).ok_or("no such photo")?;
+        if matches!(job.origin, Source::Managed { .. }) {
+            let p = self.catalog.photo(id).ok_or("no such photo")?.clone();
+            job.source = self.media.source_ref_uncached(&p, job.level);
+            if let SourceRef::Managed { requirement, .. } = &mut job.source {
+                *requirement = crate::assets::SourceRequirement::OriginalRequired;
+            }
+        }
         // An export is made from the denoised picture its Denoise amount asks for, made when the job runs if the
         // background queue has not got to it. (A source kept in memory may lack the picture, so the job reads the file.)
         if let Some(wanted) = self.denoise_for_export(id, &job.settings)? {
             let p = self.catalog.photo(id).ok_or("no such photo")?.clone();
             job.source = self.media.source_ref_uncached(&p, job.level);
-            if let SourceRef::File { denoise, .. } = &mut job.source {
+            if let SourceRef::File { denoise, .. } | SourceRef::Managed { denoise, .. } = &mut job.source {
                 *denoise = Some(wanted);
             }
         }

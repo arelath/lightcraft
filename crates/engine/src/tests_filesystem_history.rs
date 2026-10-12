@@ -5,6 +5,14 @@ use serde_json::json;
 
 use crate::{Selection, Session};
 
+fn native_path(path: &str) -> String {
+    path.replace('/', std::path::MAIN_SEPARATOR_STR)
+}
+
+fn file_source(path: String) -> Source {
+    Source::File { path: native_path(&path) }
+}
+
 fn select(s: &mut Session, ids: &[u64], active: u64) {
     s.execute("library.select", &json!({"ids": ids, "active": active})).unwrap();
 }
@@ -35,7 +43,7 @@ fn assert_file_catalog_and_journal(s: &Session, fs: &crate::rename::tests::FakeF
     let files = fs.listing();
     for photo in s.catalog.photos() {
         let Source::File { path } = &photo.source else { panic!("synthetic file fixture") };
-        assert!(files.iter().any(|(file, _)| file == path), "photo {} points to missing {path}: {files:?}", photo.id.0);
+        assert!(files.iter().any(|(file, _)| file == &path.replace('\\', "/")), "photo {} points to missing {path}: {files:?}", photo.id.0);
         assert_eq!(std::path::Path::new(path).file_name().unwrap().to_string_lossy(), photo.file_name.as_str());
     }
     let replayed = memory_library(store);
@@ -58,7 +66,7 @@ fn sidecar_history_fixture(redo: bool) -> (Session, crate::rename::tests::FakeFs
     );
     for (i, path) in ["/p/a.jpg", "/p/other.jpg"].iter().enumerate() {
         let name = std::path::Path::new(path).file_name().unwrap().to_string_lossy();
-        let photo = Photo::new(PhotoId(i as u64 + 1), Source::File { path: (*path).into() }, &name, "JPEG", 16, 16, "");
+        let photo = Photo::new(PhotoId(i as u64 + 1), file_source((*path).into()), &name, "JPEG", 16, 16, "");
         s.commit("Synthetic File", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
     }
     s.persist().unwrap();
@@ -87,7 +95,7 @@ fn merged_renames_coalesce_physical_moves_and_keep_retry_inverses_and_journal() 
     let fs = FakeFs::new(false, &[("/p/a.jpg", "Photo"), ("/p/a.xmp", "Edits"), ("/p/other.jpg", "Other")]);
     for (id, path) in [(1, "/p/a.jpg"), (2, "/p/other.jpg")] {
         let name = std::path::Path::new(path).file_name().unwrap().to_string_lossy();
-        let photo = Photo::new(PhotoId(id), Source::File { path: path.into() }, &name, "JPEG", 16, 16, "");
+        let photo = Photo::new(PhotoId(id), file_source(path.into()), &name, "JPEG", 16, 16, "");
         s.commit("Synthetic File", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
     }
     select(&mut s, &[1], 1);
@@ -102,7 +110,7 @@ fn merged_renames_coalesce_physical_moves_and_keep_retry_inverses_and_journal() 
     let renamed = fs.listing();
     s.merge_undo(2, "Rename Twice");
     assert_eq!(s.undo.len(), 1);
-    assert_eq!(s.file_moves(&s.undo.last().unwrap().op), vec![("/p/final.jpg".into(), "/p/a.jpg".into())]);
+    assert_eq!(s.file_moves(&s.undo.last().unwrap().op), vec![(native_path("/p/final.jpg"), native_path("/p/a.jpg"))]);
     // First exercise the ordinary merged step, before any corrective paths exist.
     for redo in [false, true] {
         file_history_step(&mut s, &fs, redo).unwrap();
@@ -155,7 +163,7 @@ fn partial_file_history_failures_retry_without_losing_either_inverse_or_journal(
             .enumerate()
             .map(|(i, path)| {
                 let name = std::path::Path::new(path).file_name().unwrap().to_string_lossy();
-                let photo = Photo::new(PhotoId(i as u64 + 1), Source::File { path: (*path).into() }, &name, "JPEG", 16, 16, "");
+                let photo = Photo::new(PhotoId(i as u64 + 1), file_source((*path).into()), &name, "JPEG", 16, 16, "");
                 Op::AddPhoto { photo: Box::new(photo) }
             })
             .collect();
@@ -233,7 +241,7 @@ fn history_retries_both_sidecar_styles_after_following_a_photo_with_failed_rollb
             let history = (s.undo.len(), s.redo.len());
             let error = file_history_step(&mut s, &fs, redo).unwrap_err().to_string();
             assert!(error.contains("could not be moved back"), "{error}");
-            assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, Source::File { path: to.clone() });
+            assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, file_source(to.clone()));
             assert!(s.file_moves(&sidecar_history_entry(&s, redo).op).is_empty(), "the photo already followed its destination");
             let expected_pending = if naming == SidecarNaming::Stem { 4 } else { 2 };
             assert_eq!(sidecar_history_entry(&s, redo).retry_sidecars.len(), expected_pending);
@@ -262,7 +270,7 @@ fn history_retries_both_sidecar_styles_after_following_a_photo_with_failed_rollb
 
             // A new destination collision stays an error and never replaces unrelated bytes.
             fs.fail.borrow_mut().clear();
-            fs.files.borrow_mut().push((last.to.to_string_lossy().into_owned(), b"Unrelated edits".to_vec()));
+            fs.files.borrow_mut().push((last.to.to_string_lossy().replace('\\', "/"), b"Unrelated edits".to_vec()));
             let occupied = fs.listing();
             assert!(file_history_step(&mut s, &fs, redo).is_err());
             assert_eq!(fs.listing(), occupied);
@@ -274,7 +282,9 @@ fn history_retries_both_sidecar_styles_after_following_a_photo_with_failed_rollb
             file_history_step(&mut s, &fs, redo).unwrap();
             let mut after = before
                 .iter()
-                .map(|(path, bytes)| (path.replace(from.trim_end_matches(".jpg"), to.trim_end_matches(".jpg")), bytes.clone()))
+                .map(|(path, bytes)| {
+                    (path.replace(from.replace('\\', "/").trim_end_matches(".jpg"), to.replace('\\', "/").trim_end_matches(".jpg")), bytes.clone())
+                })
                 .collect::<Vec<_>>();
             after.sort();
             assert_eq!(fs.listing(), after);
@@ -311,7 +321,7 @@ fn history_repairs_a_sidecar_whose_rollback_failed_before_retrying_the_photo() {
         let entry = sidecar_history_entry(&s, redo);
         assert_eq!(entry.retry_sidecars.len(), 1);
         assert!(entry.retry_inverse.is_empty());
-        assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, Source::File { path: from });
+        assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, file_source(from));
         assert_file_catalog_and_journal(&s, &fs, &store);
         let partial = fs.listing();
         *fs.fail.borrow_mut() = vec![stranded.to_string_lossy().into_owned()];
@@ -334,7 +344,7 @@ fn initial_partial_rename_keeps_sidecar_repairs_for_noop_retry_and_history() {
     let store = lightcraft_catalog::MemStore::new();
     let mut s = memory_library(&store);
     let fs = FakeFs::new(false, &[("/p/a.jpg", "Photo"), ("/p/a.xmp", "Stem edits"), ("/p/a.jpg.xmp", "Full edits")]);
-    let photo = Photo::new(PhotoId(1), Source::File { path: "/p/a.jpg".into() }, "a.jpg", "JPEG", 16, 16, "");
+    let photo = Photo::new(PhotoId(1), file_source("/p/a.jpg".into()), "a.jpg", "JPEG", 16, 16, "");
     s.commit("Synthetic File", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
     s.persist().unwrap();
     s.undo.clear();
@@ -343,7 +353,7 @@ fn initial_partial_rename_keeps_sidecar_repairs_for_noop_retry_and_history() {
     let plans = s.plan_rename_with(&fs, &[PhotoId(1)], "Trip", 1);
     *fs.fail.borrow_mut() = vec!["/p/a.xmp".into(), "/p/Trip.jpg".into()];
     assert!(s.execute_fn("photo.rename", |s| Ok(json!({"renamed": s.apply_rename_with(&fs, &plans)?}))).is_err());
-    assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, Source::File { path: "/p/Trip.jpg".into() });
+    assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, file_source("/p/Trip.jpg".into()));
     assert_eq!(s.undo.len(), 1);
     assert_eq!(s.undo.last().unwrap().retry_sidecars.len(), 2);
     assert_file_catalog_and_journal(&s, &fs, &store);
@@ -377,7 +387,7 @@ fn initial_sidecar_rollback_failure_keeps_a_repair_only_history_step() {
     let store = lightcraft_catalog::MemStore::new();
     let mut s = memory_library(&store);
     let fs = FakeFs::new(false, &[("/p/a.jpg", "Photo"), ("/p/a.XMP", "Stem edits"), ("/p/a.jpg.XMP", "Full edits")]);
-    let photo = Photo::new(PhotoId(1), Source::File { path: "/p/a.jpg".into() }, "a.jpg", "JPEG", 16, 16, "");
+    let photo = Photo::new(PhotoId(1), file_source("/p/a.jpg".into()), "a.jpg", "JPEG", 16, 16, "");
     s.commit("Synthetic File", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
     s.persist().unwrap();
     s.undo.clear();
@@ -386,7 +396,7 @@ fn initial_sidecar_rollback_failure_keeps_a_repair_only_history_step() {
     let plans = s.plan_rename_with(&fs, &[PhotoId(1)], "Trip", 1);
     *fs.fail.borrow_mut() = vec!["/p/a.jpg.XMP".into(), "/p/Trip.XMP".into()];
     assert!(s.execute_fn("photo.rename", |s| Ok(json!({"renamed": s.apply_rename_with(&fs, &plans)?}))).is_err());
-    assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, Source::File { path: "/p/a.jpg".into() });
+    assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, file_source("/p/a.jpg".into()));
     assert_eq!(s.undo.len(), 1);
     assert_eq!(s.undo.last().unwrap().retry_sidecars.len(), 1);
     assert_file_catalog_and_journal(&s, &fs, &store);
@@ -432,7 +442,7 @@ fn discarded_file_history_keeps_sidecar_repairs_without_stale_catalog_inverses()
             file_history_step(&mut s, &fs, true).unwrap();
             assert_eq!(s.pending_sidecar_repairs, pending);
             assert_eq!(fs.listing(), partial);
-            assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, Source::File { path: to.clone() });
+            assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, file_source(to.clone()));
             assert_file_catalog_and_journal(&s, &fs, &store);
 
             let plans = s.plan_rename_with(&fs, &[PhotoId(1)], "Next", 1);
@@ -459,7 +469,7 @@ fn discarded_file_history_keeps_sidecar_repairs_without_stale_catalog_inverses()
             // Successful repairs advance companion paths while retaining their content versions.
             let last = s.pending_sidecar_repairs[0].clone();
             fs.fail.borrow_mut().clear();
-            fs.files.borrow_mut().push((last.to.to_string_lossy().into_owned(), b"Other edits".to_vec()));
+            fs.files.borrow_mut().push((last.to.to_string_lossy().replace('\\', "/"), b"Other edits".to_vec()));
             let occupied = fs.listing();
             assert!(s.apply_rename_with(&fs, &plans).is_err());
             assert_eq!(fs.listing(), occupied);
@@ -493,7 +503,7 @@ fn merged_rename_failure_keeps_rolled_back_photo_identity() {
     let fs = FakeFs::new(false, &[("/p/a.jpg", "Photo 1"), ("/p/a.xmp", "Photo 1 edits"), ("/p/b.jpg", "Photo 2")]);
     for (id, path) in [(1, "/p/a.jpg"), (2, "/p/b.jpg")] {
         let name = std::path::Path::new(path).file_name().unwrap().to_string_lossy();
-        let photo = Photo::new(PhotoId(id), Source::File { path: path.into() }, &name, "JPEG", 16, 16, "");
+        let photo = Photo::new(PhotoId(id), file_source(path.into()), &name, "JPEG", 16, 16, "");
         s.commit("Synthetic File", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
     }
     s.persist().unwrap();
@@ -513,10 +523,13 @@ fn merged_rename_failure_keeps_rolled_back_photo_identity() {
     );
     s.merge_undo(3, "Rename Three Times");
     assert_eq!((s.undo.len(), s.redo.len()), (1, 0));
-    assert_eq!(s.file_moves(&s.undo.last().unwrap().op), vec![("/p/d.jpg".into(), "/p/b.jpg".into()), ("/p/c.jpg".into(), "/p/a.jpg".into())]);
+    assert_eq!(
+        s.file_moves(&s.undo.last().unwrap().op),
+        vec![(native_path("/p/d.jpg"), native_path("/p/b.jpg")), (native_path("/p/c.jpg"), native_path("/p/a.jpg"))]
+    );
     // The second photo move sticks; the preceding d -> b move must roll back to d.
     *fs.fail.borrow_mut() = vec!["/p/c.xmp".into(), "/p/a.jpg".into()];
-    let error = file_history_step(&mut s, &fs, false).unwrap_err().to_string();
+    let error = file_history_step(&mut s, &fs, false).unwrap_err().to_string().replace('\\', "/");
     assert!(error.contains("rename /p/c.xmp: injected failure"), "{error}");
     assert!(error.contains("/p/c.jpg could not be moved back"), "{error}");
     let files = fs.listing();
@@ -529,9 +542,9 @@ fn merged_rename_failure_keeps_rolled_back_photo_identity() {
         ]
     );
     assert_eq!((s.undo.len(), s.redo.len()), (1, 0));
-    assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, Source::File { path: "/p/a.jpg".into() });
+    assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().source, file_source("/p/a.jpg".into()));
     let photo2 = s.catalog.photo(PhotoId(2)).unwrap();
-    assert_eq!(photo2.source, Source::File { path: "/p/d.jpg".into() }, "photo 2 rolled back physically and must still identify d.jpg");
+    assert_eq!(photo2.source, file_source("/p/d.jpg".into()), "photo 2 rolled back physically and must still identify d.jpg");
     let Source::File { path } = &photo2.source else { panic!("file fixture") };
-    assert_eq!(files.iter().find(|(file, _)| file == path).map(|(_, bytes)| bytes.as_str()), Some("Photo 2"));
+    assert_eq!(files.iter().find(|(file, _)| file == &path.replace('\\', "/")).map(|(_, bytes)| bytes.as_str()), Some("Photo 2"));
 }

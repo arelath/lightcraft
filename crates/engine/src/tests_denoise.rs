@@ -712,6 +712,7 @@ fn a_photo_waits_for_its_turn_unless_pictures_are_not_made_on_their_own_or_have_
     x.s.denoise.settings.auto = Some(true);
     if let Some(l) = x.s.library.as_mut() {
         l.on_disk = false;
+        l.cache_dir = None;
     }
     match x.s.denoise_photo_state(id) {
         PhotoState::Failed { why, unsupported } => assert!(unsupported && why.contains("library folder"), "{why}"),

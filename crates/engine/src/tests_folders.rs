@@ -40,7 +40,7 @@ impl Scratch {
         Scratch(dir)
     }
     fn path(&self, rel: &str) -> String {
-        self.0.join(rel).to_string_lossy().to_string()
+        self.0.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)).to_string_lossy().to_string()
     }
 }
 
@@ -419,7 +419,7 @@ fn a_folder_name_with_spaces_at_its_edge_is_never_mistaken_for_its_neighbour() {
         .filter(|p| p.deleted)
         .map(|p| match &p.source {
             Source::File { path } => path.clone(),
-            Source::Demo { .. } => String::new(),
+            Source::Demo { .. } | Source::Managed { .. } => String::new(),
         })
         .collect();
     assert_eq!(gone, ["/p/shoot /a.jpg"], "the folder named, not its neighbour");
