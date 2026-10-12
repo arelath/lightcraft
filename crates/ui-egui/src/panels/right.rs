@@ -698,6 +698,10 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     resolver.availability(&asset.original.id)
                 })
             });
+            let preview = app.session.catalog.asset(asset_id).and_then(|asset| {
+                use lightcraft_engine::assets::TransferManager;
+                asset.smart_preview.as_ref().and_then(|blob| app.session.media.asset_resolver.as_ref().map(|r| r.availability(&blob.id)))
+            });
             use lightcraft_engine::assets::AssetAvailability;
             let text = match availability {
                 Some(AssetAvailability::Cached) => "Original downloaded",
@@ -708,10 +712,43 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             };
             ui.add_space(6.0);
             ui.label(egui::RichText::new(crate::i18n::tr(text)).color(t.text_dim));
+            if let Some(AssetAvailability::Downloading { done, total }) = &availability {
+                let fraction = if *total == 0 { 0.0 } else { (*done as f64 / *total as f64).clamp(0.0, 1.0) as f32 };
+                ui.add(egui::ProgressBar::new(fraction).text(format!("{done} / {total} bytes")));
+            }
+            let preview_text = match &preview {
+                Some(AssetAvailability::Cached) => "Preview available · editing and explicit preview export work offline",
+                Some(AssetAvailability::Downloading { .. }) => "Downloading editable preview…",
+                _ if !matches!(availability, Some(AssetAvailability::Cached)) => {
+                    "Full-quality export and original-file operations require downloading the original"
+                }
+                _ => "Full-quality source available on this device",
+            };
+            ui.label(egui::RichText::new(crate::i18n::tr(preview_text)).color(t.text_dim));
+            if let Some(AssetAvailability::Downloading { done, total }) = &preview {
+                let fraction = if *total == 0 { 0.0 } else { (*done as f64 / *total as f64).clamp(0.0, 1.0) as f32 };
+                ui.add(egui::ProgressBar::new(fraction).text(format!("{done} / {total} bytes")));
+            }
+            if let Some(AssetAvailability::Failed { error }) = &availability {
+                ui.label(egui::RichText::new(error).color(t.text_dim));
+            }
             if !matches!(availability, Some(AssetAvailability::Cached | AssetAvailability::Downloading { .. }))
                 && text_button(ui, "cloudDownloadOriginal", crate::i18n::tr("Download original"), false).clicked()
+                && let Err(error) = app.run("cloud.fetch", json!({"ids": [id.0], "original": true}))
             {
-                let _ = app.run("cloud.fetch", json!({"ids": [id.0], "original": true}));
+                app.toast(ui.ctx(), error);
+            }
+            if matches!(availability, Some(AssetAvailability::Failed { .. } | AssetAvailability::Missing))
+                && text_button(ui, "cloudReconnect", crate::i18n::tr("Reconnect and retry"), false).clicked()
+            {
+                match app.run("cloud.reconnect", json!({})) {
+                    Ok(_) => {
+                        if let Err(error) = app.run("cloud.fetch", json!({"ids": [id.0], "original": true})) {
+                            app.toast(ui.ctx(), error);
+                        }
+                    }
+                    Err(error) => app.toast(ui.ctx(), error),
+                }
             }
             #[cfg(not(target_arch = "wasm32"))]
             {

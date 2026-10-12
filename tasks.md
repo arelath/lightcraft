@@ -46,15 +46,15 @@ Verified on 2026-10-12: Milestone 1, including managed originals and proxies, ca
 
 **Dependencies:** Milestone 1.
 
-Verified retention slice (2026-10-12): configurable asset budgets, independent photo/album offline pins, protected decoded-source lifetimes, local-original removal and device-local policy persistence. Tests cover both original and preview pins across restart, offline preview editing, explicit proxy export, corruption and failed policy writes. CLI/MCP and native Info/Performance controls passed; the desktop reopened and exported a pinned RAW with its test server stopped. Remaining preview/priority and milestone-wide checks stay unchecked.
+Verified device experience (2026-10-12): recipe-matched remote thumbnails, editable proxies and original refresh; four concurrent downloads with active/nearby/visible/background priorities, deduplication, byte progress, cancellation and reconnect; configurable budgets, separate photo/album offline pins and local-original removal. CLI/MCP, native Info/Performance controls and all eight CI stages passed. Native checks covered delayed transfers, cancellation/retry, preview editing and explicit export, and offline reopening/export of a pinned RAW. Durable pending-upload and external-working-copy protection remains unchecked until the safe-import workflow lands.
 
 ### Previews and background transfers
 
 - [x] **CS2.1** Define versioned remote keys for smart previews and thumbnails, with thumbnails keyed by source, edits, and rendering parameters; retain the existing thumbnail cache as a separate disposable cache.
 - [x] **CS2.2** Adapt `.lcsp` smart-preview loading and discovery to managed assets; load thumbnails and editable proxies before fetching originals where the operation permits.
 - [x] **CS2.3** Show an available preview immediately when opening a photo and refresh the rendering when a better source arrives.
-- [ ] **CS2.4** Deduplicate simultaneous transfers for the same object and prioritize active photos, nearby photos, visible thumbnails, then background work.
-- [ ] **CS2.5** Add transfer progress, cancellation, retry, and reconnect handling through shared engine commands and consistent desktop, CLI, and MCP behavior.
+- [x] **CS2.4** Deduplicate simultaneous transfers for the same object and prioritize active photos, nearby photos, visible thumbnails, then background work.
+- [x] **CS2.5** Add transfer progress, cancellation, retry, and reconnect handling through shared engine commands and consistent desktop, CLI, and MCP behavior.
 - [x] **CS2.6** Invalidate source and availability state after download completion and retry previously failed renders even when their render key and catalog revision have not changed.
 
 ### Cache retention and offline operation
@@ -64,15 +64,15 @@ Verified retention slice (2026-10-12): configurable asset budgets, independent p
 - [ ] **CS2.9** Preserve temporary lease pins while decoders, exports, or external editors use cached files; never evict pending uploads or unsynchronized working copies.
 - [x] **CS2.10** Add a remove-local-copy command that evicts eligible cached content while preserving the photo and its remote references.
 - [x] **CS2.11** Keep cache paths, budgets, pins, progress, selection, and hardware preferences device-local.
-- [ ] **CS2.12** Define enabled operations and actionable errors for offline states with an original, only a smart preview, or no usable source.
+- [x] **CS2.12** Define enabled operations and actionable errors for offline states with an original, only a smart preview, or no usable source.
 
 ### Acceptance checks
 
 - [x] **CS2.A1** Verify library browsing and preview editing remain responsive during slow downloads; inspect UI performance through the control channel.
 - [x] **CS2.A2** Verify pinned originals and smart previews survive restart and remain usable offline; uncached remote photos do not enter the missing-file/relink workflow.
 - [x] **CS2.A3** Verify full-quality export waits for the original, reports unavailable originals offline, and only exports a proxy when explicitly requested.
-- [ ] **CS2.A4** Test request deduplication, cancellation, retry after reconnect, render recovery, cache-budget enforcement, and eviction protection for active leases and offline pins.
-- [ ] **CS2.A5** Run `cargo xtask ci`, exercise the desktop commands, and visually inspect progress, availability, and offline controls.
+- [x] **CS2.A4** Test request deduplication, cancellation, retry after reconnect, render recovery, cache-budget enforcement, and eviction protection for active leases and offline pins.
+- [x] **CS2.A5** Run `cargo xtask ci`, exercise the desktop commands, and visually inspect progress, availability, and offline controls.
 
 ## Milestone 3 — Add safe cloud import
 

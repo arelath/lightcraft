@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 thread_local! {
@@ -19,6 +19,10 @@ thread_local! {
 pub struct CachedOnly {
     previous: bool,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+pub fn is_cached_only() -> bool {
+    CACHED_ONLY.with(std::cell::Cell::get)
 }
 
 impl CachedOnly {
@@ -105,11 +109,26 @@ struct Entry {
     gate: Mutex<()>,
     state: Mutex<AssetAvailability>,
     pins: AtomicUsize,
+    priority: Arc<AtomicU32>,
 }
 
 impl Default for Entry {
     fn default() -> Self {
-        Self { gate: Mutex::new(()), state: Mutex::new(AssetAvailability::Remote), pins: AtomicUsize::new(0) }
+        Self { gate: Mutex::new(()), state: Mutex::new(AssetAvailability::Remote), pins: AtomicUsize::new(0), priority: Arc::new(AtomicU32::new(0)) }
+    }
+}
+
+fn lock_transfer<'a>(entry: &'a Entry, cancel: &AtomicBool) -> Result<MutexGuard<'a, ()>> {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(AssetError::Cancelled);
+        }
+        match entry.gate.try_lock() {
+            Ok(gate) => return Ok(gate),
+            Err(TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+            Err(TryLockError::WouldBlock) if is_cached_only() => return Err(pending_source()),
+            Err(TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
     }
 }
 
@@ -177,6 +196,8 @@ pub struct AssetResolver {
     generation: AtomicU64,
     wake: Mutex<Option<crate::availability::Waker>>,
     cache: Arc<cache::Cache>,
+    transfers: transfers::Queue,
+    activity: Mutex<Option<crate::activity::Activity>>,
 }
 
 impl AssetResolver {
@@ -189,13 +210,42 @@ impl AssetResolver {
     pub fn new(root: PathBuf) -> Self {
         let entries = Arc::new(Mutex::new(BTreeMap::new()));
         let cache = cache::Cache::new(root.clone(), Arc::downgrade(&entries));
-        Self { root, stores: Mutex::new(BTreeMap::new()), entries, generation: AtomicU64::new(0), wake: Mutex::new(None), cache }
+        Self {
+            root,
+            stores: Mutex::new(BTreeMap::new()),
+            entries,
+            generation: AtomicU64::new(0),
+            wake: Mutex::new(None),
+            cache,
+            transfers: transfers::Queue::new(4),
+            activity: Mutex::new(None),
+        }
     }
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
     pub fn set_waker(&self, wake: crate::availability::Waker) {
         *self.wake.lock().unwrap_or_else(PoisonError::into_inner) = Some(wake);
+    }
+    pub fn set_activity(&self, activity: crate::activity::Activity) {
+        *self.activity.lock().unwrap_or_else(PoisonError::into_inner) = Some(activity);
+    }
+    /// Source loaders without a command-owned task get cancellable shared activity.
+    /// Callers that already have a cancellation flag continue to use `acquire` directly.
+    pub fn source_transfer<T>(&self, run: impl FnOnce(&AtomicBool) -> Result<T>) -> Result<T> {
+        if let Some(cancel) = transfers::cancel_flag() {
+            return run(&cancel);
+        }
+        let activity = self.activity.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if !is_cached_only()
+            && let Some(activity) = activity
+        {
+            let task = activity.start("download", "Download Cloud Source", crate::activity::Cancel::Yes);
+            task.set_unit(crate::activity::Unit::Bytes);
+            let cancel = task.cancel_flag().ok_or_else(|| AssetError::Invalid("could not create download cancellation flag".into()))?;
+            return transfers::with_progress(task.handle(), || run(&cancel));
+        }
+        run(&AtomicBool::new(false))
     }
     fn changed(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
@@ -252,7 +302,11 @@ impl AssetResolver {
     pub fn acquire_cached(&self, blob: &Blob, cancel: &AtomicBool) -> Result<Option<AssetLease>> {
         blob.validate().map_err(AssetError::Invalid)?;
         let entry = self.entry(&blob.id)?;
-        let gate = lock_entry(&entry)?;
+        let gate = match entry.gate.try_lock() {
+            Ok(gate) => gate,
+            Err(TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(TryLockError::WouldBlock) => return Ok(None),
+        };
         let path = self.root.join(&blob.id.0);
         if !verify_file(&path, blob, cancel)? {
             return Ok(None);
@@ -348,7 +402,10 @@ impl TransferManager for AssetResolver {
         }
         blob.validate().map_err(AssetError::Invalid)?;
         let entry = self.entry(&blob.id)?;
-        let _gate = lock_entry(&entry)?;
+        let priority = transfers::current_priority();
+        entry.priority.fetch_max(priority, Ordering::Relaxed);
+        let _gate = lock_transfer(&entry, cancel)?;
+        entry.priority.fetch_max(priority, Ordering::Relaxed);
         if cancel.load(Ordering::Relaxed) {
             return Err(AssetError::Cancelled);
         }
@@ -366,13 +423,16 @@ impl TransferManager for AssetResolver {
                     .get(&blob.remote.connection)
                     .cloned()
                     .ok_or_else(|| AssetError::Unconfigured(blob.remote.connection.clone()))?;
+                let _permit = self.transfers.enter(&blob.id, entry.priority.clone(), cancel)?;
                 std::fs::create_dir_all(&self.root).map_err(disk)?;
                 *entry.state.lock().unwrap_or_else(PoisonError::into_inner) = AssetAvailability::Downloading { done: 0, total: blob.size };
+                transfers::progress(blob, 0);
                 let mut transfer_error = None;
                 let result = lightcraft_catalog::safe_file::write_atomic_with(&path, &mut |out| {
                     let mut writer = VerifiedWriter { out, hash: Sha256::new(), done: 0, expected: blob.size, cancel };
                     if let Err(e) = store.download(blob, &mut writer, cancel, &mut |done| {
                         *entry.state.lock().unwrap_or_else(PoisonError::into_inner) = AssetAvailability::Downloading { done, total: blob.size };
+                        transfers::progress(blob, done);
                     }) {
                         transfer_error = Some(e);
                         return Err(std::io::Error::other("object transfer failed"));
@@ -406,6 +466,7 @@ impl TransferManager for AssetResolver {
                 _ => AssetAvailability::Failed { error: error.to_string() },
             };
         }
+        entry.priority.store(0, Ordering::Relaxed);
         drop(_gate);
         if availability_changed {
             self.changed();
@@ -430,8 +491,12 @@ pub mod s3;
 
 pub mod cache;
 pub mod keys;
+pub mod transfers;
 
 impl AssetResolver {
+    pub fn transfer_status(&self) -> transfers::QueueStatus {
+        self.transfers.status()
+    }
     pub fn cache_status(&self) -> cache::CacheStatus {
         self.cache.status()
     }
@@ -465,7 +530,7 @@ impl crate::Session {
             if let Some(id) = path.strip_prefix("lcasset:\0") {
                 let blob = assets.get(&lightcraft_catalog::assets::AssetId(id.into())).ok_or("managed asset record is missing")?;
                 let resolver = resolver.as_ref().ok_or("cloud storage is not configured on this device")?;
-                let lease = resolver.acquire(blob, &AtomicBool::new(false)).map_err(|e| e.to_string())?;
+                let lease = resolver.source_transfer(|cancel| resolver.acquire(blob, cancel)).map_err(|e| e.to_string())?;
                 return lease.read_bytes().map_err(|e| e.to_string());
             }
             match &local {

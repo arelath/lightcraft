@@ -95,6 +95,216 @@ fn simultaneous_requests_download_once_and_keep_independent_leases() {
 }
 
 #[test]
+fn a_duplicate_waiter_can_cancel_without_waiting_for_the_shared_transfer() {
+    let scratch = Scratch::new();
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    let b = blob(b"original");
+    let entry = resolver.entry(&b.id).unwrap();
+    let gate = entry.gate.lock().unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let flag = cancel.clone();
+    let worker = std::thread::spawn(move || {
+        tx.send(resolver.acquire(&b, &flag).err()).unwrap();
+    });
+    cancel.store(true, Ordering::Relaxed);
+    let result = rx.recv_timeout(std::time::Duration::from_secs(1));
+    drop(gate);
+    worker.join().unwrap();
+    assert_eq!(result.unwrap(), Some(AssetError::Cancelled));
+}
+
+#[test]
+fn a_cached_preview_does_not_wait_for_an_original_being_downloaded() {
+    let scratch = Scratch::new();
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    let asset = Asset { original: blob(b"original"), smart_preview: Some(blob(b"preview")), thumbnail: None };
+    std::fs::write(scratch.0.join(&asset.smart_preview.as_ref().unwrap().id.0), b"preview").unwrap();
+    let entry = resolver.entry(&asset.original.id).unwrap();
+    let gate = entry.gate.lock().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        tx.send(resolver.acquire_asset(&asset, SourceRequirement::PreviewAllowed, &AtomicBool::new(false))).unwrap();
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(1));
+    drop(gate);
+    worker.join().unwrap();
+    let (lease, proxy) = result.unwrap().unwrap();
+    assert!(proxy);
+    assert_eq!(lease.read_bytes().unwrap(), b"preview");
+}
+
+#[test]
+fn render_source_activity_reports_bytes_cancels_and_recovers_after_reconnect() {
+    struct Slow;
+    impl BlobStore for Slow {
+        fn download(&self, _: &Blob, out: &mut dyn Write, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
+            out.write_all(b"o").map_err(disk)?;
+            progress(1);
+            while !cancel.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(AssetError::Cancelled)
+        }
+    }
+    let scratch = Scratch::new();
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    let activity = crate::activity::Activity::default();
+    resolver.set_activity(activity.clone());
+    resolver.connect("memory".into(), Arc::new(Slow)).unwrap();
+    let b = blob(b"original");
+    let (r, original) = (resolver.clone(), b.clone());
+    let worker = std::thread::spawn(move || r.source_transfer(|cancel| r.acquire(&original, cancel)).err());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let task = loop {
+        if let Some(task) = activity.list().into_iter().find(|task| task.done == 1) {
+            break task;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    };
+    assert_eq!(task.total, 8);
+    assert_eq!(task.unit, crate::activity::Unit::Bytes);
+    activity.cancel(task.id).unwrap();
+    assert_eq!(worker.join().unwrap(), Some(AssetError::Cancelled));
+    assert!(activity.list().is_empty());
+    assert!(!scratch.0.join(&b.id.0).exists());
+    assert!(matches!(resolver.availability(&b.id), AssetAvailability::Failed { .. }));
+    let before = resolver.generation();
+    resolver.connect("memory".into(), store(b"original")).unwrap();
+    assert!(resolver.generation() > before);
+    assert_eq!(resolver.source_transfer(|cancel| resolver.acquire(&b, cancel)).unwrap().read_bytes().unwrap(), b"original");
+    assert!(activity.list().is_empty());
+}
+
+#[test]
+fn resolver_bounds_network_io_and_cancels_queued_work_without_downloading() {
+    struct HeldStore {
+        released: AtomicBool,
+        reads: AtomicUsize,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+    }
+    impl BlobStore for HeldStore {
+        fn download(&self, blob: &Blob, out: &mut dyn Write, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            let active = self.active.fetch_add(1, Ordering::Relaxed) + 1;
+            self.peak.fetch_max(active, Ordering::Relaxed);
+            while !self.released.load(Ordering::Relaxed) && !cancel.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            self.active.fetch_sub(1, Ordering::Relaxed);
+            if cancel.load(Ordering::Relaxed) {
+                return Err(AssetError::Cancelled);
+            }
+            out.write_all(blob.remote.key.as_bytes()).map_err(disk)?;
+            progress(blob.size);
+            Ok(())
+        }
+    }
+    let scratch = Scratch::new();
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    let provider =
+        Arc::new(HeldStore { released: AtomicBool::new(false), reads: AtomicUsize::new(0), active: AtomicUsize::new(0), peak: AtomicUsize::new(0) });
+    resolver.connect("memory".into(), provider.clone()).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut workers = Vec::new();
+    let mut flags = Vec::new();
+    for i in 0..6 {
+        let key = format!("source-{i}");
+        let mut b = blob(key.as_bytes());
+        b.remote.key = key;
+        let (r, tx, cancel) = (resolver.clone(), tx.clone(), Arc::new(AtomicBool::new(false)));
+        flags.push(cancel.clone());
+        workers.push(std::thread::spawn(move || {
+            tx.send((i, r.acquire(&b, &cancel))).unwrap();
+        }));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status = resolver.transfer_status();
+        if status.active.len() == 4 && status.queued.len() == 2 {
+            // Identify a queued request regardless of thread start ordering.
+            let index = (0..6).find(|i| status.queued.iter().any(|q| q.blob == sha256(format!("source-{i}").as_bytes()))).unwrap();
+            flags[index].store(true, Ordering::Relaxed);
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let (_, cancelled) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert!(matches!(cancelled, Err(AssetError::Cancelled)));
+    assert_eq!(provider.reads.load(Ordering::Relaxed), 4);
+    provider.released.store(true, Ordering::Relaxed);
+    let leases: Vec<_> = (0..5).map(|_| rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().1.unwrap()).collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert_eq!(provider.reads.load(Ordering::Relaxed), 5);
+    assert_eq!(provider.peak.load(Ordering::Relaxed), 4);
+    assert_eq!(leases.len(), 5);
+}
+
+#[test]
+fn a_foreground_duplicate_promotes_the_existing_queued_blob() {
+    let scratch = Scratch::new();
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    let provider = store(b"original");
+    resolver.connect("memory".into(), provider.clone()).unwrap();
+    let b = blob(b"original");
+    let held: Vec<_> = (0..4)
+        .map(|i| resolver.transfers.enter(&BlobId(format!("held-{i}")), Arc::new(AtomicU32::new(0)), &AtomicBool::new(false)).unwrap())
+        .collect();
+    let (r, original) = (resolver.clone(), b.clone());
+    let background = std::thread::spawn(move || r.acquire(&original, &AtomicBool::new(false)).unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while resolver.transfer_status().queued.is_empty() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(resolver.transfer_status().queued[0].priority, transfers::Priority::Background);
+    let (r, original) = (resolver.clone(), b);
+    let foreground = std::thread::spawn(move || {
+        transfers::with_priority(transfers::Priority::ActivePhoto, || r.acquire(&original, &AtomicBool::new(false)).unwrap())
+    });
+    while resolver.transfer_status().queued[0].priority != transfers::Priority::ActivePhoto {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(resolver.transfer_status().queued.len(), 1);
+    drop(held);
+    let leases = [background.join().unwrap(), foreground.join().unwrap()];
+    assert_eq!(provider.reads.load(Ordering::Relaxed), 1);
+    assert_eq!(leases[0].path(), leases[1].path());
+}
+
+#[test]
+fn headless_wait_fetch_reports_errors_and_finishes_before_returning() {
+    let scratch = Scratch::new();
+    let mut session = crate::Session::new().with_fs();
+    session.open_library(&scratch.0, false).unwrap();
+    let bytes = b"a downloaded source";
+    let asset = Asset { original: blob(bytes), smart_preview: None, thumbnail: None };
+    let attached = session
+        .execute("cloud.attach", &serde_json::json!({"assetId": "waited", "asset": asset, "fileName": "waited.jpg", "width": 4, "height": 3}))
+        .unwrap();
+    let id = attached["id"].as_u64().unwrap();
+    assert!(session.execute("cloud.fetch", &serde_json::json!({"ids": [id], "wait": true})).is_err());
+    let resolver = session.media.asset_resolver.as_ref().unwrap().clone();
+    let provider = store(bytes);
+    resolver.connect("memory".into(), provider.clone()).unwrap();
+    let downloaded = session.execute("cloud.fetch", &serde_json::json!({"ids": [id], "wait": true})).unwrap();
+    assert_eq!(downloaded["completed"], 1);
+    assert_eq!(resolver.availability(&blob(bytes).id), AssetAvailability::Cached);
+    assert_eq!(provider.reads.load(Ordering::Relaxed), 1);
+    assert!(session.activity.list().is_empty());
+    let _ui = CachedOnly::enter(true);
+    assert!(session.execute("cloud.fetch", &serde_json::json!({"ids": [id], "wait": true})).is_err());
+    assert!(session.execute("cloud.pin", &serde_json::json!({"ids": [id], "wait": true})).is_err());
+    assert!(resolver.offline_pin(&format!("photo:{id}")).is_none(), "desktop wait rejection precedes persistent changes");
+}
+
+#[test]
 fn partial_corrupt_cancelled_and_unauthorized_downloads_never_publish() {
     for error in [AssetError::Network("interrupted".into()), AssetError::Unauthorized, AssetError::Missing, AssetError::Cancelled] {
         let scratch = Scratch::new();

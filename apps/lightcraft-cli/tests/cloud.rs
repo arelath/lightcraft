@@ -12,6 +12,7 @@ use std::sync::{
 };
 
 const BIN: &str = env!("CARGO_BIN_EXE_lightcraft-cli");
+static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 fn raw_bytes() -> Vec<u8> {
     use lightcraft_raw::*;
@@ -57,7 +58,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("lightcraft-cloud-binary-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lightcraft-cloud-binary-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("credentials"),
@@ -122,6 +123,51 @@ impl Drop for Fixture {
         }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+#[test]
+fn one_shot_cli_waits_for_uncached_pins_and_retries_a_removed_original() {
+    let fixture = Fixture::new();
+    let library = fixture.dir.join("library");
+    let config = json!({"id": "personal", "bucket": "photos", "region": "us-east-1", "prefix": "library", "endpoint": fixture.endpoint, "profile": "acceptance"});
+    let attach = json!({"assetId": "waited-raw", "asset": {"original": {"id": format!("{:x}", Sha256::digest(&fixture.bytes)), "size": fixture.bytes.len(),
+        "remote": {"connection": "personal", "key": "library/cloud.dng"}}}, "fileName": "cloud.dng", "format": "DNG", "kind": "raw", "width": 32, "height": 24});
+    let result = fixture
+        .command()
+        .args(["run", "--library"])
+        .arg(&library)
+        .arg("cloud.configure")
+        .arg(config.to_string())
+        .arg("cloud.attach")
+        .arg(attach.to_string())
+        .args(["cloud.pin", "quality=original", "wait=true", "cloud.status"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let rows: Vec<Value> = String::from_utf8_lossy(&result.stdout).lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert!(rows.iter().all(|row| row["ok"] == true), "{rows:?}");
+    assert_eq!(rows[2]["result"]["background"], false);
+    assert_eq!(rows[3]["result"]["photos"][0]["original"]["state"], "cached");
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 1);
+    // Reopening starts recovery of persisted pins. Release the owner in its own
+    // session before removal, so that a still-running recovery lease is not mistaken
+    // for a failure of the original-removal contract.
+    let unpinned = fixture.command().args(["run", "--library"]).arg(&library).args(["cloud.unpin", "ids=[1]"]).output().unwrap();
+    assert!(unpinned.status.success(), "{}", String::from_utf8_lossy(&unpinned.stderr));
+    let result = fixture
+        .command()
+        .args(["run", "--library"])
+        .arg(&library)
+        .args(["cloud.removeLocalCopy", "ids=[1]", "cloud.fetch", "ids=[1]", "wait=true", "cloud.status", "ids=[1]"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let rows: Vec<Value> = String::from_utf8_lossy(&result.stdout).lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert!(rows.iter().all(|row| row["ok"] == true), "{rows:?}");
+    assert_eq!(rows[0]["result"]["removed"].as_array().unwrap().len(), 1, "{rows:?}");
+    assert_eq!(rows[1]["result"]["completed"], 1);
+    assert_eq!(rows[2]["result"]["photos"][0]["original"]["state"], "cached");
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 2);
 }
 
 #[test]

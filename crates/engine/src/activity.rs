@@ -283,6 +283,9 @@ pub struct TaskHandle {
 }
 
 impl TaskHandle {
+    pub fn cancel_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.entry.cancel.clone()
+    }
     pub fn progress(&self, done: u64, total: u64) {
         self.entry.progress(done, total);
     }

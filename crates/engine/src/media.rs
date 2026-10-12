@@ -266,7 +266,7 @@ impl SourceRef {
                 let asset = asset.as_ref().ok_or("managed asset record is missing from the catalog")?;
                 let resolver = resolver.as_ref().ok_or("cloud storage is not configured on this device")?;
                 let (lease, preview) =
-                    resolver.acquire_asset(asset, *requirement, &std::sync::atomic::AtomicBool::new(false)).map_err(|e| e.to_string())?;
+                    resolver.source_transfer(|cancel| resolver.acquire_asset(asset, *requirement, cancel)).map_err(|e| e.to_string())?;
                 if preview {
                     let bytes = lease.read_bytes().map_err(|e| e.to_string())?;
                     let (image, tone) = crate::smart::decode(&bytes)?;
@@ -1072,7 +1072,7 @@ impl ManagedThumbnail {
         if self.blob.size > 16 << 20 {
             return Err("cloud thumbnail exceeds the 16 MiB limit".into());
         }
-        let lease = self.resolver.acquire(&self.blob, &std::sync::atomic::AtomicBool::new(false)).map_err(|e| e.to_string())?;
+        let lease = self.resolver.source_transfer(|cancel| self.resolver.acquire(&self.blob, cancel)).map_err(|e| e.to_string())?;
         let bytes = lease.read_bytes().map_err(|e| e.to_string())?;
         if lightcraft_codecs::sniff(&bytes) != Some(lightcraft_codecs::Format::Png) {
             return Err("cloud thumbnail must be a display-ready PNG".into());

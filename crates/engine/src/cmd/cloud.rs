@@ -92,14 +92,49 @@ fn status(s: &mut Session, p: &Value) -> Result<Value> {
             let Source::Managed { asset_id } = &photo.source else { return None };
             let asset = s.catalog.asset(asset_id)?;
             Some(json!({"id": id.0, "assetId": asset_id.0, "original": resolver.availability(&asset.original.id),
-            "smartPreview": asset.smart_preview.as_ref().map(|b| resolver.availability(&b.id))}))
+            "smartPreview": asset.smart_preview.as_ref().map(|b| resolver.availability(&b.id)),
+            "thumbnail": asset.thumbnail.as_ref().map(|b| resolver.availability(&b.id))}))
         })
         .collect::<Vec<_>>();
-    Ok(json!({"photos": photos}))
+    Ok(json!({"photos": photos, "transfers": resolver.transfer_status()}))
+}
+
+fn wait_requested(p: &Value, command: &str) -> Result<bool> {
+    let wait = match p.get("wait") {
+        None => false,
+        Some(value) => value.as_bool().ok_or_else(|| bad(command, "wait must be true or false"))?,
+    };
+    if wait && crate::assets::is_cached_only() {
+        return Err(bad(command, "wait is available in headless CLI/MCP sessions; use background downloads and activity.list on the desktop"));
+    }
+    Ok(wait)
+}
+
+fn reconnect(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "cloud.reconnect";
+    let resolver = resolver(s, C)?;
+    let connections = s.library.as_mut().ok_or_else(|| bad(C, "open a library first"))?.cloud_connections()?;
+    let id = super::str_param(p, "id");
+    let mut connected = Vec::new();
+    for connection in connections.into_iter().filter(|connection| id.is_none_or(|id| connection.id == id)) {
+        connected.push(connection.id.clone());
+        resolver.connect(connection.id.clone(), Arc::new(connection)).map_err(|e| bad(C, e.to_string()))?;
+    }
+    if connected.is_empty() {
+        return Err(bad(C, "no matching saved storage connection; connect it first"));
+    }
+    // Transports resolve external credentials again on each request. Connecting advances
+    // availability generation so failed renders retry, without discarding verified bytes.
+    resume_offline_pins(s);
+    Ok(json!({"connections": connected}))
 }
 
 fn fetch(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "cloud.fetch";
+    let wait = wait_requested(p, C)?;
+    if !wait && s.activity.list().iter().filter(|task| task.kind == "download").count() >= 32 {
+        return Err(bad(C, "too many download tasks; cancel background work and retry"));
+    }
     let resolver = resolver(s, C)?;
     let ids = s.targets(p);
     if ids.is_empty() || ids.len() > 1000 {
@@ -118,15 +153,26 @@ fn fetch(s: &mut Session, p: &Value) -> Result<Value> {
     let cancel = task.cancel_flag().ok_or_else(|| bad(C, "download cancellation flag could not be created"))?;
     let task_id = task.id();
     let total = assets.len();
+    task.set_unit(crate::activity::Unit::Bytes);
+    let handle = task.handle();
+    let run = move || {
+        crate::assets::transfers::with_progress(handle, || {
+            for asset in &assets {
+                resolver.acquire_asset(asset, requirement, &cancel)?;
+            }
+            drop(task);
+            Ok::<_, crate::assets::AssetError>(())
+        })
+    };
+    if wait {
+        run().map_err(|e| bad(C, e.to_string()))?;
+        return Ok(json!({"background": false, "total": total, "completed": total}));
+    }
     std::thread::Builder::new()
         .name("cloud-download".into())
         .spawn(move || {
-            for (i, asset) in assets.iter().enumerate() {
-                if let Err(e) = resolver.acquire_asset(asset, requirement, &cancel) {
-                    log::warn!("cloud download: {e}");
-                    break;
-                }
-                task.progress(i as u64 + 1, total as u64);
+            if let Err(error) = run() {
+                log::warn!("cloud download: {error}");
             }
         })
         .map_err(|e| bad(C, format!("could not start download worker: {e}")))?;
@@ -156,6 +202,7 @@ fn pin_targets(s: &Session, p: &Value, command: &str) -> Result<(Option<String>,
 
 fn pin(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "cloud.pin";
+    let wait = wait_requested(p, C)?;
     let resolver = resolver(s, C)?;
     let quality: OfflineQuality =
         serde_json::from_value(p.get("quality").cloned().unwrap_or(json!("original"))).map_err(|_| bad(C, "quality must be original or preview"))?;
@@ -194,8 +241,8 @@ fn pin(s: &mut Session, p: &Value) -> Result<Value> {
         changes.push((owner, Some(OfflinePin { quality, blobs: album_blobs.into_iter().collect() })));
     }
     resolver.set_offline_pins(&changes).map_err(|e| bad(C, e.to_string()))?;
-    resume_offline_pins(s);
-    Ok(json!({"savedLocally": true, "pins": changes.len(), "quality": quality}))
+    let task = start_offline_pins(s, wait).map_err(|e| bad(C, e))?;
+    Ok(json!({"savedLocally": true, "pins": changes.len(), "quality": quality, "background": task.is_some(), "task": task}))
 }
 
 fn unpin(s: &mut Session, p: &Value) -> Result<Value> {
@@ -265,15 +312,23 @@ fn remove_local_copy(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// Reconnecting/reopening retries durable offline intent. It never mutates the catalog.
 pub(crate) fn resume_offline_pins(s: &Session) {
-    let Some(resolver) = s.media.asset_resolver.clone() else { return };
+    if let Err(error) = start_offline_pins(s, false) {
+        log::warn!("offline copy recovery: {error}");
+    }
+}
+
+fn start_offline_pins(s: &Session, wait: bool) -> std::result::Result<Option<u64>, String> {
+    let Some(resolver) = s.media.asset_resolver.clone() else { return Ok(None) };
+    if !wait && s.activity.list().iter().filter(|task| task.kind == "download").count() >= 32 {
+        return Err("offline intent was saved; too many download tasks, cancel background work and reconnect to retry".into());
+    }
     let status = resolver.cache_status();
     if let Some(error) = status.error {
-        log::warn!("offline pin recovery: {error}");
-        return;
+        return Err(error);
     }
     let wanted: std::collections::BTreeSet<_> = status.pins.values().flat_map(|pin| pin.blobs.iter().cloned()).collect();
     if wanted.is_empty() {
-        return;
+        return Ok(None);
     }
     let blobs: std::collections::BTreeMap<_, _> = s
         .catalog
@@ -284,21 +339,38 @@ pub(crate) fn resume_offline_pins(s: &Session) {
         .map(|blob| (blob.id.clone(), blob.clone()))
         .collect();
     let task = s.activity.start("download", "Download Offline Copies", crate::activity::Cancel::Yes);
-    let Some(cancel) = task.cancel_flag() else { return };
-    let total = blobs.len() as u64;
-    if let Err(error) = std::thread::Builder::new().name("cloud-offline".into()).spawn(move || {
-        for (i, blob) in blobs.values().enumerate() {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
+    let cancel = task.cancel_flag().ok_or("offline download could not create cancellation flag")?;
+    let id = task.id();
+    task.set_unit(crate::activity::Unit::Bytes);
+    let handle = task.handle();
+    let run = move || {
+        crate::assets::transfers::with_progress(handle, || {
+            let mut failure = None;
+            for blob in blobs.values() {
+                if let Err(error) = resolver.acquire(blob, &cancel) {
+                    if error == crate::assets::AssetError::Cancelled {
+                        return Err(error.to_string());
+                    }
+                    failure = Some(error.to_string());
+                }
             }
-            if let Err(error) = resolver.acquire(blob, &cancel) {
+            drop(task);
+            failure.map_or(Ok(()), Err)
+        })
+    };
+    if wait {
+        run()?;
+        return Ok(None);
+    }
+    std::thread::Builder::new()
+        .name("cloud-offline".into())
+        .spawn(move || {
+            if let Err(error) = run() {
                 log::warn!("offline copy: {error}");
             }
-            task.progress(i as u64 + 1, total);
-        }
-    }) {
-        log::warn!("offline copy worker: {error}");
-    }
+        })
+        .map_err(|error| format!("could not start offline copy worker: {error}"))?;
+    Ok(Some(id))
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -322,9 +394,10 @@ pub fn specs() -> Vec<CommandSpec> {
             attach
         ),
         cmd!(query "cloud.status", "Cloud Photo Status", [], None, "{ids?}; cached, downloading, remote, missing or failed state on this device", always, status),
-        cmd!(query "cloud.fetch", "Download Cloud Photos", [], None, "{ids?, original?: true}; background download, cancellation via activity.cancel", always, fetch),
+        cmd!(query "cloud.fetch", "Download Cloud Photos", [], None, "{ids?, original?: true, wait?: false}; background download, byte progress and cancellation via activity; wait only in headless CLI/MCP", always, fetch),
+        cmd!(query "cloud.reconnect", "Reconnect Cloud Storage", [], None, "{id?}; reload saved connections and external credentials, retry failed renders and offline pins", always, reconnect),
         cmd!(query "cloud.cache", "Cloud Cache Settings", [], None, "{budgetMb?}; device-local disk budget, usage and offline pins; 0 retains only pinned or active bytes", always, cache),
-        cmd!(query "cloud.pin", "Keep Cloud Photos Offline", [], None, "{ids? or albumId?, quality?: original|preview}; persist pin intent and download in background; album pins snapshot current members", always, pin),
+        cmd!(query "cloud.pin", "Keep Cloud Photos Offline", [], None, "{ids? or albumId?, quality?: original|preview, wait?: false}; persist pin intent and return download task; wait only headless; album pins snapshot current members", always, pin),
         cmd!(query "cloud.unpin", "Release Offline Pins", [], None, "{ids? or albumId? or owner?}; release only these owners' pins", always, unpin),
         cmd!(query "cloud.removeLocalCopy", "Remove Local Original Copy", [], None, "{ids? or albumId?}; preserve library/remote objects/previews; return removed and failed blobs; refuse pinned or in-use bytes", always, remove_local_copy),
     ]

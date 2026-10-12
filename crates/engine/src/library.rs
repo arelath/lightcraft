@@ -493,6 +493,9 @@ impl Session {
         self.media.clear_sources();
         self.media.managed_assets = self.catalog.assets().clone();
         self.media.asset_resolver = cache_dir.as_ref().map(|d| std::sync::Arc::new(crate::assets::AssetResolver::new(d.join("assets-cache"))));
+        if let Some(resolver) = &self.media.asset_resolver {
+            resolver.set_activity(self.activity.clone());
+        }
         if let Some(cache_dir) = &cache_dir {
             self.media.attach_disk_cache(&cache_dir.join("thumbs"), self.cache_bytes());
         }

@@ -229,6 +229,15 @@ pub struct Renderer {
 const IDLE_TRIM: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl Slot {
+    fn transfer_priority(self, priority: u32) -> lightcraft_engine::assets::transfers::Priority {
+        use lightcraft_engine::assets::transfers::Priority;
+        match self {
+            Self::Prefetch(_) => Priority::NearbyPhoto,
+            Self::Thumb(_) | Self::ThumbQuick(_) if priority >= 10 => Priority::VisibleThumbnail,
+            Self::Thumb(_) | Self::ThumbQuick(_) | Self::Import(_) | Self::Variant(_) => Priority::Background,
+            _ => Priority::ActivePhoto,
+        }
+    }
     /// An interactive view of the open photo: slider drags redo only the stages they feed, and a
     /// draft that finishes late still replaces older pixels.
     pub fn is_view(self) -> bool {
@@ -444,6 +453,7 @@ impl Renderer {
         }
         let key = job.key;
         let background = matches!(slot, Slot::Thumb(_) | Slot::ThumbQuick(_) | Slot::Prefetch(_));
+        let transfer_priority = slot.transfer_priority(priority);
         let display = self.display.clone();
         self.pool.submit(
             slot,
@@ -451,7 +461,7 @@ impl Renderer {
             priority,
             Box::new(move || {
                 let run = || if background { lightcraft_engine::memory::in_background(|| job.run()) } else { job.run() };
-                Self::run_for(run, &display)
+                lightcraft_engine::assets::transfers::with_priority(transfer_priority, || Self::run_for(run, &display))
             }),
         );
     }
@@ -467,7 +477,14 @@ impl Renderer {
         self.request_ids.insert(slot, job.request_id);
         let key = job.key;
         let display = self.display.clone();
-        self.pool.submit(slot, key, priority, Box::new(move || Self::run_for(|| job.run(), &display)));
+        self.pool.submit(
+            slot,
+            key,
+            priority,
+            Box::new(move || {
+                lightcraft_engine::assets::transfers::with_priority(slot.transfer_priority(priority), || Self::run_for(|| job.run(), &display))
+            }),
+        );
     }
 
     /// Prepare a photo in the background (a [`Slot::Prefetch`] job runs once per key; a newer one
@@ -481,7 +498,16 @@ impl Renderer {
         job.request_id = lightcraft_preview::next_tick();
         self.request_ids.insert(slot, job.request_id);
         let key = job.key;
-        self.pool.submit(slot, key, priority, Box::new(move || lightcraft_engine::memory::in_background(|| job.run())));
+        self.pool.submit(
+            slot,
+            key,
+            priority,
+            Box::new(move || {
+                lightcraft_engine::assets::transfers::with_priority(slot.transfer_priority(priority), || {
+                    lightcraft_engine::memory::in_background(|| job.run())
+                })
+            }),
+        );
     }
 
     /// Is a request for `slot` queued or running?

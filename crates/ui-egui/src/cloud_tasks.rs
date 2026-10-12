@@ -19,6 +19,13 @@ fn plan(app: &LightcraftApp, command: &str, params: &Value) -> Option<Plan> {
     if app.headless_host {
         return None;
     }
+    let expanded;
+    let params = if command == "app.export" {
+        expanded = app.session.export_params(params).ok()?;
+        &expanded
+    } else {
+        params
+    };
     let single = matches!(command, "ui.render" | "dialog.allMetadata" | "photo.allMetadata");
     let requirement = match command {
         "ui.render" if params.get("size").and_then(Value::as_u64).unwrap_or(1600) <= 2560 => SourceRequirement::PreviewAllowed,
@@ -89,6 +96,8 @@ fn start(
     let task = app.session.activity.start("download", LABEL, lightcraft_engine::activity::Cancel::Yes);
     let task_id = task.id();
     let cancel = task.cancel_flag().ok_or("could not create source-acquisition cancellation flag")?;
+    task.set_unit(lightcraft_engine::activity::Unit::Bytes);
+    let handle = task.handle();
     let Plan { resolver, assets, requirement, library, params } = plan;
     let captured_sources = assets.clone();
     crate::tasks::spawn(
@@ -96,13 +105,17 @@ fn start(
         LABEL,
         None,
         move || {
-            let mut leases = Vec::with_capacity(assets.len());
-            for (i, (_, _, asset)) in assets.iter().enumerate() {
-                let (lease, _) = resolver.acquire_asset(asset, requirement, &cancel).map_err(|e| e.to_string())?;
-                leases.push(lease);
-                task.progress(i as u64 + 1, assets.len() as u64);
-            }
-            Ok(leases)
+            lightcraft_engine::assets::transfers::with_priority(lightcraft_engine::assets::transfers::Priority::ActivePhoto, || {
+                lightcraft_engine::assets::transfers::with_progress(handle, || {
+                    let mut leases = Vec::with_capacity(assets.len());
+                    for (_, _, asset) in &assets {
+                        let (lease, _) = resolver.acquire_asset(asset, requirement, &cancel).map_err(|e| e.to_string())?;
+                        leases.push(lease);
+                    }
+                    drop(task);
+                    Ok(leases)
+                })
+            })
         },
         move |app, ctx, result: Result<Vec<AssetLease>, String>| {
             let result = if still_current(app, &library, &captured_sources) {
@@ -240,6 +253,24 @@ mod tests {
             crate::tasks::wait(&mut self.app, &egui::Context::default(), Duration::from_secs(5));
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn foreground_export_acquisition_expands_proxy_presets_and_respects_overrides() {
+        let mut fixture = Fixture::new();
+        fixture.app.session.export_presets.push(lightcraft_engine::export::ExportPreset {
+            name: "Preview export".into(),
+            params: json!({"format": "png", "allowSmartPreview": true}),
+        });
+        let proxy = plan(&fixture.app, "app.export", &json!({"preset": "Preview export"})).unwrap();
+        assert_eq!(proxy.requirement, SourceRequirement::PreviewAllowed);
+        assert_eq!(proxy.params["allowSmartPreview"], true);
+        assert!(proxy.params.get("preset").is_none());
+        let original = plan(&fixture.app, "app.export", &json!({"preset": "Preview export", "allowSmartPreview": false})).unwrap();
+        assert_eq!(original.requirement, SourceRequirement::OriginalRequired);
+        fixture.app.session.last_export = Some(json!({"allowSmartPreview": true}));
+        assert_eq!(plan(&fixture.app, "app.export", &json!({})).unwrap().requirement, SourceRequirement::OriginalRequired);
+        assert!(plan(&fixture.app, "app.export", &json!({"preset": "missing"})).is_none());
     }
 
     #[test]
