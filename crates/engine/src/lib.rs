@@ -951,6 +951,11 @@ impl Session {
     }
 
     /// Targets of photo commands: explicit `ids`/`id` param, else the selection.
+    /// Opaque per-open token for rejecting worker results after a library switch or reopen.
+    pub fn library_token(&self) -> Arc<()> {
+        self.library_identity.clone()
+    }
+
     pub fn targets(&self, p: &Value) -> Vec<PhotoId> {
         if let Some(a) = p.get("ids").and_then(Value::as_array) {
             return a.iter().filter_map(Value::as_u64).map(PhotoId).collect();

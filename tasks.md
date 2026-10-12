@@ -4,7 +4,7 @@ Based on [docs/cloud-storage.md](docs/cloud-storage.md). Checkboxes reflect veri
 
 The source document describes a particular source snapshot. Verify its implementation assumptions before changing code. Task IDs use the `CS` prefix to distinguish this backlog from the existing project plan.
 
-Verified on 2026-10-12: managed originals and proxies, catalog migration, integrity and failure recovery, real CLI/MCP acceptance, and a native desktop control-channel acceptance with a generated RAW. The local S3-compatible test server verified request signing; live AWS interoperability remains unverified. `cargo +1.95.0 xtask ci` passed all eight stages. CS1.11 remains open because some synchronous UI commands still need deferred acquisition. Long-lived keys cannot be entered into LightCraft; authentication uses externally managed AWS profiles or environment credentials.
+Verified on 2026-10-12: Milestone 1, including managed originals and proxies, catalog migration, integrity and failure recovery, real CLI/MCP acceptance, and native desktop control-channel acceptance with a generated RAW. Deferred metadata/render requests kept the UI responsive during a deliberately slow download, and attempts to overwrite managed cache data were rejected. The local S3-compatible test server verified request signing; live AWS interoperability remains unverified. `cargo +1.95.0 xtask ci` passed all eight stages. Long-lived keys cannot be entered into LightCraft; authentication uses externally managed AWS profiles or environment credentials.
 
 ## Milestone 1 — Read cloud-backed originals
 
@@ -27,7 +27,7 @@ Verified on 2026-10-12: managed originals and proxies, catalog migration, integr
 
 - [x] **CS1.9** Implement source-quality requirements equivalent to `PreviewAllowed` and `OriginalRequired`, returning an asset lease that pins verified local content for the caller's lifetime.
 - [x] **CS1.10** Implement download-to-temporary-file, SHA-256 verification, and atomic cache publication; reject incomplete or corrupt downloads as usable sources.
-- [ ] **CS1.11** Schedule downloads outside the UI thread and resume pending operations when their required assets become available; avoid network waits inside synchronous loader callbacks.
+- [x] **CS1.11** Schedule downloads outside the UI thread and resume pending operations when their required assets become available; avoid network waits inside synchronous loader callbacks.
 - [x] **CS1.12** Route file loading, preview loading, denoise pair loading, and original-byte access such as `Media::file_bytes` through the resolver.
 - [x] **CS1.13** Distinguish uncached remote originals, temporary connectivity failures, and confirmed missing sources in availability state.
 - [x] **CS1.14** Make full-quality export require an original; expose preview-size export explicitly and prevent silent smart-preview substitution.

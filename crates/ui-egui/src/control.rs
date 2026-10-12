@@ -22,6 +22,7 @@ use crate::LightcraftApp;
 
 pub type ControlResponse = Value;
 
+#[derive(Clone)]
 pub struct ControlRequest {
     pub method: String,
     pub params: Value,
@@ -37,6 +38,7 @@ impl ControlRequest {
 
 pub enum Outcome {
     Done(Value),
+    Deferred,
     Screenshot { path: Option<String>, headless: bool },
 }
 
@@ -170,6 +172,14 @@ fn widget_rect(app: &LightcraftApp, id: &str) -> Option<egui::Rect> {
 }
 
 pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
+    let _cached_only = lightcraft_engine::assets::CachedOnly::enter(!app.headless_host);
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(deferred) = crate::cloud_tasks::defer_control(app, req) {
+        return match deferred {
+            Ok(()) => Outcome::Deferred,
+            Err(error) => err(error),
+        };
+    }
     let p = &req.params;
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let f = |k: &str| p.get(k).and_then(Value::as_f64);

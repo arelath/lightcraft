@@ -8,6 +8,8 @@
 
 pub mod album_picker;
 pub mod brush_live;
+#[cfg(not(target_arch = "wasm32"))]
+mod cloud_tasks;
 pub mod control;
 pub mod credits;
 pub mod date_picker;
@@ -487,6 +489,11 @@ impl LightcraftApp {
 
     /// Run a UI or engine command by id. The single entry point for every frontend path.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        let _cached_only = lightcraft_engine::assets::CachedOnly::enter(!self.headless_host);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(deferred) = cloud_tasks::defer_command(self, id, &params) {
+            return deferred;
+        }
         if let Some(result) = model_setup::intercept(self, id, &params) {
             return result;
         }
@@ -794,6 +801,7 @@ impl LightcraftApp {
                 control::Outcome::Done(v) => {
                     let _ = reply.send(v);
                 }
+                control::Outcome::Deferred => {}
                 control::Outcome::Screenshot { path, headless } => {
                     self.screenshot_token += 1;
                     let now = now_ms();

@@ -1087,7 +1087,14 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 Ok(r) => r,
                 Err(e) => return Some(Err(e.to_string())),
             };
-            let title = app.session.active().and_then(|id| app.session.catalog.photo(id)).map(|p| p.file_name.clone()).unwrap_or_default();
+            let title = p
+                .get("id")
+                .and_then(Value::as_u64)
+                .map(lightcraft_catalog::PhotoId)
+                .or(app.session.active())
+                .and_then(|id| app.session.catalog.photo(id))
+                .map(|p| p.file_name.clone())
+                .unwrap_or_default();
             app.ui.dialog = Some(Dialog::AllMetadata { title, rows: r, search: String::new() });
             Ok(Value::Null)
         }

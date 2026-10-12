@@ -7,7 +7,36 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+
+thread_local! {
+    static CACHED_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Native UI dispatch uses this scope: acquisitions may verify local bytes but never wait
+/// for a transfer or start network I/O. Render and transfer workers have independent scopes.
+#[must_use]
+pub struct CachedOnly {
+    previous: bool,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl CachedOnly {
+    pub fn enter(enabled: bool) -> Self {
+        let previous = CACHED_ONLY.with(|flag| flag.replace(flag.get() || enabled));
+        Self { previous, _thread: std::marker::PhantomData }
+    }
+}
+
+impl Drop for CachedOnly {
+    fn drop(&mut self) {
+        CACHED_ONLY.with(|flag| flag.set(self.previous));
+    }
+}
+
+fn pending_source() -> AssetError {
+    AssetError::Pending
+}
 
 use lightcraft_catalog::assets::{Asset, Blob, BlobId};
 use serde::{Deserialize, Serialize};
@@ -15,6 +44,8 @@ use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AssetError {
+    #[error("source is not ready on this device; download it with cloud.fetch and retry")]
+    Pending,
     #[error("invalid asset: {0}")]
     Invalid(String),
     #[error("cloud object is missing")]
@@ -80,6 +111,17 @@ impl Default for Entry {
     fn default() -> Self {
         Self { gate: Mutex::new(()), state: Mutex::new(AssetAvailability::Remote), pins: AtomicUsize::new(0) }
     }
+}
+
+fn lock_entry(entry: &Entry) -> Result<MutexGuard<'_, ()>> {
+    if CACHED_ONLY.with(std::cell::Cell::get) {
+        return match entry.gate.try_lock() {
+            Ok(gate) => Ok(gate),
+            Err(TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+            Err(TryLockError::WouldBlock) => Err(pending_source()),
+        };
+    }
+    Ok(entry.gate.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 /// A verified local source. Keep this alive while decoding or handing the path to another app.
@@ -199,7 +241,7 @@ impl AssetResolver {
     pub fn acquire_cached(&self, blob: &Blob, cancel: &AtomicBool) -> Result<Option<AssetLease>> {
         blob.validate().map_err(AssetError::Invalid)?;
         let entry = self.entry(&blob.id)?;
-        let gate = entry.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        let gate = lock_entry(&entry)?;
         let path = self.root.join(&blob.id.0);
         if !verify_file(&path, blob, cancel)? {
             return Ok(None);
@@ -220,7 +262,7 @@ impl AssetResolver {
     pub fn evict(&self, blob: &Blob) -> Result<()> {
         blob.validate().map_err(AssetError::Invalid)?;
         let entry = self.entry(&blob.id)?;
-        let _gate = entry.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        let _gate = lock_entry(&entry)?;
         if entry.pins.load(Ordering::Relaxed) != 0 {
             return Err(AssetError::Invalid("original is in use".into()));
         }
@@ -297,11 +339,17 @@ impl TransferManager for AssetResolver {
         }
         blob.validate().map_err(AssetError::Invalid)?;
         let entry = self.entry(&blob.id)?;
-        let _gate = entry.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        let _gate = lock_entry(&entry)?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(AssetError::Cancelled);
+        }
         let path = self.root.join(&blob.id.0);
         let mut availability_changed = false;
         let result = (|| {
             if !verify_file(&path, blob, cancel)? {
+                if CACHED_ONLY.with(std::cell::Cell::get) {
+                    return Err(pending_source());
+                }
                 let store = self
                     .stores
                     .lock()
@@ -343,6 +391,7 @@ impl TransferManager for AssetResolver {
         })();
         if let Err(error) = &result {
             *entry.state.lock().unwrap_or_else(PoisonError::into_inner) = match error {
+                AssetError::Pending => AssetAvailability::Remote,
                 AssetError::Missing => AssetAvailability::Missing,
                 _ => AssetAvailability::Failed { error: error.to_string() },
             };
@@ -380,7 +429,7 @@ impl crate::Session {
             .collect();
         let local = self.media.file_bytes.clone();
         Arc::new(move |path| {
-            if let Some(id) = path.strip_prefix("lcasset:") {
+            if let Some(id) = path.strip_prefix("lcasset:\0") {
                 let blob = assets.get(&lightcraft_catalog::assets::AssetId(id.into())).ok_or("managed asset record is missing")?;
                 let resolver = resolver.as_ref().ok_or("cloud storage is not configured on this device")?;
                 let lease = resolver.acquire(blob, &AtomicBool::new(false)).map_err(|e| e.to_string())?;
@@ -397,7 +446,9 @@ impl crate::Session {
 pub fn source_path(source: &lightcraft_catalog::Source) -> std::result::Result<String, String> {
     match source {
         lightcraft_catalog::Source::File { path } => Ok(path.clone()),
-        lightcraft_catalog::Source::Managed { asset_id } => Ok(format!("lcasset:{}", asset_id.0)),
+        // NUL cannot occur in a filesystem path, so a valid local filename can never collide
+        // with the private original-reader handle.
+        lightcraft_catalog::Source::Managed { asset_id } => Ok(format!("lcasset:\0{}", asset_id.0)),
         lightcraft_catalog::Source::Demo { .. } => Err("generated demo photos have no original file".into()),
     }
 }

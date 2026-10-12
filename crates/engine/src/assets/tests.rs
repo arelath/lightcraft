@@ -161,6 +161,89 @@ fn cached_acquisition_never_starts_a_network_request() {
 }
 
 #[test]
+fn ui_scope_uses_cached_bytes_without_starting_a_transfer() {
+    let scratch = Scratch::new();
+    let resolver = AssetResolver::new(scratch.0.clone());
+    let provider = store(b"original");
+    resolver.connect("memory".into(), provider.clone()).unwrap();
+    let b = blob(b"original");
+    {
+        let _scope = CachedOnly::enter(true);
+        let _nested = CachedOnly::enter(false);
+        assert!(matches!(resolver.acquire(&b, &AtomicBool::new(false)), Err(AssetError::Pending)));
+        assert_eq!(provider.reads.load(Ordering::Relaxed), 0);
+        assert_eq!(resolver.availability(&b.id), AssetAvailability::Remote);
+    }
+    drop(resolver.acquire(&b, &AtomicBool::new(false)).unwrap());
+    let _scope = CachedOnly::enter(true);
+    assert_eq!(resolver.acquire(&b, &AtomicBool::new(false)).unwrap().read_bytes().unwrap(), b"original");
+    assert_eq!(provider.reads.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn ui_scope_does_not_wait_for_an_in_progress_transfer() {
+    let scratch = Scratch::new();
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    let b = blob(b"original");
+    let entry = resolver.entry(&b.id).unwrap();
+    let gate = entry.gate.lock().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _scope = CachedOnly::enter(true);
+        tx.send(resolver.acquire(&b, &AtomicBool::new(false)).err()).unwrap();
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(1));
+    drop(gate); // Always unblock a regressed worker before the assertion/join.
+    worker.join().unwrap();
+    assert_eq!(result.unwrap(), Some(AssetError::Pending));
+}
+
+#[test]
+fn private_managed_handles_do_not_capture_valid_local_filenames() {
+    let mut session = crate::Session::new();
+    session.media.file_bytes = Some(Arc::new(|path| {
+        assert_eq!(path, "lcasset:local-original");
+        Ok(b"local bytes".to_vec())
+    }));
+    let source = lightcraft_catalog::Source::File { path: "lcasset:local-original".into() };
+    let reader = session.original_reader_for(std::slice::from_ref(&source));
+    assert_eq!(reader(&source_path(&source).unwrap()).unwrap(), b"local bytes");
+}
+
+#[test]
+fn user_outputs_cannot_replace_managed_cache_or_create_future_blob_files() {
+    let scratch = Scratch::new();
+    let mut session = crate::Session::new().with_fs();
+    session.open_library(&scratch.0, false).unwrap();
+    let bytes = b"original bytes";
+    let asset = Asset { original: blob(bytes), smart_preview: None, thumbnail: None };
+    session
+        .execute(
+            "cloud.attach",
+            &serde_json::json!({"assetId": "protected", "asset": asset,
+        "fileName": "original.jpg", "width": 4, "height": 3}),
+        )
+        .unwrap();
+    let resolver = session.media.asset_resolver.as_ref().unwrap().clone();
+    resolver.connect("memory".into(), store(bytes)).unwrap();
+    let lease = resolver.acquire(&blob(bytes), &AtomicBool::new(false)).unwrap();
+    assert!(session.check_write_target(&lease.path().to_string_lossy()).is_err());
+    let future = resolver.root().join("new-folder").join("a".repeat(64));
+    assert!(session.check_write_target(&future.to_string_lossy()).is_err());
+    assert!(session.original_guard().check(&future).is_err(), "prepared exports protect prospective paths too");
+    let alias = resolver.root().join("future").join("..").join("b".repeat(64));
+    assert!(session.check_write_target(&alias.to_string_lossy()).is_err());
+    assert!(session.check_write_target(&scratch.0.join("export.png").to_string_lossy()).is_ok());
+    assert_eq!(lease.read_bytes().unwrap(), bytes);
+    #[cfg(unix)]
+    {
+        let linked = scratch.0.join("cache-link");
+        std::os::unix::fs::symlink(resolver.root(), &linked).unwrap();
+        assert!(session.check_write_target(&linked.join("future.png").to_string_lossy()).is_err());
+    }
+}
+
+#[test]
 fn catalog_storage_and_local_caches_are_independent() {
     let scratch = Scratch::new();
     let mut session = crate::Session::new().with_fs();

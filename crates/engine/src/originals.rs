@@ -17,9 +17,22 @@ pub struct OriginalGuard {
     by_name: HashMap<String, Vec<(PathBuf, String)>>,
     /// The entries of `by_name` that are symlinks, found on the first check that needs them.
     links: std::sync::OnceLock<Vec<(PathBuf, String)>>,
+    roots: Vec<PathBuf>,
 }
 
 impl OriginalGuard {
+    /// Protect an internal cache namespace, including filenames not created yet.
+    pub fn add_root(&mut self, root: &Path) {
+        self.roots.push(root.to_path_buf());
+    }
+
+    /// Protect one file without inventing neighboring sidecar names.
+    pub fn add_file(&mut self, path: &Path, label: &str) {
+        let Some(name) = path.file_name() else { return };
+        self.links = std::sync::OnceLock::new();
+        self.by_name.entry(name.to_string_lossy().to_lowercase()).or_default().push((path.to_path_buf(), label.into()));
+    }
+
     /// The originals of every photo in `catalog`.
     pub fn new(catalog: &Catalog) -> Self {
         let mut g = Self::default();
@@ -44,6 +57,7 @@ impl OriginalGuard {
 
     /// `Err` (a message for the user) when writing `target` would replace a protected file.
     pub fn check(&self, target: &Path) -> Result<(), String> {
+        self.check_roots(target)?;
         if std::fs::symlink_metadata(target).is_err() {
             return Ok(()); // nothing there to replace
         }
@@ -76,12 +90,78 @@ impl OriginalGuard {
         }
         Ok(())
     }
+
+    fn check_roots(&self, target: &Path) -> Result<(), String> {
+        if self.roots.is_empty() {
+            return Ok(());
+        }
+        let target = prospective_path(target)?;
+        for root in &self.roots {
+            let root = prospective_path(root)?;
+            let within = target.starts_with(&root);
+            #[cfg(windows)]
+            let within = within || {
+                let target = target.to_string_lossy().replace('\\', "/").to_lowercase();
+                let root = root.to_string_lossy().replace('\\', "/").to_lowercase();
+                target == root || target.starts_with(&format!("{root}/"))
+            };
+            if within {
+                return Err("the destination is inside the managed asset cache; choose another folder or file name".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Resolve existing ancestors first, then normalize a not-yet-created suffix. This catches
+/// outputs through symlinked directories without requiring the output file to exist.
+fn prospective_path(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().len() > 32_768 || path.components().count() > 256 {
+        return Err("output path is too long or deeply nested".into());
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(|e| format!("could not resolve output directory: {e}"))?.join(path)
+    };
+    let mut parent = absolute.clone();
+    let mut suffix = Vec::new();
+    let base = loop {
+        if let Ok(canonical) = std::fs::canonicalize(&parent) {
+            break canonical;
+        }
+        let Some(component) = parent.components().next_back() else {
+            return Err("could not resolve the output path".into());
+        };
+        suffix.push(component.as_os_str().to_os_string());
+        if !parent.pop() {
+            return Err("could not resolve the output path".into());
+        }
+    };
+    let mut resolved = base;
+    for component in suffix.into_iter().rev() {
+        if component == ".." {
+            resolved.pop();
+        } else if component != "." {
+            resolved.push(component);
+        }
+    }
+    Ok(resolved)
 }
 
 impl crate::Session {
     /// A guard over this library's originals (see [`OriginalGuard`]).
     pub fn original_guard(&self) -> OriginalGuard {
-        OriginalGuard::new(&self.catalog)
+        let mut guard = OriginalGuard::new(&self.catalog);
+        if let Some(resolver) = &self.media.asset_resolver {
+            guard.add_root(resolver.root());
+            for asset in self.catalog.assets().values() {
+                for blob in std::iter::once(&asset.original).chain(asset.smart_preview.iter()).chain(asset.thumbnail.iter()) {
+                    guard.add_file(&resolver.root().join(&blob.id.0), "a managed original or rendition");
+                }
+            }
+        }
+        guard
     }
 
     /// `Err` when writing `path` would replace a catalogued photo's original or sidecar. A free
@@ -89,6 +169,11 @@ impl crate::Session {
     pub fn check_write_target(&self, path: &str) -> Result<(), String> {
         let path = Path::new(path);
         if std::fs::symlink_metadata(path).is_err() {
+            if let Some(resolver) = &self.media.asset_resolver {
+                let mut guard = OriginalGuard::default();
+                guard.add_root(resolver.root());
+                guard.check_roots(path)?;
+            }
             return Ok(()); // nothing there to replace
         }
         self.original_guard().check(path)
