@@ -304,7 +304,8 @@ impl Op {
             | Op::SetKeyword { .. }
             | Op::SetBrowsed { .. }
             | Op::SetFolderRecord { .. }
-            | Op::SetAsset { .. } => {}
+            | Op::SetAsset { .. }
+            | Op::SetUploadIntent { .. } => {}
         }
     }
 }

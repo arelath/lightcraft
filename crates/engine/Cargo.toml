@@ -45,6 +45,7 @@ lightcraft-segment = { workspace = true, optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 lightcraft-fetch = { workspace = true }
 hmac = "0.12"
+getrandom = "0.3.4"
 time = { version = "0.3", default-features = false, features = ["std"] }
 
 [features]

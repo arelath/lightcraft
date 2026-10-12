@@ -703,7 +703,10 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 asset.smart_preview.as_ref().and_then(|blob| app.session.media.asset_resolver.as_ref().map(|r| r.availability(&blob.id)))
             });
             use lightcraft_engine::assets::AssetAvailability;
+            let upload = app.session.catalog.upload_intents().values().find(|intent| &intent.asset_id == asset_id);
+            let pending_upload = upload.is_some_and(|intent| intent.state != lightcraft_catalog::uploads::UploadState::Synchronized);
             let text = match availability {
+                Some(AssetAvailability::Cached) if pending_upload => "Original saved on this device",
                 Some(AssetAvailability::Cached) => "Original downloaded",
                 Some(AssetAvailability::Downloading { .. }) => "Downloading original…",
                 Some(AssetAvailability::Missing) => "Cloud original is missing",
@@ -711,6 +714,18 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 _ => "Original in cloud storage",
             };
             ui.add_space(6.0);
+            if let Some(upload) = upload {
+                use lightcraft_catalog::uploads::UploadState;
+                let label = match upload.state {
+                    UploadState::SavedLocally => "Saved locally · upload pending",
+                    UploadState::Uploading => "Uploading · original kept on this device",
+                    UploadState::Failed => "Upload failed · original kept on this device",
+                    UploadState::ObjectsVerified => "Objects verified · publication pending",
+                    UploadState::Published => "Published · saving synchronization state",
+                    UploadState::Synchronized => "Synchronized",
+                };
+                ui.label(egui::RichText::new(crate::i18n::tr(label)).color(t.text_dim));
+            }
             ui.label(egui::RichText::new(crate::i18n::tr(text)).color(t.text_dim));
             if let Some(AssetAvailability::Downloading { done, total }) = &availability {
                 let fraction = if *total == 0 { 0.0 } else { (*done as f64 / *total as f64).clamp(0.0, 1.0) as f32 };

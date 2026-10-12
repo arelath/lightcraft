@@ -115,7 +115,7 @@ impl OriginalGuard {
 
 /// Resolve existing ancestors first, then normalize a not-yet-created suffix. This catches
 /// outputs through symlinked directories without requiring the output file to exist.
-fn prospective_path(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn prospective_path(path: &Path) -> Result<PathBuf, String> {
     if path.as_os_str().len() > 32_768 || path.components().count() > 256 {
         return Err("output path is too long or deeply nested".into());
     }
@@ -149,12 +149,29 @@ fn prospective_path(path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+pub(crate) fn paths_overlap(left: &Path, right: &Path) -> Result<bool, String> {
+    let (left, right) = (prospective_path(left)?, prospective_path(right)?);
+    if left.starts_with(&right) || right.starts_with(&left) {
+        return Ok(true);
+    }
+    #[cfg(windows)]
+    {
+        let (left, right) = (left.to_string_lossy().replace('\\', "/").to_lowercase(), right.to_string_lossy().replace('\\', "/").to_lowercase());
+        Ok(left == right || left.starts_with(&format!("{right}/")) || right.starts_with(&format!("{left}/")))
+    }
+    #[cfg(not(windows))]
+    Ok(false)
+}
+
 impl crate::Session {
     /// A guard over this library's originals (see [`OriginalGuard`]).
     pub fn original_guard(&self) -> OriginalGuard {
         let mut guard = OriginalGuard::new(&self.catalog);
         if let Some(resolver) = &self.media.asset_resolver {
             guard.add_root(resolver.root());
+            if let Some(root) = resolver.durable_root() {
+                guard.add_root(&root.join("blobs"));
+            }
             for asset in self.catalog.assets().values() {
                 for blob in std::iter::once(&asset.original).chain(asset.smart_preview.iter()).chain(asset.thumbnail.iter()) {
                     guard.add_file(&resolver.root().join(&blob.id.0), "a managed original or rendition");
@@ -172,6 +189,9 @@ impl crate::Session {
             if let Some(resolver) = &self.media.asset_resolver {
                 let mut guard = OriginalGuard::default();
                 guard.add_root(resolver.root());
+                if let Some(root) = resolver.durable_root() {
+                    guard.add_root(&root.join("blobs"));
+                }
                 guard.check_roots(path)?;
             }
             return Ok(()); // nothing there to replace

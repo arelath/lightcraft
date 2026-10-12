@@ -93,6 +93,7 @@ struct State {
 }
 pub(super) struct Cache {
     root: PathBuf,
+    durable_root: Mutex<Option<PathBuf>>,
     entries: Weak<Entries>,
     state: Mutex<State>,
     maintenance: Mutex<()>,
@@ -124,6 +125,7 @@ impl Cache {
         let pinned_ids = policy.pins.values().flat_map(|pin| pin.blobs.iter().cloned()).collect();
         let cache = Arc::new(Self {
             root,
+            durable_root: Mutex::new(None),
             entries,
             state: Mutex::new(State { policy, pinned_ids, error, access: BTreeMap::new(), tick: 0, used: 0, pinned: 0 }),
             maintenance: Mutex::new(()),
@@ -184,6 +186,7 @@ impl Cache {
         self.state.lock().unwrap_or_else(PoisonError::into_inner).policy.pins.get(owner).cloned()
     }
     fn save(&self, state: &mut State, policy: Policy) -> Result<()> {
+        self.validate_root()?;
         if let Some(error) = &state.error {
             return Err(AssetError::Disk(format!(
                 "retention settings preserved; repair {} before changing policy: {error}",
@@ -233,6 +236,7 @@ impl Cache {
     }
     /// Called under the blob gate; concurrent pin changes are serialized by the policy mutex.
     pub(super) fn remove_local(&self, id: &BlobId) -> Result<()> {
+        self.validate_root()?;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.pinned_ids.contains(id) {
             return Err(AssetError::Invalid("offline copy is pinned; unpin all photos/albums using it first".into()));
@@ -249,7 +253,25 @@ impl Cache {
         self.schedule_trim();
         Ok(())
     }
+    pub(super) fn protect_durable_root(&self, root: PathBuf) {
+        *self.durable_root.lock().unwrap_or_else(PoisonError::into_inner) = Some(root);
+    }
+
+    pub(super) fn validate_root(&self) -> Result<()> {
+        if let Some(root) = &*self.durable_root.lock().unwrap_or_else(PoisonError::into_inner) {
+            for protected in [root.clone(), root.join("blobs"), root.join("working")] {
+                if crate::originals::paths_overlap(&self.root, &protected).map_err(AssetError::Invalid)? {
+                    return Err(AssetError::Invalid(
+                        "disposable cache overlaps durable managed data; repair the directory mapping before using cloud storage".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn trim(&self) -> Result<()> {
+        self.validate_root()?;
         let _maintenance = self.maintenance.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(error) = &self.state.lock().unwrap_or_else(PoisonError::into_inner).error {
             return Err(AssetError::Disk(error.clone()));

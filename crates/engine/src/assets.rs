@@ -198,6 +198,7 @@ pub struct AssetResolver {
     cache: Arc<cache::Cache>,
     transfers: transfers::Queue,
     activity: Mutex<Option<crate::activity::Activity>>,
+    durable_root: Mutex<Option<PathBuf>>,
 }
 
 impl AssetResolver {
@@ -219,6 +220,7 @@ impl AssetResolver {
             cache,
             transfers: transfers::Queue::new(4),
             activity: Mutex::new(None),
+            durable_root: Mutex::new(None),
         }
     }
     pub fn generation(&self) -> u64 {
@@ -229,6 +231,26 @@ impl AssetResolver {
     }
     pub fn set_activity(&self, activity: crate::activity::Activity) {
         *self.activity.lock().unwrap_or_else(PoisonError::into_inner) = Some(activity);
+    }
+    pub(crate) fn set_durable_root(&self, root: PathBuf) {
+        self.cache.protect_durable_root(root.clone());
+        *self.durable_root.lock().unwrap_or_else(PoisonError::into_inner) = Some(root);
+    }
+    pub fn durable_root(&self) -> Option<PathBuf> {
+        self.durable_root.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+    pub(crate) fn validate_storage(&self) -> Result<()> {
+        self.cache.validate_root()
+    }
+    fn local_path(&self, blob: &Blob) -> Result<PathBuf> {
+        self.cache.validate_root()?;
+        if let Some(root) = self.durable_root() {
+            let path = root.join("blobs").join(&blob.id.0);
+            if path.try_exists().map_err(disk)? {
+                return Ok(path);
+            }
+        }
+        Ok(self.root.join(&blob.id.0))
     }
     /// Source loaders without a command-owned task get cancellable shared activity.
     /// Callers that already have a cancellation flag continue to use `acquire` directly.
@@ -282,6 +304,11 @@ impl AssetResolver {
         {
             return Ok((lease, false));
         }
+        if requirement == SourceRequirement::PreviewAllowed && self.availability(&asset.original.id) == AssetAvailability::Cached {
+            // A concurrent verifier holds the gate. Prefer the known original;
+            // UI callbacks return Pending while workers wait with cancellation.
+            return self.acquire(&asset.original, cancel).map(|lease| (lease, false));
+        }
         if requirement == SourceRequirement::PreviewAllowed
             && let Some(preview) = &asset.smart_preview
         {
@@ -307,7 +334,7 @@ impl AssetResolver {
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
             Err(TryLockError::WouldBlock) => return Ok(None),
         };
-        let path = self.root.join(&blob.id.0);
+        let path = self.local_path(blob)?;
         if !verify_file(&path, blob, cancel)? {
             return Ok(None);
         }
@@ -328,6 +355,11 @@ impl AssetResolver {
     /// Eviction is serialized against acquisition and prohibited while a lease exists.
     pub fn evict(&self, blob: &Blob) -> Result<()> {
         blob.validate().map_err(AssetError::Invalid)?;
+        if self.local_path(blob)?.parent().is_some_and(|parent| parent != self.root) {
+            return Err(AssetError::Invalid(
+                "this original is durable local data awaiting safe cloud publication; it cannot be removed as cache".into(),
+            ));
+        }
         let entry = self.entry(&blob.id)?;
         let _gate = lock_entry(&entry)?;
         if entry.pins.load(Ordering::Relaxed) != 0 {
@@ -409,10 +441,15 @@ impl TransferManager for AssetResolver {
         if cancel.load(Ordering::Relaxed) {
             return Err(AssetError::Cancelled);
         }
-        let path = self.root.join(&blob.id.0);
+        let path = self.local_path(blob)?;
         let mut availability_changed = false;
         let result = (|| {
             if !verify_file(&path, blob, cancel)? {
+                if path.parent().is_some_and(|parent| parent != self.root) {
+                    return Err(AssetError::Disk(
+                        "durable managed original failed verification; recover it from the source file before uploading".into(),
+                    ));
+                }
                 if CACHED_ONLY.with(std::cell::Cell::get) {
                     return Err(pending_source());
                 }

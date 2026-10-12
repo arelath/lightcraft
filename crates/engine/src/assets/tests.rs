@@ -135,6 +135,73 @@ fn a_cached_preview_does_not_wait_for_an_original_being_downloaded() {
 }
 
 #[test]
+fn a_known_cached_original_is_not_replaced_by_a_proxy_during_verification() {
+    let scratch = Scratch::new();
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    let asset = Asset { original: blob(b"original"), smart_preview: Some(blob(b"preview")), thumbnail: None };
+    std::fs::write(scratch.0.join(&asset.original.id.0), b"original").unwrap();
+    std::fs::write(scratch.0.join(&asset.smart_preview.as_ref().unwrap().id.0), b"preview").unwrap();
+    drop(resolver.acquire_cached(&asset.original, &AtomicBool::new(false)).unwrap().unwrap());
+    let entry = resolver.entry(&asset.original.id).unwrap();
+    let gate = entry.gate.lock().unwrap();
+    {
+        let _ui = CachedOnly::enter(true);
+        assert!(matches!(resolver.acquire_asset(&asset, SourceRequirement::PreviewAllowed, &AtomicBool::new(false)), Err(AssetError::Pending)));
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (worker_resolver, worker_asset) = (resolver.clone(), asset.clone());
+    let worker = std::thread::spawn(move || {
+        tx.send(worker_resolver.acquire_asset(&worker_asset, SourceRequirement::PreviewAllowed, &AtomicBool::new(false))).unwrap();
+    });
+    assert!(rx.recv_timeout(std::time::Duration::from_millis(50)).is_err());
+    drop(gate);
+    let (lease, proxy) = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap().unwrap();
+    worker.join().unwrap();
+    assert!(!proxy);
+    assert_eq!(lease.read_bytes().unwrap(), b"original");
+}
+
+#[test]
+fn a_direct_render_replaces_cached_proxy_pixels_after_original_arrival() {
+    use lightcraft_catalog::{Op, Photo, PhotoId, Source};
+    let scratch = Scratch::new();
+    let pixels = lightcraft_raster::Rgba8::from_fn(32, 24, |_, _| [20, 40, 60, 255]);
+    let original = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&pixels), &lightcraft_codecs::EncodeMeta::default()).unwrap();
+    let preview = crate::smart::encode(&lightcraft_raster::Rgb32f::from_fn(16, 12, |_, _| [0.6, 0.2, 0.1]), None).unwrap();
+    let asset = Asset { original: blob(&original), smart_preview: Some(blob(&preview)), thumbnail: None };
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    resolver.connect("memory".into(), store(&preview)).unwrap();
+    let mut session = crate::Session::new().with_fs();
+    session.media.asset_resolver = Some(resolver.clone());
+    let id = PhotoId(1);
+    let asset_id = lightcraft_catalog::assets::AssetId("late-original".into());
+    session.catalog.apply(Op::SetAsset { id: asset_id.clone(), asset: Some(Box::new(asset.clone())) }).unwrap();
+    session
+        .catalog
+        .apply(Op::AddPhoto { photo: Box::new(Photo::new(id, Source::Managed { asset_id }, "cloud.png", "PNG", 32, 24, "2026-10-12")) })
+        .unwrap();
+    // Acquire the proxy first so subsequent jobs have a stable generation.
+    drop(resolver.acquire(asset.smart_preview.as_ref().unwrap(), &AtomicBool::new(false)).unwrap());
+    let proxy = session.render_job(id, 16, 12, false, true).unwrap().run();
+    assert!(proxy.loaded.as_ref().unwrap().proxy);
+    session.accept(&proxy);
+    assert!(session.media.get(id, crate::media::SourceLevel::Thumb).is_some());
+    let late = session.render_job(id, 16, 12, false, true).unwrap().run();
+    std::fs::write(scratch.0.join(&asset.original.id.0), &original).unwrap();
+    drop(resolver.acquire_cached(&asset.original, &AtomicBool::new(false)).unwrap().unwrap());
+    session.media.clear_sources();
+    session.accept(&late);
+    assert!(session.media.get(id, crate::media::SourceLevel::Thumb).is_none(), "late proxy jobs cannot repopulate a new generation");
+    // An already accepted proxy is also bypassed by direct/headless callers.
+    let mut stale = proxy;
+    stale.source_key = None;
+    session.accept(&stale);
+    let full = session.render_job(id, 32, 24, false, true).unwrap().run();
+    assert!(!full.loaded.as_ref().unwrap().proxy);
+    assert_eq!((full.rendered.as_ref().unwrap().image.width, full.rendered.as_ref().unwrap().image.height), (32, 24));
+}
+
+#[test]
 fn render_source_activity_reports_bytes_cancels_and_recovers_after_reconnect() {
     struct Slow;
     impl BlobStore for Slow {

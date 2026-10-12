@@ -4,7 +4,7 @@ Last updated: 2026-10-12. Completion and acceptance checks are tracked in [../ta
 
 ## Current architecture
 
-The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–7 still load and upgrade; older builds refuse format 8.
+The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–8 still load and upgrade; older builds refuse format 9. Upload intents must be excluded from future shared checkpoints and mutation publication.
 
 `crates/catalog/src/assets.rs` describes originals and optional smart-preview/thumbnail blobs, with connection IDs, object keys and optional object versions. Device cache paths, transfer state and connection settings are excluded from the catalog. Existing SipHash duplicate-detection and cache hashes retain their semantics.
 
@@ -31,6 +31,16 @@ The original identity is SHA-256; existing recipe/cache hashes remain descriptor
 Quick preview jobs try the existing local render cache, a matching remote thumbnail, the cached camera preview and a small develop render. Downloads and decoding run on preview workers. Matching thumbnails can finish grid browsing without downloading the original; edits that invalidate the thumbnail render from an available smart preview. A failed final thumbnail falls back to the normal render path. Editable proxies remain separate from display-ready thumbnails and retain the explicit export policy above.
 
 Adding/replacing rendition references invalidates resolver/UI generations once per catalog operation batch, clears decoded sources and rejects results captured against older rendition identities. Managed variant/loupe/grid keys also follow availability changes. Local-file cache keys retain their previous behavior.
+
+Decoded proxies are bypassed when an original becomes cached, including direct/headless renders. Source-result identities include the resolver generation, so late proxy results cannot repopulate a newer source cache. A concurrent verifier of an already cached original cannot cause substitution of a proxy: workers wait with cancellation while UI callbacks return Pending.
+
+## Durable managed import
+
+`cloud.import` prepares photos on workers, then commits the asset, photo and local upload intent in one journal batch on the owning session. Each import has a fallibly generated random identity, persisted in `Managed/imports/<id>.json` before staging. Original bytes, a generated editable `.lcsp`, and a recipe-matched PNG thumbnail live at `Managed/blobs/<sha256>`, separate from the disposable cache. Original staging is immutable, SHA-256 checked, atomically written and limited to 512 MiB per imported photo. Malformed or unsupported inputs return errors and preserve staged data for recovery.
+
+The import completes locally without storage connectivity or credentials. It reports **Saved locally / upload pending**; no uploader or remote publication is implemented in this slice. Cancelling, abandoning a worker result, switching libraries or failing a catalog save preserves the manifest and original. `cloud.recoverImports` explicitly scans validated manifests for the selected connection, regenerates missing renditions from the staged original and commits unrecorded imports. Already journaled identities are skipped, preventing duplicate recovery. It never rereads arbitrary source paths from a manifest. A failed journal append keeps the in-memory pending save; repair the error and retry the save before recovery in another process.
+
+Resolver acquisition prefers durable staged bytes and verifies them before decoding or exporting. Cache trimming and remove-local-copy cannot remove them; output guards prevent overwriting the immutable blob namespace. Invalid overlapping cache/managed directory mappings disable trimming and staging until repaired. `Managed/working` is reserved for durable external-edit revisions and excluded from cache maintenance; the external-editor ingestion workflow remains open.
 
 ## Transfer scheduling and recovery
 
@@ -67,6 +77,9 @@ Native commands use the shared engine registry, CLI, control channel and MCP:
 |---|---|---|
 | `cloud.configure` | `{id, bucket, region, prefix?, endpoint?, profile?}` | Save and attach a connection; no network request. |
 | `cloud.attach` | `{assetId, asset, fileName, width, height, kind?, format?}` | Add and select a photo referencing already uploaded blobs. The caller supplies its source description. |
+| `cloud.import` | `{connection, paths, wait?}` | Stage originals/renditions and atomically save local photos and upload intent. Headless defaults to waiting; desktop returns a background task. |
+| `cloud.importStatus` | `{}` | Return preparation activity, bounded completion reports and durable local upload intents. |
+| `cloud.recoverImports` | `{connection, imports?, wait?}` | Recover validated staged manifests without duplicating recorded imports; optional import IDs limit recovery. |
 | `cloud.status` | `{ids?}` | Report original/proxy/thumbnail availability and active/queued transfers. |
 | `cloud.fetch` | `{ids?, original?: true, wait?: false}` | Download on a worker; returns a task ID. Byte progress/cancellation use `activity.list` and `activity.cancel`; headless `wait` returns after completion or error. |
 | `cloud.reconnect` | `{id?}` | Reload saved connections; retry failed renders and durable offline pins. |
@@ -107,7 +120,7 @@ The Info panel identifies cloud storage, reports original availability and offer
 
 `assets-cache/retention.json` stores a versioned policy, a 20 GiB default budget, pin owners and explicitly removed originals. It is not catalog data. Zero budget retains only pinned or actively leased bytes. Original, smart-preview and thumbnail blobs share the asset budget; the existing rendered-thumbnail cache has its own budget. Pins and active operations may exceed the soft limit, and usage is measured asynchronously.
 
-A bounded maintenance worker evicts least recently used eligible flat SHA-256 cache files. Acquisitions and eviction share per-blob gates; decoded-source clones retain an `Arc<AssetLease>` throughout their memory-cache/job lifetime. Downloads, decoding and exports therefore keep their source bytes protected. Every cache blob is a verified download of an already uploaded object. Future import staging and unsynchronized external working copies must use a separate durable directory and cannot enter this disposable cache.
+A bounded maintenance worker evicts least recently used eligible flat SHA-256 cache files. Acquisitions and eviction share per-blob gates; decoded-source clones retain an `Arc<AssetLease>` throughout their memory-cache/job lifetime. Downloads, decoding and exports therefore keep their source bytes protected. Every cache blob is a verified download of an already uploaded object. Import staging and the reserved external-working-copy namespace use the separate durable `Managed/` directory and cannot enter this disposable cache.
 
 Photo and album pin owners are independent even when virtual copies share bytes. Preview pinning requires an editable `.lcsp` rendition and returns an actionable error if one is absent. The pin intent is atomically saved before downloading, retried when reopening or reconnecting, and retained after failed/cancelled transfers. Album pins snapshot their current cloud members; local-file members are already local and are skipped. Repeating a pin updates that owner's snapshot.
 
@@ -125,7 +138,7 @@ Engine tests cover a cloud-only synthetic Bayer DNG opening, developing, exporti
 
 The native desktop acceptance also passed on 2026-10-12 using control port 18837 and a separate loopback server that independently checked SigV4 with Python's HMAC implementation. It attached the remote-only RAW, applied +0.75 exposure, reached a completed native render, saved its catalog and exported a 32×24 PNG. One verified request acquired the original; the export reused it. The inspected native screenshot and results are in gitignored `target/cloud-acceptance/`. The final inspected frame measured 0.82 ms for UI update and 6.29 ms for the last render, with no queued or in-flight renders. These measurements use a tiny synthetic fixture and are not a large-library performance benchmark. This does not establish live AWS interoperability. Per-task completion and actual validation results are recorded in `tasks.md`.
 
-Unchecked work includes durable import/upload and external-working-copy protection, synchronization/conflicts, browser adapters and the optional backend. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
+Unchecked work includes uploads and external-editor ingestion, synchronization/conflicts, browser adapters and the optional backend. Durable local import and recovery are implemented; staged originals and the reserved working directory are protected from cache eviction. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
 
 `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF checks, workspace tests, parity references, layering, asset attribution and WASM on Windows. The required Rust 1.95 toolchain exposed older Clippy suggestions and Unix-specific test assumptions, which were corrected. Recovery tests also exposed duplicate Windows `.xmp`/`.XMP` alias moves: sidecar operations now deduplicate physical aliases, preserve actual filename spelling and retain distinct packets on sensitive volumes. Synthetic and native regressions cover these cases.
 
@@ -141,6 +154,8 @@ Native preview acceptance passed on 2026-10-12 with a 2.5-second proxy delay: a 
 
 Native transfer acceptance passed on 2026-10-12 through port 18847 against a signed loopback server that sent an original in delayed chunks. The Info panel displayed partial byte progress and cached-preview availability. Cancelling the activity left the original uncached and editing from the proxy succeeded. Clicking Reconnect and retry acquired the original, restored cached availability and allowed 32×24 full export. All HTTP requests passed independent SigV4 verification. Screenshots and results are `target/cloud-acceptance/native-transfer-*`; maximum observed inspection latency was 36 ms and the final native UI update was 1.18 ms with empty render queues. These measurements use a tiny procedural fixture, not a large-library benchmark. Focused tests also cover the four-download limit, priority ordering and duplicate promotion, cancellation while waiting for a shared blob or network slot, preview use during an original transfer, render-driven activity cancellation/reconnect, and one-shot CLI wait completion. Live AWS remains unverified.
 
+Native staging acceptance passed on 2026-10-12 through port 18857 with storage unavailable. A background RAW import produced durable original/proxy/thumbnail bytes and a saved local upload intent. After removing its private source copy, the photo accepted develop changes and exported at 32×24, survived restart with a zero-byte cache budget, and exported again. Local-copy removal was refused; explicit recovery skipped the recorded import without duplication. Inspected screenshots and results are `target/cloud-acceptance/native-import-*`. The restarted app's final UI update was 0.71 ms with empty render queues; this tiny procedural fixture does not measure large-library or camera fidelity. CLI/MCP staging and export acceptance also passed without HTTP requests. Regression tests cover abandoned prepared results, journal-append failure, immutable output protection, overlapping directory mappings, durable working-directory preservation, and library switching during background preparation.
+
 ## Revision history
 
 | Date | Change |
@@ -150,3 +165,4 @@ Native transfer acceptance passed on 2026-10-12 through port 18847 against a sig
 | 2026-10-12 | Device-local asset budgets, persistent offline photo/album pin owners, retained decoded-source leases and safe local-original removal; offline restart/export and native controls verified. |
 | 2026-10-12 | Versioned remote rendition keys, recipe-matched thumbnail browsing, proxy/original refresh, stale-result rejection and corrupt/missing-thumbnail fallback; native delay/export checks verified. |
 | 2026-10-12 | Bounded priority downloads, byte progress and shared cancellation, headless wait completion, reconnect/retry controls and preset-aware foreground acquisition; signed native progress/cancellation/retry acceptance passed. |
+| 2026-10-12 | Durable local managed import and explicit manifest recovery; atomic photo/asset/upload-intent journal records (format 9), pending-original protection and cached-proxy replacement in direct renders. |

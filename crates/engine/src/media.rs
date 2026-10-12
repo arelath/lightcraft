@@ -670,7 +670,11 @@ impl MediaCache {
     }
 
     fn source_ref_plain(&mut self, p: &Photo, level: SourceLevel, cached: bool) -> SourceRef {
-        if cached && let Some(a) = self.get_source(p.id, level) {
+        if cached
+            && let Some(a) = self.get_source(p.id, level)
+            && !(a.proxy
+                && matches!(&p.source, Source::Managed { asset_id } if self.managed_assets.get(asset_id).is_some_and(|asset| self.asset_resolver.as_ref().is_some_and(|resolver| crate::assets::TransferManager::availability(resolver.as_ref(), &asset.original.id) == crate::assets::AssetAvailability::Cached))))
+        {
             return SourceRef::Loaded(Box::new(a));
         }
         // Procedural scenes have a nominal size: "full" is that size, not unbounded.
@@ -1177,7 +1181,8 @@ impl crate::Session {
         {
             hash.str(&asset.original.id.0)
                 .str(asset.smart_preview.as_ref().map_or("", |b| &b.id.0))
-                .str(asset.thumbnail.as_ref().map_or("", |b| &b.id.0));
+                .str(asset.thumbnail.as_ref().map_or("", |b| &b.id.0))
+                .u64(self.media.asset_salt(p));
         }
         hash.finish()
     }

@@ -212,8 +212,9 @@ fn op_variants_are_versioned() {
             Op::SetFolderRecord { .. } => 6,
             Op::SetAsShotWb { .. } => 7,
             Op::SetAsset { .. } => 8,
+            Op::SetUploadIntent { .. } => 9,
         }
     }
-    let newest = since(&Op::SetAsset { id: crate::assets::AssetId("photo".into()), asset: None });
+    let newest = since(&Op::SetUploadIntent { id: "import".into(), intent: None });
     assert_eq!(newest, VERSION, "the newest op's version must be the current format version");
 }

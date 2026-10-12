@@ -26,6 +26,7 @@ pub mod rules;
 pub mod safe_file;
 pub mod stacks;
 pub mod store;
+pub mod uploads;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -75,6 +76,10 @@ pub const HISTORY_LIMIT: usize = 200;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum Op {
+    SetUploadIntent {
+        id: String,
+        intent: Option<Box<uploads::UploadIntent>>,
+    },
     SetAsset {
         id: assets::AssetId,
         asset: Option<Box<assets::Asset>>,
@@ -257,6 +262,9 @@ pub enum Op {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
+    /// Local durable work and receipts, never synchronized to other devices.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    upload_intents: BTreeMap<String, uploads::UploadIntent>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     assets: BTreeMap<assets::AssetId, assets::Asset>,
     photos: BTreeMap<PhotoId, Arc<Photo>>,
@@ -285,6 +293,9 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn upload_intents(&self) -> &BTreeMap<String, uploads::UploadIntent> {
+        &self.upload_intents
+    }
     pub fn asset(&self, id: &assets::AssetId) -> Option<&assets::Asset> {
         self.assets.get(id)
     }
@@ -500,6 +511,25 @@ impl Catalog {
 
     fn apply_inner(&mut self, op: Op) -> Result<Op> {
         Ok(match op {
+            Op::SetUploadIntent { id, intent } => {
+                if !assets::identifier(&id) {
+                    return Err(CatalogError::Invalid("invalid upload intent identity".into()));
+                }
+                let old = if let Some(intent) = intent {
+                    let asset = self.assets.get(&intent.asset_id).ok_or_else(|| CatalogError::Invalid("upload asset is absent".into()))?;
+                    intent.validate(asset).map_err(CatalogError::Invalid)?;
+                    if !self.upload_intents.contains_key(&id) && self.upload_intents.len() >= 100_000 {
+                        return Err(CatalogError::Invalid("upload receipt limit reached".into()));
+                    }
+                    if self.upload_intents.get(&id).is_some_and(|old| old.asset_id != intent.asset_id || old.photo_id != intent.photo_id) {
+                        return Err(CatalogError::Invalid("an upload intent cannot change its photo or asset identity".into()));
+                    }
+                    self.upload_intents.insert(id.clone(), *intent)
+                } else {
+                    self.upload_intents.remove(&id)
+                };
+                Op::SetUploadIntent { id, intent: old.map(Box::new) }
+            }
             Op::SetAsset { id, asset } => {
                 if !assets::identifier(&id.0) {
                     return Err(CatalogError::Invalid("invalid asset identity".into()));
@@ -511,7 +541,9 @@ impl Catalog {
                     }
                     self.assets.insert(id.clone(), *asset)
                 } else {
-                    if self.photos.values().any(|p| matches!(&p.source, Source::Managed { asset_id } if *asset_id == id)) {
+                    if self.photos.values().any(|p| matches!(&p.source, Source::Managed { asset_id } if *asset_id == id))
+                        || self.upload_intents.values().any(|intent| intent.asset_id == id)
+                    {
                         return Err(CatalogError::Invalid("asset is still referenced by a photo".into()));
                     }
                     self.assets.remove(&id)

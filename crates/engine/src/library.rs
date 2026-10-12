@@ -495,6 +495,9 @@ impl Session {
         self.media.asset_resolver = cache_dir.as_ref().map(|d| std::sync::Arc::new(crate::assets::AssetResolver::new(d.join("assets-cache"))));
         if let Some(resolver) = &self.media.asset_resolver {
             resolver.set_activity(self.activity.clone());
+            if on_disk {
+                resolver.set_durable_root(dir.join("Managed"));
+            }
         }
         if let Some(cache_dir) = &cache_dir {
             self.media.attach_disk_cache(&cache_dir.join("thumbs"), self.cache_bytes());
@@ -630,6 +633,10 @@ impl Session {
     /// holding everything in memory, so it saves those ops too (the log handle may be the only
     /// thing that's broken). Fails only if nothing could be saved; the ops then stay queued.
     pub fn close_library(&mut self) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.cloud_imports = Default::default();
+        }
         if self.library.is_none() {
             return Ok(());
         }

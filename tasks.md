@@ -80,10 +80,12 @@ Verified device experience (2026-10-12): recipe-matched remote thumbnails, edita
 
 **Dependencies:** Milestones 1–2. Full multi-device mutation synchronization follows in Milestone 4.
 
+Verified local staging (2026-10-12): durable original/proxy/thumbnail preparation, atomic photo/asset/upload-intent persistence, explicit manifest recovery without duplicate imports, and editable/exportable originals after source deletion and offline restart with a zero-byte cache budget. Native, CLI/MCP and fault-injection checks passed. Uploading, remote publication and external-editor ingestion remain unchecked.
+
 ### Durable import and upload pipeline
 
-- [ ] **CS3.1** Stage a durable local original before completing a managed import; probe it and generate its thumbnail and smart preview.
-- [ ] **CS3.2** Persist the imported catalog record and its upload intent together; recover pending work after restart without losing or duplicating the import.
+- [x] **CS3.1** Stage a durable local original before completing a managed import; probe it and generate its thumbnail and smart preview.
+- [x] **CS3.2** Persist the imported catalog record and its upload intent together; recover pending work after restart without losing or duplicating the import.
 - [ ] **CS3.3** Implement a durable upload queue with progress, cancellation, retry, and persisted state; allow editing immediately after the local save.
 - [ ] **CS3.4** Upload immutable originals and required supporting objects, verify successful storage, publish remote catalog references last, and mark work synchronized only after publication succeeds.
 - [ ] **CS3.5** Make retries idempotent when storage accepted a request but the client lost the response; reconcile uploaded objects whose catalog publication failed.

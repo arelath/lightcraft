@@ -126,6 +126,78 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn staged_cloud_import_is_saved_edited_and_exported_offline_through_cli_and_mcp() {
+    let fixture = Fixture::new();
+    let library = fixture.dir.join("staged-library");
+    let source = fixture.dir.join("source.dng");
+    std::fs::write(&source, &fixture.bytes).unwrap();
+    let config =
+        json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":fixture.endpoint,"profile":"acceptance"});
+    let imported = fixture
+        .command()
+        .args(["run", "--library"])
+        .arg(&library)
+        .arg("cloud.configure")
+        .arg(config.to_string())
+        .arg("cloud.import")
+        .arg(json!({"connection":"personal","paths":[source]}).to_string())
+        .args(["develop.set", "control=light.exposure", "value=0.5", "cloud.cache", "budgetMb=0", "cloud.importStatus"])
+        .output()
+        .unwrap();
+    assert!(imported.status.success(), "{}", String::from_utf8_lossy(&imported.stderr));
+    let rows: Vec<Value> = String::from_utf8_lossy(&imported.stdout).lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert!(rows.iter().all(|row| row["ok"] == true), "{rows:?}");
+    let id = rows[1]["result"]["ids"][0].as_u64().unwrap();
+    assert_eq!(rows[1]["result"]["savedLocally"], true);
+    assert_eq!(rows[4]["result"]["uploads"].as_object().unwrap().len(), 1);
+    std::fs::remove_file(source).unwrap();
+    let out = fixture.dir.join("staged-cli.png");
+    let exported = fixture
+        .command()
+        .args(["run", "--library"])
+        .arg(&library)
+        .arg("app.export")
+        .arg(json!({"ids":[id],"path":out,"format":"png","longEdge":0}).to_string())
+        .arg("cloud.recoverImports")
+        .arg(json!({"connection":"personal"}).to_string())
+        .output()
+        .unwrap();
+    assert!(exported.status.success(), "{}", String::from_utf8_lossy(&exported.stderr));
+    assert!(out.is_file());
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 0, "staged originals require no remote reads");
+    let mut process = fixture
+        .command()
+        .args(["mcp", "--library"])
+        .arg(&library)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let mut output = BufReader::new(process.stdout.take().unwrap());
+    let mut rpc = |request: Value| {
+        writeln!(input, "{request}").unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        serde_json::from_str::<Value>(&line).unwrap()
+    };
+    rpc(
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"staging-test","version":"1"}}}),
+    );
+    let out = fixture.dir.join("staged-mcp.png");
+    let result = rpc(
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"export","arguments":{"ids":[id],"path":out,"format":"png","longEdge":0}}}),
+    );
+    assert_eq!(result["result"]["isError"], false, "{result:?}");
+    assert!(out.is_file());
+    drop(input);
+    assert!(process.wait().unwrap().success());
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn one_shot_cli_waits_for_uncached_pins_and_retries_a_removed_original() {
     let fixture = Fixture::new();
     let library = fixture.dir.join("library");

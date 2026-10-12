@@ -91,9 +91,10 @@ fn status(s: &mut Session, p: &Value) -> Result<Value> {
             let photo = s.catalog.photo(id)?;
             let Source::Managed { asset_id } = &photo.source else { return None };
             let asset = s.catalog.asset(asset_id)?;
+            let upload = s.catalog.upload_intents().values().find(|intent| &intent.asset_id == asset_id);
             Some(json!({"id": id.0, "assetId": asset_id.0, "original": resolver.availability(&asset.original.id),
             "smartPreview": asset.smart_preview.as_ref().map(|b| resolver.availability(&b.id)),
-            "thumbnail": asset.thumbnail.as_ref().map(|b| resolver.availability(&b.id))}))
+            "thumbnail": asset.thumbnail.as_ref().map(|b| resolver.availability(&b.id)), "upload": upload}))
         })
         .collect::<Vec<_>>();
     Ok(json!({"photos": photos, "transfers": resolver.transfer_status()}))
@@ -375,6 +376,25 @@ fn start_offline_pins(s: &Session, wait: bool) -> std::result::Result<Option<u64
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(
+            "cloud.import",
+            "Import Cloud Photos",
+            [],
+            None,
+            "{connection, paths: [originalFile], wait?}; durable staging, photo plus upload intent; headless waits by default, desktop prepares in background",
+            always,
+            crate::cloud_import::start
+        ),
+        cmd!(query "cloud.importStatus", "Cloud Import Status", [], None, "{}; recent completed import results and durable upload intent", always, |s, _| Ok(json!({"reports": s.cloud_imports.reports, "preparing": s.cloud_imports.preparing(), "uploads": s.catalog.upload_intents()}))),
+        cmd!(
+            "cloud.recoverImports",
+            "Recover Staged Cloud Imports",
+            [],
+            None,
+            "{connection, imports?: [importId], wait?}; finish retained staged originals and recover uncommitted imports without duplication",
+            always,
+            crate::cloud_import::recover
+        ),
         cmd!(
             "cloud.configure",
             "Connect Cloud Storage",

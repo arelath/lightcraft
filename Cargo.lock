@@ -3224,6 +3224,7 @@ name = "lightcraft-engine"
 version = "0.6.0"
 dependencies = [
  "ab_glyph",
+ "getrandom 0.3.4",
  "harfrust",
  "hmac",
  "jxl-oxide",

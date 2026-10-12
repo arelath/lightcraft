@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(report.upgraded_from, Some(7));
         assert_eq!(upgraded.photo(PhotoId(1)).unwrap().source, source);
         let snap: serde_json::Value = serde_json::from_slice(&store.get(crate::journal::SNAPSHOT).unwrap()).unwrap();
-        assert_eq!(snap["version"], 8);
+        assert_eq!(snap["version"], crate::journal::VERSION);
     }
 
     #[test]
