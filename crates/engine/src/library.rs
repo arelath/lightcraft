@@ -535,6 +535,9 @@ impl Session {
         self.library_identity = std::sync::Arc::new(());
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(lib) = &mut self.library {
+            if let Some(error) = self.media.asset_resolver.as_ref().and_then(|r| r.cache_status().error) {
+                lib.settings_warnings.push(error);
+            }
             match lib.cloud_connections() {
                 Ok(connections) => {
                     if let Some(resolver) = &self.media.asset_resolver {
@@ -548,6 +551,8 @@ impl Session {
                 Err(e) => lib.settings_warnings.push(e.to_string()),
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::cmd::cloud::resume_offline_pins(self);
         Ok(())
     }
 

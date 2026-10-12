@@ -165,6 +165,8 @@ impl Twin {
 /// Pixels and the source interpretation learned while decoding; they must be cached together.
 #[derive(Clone)]
 pub struct DecodedSource {
+    /// Keep managed bytes pinned for the decoded source's entire cached/job lifetime.
+    pub asset_lease: Option<Arc<crate::assets::AssetLease>>,
     /// Explicit provenance: these pixels came from an editable source proxy.
     pub proxy: bool,
     pub image: Arc<Rgb32f>,
@@ -178,7 +180,7 @@ pub struct DecodedSource {
 
 impl DecodedSource {
     pub fn new(image: Arc<Rgb32f>, info: Option<SourceInfo>) -> Self {
-        DecodedSource { proxy: false, image, info, camera_tone: None, denoised: None }
+        DecodedSource { asset_lease: None, proxy: false, image, info, camera_tone: None, denoised: None }
     }
 
     /// The picture to develop for a Denoise `amount` (0 to 1, see [`DevelopSettings::denoise_amount`]): the plain one,
@@ -268,10 +270,20 @@ impl SourceRef {
                 if preview {
                     let bytes = lease.read_bytes().map_err(|e| e.to_string())?;
                     let (image, tone) = crate::smart::decode(&bytes)?;
-                    return Ok(DecodedSource { proxy: true, image: Arc::new(image), info: None, camera_tone: tone, denoised: None });
+                    return Ok(DecodedSource {
+                        asset_lease: Some(Arc::new(lease)),
+                        proxy: true,
+                        image: Arc::new(image),
+                        info: None,
+                        camera_tone: tone,
+                        denoised: None,
+                    });
                 }
                 let path = lease.path().to_string_lossy().to_string();
-                return SourceRef::File { path, max_edge: *max_edge, loader: loader.clone(), fallback: None, denoise: denoise.clone() }.load_source();
+                let mut source =
+                    SourceRef::File { path, max_edge: *max_edge, loader: loader.clone(), fallback: None, denoise: denoise.clone() }.load_source()?;
+                source.asset_lease = Some(Arc::new(lease));
+                return Ok(source);
             }
             SourceRef::Loaded(a) => return Ok((**a).clone()),
             SourceRef::Demo { scene, max_edge } => crate::demo::scene_pixels(scene, *max_edge)?,
@@ -296,6 +308,7 @@ impl SourceRef {
                                     return Err("the cached AI Denoise picture could not be read; clear the denoise cache and retry".into());
                                 }
                                 Ok(DecodedSource {
+                                    asset_lease: None,
                                     proxy: false,
                                     image: Arc::new(image),
                                     info: Some(info),

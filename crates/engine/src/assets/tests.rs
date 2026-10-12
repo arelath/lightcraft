@@ -317,3 +317,156 @@ fn export_requires_original_even_if_a_preview_is_cached() {
     let original = crate::export::ExportOptions { allow_smart_preview: true, format: crate::export::ExportFormat::Original, ..Default::default() };
     assert!(crate::export::prepare_export(&mut session, id, &original, 1).is_err());
 }
+
+#[test]
+fn budget_keeps_active_leases_and_independent_persistent_pin_owners() {
+    use super::cache::{OfflinePin, OfflineQuality};
+    let scratch = Scratch::new();
+    let b = blob(b"offline original");
+    let other = blob(b"disposable bytes");
+    let resolver = AssetResolver::new(scratch.0.clone());
+    resolver.connect("memory".into(), store(b"offline original")).unwrap();
+    let a = resolver.acquire(&b, &AtomicBool::new(false)).unwrap();
+    resolver.connect("memory".into(), store(b"disposable bytes")).unwrap();
+    let active = resolver.acquire(&other, &AtomicBool::new(false)).unwrap();
+    let pin = OfflinePin { quality: OfflineQuality::Original, blobs: vec![b.id.clone()] };
+    resolver.set_offline_pins(&[("photo:1".into(), Some(pin.clone())), ("album:1".into(), Some(pin))]).unwrap();
+    resolver.set_cache_budget(0).unwrap();
+    assert_eq!(resolver.trim_cache().unwrap().used_bytes, b.size + other.size);
+    drop(a);
+    resolver.set_offline_pins(&[("photo:1".into(), None)]).unwrap();
+    assert!(resolver.evict(&b).unwrap_err().to_string().contains("pinned"));
+    drop(active);
+    let status = resolver.trim_cache().unwrap();
+    assert_eq!((status.used_bytes, status.pinned_bytes), (b.size, b.size));
+    assert!(scratch.0.join(&b.id.0).exists());
+    assert!(!scratch.0.join(&other.id.0).exists());
+    drop(resolver);
+    let reopened = AssetResolver::new(scratch.0.clone());
+    assert_eq!(reopened.cache_status().budget_bytes, 0);
+    assert_eq!(reopened.offline_pin("album:1").unwrap().blobs, vec![b.id.clone()]);
+    let offline = reopened.acquire(&b, &AtomicBool::new(false)).unwrap();
+    assert_eq!(offline.read_bytes().unwrap(), b"offline original");
+    reopened.set_offline_pins(&[("album:1".into(), None)]).unwrap();
+    assert!(reopened.evict(&b).is_err(), "the last active lease still protects an unpinned blob");
+    drop(offline);
+    assert_eq!(reopened.trim_cache().unwrap().used_bytes, 0);
+}
+
+#[test]
+fn decoded_source_clones_keep_the_managed_original_leased() {
+    let scratch = Scratch::new();
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    let asset = Asset { original: blob(b"original"), smart_preview: None, thumbnail: None };
+    resolver.connect("memory".into(), store(b"original")).unwrap();
+    let source = crate::media::SourceRef::Managed {
+        asset: Some(Box::new(asset.clone())),
+        resolver: Some(resolver.clone()),
+        requirement: SourceRequirement::OriginalRequired,
+        max_edge: 4,
+        denoise: None,
+        loader: Some(Arc::new(|_, _| Ok((lightcraft_raster::Rgb32f::from_fn(4, 3, |_, _| [0.1; 3]), Default::default())))),
+    }
+    .load_source()
+    .unwrap();
+    let retained = source.clone();
+    drop(source);
+    resolver.set_cache_budget(0).unwrap();
+    assert_eq!(resolver.trim_cache().unwrap().used_bytes, asset.original.size);
+    assert!(resolver.evict(&asset.original).is_err());
+    drop(retained);
+    assert_eq!(resolver.trim_cache().unwrap().used_bytes, 0);
+}
+
+#[test]
+fn damaged_or_future_retention_settings_disable_eviction_and_preserve_bytes() {
+    for bytes in [b"broken".as_slice(), br#"{"version":2,"budget_bytes":0,"pins":{},"removed":[]}"#] {
+        let scratch = Scratch::new();
+        let b = blob(b"protected");
+        std::fs::write(scratch.0.join(&b.id.0), b"protected").unwrap();
+        std::fs::write(scratch.0.join("retention.json"), bytes).unwrap();
+        let resolver = AssetResolver::new(scratch.0.clone());
+        assert!(resolver.cache_status().error.is_some());
+        assert!(resolver.trim_cache().is_err());
+        assert!(resolver.set_cache_budget(0).is_err());
+        assert!(resolver.evict(&b).is_err());
+        assert_eq!(std::fs::read(scratch.0.join("retention.json")).unwrap(), bytes);
+        assert_eq!(resolver.acquire(&b, &AtomicBool::new(false)).unwrap().read_bytes().unwrap(), b"protected");
+    }
+}
+
+#[test]
+fn a_failed_pin_save_does_not_change_retention_and_remove_local_does_not_refetch_automatically() {
+    use super::cache::{OfflinePin, OfflineQuality};
+    let scratch = Scratch::new();
+    let b = blob(b"original");
+    let provider = store(b"original");
+    let resolver = AssetResolver::new(scratch.0.clone());
+    resolver.connect("memory".into(), provider.clone()).unwrap();
+    drop(resolver.acquire(&b, &AtomicBool::new(false)).unwrap());
+    let fault = lightcraft_catalog::safe_file::fail_writes_after(1);
+    assert!(
+        resolver.set_offline_pins(&[("photo:1".into(), Some(OfflinePin { quality: OfflineQuality::Original, blobs: vec![b.id.clone()] }))]).is_err()
+    );
+    assert!(resolver.offline_pin("photo:1").is_none());
+    drop(fault);
+    resolver.evict(&b).unwrap();
+    let asset = Asset { original: b.clone(), smart_preview: None, thumbnail: None };
+    assert!(matches!(resolver.acquire_asset(&asset, SourceRequirement::PreviewAllowed, &AtomicBool::new(false)), Err(AssetError::Pending)));
+    assert_eq!(provider.reads.load(Ordering::Relaxed), 1);
+    drop(resolver.acquire_asset(&asset, SourceRequirement::OriginalRequired, &AtomicBool::new(false)).unwrap());
+    assert_eq!(provider.reads.load(Ordering::Relaxed), 2, "explicit fetch/export can reacquire a removed original");
+    assert!(resolver.acquire_asset(&asset, SourceRequirement::PreviewAllowed, &AtomicBool::new(false)).is_ok());
+}
+
+#[test]
+fn pinned_preview_restarts_offline_edits_and_explicit_proxy_export_preserves_membership() {
+    let scratch = Scratch::new();
+    let image = lightcraft_raster::Rgb32f::from_fn(16, 12, |_, _| [0.2, 0.3, 0.4]);
+    let preview = crate::smart::encode(&image, None).unwrap();
+    let asset = Asset { original: blob(b"remote original"), smart_preview: Some(blob(&preview)), thumbnail: None };
+    let mut session = crate::Session::new().with_fs();
+    session.open_library(&scratch.0, false).unwrap();
+    session.media.asset_resolver.as_ref().unwrap().connect("memory".into(), store(&preview)).unwrap();
+    let result = session
+        .execute(
+            "cloud.attach",
+            &serde_json::json!({"assetId": "offline-preview", "asset": asset, "fileName": "offline.raw", "width": 32, "height": 24, "kind": "raw"}),
+        )
+        .unwrap();
+    let id = result["id"].as_u64().unwrap();
+    session.execute("cloud.pin", &serde_json::json!({"ids": [id], "quality": "preview"})).unwrap();
+    let album = session.execute("album.create", &serde_json::json!({"name": "Offline trip", "addSelected": true})).unwrap();
+    let album_id = album["id"].as_u64().unwrap();
+    session.execute("cloud.pin", &serde_json::json!({"albumId": album_id, "quality": "preview"})).unwrap();
+    session.execute("cloud.unpin", &serde_json::json!({"ids": [id]})).unwrap();
+    session.execute("cloud.cache", &serde_json::json!({"budgetMb": 0})).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !session.activity.list().is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(session.activity.list().is_empty(), "offline transfer finished");
+    let resolver = session.media.asset_resolver.as_ref().unwrap();
+    assert_eq!(resolver.trim_cache().unwrap().used_bytes, preview.len() as u64);
+    assert!(resolver.offline_pin(&format!("photo:{id}")).is_none());
+    assert!(resolver.offline_pin(&format!("album:{album_id}")).is_some());
+    session.close_library().unwrap();
+    drop(session);
+    let mut reopened = crate::Session::new().with_fs();
+    reopened.open_library(&scratch.0, false).unwrap();
+    reopened.execute("develop.set", &serde_json::json!({"id": id, "control": "light.exposure", "value": 0.5})).unwrap();
+    assert!(reopened.render_now(lightcraft_catalog::PhotoId(id), 16, 12).is_ok());
+    let options = crate::export::ExportOptions { format: crate::export::ExportFormat::Png, resize: None, ..Default::default() };
+    assert!(
+        crate::export::prepare_export(&mut reopened, lightcraft_catalog::PhotoId(id), &options, 1).unwrap().run().is_err(),
+        "full-quality export reports unavailable original offline"
+    );
+    let proxy = crate::export::ExportOptions { allow_smart_preview: true, ..options };
+    let exported = crate::export::prepare_export(&mut reopened, lightcraft_catalog::PhotoId(id), &proxy, 1).unwrap().run().unwrap();
+    assert_eq!((exported.width, exported.height), (16, 12));
+    let removed = reopened.execute("cloud.removeLocalCopy", &serde_json::json!({"ids": [id]})).unwrap();
+    assert_eq!(removed["removed"].as_array().unwrap().len(), 1);
+    assert!(reopened.catalog.photo(lightcraft_catalog::PhotoId(id)).is_some());
+    assert_eq!(reopened.execute("library.missing", &serde_json::json!({})).unwrap(), serde_json::json!([]));
+    assert!(reopened.render_now(lightcraft_catalog::PhotoId(id), 16, 12).is_ok(), "removal retains the pinned editable preview");
+}

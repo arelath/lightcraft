@@ -1,6 +1,7 @@
 //! Managed cloud asset commands shared by UI, CLI, control channel and MCP.
 
 use super::{CommandSpec, always, bad, cmd};
+use crate::assets::cache::{OfflinePin, OfflineQuality};
 use crate::assets::{AssetResolver, SourceRequirement, TransferManager};
 use crate::{Result, Selection, Session};
 use lightcraft_catalog::assets::{Asset, AssetId};
@@ -27,6 +28,7 @@ fn configure(s: &mut Session, p: &Value) -> Result<Value> {
     connections.push(connection.clone());
     lib.save_cloud_connections(&connections)?;
     resolver.connect(connection.id.clone(), Arc::new(connection)).map_err(|e| bad(C, e.to_string()))?;
+    resume_offline_pins(s);
     Ok(json!({"connections": connections}))
 }
 
@@ -131,6 +133,174 @@ fn fetch(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"background": true, "task": task_id, "total": total}))
 }
 
+fn cache(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "cloud.cache";
+    let resolver = resolver(s, C)?;
+    if let Some(value) = p.get("budgetMb") {
+        let mb = value.as_u64().filter(|v| *v <= (1 << 30)).ok_or_else(|| bad(C, "budgetMb must be between 0 and 1,073,741,824"))?;
+        resolver.set_cache_budget(mb << 20).map_err(|e| bad(C, e.to_string()))?;
+    }
+    Ok(json!(resolver.cache_status()))
+}
+
+fn pin_targets(s: &Session, p: &Value, command: &str) -> Result<(Option<String>, Vec<lightcraft_catalog::PhotoId>)> {
+    if let Some(value) = p.get("albumId") {
+        let id = lightcraft_catalog::AlbumId(value.as_u64().filter(|id| *id > 0).ok_or_else(|| bad(command, "invalid albumId"))?);
+        if s.catalog.album(id).is_none() {
+            return Err(bad(command, "album does not exist"));
+        }
+        return Ok((Some(format!("album:{}", id.0)), s.catalog.album_photos(id)));
+    }
+    Ok((None, s.targets(p)))
+}
+
+fn pin(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "cloud.pin";
+    let resolver = resolver(s, C)?;
+    let quality: OfflineQuality =
+        serde_json::from_value(p.get("quality").cloned().unwrap_or(json!("original"))).map_err(|_| bad(C, "quality must be original or preview"))?;
+    let (album, ids) = pin_targets(s, p, C)?;
+    if ids.is_empty() || ids.len() > 100_000 {
+        return Err(bad(C, "select between 1 and 100,000 photos"));
+    }
+    let mut changes = Vec::new();
+    let mut album_blobs = std::collections::BTreeSet::new();
+    for id in ids {
+        let photo = s.catalog.photo(id).ok_or_else(|| bad(C, "photo does not exist"))?;
+        let Source::Managed { asset_id } = &photo.source else {
+            if album.is_some() {
+                continue;
+            }
+            return Err(bad(C, "select managed cloud photos"));
+        };
+        let asset = s.catalog.asset(asset_id).ok_or_else(|| bad(C, "missing asset record"))?;
+        let blob = match quality {
+            OfflineQuality::Original => &asset.original,
+            OfflineQuality::Preview => asset
+                .smart_preview
+                .as_ref()
+                .ok_or_else(|| bad(C, format!("{} has no editable smart preview; pin its original instead", photo.file_name)))?,
+        };
+        if album.is_some() {
+            album_blobs.insert(blob.id.clone());
+        } else {
+            changes.push((format!("photo:{}", id.0), Some(OfflinePin { quality, blobs: vec![blob.id.clone()] })));
+        }
+    }
+    if let Some(owner) = album {
+        if album_blobs.is_empty() {
+            return Err(bad(C, "album has no managed cloud photos"));
+        }
+        changes.push((owner, Some(OfflinePin { quality, blobs: album_blobs.into_iter().collect() })));
+    }
+    resolver.set_offline_pins(&changes).map_err(|e| bad(C, e.to_string()))?;
+    resume_offline_pins(s);
+    Ok(json!({"savedLocally": true, "pins": changes.len(), "quality": quality}))
+}
+
+fn unpin(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "cloud.unpin";
+    let resolver = resolver(s, C)?;
+    let owners = if let Some(owner) = super::str_param(p, "owner") {
+        vec![owner.to_owned()]
+    } else {
+        let (album, ids) = pin_targets(s, p, C)?;
+        match album {
+            Some(owner) => vec![owner],
+            None => ids.iter().map(|id| format!("photo:{}", id.0)).collect(),
+        }
+    };
+    if owners.is_empty() || owners.len() > 100_000 {
+        return Err(bad(C, "select photos or specify an offline pin owner"));
+    }
+    let changes: Vec<_> = owners.into_iter().map(|owner| (owner, None)).collect();
+    resolver.set_offline_pins(&changes).map_err(|e| bad(C, e.to_string()))?;
+    Ok(json!({"unpinned": changes.len()}))
+}
+
+fn remove_local_copy(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "cloud.removeLocalCopy";
+    let resolver = resolver(s, C)?;
+    let (album, ids) = pin_targets(s, p, C)?;
+    if ids.is_empty() || ids.len() > 100_000 {
+        return Err(bad(C, "select between 1 and 100,000 photos"));
+    }
+    let mut blobs = std::collections::BTreeMap::new();
+    for id in ids {
+        let photo = s.catalog.photo(id).ok_or_else(|| bad(C, "photo does not exist"))?;
+        let Source::Managed { asset_id } = &photo.source else {
+            if album.is_some() {
+                continue;
+            }
+            return Err(bad(C, "select managed cloud photos"));
+        };
+        let asset = s.catalog.asset(asset_id).ok_or_else(|| bad(C, "missing asset record"))?;
+        // Keep editable previews and rendered thumbnails; remove the disposable original only.
+        blobs.insert(asset.original.id.clone(), asset.original.clone());
+    }
+    // Virtual copies share bytes. Release all their decoded sources, leaving live worker
+    // leases protected; an in-flight operation produces an actionable retry error.
+    let affected: Vec<_> = s
+        .catalog
+        .photos()
+        .filter(|photo| {
+            let Source::Managed { asset_id } = &photo.source else { return false };
+            s.catalog.asset(asset_id).is_some_and(|asset| blobs.contains_key(&asset.original.id))
+        })
+        .map(|photo| photo.id)
+        .collect();
+    for id in affected {
+        s.media.forget(id);
+    }
+    let mut removed = Vec::new();
+    let mut failed = Vec::new();
+    for (id, blob) in blobs {
+        match resolver.evict(&blob) {
+            Ok(()) => removed.push(id),
+            Err(error) => failed.push(json!({"blob": id, "error": error.to_string()})),
+        }
+    }
+    Ok(json!({"removed": removed, "failed": failed}))
+}
+
+/// Reconnecting/reopening retries durable offline intent. It never mutates the catalog.
+pub(crate) fn resume_offline_pins(s: &Session) {
+    let Some(resolver) = s.media.asset_resolver.clone() else { return };
+    let status = resolver.cache_status();
+    if let Some(error) = status.error {
+        log::warn!("offline pin recovery: {error}");
+        return;
+    }
+    let wanted: std::collections::BTreeSet<_> = status.pins.values().flat_map(|pin| pin.blobs.iter().cloned()).collect();
+    if wanted.is_empty() {
+        return;
+    }
+    let blobs: std::collections::BTreeMap<_, _> = s
+        .catalog
+        .assets()
+        .values()
+        .flat_map(|asset| std::iter::once(&asset.original).chain(asset.smart_preview.iter()).chain(asset.thumbnail.iter()))
+        .filter(|blob| wanted.contains(&blob.id))
+        .map(|blob| (blob.id.clone(), blob.clone()))
+        .collect();
+    let task = s.activity.start("download", "Download Offline Copies", crate::activity::Cancel::Yes);
+    let Some(cancel) = task.cancel_flag() else { return };
+    let total = blobs.len() as u64;
+    if let Err(error) = std::thread::Builder::new().name("cloud-offline".into()).spawn(move || {
+        for (i, blob) in blobs.values().enumerate() {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            if let Err(error) = resolver.acquire(blob, &cancel) {
+                log::warn!("offline copy: {error}");
+            }
+            task.progress(i as u64 + 1, total);
+        }
+    }) {
+        log::warn!("offline copy worker: {error}");
+    }
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -153,5 +323,9 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!(query "cloud.status", "Cloud Photo Status", [], None, "{ids?}; cached, downloading, remote, missing or failed state on this device", always, status),
         cmd!(query "cloud.fetch", "Download Cloud Photos", [], None, "{ids?, original?: true}; background download, cancellation via activity.cancel", always, fetch),
+        cmd!(query "cloud.cache", "Cloud Cache Settings", [], None, "{budgetMb?}; device-local disk budget, usage and offline pins; 0 retains only pinned or active bytes", always, cache),
+        cmd!(query "cloud.pin", "Keep Cloud Photos Offline", [], None, "{ids? or albumId?, quality?: original|preview}; persist pin intent and download in background; album pins snapshot current members", always, pin),
+        cmd!(query "cloud.unpin", "Release Offline Pins", [], None, "{ids? or albumId? or owner?}; release only these owners' pins", always, unpin),
+        cmd!(query "cloud.removeLocalCopy", "Remove Local Original Copy", [], None, "{ids? or albumId?}; preserve library/remote objects/previews; return removed and failed blobs; refuse pinned or in-use bytes", always, remove_local_copy),
     ]
 }

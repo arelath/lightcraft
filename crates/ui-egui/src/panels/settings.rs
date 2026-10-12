@@ -451,6 +451,30 @@ fn performance_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
             let _ = app.run("library.clearPreviews", json!({}));
         }
     });
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(resolver) = &app.session.media.asset_resolver {
+        let (budget, used, pinned) = resolver.cache_usage();
+        heading(ui, t, crate::i18n::tr("Cloud asset cache"));
+        row(ui, t, crate::i18n::tr("Size limit"), |ui| {
+            let opts = [(0u32, "Pinned only"), (1024, "1 GB"), (5120, "5 GB"), (20480, "20 GB"), (102400, "100 GB")];
+            let mut mb = u32::try_from(budget >> 20).unwrap_or(20480);
+            if choices(ui, "settingsCloudCache", &opts, &mut mb)
+                && let Err(error) = app.run("cloud.cache", json!({"budgetMb": mb}))
+            {
+                app.toast(ui.ctx(), error);
+            }
+        });
+        row(ui, t, crate::i18n::tr("In use"), |ui| {
+            ui.label(RichText::new(format!("{:.1} MB · {:.1} MB pinned", used as f64 / 1048576.0, pinned as f64 / 1048576.0)).color(t.text));
+        });
+        hint(
+            ui,
+            t,
+            crate::i18n::tr(
+                "Offline pins and files used by active operations can exceed this limit. Removing a local original keeps its photo and remote copy.",
+            ),
+        );
+    }
     heading(ui, t, crate::i18n::tr("Local folders"));
     row(ui, t, crate::i18n::tr("Forget unchanged photos"), |ui| {
         let opts = [(0u32, "Never"), (7, "After 7 days"), (30, "After 30 days"), (90, "After 90 days"), (365, "After a year")];

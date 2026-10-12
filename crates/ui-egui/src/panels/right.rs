@@ -713,6 +713,56 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             {
                 let _ = app.run("cloud.fetch", json!({"ids": [id.0], "original": true}));
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use lightcraft_engine::assets::cache::OfflineQuality;
+                let pin = app.session.media.asset_resolver.as_ref().and_then(|r| r.offline_pin(&format!("photo:{}", id.0)));
+                let has_preview = app.session.catalog.asset(asset_id).is_some_and(|a| a.smart_preview.is_some());
+                let label = match pin.as_ref().map(|p| p.quality) {
+                    Some(OfflineQuality::Original) => "Keep original offline ✓",
+                    _ => "Keep original offline",
+                };
+                if text_button(ui, "cloudPinOriginal", crate::i18n::tr(label), false).clicked()
+                    && let Err(error) = app.run("cloud.pin", json!({"ids": [id.0], "quality": "original"}))
+                {
+                    app.toast(ui.ctx(), error);
+                }
+                if has_preview
+                    && text_button(
+                        ui,
+                        "cloudPinPreview",
+                        crate::i18n::tr(if pin.as_ref().is_some_and(|p| p.quality == OfflineQuality::Preview) {
+                            "Keep preview offline ✓"
+                        } else {
+                            "Keep preview offline"
+                        }),
+                        false,
+                    )
+                    .clicked()
+                    && let Err(error) = app.run("cloud.pin", json!({"ids": [id.0], "quality": "preview"}))
+                {
+                    app.toast(ui.ctx(), error);
+                }
+                if pin.is_some()
+                    && text_button(ui, "cloudUnpin", crate::i18n::tr("Release offline pin"), false).clicked()
+                    && let Err(error) = app.run("cloud.unpin", json!({"ids": [id.0]}))
+                {
+                    app.toast(ui.ctx(), error);
+                }
+                if text_button(ui, "cloudRemoveLocal", crate::i18n::tr("Remove local original copy"), false).clicked() {
+                    match app.run("cloud.removeLocalCopy", json!({"ids": [id.0]})) {
+                        Ok(result) => {
+                            if let Some(failed) = result.get("failed").and_then(serde_json::Value::as_array).and_then(|a| a.first()) {
+                                app.toast(
+                                    ui.ctx(),
+                                    failed.get("error").and_then(serde_json::Value::as_str).unwrap_or("Local copy could not be removed"),
+                                );
+                            }
+                        }
+                        Err(error) => app.toast(ui.ctx(), error),
+                    }
+                }
+            }
         }
         // (cached answers, checked off the UI thread: unknown counts as online / no smart preview)
         if let lightcraft_catalog::Source::File { path } = &p.source {

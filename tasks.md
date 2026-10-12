@@ -46,6 +46,8 @@ Verified on 2026-10-12: Milestone 1, including managed originals and proxies, ca
 
 **Dependencies:** Milestone 1.
 
+Verified retention slice (2026-10-12): configurable asset budgets, independent photo/album offline pins, protected decoded-source lifetimes, local-original removal and device-local policy persistence. Tests cover both original and preview pins across restart, offline preview editing, explicit proxy export, corruption and failed policy writes. CLI/MCP and native Info/Performance controls passed; the desktop reopened and exported a pinned RAW with its test server stopped. Remaining preview/priority and milestone-wide checks stay unchecked.
+
 ### Previews and background transfers
 
 - [ ] **CS2.1** Define versioned remote keys for smart previews and thumbnails, with thumbnails keyed by source, edits, and rendering parameters; retain the existing thumbnail cache as a separate disposable cache.
@@ -57,18 +59,18 @@ Verified on 2026-10-12: Milestone 1, including managed originals and proxies, ca
 
 ### Cache retention and offline operation
 
-- [ ] **CS2.7** Add a configurable original-cache disk budget and eviction of eligible, safely uploaded, unused content.
-- [ ] **CS2.8** Add explicit offline pinning for individual photos and albums, with a choice of originals or previews.
+- [x] **CS2.7** Add a configurable original-cache disk budget and eviction of eligible, safely uploaded, unused content.
+- [x] **CS2.8** Add explicit offline pinning for individual photos and albums, with a choice of originals or previews.
 - [ ] **CS2.9** Preserve temporary lease pins while decoders, exports, or external editors use cached files; never evict pending uploads or unsynchronized working copies.
-- [ ] **CS2.10** Add a remove-local-copy command that evicts eligible cached content while preserving the photo and its remote references.
-- [ ] **CS2.11** Keep cache paths, budgets, pins, progress, selection, and hardware preferences device-local.
+- [x] **CS2.10** Add a remove-local-copy command that evicts eligible cached content while preserving the photo and its remote references.
+- [x] **CS2.11** Keep cache paths, budgets, pins, progress, selection, and hardware preferences device-local.
 - [ ] **CS2.12** Define enabled operations and actionable errors for offline states with an original, only a smart preview, or no usable source.
 
 ### Acceptance checks
 
 - [ ] **CS2.A1** Verify library browsing and preview editing remain responsive during slow downloads; inspect UI performance through the control channel.
-- [ ] **CS2.A2** Verify pinned originals and smart previews survive restart and remain usable offline; uncached remote photos do not enter the missing-file/relink workflow.
-- [ ] **CS2.A3** Verify full-quality export waits for the original, reports unavailable originals offline, and only exports a proxy when explicitly requested.
+- [x] **CS2.A2** Verify pinned originals and smart previews survive restart and remain usable offline; uncached remote photos do not enter the missing-file/relink workflow.
+- [x] **CS2.A3** Verify full-quality export waits for the original, reports unavailable originals offline, and only exports a proxy when explicitly requested.
 - [ ] **CS2.A4** Test request deduplication, cancellation, retry after reconnect, render recovery, cache-budget enforcement, and eviction protection for active leases and offline pins.
 - [ ] **CS2.A5** Run `cargo xtask ci`, exercise the desktop commands, and visually inspect progress, availability, and offline controls.
 

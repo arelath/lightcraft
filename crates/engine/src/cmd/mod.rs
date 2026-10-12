@@ -8,7 +8,7 @@ mod activity;
 mod before;
 pub(crate) mod browse;
 #[cfg(not(target_arch = "wasm32"))]
-mod cloud;
+pub(crate) mod cloud;
 mod color;
 pub(crate) mod convert;
 mod cull;

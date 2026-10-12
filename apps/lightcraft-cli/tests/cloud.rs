@@ -148,13 +148,16 @@ fn s3_only_raw_is_edited_exported_and_reopened_through_cli_and_mcp() {
         .args(["develop.set", "control=light.exposure", "value=0.75", "app.export"])
         .arg(format!("path={}", out.display()))
         .args(["format=png", "longEdge=0"])
+        .args(["cloud.pin", "quality=original", "cloud.cache", "budgetMb=0"])
         .output()
         .unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     let results: Vec<Value> = String::from_utf8_lossy(&result.stdout).lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-    assert_eq!(results.len(), 4, "{results:?}");
+    assert_eq!(results.len(), 6, "{results:?}");
     assert!(results.iter().all(|r| r["ok"] == true), "{results:?}");
     assert_eq!(results[3]["result"]["width"], 32);
+    assert_eq!(results[5]["result"]["budgetBytes"], 0);
+    assert_eq!(results[5]["result"]["pins"]["photo:1"]["quality"], "original");
     assert!(out.is_file());
     assert_eq!(fixture.requests.load(Ordering::Relaxed), 1);
 
@@ -192,6 +195,15 @@ fn s3_only_raw_is_edited_exported_and_reopened_through_cli_and_mcp() {
     );
     assert_eq!(exported["result"]["isError"], false, "{exported}");
     assert!(out.is_file());
+    let retained = rpc(
+        json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "run_command", "arguments": {"command": "cloud.cache", "params": {}}}}),
+    );
+    assert_eq!(retained["result"]["structuredContent"]["pins"]["photo:1"]["quality"], "original");
+    let protected = rpc(
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "run_command", "arguments": {"command": "cloud.removeLocalCopy", "params": {"ids": [1]}}}}),
+    );
+    assert_eq!(protected["result"]["structuredContent"]["removed"], json!([]));
+    assert_eq!(protected["result"]["structuredContent"]["failed"].as_array().unwrap().len(), 1);
     drop(input);
     assert!(process.wait().unwrap().success());
     assert_eq!(fixture.requests.load(Ordering::Relaxed), 1, "reopening must use verified cache");

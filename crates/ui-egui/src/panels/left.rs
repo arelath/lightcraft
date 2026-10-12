@@ -1516,6 +1516,24 @@ fn folder_menu(app: &mut LightcraftApp, resp: &egui::Response, a: &Album) {
             }
             ui.separator();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if !a.folder && app.session.media.asset_resolver.is_some() {
+            ui.menu_button(crate::i18n::tr("Offline cloud copies"), |ui| {
+                for (label, command, quality) in [
+                    ("Keep originals offline", "cloud.pin", "original"),
+                    ("Keep previews offline", "cloud.pin", "preview"),
+                    ("Release album offline pin", "cloud.unpin", "original"),
+                ] {
+                    if ui.button(crate::i18n::tr(label)).clicked()
+                        && let Err(error) = app.run(command, json!({"albumId": a.id.0, "quality": quality}))
+                    {
+                        app.toast(ui.ctx(), error);
+                    }
+                }
+                ui.label(crate::i18n::tr("Pins keep the album's current cloud photos. Repeat after adding photos."));
+            });
+            ui.separator();
+        }
         if !a.folder && !a.is_smart() {
             let local_only = super::grid::local_only(app, &app.session.targets(&serde_json::Value::Null));
             let b = ui

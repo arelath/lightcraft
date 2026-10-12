@@ -34,6 +34,10 @@ Native commands use the shared engine registry, CLI, control channel and MCP:
 | `cloud.attach` | `{assetId, asset, fileName, width, height, kind?, format?}` | Add and select a photo referencing already uploaded blobs. The caller supplies its source description. |
 | `cloud.status` | `{ids?}` | Report remote, downloading, cached, missing or failed availability. |
 | `cloud.fetch` | `{ids?, original?: true}` | Download on a worker; returns a task ID. Progress/cancellation use `activity.list` and `activity.cancel`. |
+| `cloud.cache` | `{budgetMb?}` | Inspect/set the device-local asset budget; return usage, persistent offline owners and recovery errors. |
+| `cloud.pin` | `{ids? or albumId?, quality?: "original" or "preview"}` | Persist offline intent before starting downloads. Album pins retain current managed members; repeat after membership changes. |
+| `cloud.unpin` | `{ids? or albumId? or owner?}` | Release those owners' pins, preserving other photos/albums that share the blob. `owner` can release a deleted photo/album's retained pin. |
+| `cloud.removeLocalCopy` | `{ids? or albumId?}` | Remove eligible original cache bytes; preserve library records, remote objects and previews. Report each removed or refused blob. |
 
 Pass a JSON parameter object after `cloud.configure` in `lightcraft-cli run --library LIBRARY`:
 
@@ -61,7 +65,19 @@ Then attach an uploaded original through `cloud.attach`:
 }
 ```
 
-The Info panel identifies cloud storage, reports original availability and offers Download original. Merely uncached managed originals do not enter filesystem Missing Photos/relink detection.
+The Info panel identifies cloud storage, reports original availability and offers Download original, original/preview offline pinning, unpinning and local-original removal. Album context menus offer offline pinning. Settings → Performance has a separate cloud asset budget. Merely uncached managed originals do not enter filesystem Missing Photos/relink detection.
+
+## Device-local retention
+
+`assets-cache/retention.json` stores a versioned policy, a 20 GiB default budget, pin owners and explicitly removed originals. It is not catalog data. Zero budget retains only pinned or actively leased bytes. Original, smart-preview and thumbnail blobs share the asset budget; the existing rendered-thumbnail cache has its own budget. Pins and active operations may exceed the soft limit, and usage is measured asynchronously.
+
+A bounded maintenance worker evicts least recently used eligible flat SHA-256 cache files. Acquisitions and eviction share per-blob gates; decoded-source clones retain an `Arc<AssetLease>` throughout their memory-cache/job lifetime. Downloads, decoding and exports therefore keep their source bytes protected. Every cache blob is a verified download of an already uploaded object. Future import staging and unsynchronized external working copies must use a separate durable directory and cannot enter this disposable cache.
+
+Photo and album pin owners are independent even when virtual copies share bytes. Preview pinning requires an editable `.lcsp` rendition and returns an actionable error if one is absent. The pin intent is atomically saved before downloading, retried when reopening or reconnecting, and retained after failed/cancelled transfers. Album pins snapshot their current cloud members; local-file members are already local and are skipped. Repeating a pin updates that owner's snapshot.
+
+Removing an original first releases decoded sources for every photo sharing it. Active workers and persistent pins still block removal. Removed originals are not automatically downloaded again for preview-allowed browsing; previews and disposable rendered thumbnails remain usable. Explicit download, metadata and original-required export can reacquire them. This operation never deletes the photo or the remote object.
+
+Malformed, oversized or future retention settings are preserved and reported. Policy writes and eviction are disabled until repaired; verified local bytes remain usable. Atomic-save failures preserve the previous policy. Settings and staging files, subdirectories and symbolic links are never eviction candidates.
 
 ## Verification and remaining work
 
@@ -73,7 +89,7 @@ Engine tests cover a cloud-only synthetic Bayer DNG opening, developing, exporti
 
 The native desktop acceptance also passed on 2026-10-12 using control port 18837 and a separate loopback server that independently checked SigV4 with Python's HMAC implementation. It attached the remote-only RAW, applied +0.75 exposure, reached a completed native render, saved its catalog and exported a 32×24 PNG. One verified request acquired the original; the export reused it. The inspected native screenshot and results are in gitignored `target/cloud-acceptance/`. The final inspected frame measured 0.82 ms for UI update and 6.29 ms for the last render, with no queued or in-flight renders. These measurements use a tiny synthetic fixture and are not a large-library performance benchmark. This does not establish live AWS interoperability. Per-task completion and actual validation results are recorded in `tasks.md`.
 
-Unchecked work includes cache budgets and persistent offline pins, safe import/uploads, synchronization/conflicts, browser adapters and the optional backend. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
+Unchecked work includes remote thumbnail discovery and transfer priorities, safe import/uploads, synchronization/conflicts, browser adapters and the optional backend. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
 
 `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF checks, workspace tests, parity references, layering, asset attribution and WASM on Windows. The required Rust 1.95 toolchain exposed older Clippy suggestions and Unix-specific test assumptions, which were corrected. Recovery tests also exposed duplicate Windows `.xmp`/`.XMP` alias moves: sidecar operations now deduplicate physical aliases, preserve actual filename spelling and retain distinct packets on sensitive volumes. Synthetic and native regressions cover these cases.
 
@@ -83,9 +99,12 @@ User-output guards protect managed originals and renditions, and reject writes a
 
 A second native acceptance used a 2.5-second server delay. Concurrent metadata and `ui.render` requests completed after one independently verified download while another connection's `ui.inspect` answered in 26 ms. It returned 31 metadata rows, rendered 32×24, exported at original dimensions and rejected a render output pointed at the original cache file; its SHA-256 remained intact. The inspected screenshot is `target/cloud-acceptance/native-deferred.png`; results are `native-deferred-results.json`. Final UI update time was 0.73 ms with empty render queues. These are small-fixture responsiveness checks.
 
+Native retention acceptance passed on 2026-10-12 through control port 18837. Clicking Info → Keep original offline persisted the pin; Settings → Performance displayed the separate budget and its pinned-only option. After the local S3-compatible server stopped, reopening retained the pin and a zero-byte budget, and an adjusted RAW exported at 32×24. Pinned removal was refused. Unpinning and explicit removal deleted the cached original while preserving the photo, its remote reference and an empty Missing Photos result; browsing did not recreate the removed original. Screenshots (`native-cache-info.png`, `native-cache-settings.png`, `native-cache-removed.png`) and results are in gitignored `target/cloud-acceptance/`. Final native update time was 7.79 ms with no queued/in-flight renders; this tiny fixture is not a large-library benchmark. Engine tests additionally verify editable preview pins across restart, separate album/photo ownership, corruption recovery and atomic-save failures. CLI/MCP retention acceptance passed too.
+
 ## Revision history
 
 | Date | Change |
 |---|---|
 | 2026-10-12 | Initial managed-asset and verified-cache foundation; completion evidence tracked per task. |
 | 2026-10-12 | Deferred native UI acquisition, cached-only dispatch, source-change/cancellation recovery and managed-cache output protection. |
+| 2026-10-12 | Device-local asset budgets, persistent offline photo/album pin owners, retained decoded-source leases and safe local-original removal; offline restart/export and native controls verified. |

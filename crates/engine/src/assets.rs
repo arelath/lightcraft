@@ -128,6 +128,7 @@ fn lock_entry(entry: &Entry) -> Result<MutexGuard<'_, ()>> {
 pub struct AssetLease {
     path: PathBuf,
     entry: Arc<Entry>,
+    cache: Arc<cache::Cache>,
 }
 
 impl AssetLease {
@@ -156,6 +157,7 @@ impl AssetLease {
 impl Drop for AssetLease {
     fn drop(&mut self) {
         self.entry.pins.fetch_sub(1, Ordering::Relaxed);
+        self.cache.schedule_trim();
     }
 }
 
@@ -171,20 +173,23 @@ pub fn sha256(bytes: &[u8]) -> BlobId {
 pub struct AssetResolver {
     root: PathBuf,
     stores: Mutex<BTreeMap<String, Arc<dyn BlobStore>>>,
-    entries: Mutex<BTreeMap<BlobId, Arc<Entry>>>,
+    entries: Arc<Mutex<BTreeMap<BlobId, Arc<Entry>>>>,
     generation: AtomicU64,
     wake: Mutex<Option<crate::availability::Waker>>,
+    cache: Arc<cache::Cache>,
 }
 
 impl AssetResolver {
+    pub fn cache_usage(&self) -> (u64, u64, u64) {
+        self.cache.usage()
+    }
+    pub fn offline_pin(&self, owner: &str) -> Option<cache::OfflinePin> {
+        self.cache.pin(owner)
+    }
     pub fn new(root: PathBuf) -> Self {
-        Self {
-            root,
-            stores: Mutex::new(BTreeMap::new()),
-            entries: Mutex::new(BTreeMap::new()),
-            generation: AtomicU64::new(0),
-            wake: Mutex::new(None),
-        }
+        let entries = Arc::new(Mutex::new(BTreeMap::new()));
+        let cache = cache::Cache::new(root.clone(), Arc::downgrade(&entries));
+        Self { root, stores: Mutex::new(BTreeMap::new()), entries, generation: AtomicU64::new(0), wake: Mutex::new(None), cache }
     }
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
@@ -234,6 +239,9 @@ impl AssetResolver {
                 return Err(AssetError::Cancelled);
             }
         }
+        if requirement == SourceRequirement::PreviewAllowed && self.cache.removed(&asset.original.id) {
+            return Err(AssetError::Pending);
+        }
         self.acquire(&asset.original, cancel).map(|lease| (lease, false))
     }
 
@@ -251,11 +259,13 @@ impl AssetResolver {
         *state = AssetAvailability::Cached;
         drop(state);
         entry.pins.fetch_add(1, Ordering::Relaxed);
-        let lease = AssetLease { path, entry: entry.clone() };
+        self.cache.touch(&blob.id);
+        let lease = AssetLease { path, entry: entry.clone(), cache: self.cache.clone() };
         drop(gate);
         if changed {
             self.changed();
         }
+        self.cache.schedule_trim();
         Ok(Some(lease))
     }
     /// Eviction is serialized against acquisition and prohibited while a lease exists.
@@ -266,11 +276,7 @@ impl AssetResolver {
         if entry.pins.load(Ordering::Relaxed) != 0 {
             return Err(AssetError::Invalid("original is in use".into()));
         }
-        match std::fs::remove_file(self.root.join(&blob.id.0)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(disk(e)),
-        }
+        self.cache.remove_local(&blob.id)?;
         *entry.state.lock().unwrap_or_else(PoisonError::into_inner) = AssetAvailability::Remote;
         drop(_gate);
         self.changed();
@@ -387,7 +393,8 @@ impl TransferManager for AssetResolver {
             *state = AssetAvailability::Cached;
             drop(state);
             entry.pins.fetch_add(1, Ordering::Relaxed);
-            Ok(AssetLease { path, entry: entry.clone() })
+            self.cache.touch(&blob.id);
+            Ok(AssetLease { path, entry: entry.clone(), cache: self.cache.clone() })
         })();
         if let Err(error) = &result {
             *entry.state.lock().unwrap_or_else(PoisonError::into_inner) = match error {
@@ -399,6 +406,9 @@ impl TransferManager for AssetResolver {
         drop(_gate);
         if availability_changed {
             self.changed();
+        }
+        if result.is_ok() {
+            self.cache.schedule_trim();
         }
         result
     }
@@ -414,6 +424,25 @@ impl TransferManager for AssetResolver {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod s3;
+
+pub mod cache;
+
+impl AssetResolver {
+    pub fn cache_status(&self) -> cache::CacheStatus {
+        self.cache.status()
+    }
+    pub fn set_cache_budget(&self, bytes: u64) -> Result<()> {
+        self.cache.set_budget(bytes)
+    }
+    pub fn set_offline_pins(&self, pins: &[(String, Option<cache::OfflinePin>)]) -> Result<()> {
+        self.cache.set_pins(pins)
+    }
+    /// Intended for workers and deterministic verification; active/persistent pins are retained.
+    pub fn trim_cache(&self) -> Result<cache::CacheStatus> {
+        self.cache.trim()?;
+        Ok(self.cache.status())
+    }
+}
 
 impl crate::Session {
     /// Detached reader for commands/jobs that require original bytes. Acquires only on use,
