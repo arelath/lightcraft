@@ -283,22 +283,54 @@ impl S3Connection {
             return Err(AssetError::Invalid("multipart uploads cannot target a historical version".into()));
         }
         identifier(upload_id)?;
-        let response = self.request(
-            Request {
-                method: Method::Delete,
-                key: &blob.remote.key,
-                query: &[("uploadId", upload_id)],
-                headers: &[],
-                payload: &sha256(b"").0,
-                body: None,
-            },
-            cancel,
-            &mut |_| {},
-        )?;
-        if response.status != 404 {
+        for _ in 0..3 {
+            let response = self.request(
+                Request {
+                    method: Method::Delete,
+                    key: &blob.remote.key,
+                    query: &[("uploadId", upload_id)],
+                    headers: &[],
+                    payload: &sha256(b"").0,
+                    body: None,
+                },
+                cancel,
+                &mut |_| {},
+            )?;
+            if response.status == 404 {
+                return Ok(());
+            }
             read_reply(response, MAX_REPLY, cancel)?;
+            // In-flight part writes can outlive an abort acknowledgement. Confirm
+            // that no parts remain before discarding our only resumable receipt.
+            let response = self.request(
+                Request {
+                    method: Method::Get,
+                    key: &blob.remote.key,
+                    query: &[("max-parts", "1"), ("uploadId", upload_id)],
+                    headers: &[],
+                    payload: &sha256(b"").0,
+                    body: None,
+                },
+                cancel,
+                &mut |_| {},
+            )?;
+            if response.status == 404 {
+                return Ok(());
+            }
+            let reply = read_reply(response, MAX_REPLY, cancel)?;
+            let fields = parse_xml(&reply.bytes, "ListPartsResult")?;
+            if fields.get("UploadId").map(String::as_str) != Some(upload_id)
+                || fields.get("Key") != Some(&blob.remote.key)
+                || fields.get("Bucket") != Some(&self.bucket)
+                || !matches!(fields.get("IsTruncated").map(String::as_str), Some("true" | "false"))
+            {
+                return Err(AssetError::Network("invalid multipart abort confirmation; receipt retained".into()));
+            }
+            if !fields.contains_key("Part") && fields.get("IsTruncated").map(String::as_str) == Some("false") {
+                return Ok(());
+            }
         }
-        Ok(())
+        Err(AssetError::Network("multipart parts remain after abort; receipt retained for another cleanup attempt".into()))
     }
 }
 
@@ -341,7 +373,11 @@ fn parse_xml(bytes: &[u8], expected: &str) -> Result<BTreeMap<String, String>> {
                 }
                 saw_error |= name == "Error";
                 path.push(name);
-                if path.len() == 2 && path.last().is_some_and(|name| matches!(name.as_str(), "UploadId" | "ETag" | "Code")) {
+                if path.len() == 2
+                    && path
+                        .last()
+                        .is_some_and(|name| matches!(name.as_str(), "UploadId" | "ETag" | "Code" | "Bucket" | "Key" | "IsTruncated" | "Part"))
+                {
                     let name = path.last().ok_or_else(invalid)?.clone();
                     if fields.insert(name, String::new()).is_some() {
                         return Err(invalid());

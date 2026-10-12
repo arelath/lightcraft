@@ -381,6 +381,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "cloud.upload", "Upload Cloud Originals", [], None, "{imports?: [importId], wait?}; durable upload, multipart resume, remote verification and conditional catalog publication; defaults to background on desktop", always, crate::cloud_upload::start),
         cmd!(query "cloud.uploadStatus", "Cloud Upload Status", [], None, "{}; persistent upload states, running tasks and recent completion reports", always, |s, _| Ok(json!({"running": s.cloud_uploads.running(), "reports": s.cloud_uploads.reports, "uploads": s.catalog.upload_intents()}))),
         cmd!(query "cloud.abortUploads", "Abort Resumable Cloud Uploads", [], None, "{imports: [importId], wait?}; abort only recorded multipart identities while preserving staged originals and existing objects", always, crate::cloud_upload::abort),
+        cmd!(query "cloud.cleanupUploads", "Retire Idle Cloud Uploads", [], None, "{connection, olderThanDays?: 7 (1..3650), apply?: false, wait?}; preview or explicitly retire recorded idle multipart sessions, including deleted-photo receipts; preserve originals and working files", always, crate::cloud_upload::cleanup),
         cmd!(
             "cloud.import",
             "Import Cloud Photos",

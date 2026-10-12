@@ -180,9 +180,10 @@ impl Server {
                 let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing tool `name`".to_string()))?;
                 let args = params.get("arguments").cloned().unwrap_or(Value::Null);
                 check_args(name, &args).map_err(|e| (INVALID_PARAMS, e))?;
-                let upload = matches!(name, "cmd_cloud_upload" | "cmd_cloud_abortUploads")
-                    || (name == "command_run" && matches!(args["id"].as_str(), Some("cloud.upload" | "cloud.abortUploads")))
-                    || (name == "run_command" && matches!(args["command"].as_str(), Some("cloud.upload" | "cloud.abortUploads")));
+                let upload = matches!(name, "cmd_cloud_upload" | "cmd_cloud_abortUploads" | "cmd_cloud_cleanupUploads")
+                    || (name == "command_run" && matches!(args["id"].as_str(), Some("cloud.upload" | "cloud.abortUploads" | "cloud.cleanupUploads")))
+                    || (name == "run_command"
+                        && matches!(args["command"].as_str(), Some("cloud.upload" | "cloud.abortUploads" | "cloud.cleanupUploads")));
                 let long = upload
                     || matches!(name, "export" | "cmd_app_export")
                     || (name == "command_run" && args["id"] == "app.export")

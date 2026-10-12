@@ -108,6 +108,8 @@ pub struct State {
     pub signature_errors: usize,
     pub hold_part: bool,
     pub hold_head: bool,
+    pub hold_abort: bool,
+    pub defer_abort: usize,
 }
 
 pub struct Fixture {
@@ -179,11 +181,12 @@ impl Fixture {
                 };
                 let hold_part = state.hold_part && method == "PUT" && target.contains("partNumber=1&");
                 let hold_head = state.hold_head && method == "PUT" && target.ends_with("/catalog/head.json");
+                let hold_abort = state.hold_abort && method == "DELETE" && target.contains("uploadId=");
                 drop(state);
-                if hold_part || hold_head {
+                if hold_part || hold_head || hold_abort {
                     while !worker_stop.load(Ordering::Relaxed) {
                         let state = worker_state.lock().unwrap();
-                        let held = (hold_part && state.hold_part) || (hold_head && state.hold_head);
+                        let held = (hold_part && state.hold_part) || (hold_head && state.hold_head) || (hold_abort && state.hold_abort);
                         drop(state);
                         if !held {
                             break;
@@ -269,7 +272,18 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
     let mut response = Vec::new();
     let mut etag = None;
     let mut lose = false;
-    if method == "GET" {
+    if method == "GET"
+        && let Some(id) = query.get("uploadId")
+    {
+        if let Some((upload_key, parts)) = state.multipart.get(id) {
+            assert_eq!(upload_key, key);
+            let part = parts.keys().next().map(|number| format!("<Part><PartNumber>{number}</PartNumber></Part>")).unwrap_or_default();
+            let object_key = key.strip_prefix("/photos/").unwrap();
+            response = format!("<ListPartsResult><Bucket>photos</Bucket><Key>{object_key}</Key><UploadId>{id}</UploadId><IsTruncated>{}</IsTruncated>{part}</ListPartsResult>", parts.len() > 1).into_bytes();
+        } else {
+            status = 404;
+        }
+    } else if method == "GET" {
         if let Some(bytes) = state.objects.get(key) {
             response = bytes.clone();
             etag = Some(tag(bytes));
@@ -283,7 +297,14 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
         response = format!("<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>").into_bytes();
     } else if let Some(id) = query.get("uploadId") {
         if method == "DELETE" {
-            status = if state.multipart.remove(id).is_some() { 204 } else { 404 };
+            status = if state.defer_abort > 0 {
+                state.defer_abort -= 1;
+                204
+            } else if state.multipart.remove(id).is_some() {
+                204
+            } else {
+                404
+            };
         } else if let Some((upload_key, parts)) = state.multipart.get_mut(id) {
             assert_eq!(upload_key, key);
             if method == "PUT" {

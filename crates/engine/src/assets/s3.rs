@@ -29,6 +29,23 @@ pub struct S3Connection {
 }
 
 impl S3Connection {
+    /// Receipt destination binding excludes device-local credential selection.
+    pub(crate) fn storage_snapshot(&self) -> Self {
+        let mut storage = self.clone();
+        storage.profile = None;
+        storage.prefix = storage.prefix.trim_end_matches('/').to_owned();
+        storage.endpoint = storage.endpoint.map(|endpoint| endpoint.trim_end_matches('/').to_owned());
+        storage
+    }
+
+    pub(crate) fn same_destination(&self, other: &Self) -> bool {
+        self.storage_snapshot() == other.storage_snapshot()
+    }
+
+    pub(crate) fn validate_blob(&self, blob: &Blob) -> Result<()> {
+        self.url(blob).map(|_| ())
+    }
+
     pub fn validate(&self) -> Result<()> {
         if !lightcraft_catalog::assets::identifier(&self.id)
             || self.bucket.len() < 3

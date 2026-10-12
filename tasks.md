@@ -80,7 +80,7 @@ Verified device experience (2026-10-12): recipe-matched remote thumbnails, edita
 
 **Dependencies:** Milestones 1–2. Full multi-device mutation synchronization follows in Milestone 4.
 
-Verified staging and uploads (2026-10-12): durable original/proxy/thumbnail preparation, atomic photo/asset/upload intent, recovery without duplicate imports, resumable multipart transfer, SHA-256 readback verification and conditional initial publication. CLI/MCP response-loss, cancellation, credentials, process-crash and local-acknowledgement failure checks passed. Native connection/import dialogs, immediate editing/export, byte progress, failure and retry were visually inspected; retry reused its multipart ID and published once. All eight CI stages passed. Upload retention automation, staging/cache migration, path-dependent operations and external-editor ingestion remain open. Initial import publication does not synchronize subsequent edits between devices.
+Verified staging and uploads (2026-10-12): durable original/proxy/thumbnail preparation, atomic photo/asset/upload intent, recovery without duplicate imports, resumable multipart transfer, SHA-256 readback verification and conditional initial publication. CLI/MCP response-loss, cancellation, credentials, process-crash and local-acknowledgement failure checks passed. Native connection/import dialogs, immediate editing/export, byte progress, failure and retry were visually inspected; retry reused its multipart ID and published once. All eight CI stages passed. Explicit idle multipart cleanup includes deleted-photo receipts, destination binding and confirmed aborts; cancellation and retry preserve durable bytes. Staging/cache migration, path-dependent operations and external-editor ingestion remain open. Initial import publication does not synchronize subsequent edits between devices.
 
 ### Durable import and upload pipeline
 
@@ -90,7 +90,7 @@ Verified staging and uploads (2026-10-12): durable original/proxy/thumbnail prep
 - [x] **CS3.4** Upload immutable originals and required supporting objects, verify successful storage, publish remote catalog references last, and mark work synchronized only after publication succeeds.
 - [x] **CS3.5** Make retries idempotent when storage accepted a request but the client lost the response; reconcile uploaded objects whose catalog publication failed.
 - [x] **CS3.6** Implement multipart uploads for large assets and persist upload IDs and completed-part information for resumption.
-- [ ] **CS3.7** Clean up abandoned multipart uploads with explicit retention and cancellation rules that preserve resumable work.
+- [x] **CS3.7** Clean up abandoned multipart uploads with explicit retention and cancellation rules that preserve resumable work.
 - [x] **CS3.8** Enforce that unuploaded originals and externally edited working copies awaiting upload are durable local data and cannot be evicted.
 - [x] **CS3.9** Expose distinct saved-locally, uploading, failed/retryable, and synchronized states to the user.
 

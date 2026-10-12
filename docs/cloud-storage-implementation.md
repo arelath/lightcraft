@@ -44,7 +44,7 @@ Resolver acquisition prefers durable staged bytes and verifies them before decod
 
 ## Durable upload and initial remote publication
 
-Upload receipts live in `Managed/uploads/<import-id>.json`. They contain a versioned immutable import snapshot, verified object keys, multipart upload identities, acknowledged part ETags with SHA-256 and length, publication generation and a bounded retry error. They are atomically saved before sending multipart parts and after each acknowledged part. Corrupt, oversized and future receipts are preserved and return an actionable error. Receipts and connection settings contain no credentials.
+Upload receipts live in `Managed/uploads/<import-id>.json`. They contain a versioned immutable import snapshot, verified object keys, multipart upload identities, acknowledged part ETags with SHA-256 and length, publication generation and a bounded retry error. Version 2 also binds the receipt to its bucket, region, library prefix and endpoint, excluding credential-profile selection. Retries refuse to send recorded multipart IDs to a different storage destination. Version-1 receipts remain readable; a legacy incomplete session needs explicit abort using its original connection settings before retry can bind it. Receipts are atomically saved before sending multipart parts and after each acknowledged part. Corrupt, oversized and future receipts are preserved and return an actionable error. Receipts and connection settings contain no credentials.
 
 The queue keeps at most four upload groups running, shares the resolver's background transfer admission queue, and processes independent imports after a failure. Desktop reopening, a completed import, connection configuration and reconnect request one retry of queued work; failed tasks do not spin in a network retry loop. The activity stack shows bytes and cancellation. Info shows saved locally, uploading, failed with Retry upload, publication pending, and Original synchronized. File → Cloud Storage configures a connection; File → Import to Cloud Storage selects it and opens the ordinary asynchronous file picker.
 
@@ -52,7 +52,26 @@ Originals and required proxies/thumbnails are immutable conditional writes. Ever
 
 Originals larger than 8 MiB use 8 MiB multipart parts. A persisted upload ID and acknowledged parts survive process restart. A lost part response causes retry of that same part number; a part is skipped only when its saved SHA-256 and size match the staged source. Missing/expired upload IDs restart safely; conflicting completion checks the object first. HTTP 200 containing an S3 XML Error is a failure. Known incomplete multipart sessions are retired after successful object verification or explicit `cloud.abortUploads`; cancelling a task retains its parts and staged original for resumption.
 
-There is no automatic age-based multipart cleanup yet. Configure a bucket lifecycle rule scoped to the library prefix for `AbortIncompleteMultipartUpload`, with a retention window that accommodates offline work. This also handles an initiation accepted by storage whose response (and unknown upload ID) was lost. Lifecycle expiration removes incomplete remote parts, never the staged original; the next retry creates a new multipart session. `cloud.abortUploads` requires explicit import IDs and only aborts recorded sessions. It never deletes complete remote objects or originals. Client retention automation remains an unchecked task.
+`cloud.cleanupUploads` previews recorded multipart sessions idle for at least seven days by default.
+Set `olderThanDays` to 1–3650 and `apply: true` to explicitly retire them. Age is measured from the last
+durable receipt write, including progress, failure or cancellation; future timestamps never qualify.
+Cleanup includes receipts whose photos were permanently removed. Young sessions and ordinary cancellation
+retain resumable parts. It reserves the connection against manual and automatic uploads, performs disk/network
+work on a worker and supports activity/MCP cancellation. Scans are bounded to 4096 entries and 32 candidates
+per call; `remaining` requests another pass. Invalid/future/misnamed receipts, redirected receipt directories
+and changed destinations stop cleanup while preserving their records.
+
+After an abort acknowledgement, LightCraft uses `ListParts` to confirm that no parts remain and retries
+abort up to three times when a part write outlives the first acknowledgement. Failure, uncertain responses
+and cancellation retain the receipt; a failed local atomic write can reconcile a confirmed remote 404 on retry.
+Originals, renditions, working files and complete remote objects are never deleted by cleanup.
+See AWS's [abort verification guidance](https://docs.aws.amazon.com/AmazonS3/latest/API/API_AbortMultipartUpload.html).
+
+For an initiation accepted by storage whose response and unknown upload ID were lost, configure a bucket
+lifecycle rule scoped to the library prefix for `AbortIncompleteMultipartUpload`, with a retention window
+that accommodates offline work. LightCraft cannot identify that session from its local receipts and does
+not change bucket-wide policies. Lifecycle expiration removes incomplete parts; the staged original remains,
+and retry creates a new session. See AWS's [lifecycle configuration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpu-abort-incomplete-mpu-lifecycle-config.html).
 
 AWS documents the [conditional-write retry rules and incomplete-upload lifecycle option](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html). The implementation also checks the response body because [multipart completion can report an error inside HTTP 200](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html).
 
@@ -98,7 +117,7 @@ The provider reuses `lightcraft-fetch` HTTP/1.1 with RustCrypto TLS and SigV4-si
 
 Connections save only bucket, region, prefix, endpoint and profile references to device-local `cloud-connections.json`. Credentials are resolved for each request from an explicit AWS shared credentials profile, or AWS environment credentials followed by the default profile. Temporary session tokens work. This is a limited resolver: SSO, credential processes, instance/container metadata and automatic renewal are not implemented. The app accepts no secret keys in connection parameters and never stores credentials in its settings or catalog. Damaged settings are reported and left unchanged.
 
-Use credentials with `s3:GetObject`, `s3:PutObject` and `s3:AbortMultipartUpload` permissions for the library objects. Versioned downloads need `s3:GetObjectVersion`. Absence checks also need `s3:ListBucket`: without it, S3 returns 403 for missing objects, and LightCraft conservatively stops instead of treating an authorization error as permission to overwrite. See AWS's [GetObject permissions and missing-object behavior](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html), [multipart initiation permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html) and [abort permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_AbortMultipartUpload.html).
+Use credentials with `s3:GetObject`, `s3:PutObject`, `s3:AbortMultipartUpload` and `s3:ListMultipartUploadParts` permissions for the library objects. The last action enables abort verification; KMS-encrypted multipart uploads can additionally need `kms:Decrypt` for listing parts. Versioned downloads need `s3:GetObjectVersion`. Absence checks also need `s3:ListBucket`: without it, S3 returns 403 for missing objects, and LightCraft conservatively stops instead of treating an authorization error as permission to overwrite. See AWS's [GetObject permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html), [multipart permissions](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html) and [ListParts permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListParts.html).
 
 ## Commands
 
@@ -116,6 +135,7 @@ Native commands use the shared engine registry, CLI, control channel and MCP:
 | `cloud.upload` | `{imports?: [id], wait?}` | Upload staged imports, resume multipart receipts, verify every object and conditionally publish. Headless defaults to waiting; desktop returns an activity task. |
 | `cloud.uploadStatus` | `{}` | Inspect durable upload states, running tasks and recent reports. |
 | `cloud.abortUploads` | `{imports: [id], wait?}` | Explicitly abort known incomplete multipart sessions, retaining staged originals and complete remote objects. |
+| `cloud.cleanupUploads` | `{connection, olderThanDays?: 7, apply?: false, wait?}` | Preview/retire idle recorded multipart sessions, including deleted-photo receipts. Preserve original/working bytes; defaults to background on desktop. |
 | `cloud.fetch` | `{ids?, original?: true, wait?: false}` | Download on a worker; returns a task ID. Byte progress/cancellation use `activity.list` and `activity.cancel`; headless `wait` returns after completion or error. |
 | `cloud.reconnect` | `{id?}` | Reload saved connections; retry failed renders and durable offline pins. |
 | `cloud.cache` | `{budgetMb?}` | Inspect/set the device-local asset budget; return usage, persistent offline owners and recovery errors. |
@@ -179,7 +199,7 @@ Engine tests cover a cloud-only synthetic Bayer DNG opening, developing, exporti
 
 The native desktop acceptance also passed on 2026-10-12 using control port 18837 and a separate loopback server that independently checked SigV4 with Python's HMAC implementation. It attached the remote-only RAW, applied +0.75 exposure, reached a completed native render, saved its catalog and exported a 32×24 PNG. One verified request acquired the original; the export reused it. The inspected native screenshot and results are in gitignored `target/cloud-acceptance/`. The final inspected frame measured 0.82 ms for UI update and 6.29 ms for the last render, with no queued or in-flight renders. These measurements use a tiny synthetic fixture and are not a large-library performance benchmark. This does not establish live AWS interoperability. Per-task completion and actual validation results are recorded in `tasks.md`.
 
-Unchecked work includes upload retention automation and staging/cache migration, associated XMP and external-editor ingestion, synchronization/conflicts, browser adapters and the optional backend. Durable local import, recovery, verified uploads and initial conditional publication are implemented; staged originals and the reserved working directory are protected from cache eviction. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
+Unchecked work includes staging/cache migration, associated XMP and external-editor ingestion, synchronization/conflicts, browser adapters and the optional backend. Durable local import, recovery, verified uploads, explicit idle multipart retention and initial conditional publication are implemented; staged originals and the reserved working directory are protected from cache eviction. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
 
 `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF checks, workspace tests, parity references, layering, asset attribution and WASM on Windows. The required Rust 1.95 toolchain exposed older Clippy suggestions and Unix-specific test assumptions, which were corrected. Recovery tests also exposed duplicate Windows `.xmp`/`.XMP` alias moves: sidecar operations now deduplicate physical aliases, preserve actual filename spelling and retain distinct packets on sensitive volumes. Synthetic and native regressions cover these cases.
 
@@ -209,6 +229,19 @@ The last render took 14.04 ms; the captured UI update took 33.37 ms with empty r
 measurements use a tiny procedural fixture. Regression tests additionally cover mixed local/cloud
 rename, undo/redo, folder membership across restart and overflow rejection before any name or path changes.
 
+Native multipart retention acceptance passed on 2026-10-12 through control port 18867 against an independently
+signed loopback fixture. A generated RAW remained editable/exportable after a deliberately failed completion.
+After its catalog photo was permanently removed, preview found its eight-day-old receipt without changing it.
+Clicking the activity Cancel control retained an uncertain abort receipt. Retry confirmed a still-present part,
+repeated abort, then removed the recorded session. All staged blobs and a pending working file stayed byte-identical;
+no catalog head was published. The inspected progress screenshot and results are in gitignored
+`target/cloud-acceptance/native-cleanup-*`. Maximum observed inspection latency was 47 ms; final UI update
+was 7.01 ms with empty render queues. These are tiny procedural fixtures; live AWS remains unverified.
+
+CLI/MCP regressions cover deleted-photo cleanup, preview/young-session preservation, repeated abort confirmation,
+rejected credentials/destination changes, ping/cancellation and uncertain-response recovery. Engine checks cover
+future timestamps, corrupt/future/legacy/misnamed receipts, connection reservations and failed retirement writes.
+
 ## Revision history
 
 | Date | Change |
@@ -221,3 +254,4 @@ rename, undo/redo, folder membership across restart and overflow rejection befor
 | 2026-10-12 | Durable local managed import and explicit manifest recovery; atomic photo/asset/upload-intent journal records (format 9), pending-original protection and cached-proxy replacement in direct renders. |
 | 2026-10-12 | Durable upload receipts, resumable multipart transfer, SHA-256 readback verification, conditional initial publication and headless MCP byte progress/ping/cancellation; native connection/import and retry controls. |
 | 2026-10-12 | Logical managed rename and album-folder organization; mixed-source undo/restart and rename-sequence overflow regression, native offline organization/export acceptance. |
+| 2026-10-12 | Explicit idle multipart retention, deleted-photo receipt recovery, destination-bound receipts and abort verification; native activity cancellation/retry and durable-byte preservation. |

@@ -21,6 +21,8 @@ use std::time::Duration;
 
 const PART_BYTES: usize = 8 << 20;
 const MAX_RECEIPT: u64 = 4 << 20;
+mod cleanup;
+pub use cleanup::{observed as observed_cleanup, start as cleanup};
 fn error(value: impl Into<String>) -> EngineError {
     EngineError::Other(value.into())
 }
@@ -28,25 +30,27 @@ fn io(value: std::io::Error) -> EngineError {
     error(value.to_string())
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Part {
     etag: String,
     hash: BlobId,
     size: u64,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Multipart {
     id: String,
     parts: BTreeMap<u16, Part>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Receipt {
     version: u32,
     id: String,
     imported: Imported,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage: Option<S3Connection>,
     state: UploadState,
     verified: BTreeSet<String>,
     multipart: BTreeMap<String, Multipart>,
@@ -56,7 +60,9 @@ struct Receipt {
 
 impl Receipt {
     fn validate(&self) -> Result<()> {
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
+            || (self.version == 1 && self.storage.is_some())
+            || (self.version == 2 && self.storage.is_none())
             || !identifier(&self.id)
             || self.id != self.imported.mutation_id
             || self.id != self.imported.photo_id
@@ -66,6 +72,14 @@ impl Receipt {
             return Err(error("invalid upload receipt; staged data preserved"));
         }
         self.imported.validate().map_err(|e| error(e.to_string()))?;
+        if let Some(storage) = &self.storage {
+            if storage.profile.is_some() {
+                return Err(error("upload destination binding contains device credential selection; preserved"));
+            }
+            for blob in blobs(&self.imported.asset) {
+                storage.validate_blob(blob).map_err(|e| error(e.to_string()))?;
+            }
+        }
         let intent = UploadIntent {
             asset_id: self.imported.asset_id.clone(),
             photo_id: self.imported.photo.id,
@@ -353,9 +367,10 @@ impl Item {
     fn run(&self, abort: bool, events: &mpsc::SyncSender<Event>, cancel: &AtomicBool, task: &UploadProgress) -> Result<Value> {
         let path = self.root.join("uploads").join(format!("{}.json", self.id));
         let mut receipt = read_receipt(&path)?.unwrap_or_else(|| Receipt {
-            version: 1,
+            version: 2,
             id: self.id.clone(),
             imported: self.imported.clone(),
+            storage: Some(self.connection.storage_snapshot()),
             state: UploadState::SavedLocally,
             verified: Default::default(),
             multipart: Default::default(),
@@ -364,6 +379,20 @@ impl Item {
         });
         if receipt.id != self.id || receipt.imported.asset_id != self.imported.asset_id || receipt.imported.asset != self.imported.asset {
             return Err(error("upload receipt describes another asset or rendition; preserved"));
+        }
+        if receipt.storage.as_ref().is_some_and(|storage| !storage.same_destination(&self.connection)) {
+            return Err(error(
+                "upload receipt belongs to another storage destination; restore the original connection settings; staged bytes preserved",
+            ));
+        }
+        if receipt.storage.is_none() {
+            if !receipt.multipart.is_empty() && !abort {
+                return Err(error(
+                    "legacy multipart receipt has no destination binding; explicitly abort it using its original connection settings, then retry; staged bytes preserved",
+                ));
+            }
+            receipt.storage = Some(self.connection.storage_snapshot());
+            receipt.version = 2;
         }
         let result = (|| {
             receipt.state = UploadState::Uploading;
@@ -445,6 +474,8 @@ struct Pending {
     resolver: Arc<AssetResolver>,
     connection_revision: u64,
     ids: BTreeMap<String, lightcraft_catalog::assets::AssetId>,
+    connections: BTreeSet<String>,
+    maintenance: Option<String>,
     guard: TaskGuard,
     cancel: Arc<AtomicBool>,
 }
@@ -517,6 +548,12 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
             .find(|connection| connection.id == asset.original.remote.connection)
             .ok_or_else(|| error("configure the import's cloud connection before uploading"))?
             .clone();
+        if s.cloud_uploads.pending.iter().any(|pending| pending.maintenance.as_deref() == Some(connection.id.as_str())) {
+            if selected.is_some() {
+                return Err(error("upload retention cleanup is using this connection; wait or cancel cleanup before resuming"));
+            }
+            continue;
+        }
         if blobs(asset).any(|blob| blob.remote.connection != connection.id) {
             return Err(error("import renditions refer to different connections"));
         }
@@ -551,7 +588,7 @@ pub fn observed(s: &mut Session, p: &Value, abort: bool, observer: &mut dyn FnMu
     s.execute_fn(if abort { "cloud.abortUploads" } else { "cloud.upload" }, |s| start_impl(s, p, abort, Some(observer)))
 }
 
-fn start_impl(s: &mut Session, p: &Value, abort: bool, mut observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
+fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
     let wait = p
         .get("wait")
         .map(|value| value.as_bool().ok_or_else(|| error("wait must be true or false")))
@@ -577,6 +614,7 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, mut observer: Option<&mut
     let worker_bytes = bytes.clone();
     let cancel = task.cancel_flag().ok_or_else(|| error("upload cancellation flag unavailable"))?;
     let ids = items.iter().map(|item| (item.id.clone(), item.imported.asset_id.clone())).collect();
+    let connections = items.iter().map(|item| item.connection.id.clone()).collect();
     let (sender, receiver) = mpsc::sync_channel(2);
     let worker_cancel = cancel.clone();
     let resolver = items.first().map(|item| item.resolver.clone()).ok_or_else(|| error("upload task is empty"))?;
@@ -614,28 +652,40 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, mut observer: Option<&mut
         resolver: owner_resolver,
         connection_revision,
         ids,
+        connections,
+        maintenance: None,
         guard: task,
         cancel: cancel.clone(),
     });
     if wait {
-        loop {
-            s.poll_cloud_uploads();
-            if let Some(observer) = observer.as_mut() {
-                let detail = s.activity.list().into_iter().find(|task| task.id == id).map(|task| task.detail).unwrap_or_default();
-                if !observer(bytes.load(Ordering::Relaxed), 0, &detail) {
-                    cancel.store(true, Ordering::Relaxed);
-                }
-            }
-            if let Some(report) = s.cloud_uploads.reports.iter().find(|report| report["task"] == id) {
-                if report["ok"] == true {
-                    return Ok(report["result"].clone());
-                }
-                return Err(error(report["error"].as_str().unwrap_or("cloud upload failed")));
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        return wait_task(s, id, cancel, bytes, observer);
     }
     Ok(json!({"background": true, "task": id}))
+}
+
+fn wait_task(
+    s: &mut Session,
+    id: u64,
+    cancel: Arc<AtomicBool>,
+    bytes: Arc<AtomicU64>,
+    mut observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>,
+) -> Result<Value> {
+    loop {
+        s.poll_cloud_uploads();
+        if let Some(observer) = observer.as_mut() {
+            let detail = s.activity.list().into_iter().find(|task| task.id == id).map(|task| task.detail).unwrap_or_default();
+            if !observer(bytes.load(Ordering::Relaxed), 0, &detail) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        if let Some(report) = s.cloud_uploads.reports.iter().find(|report| report["task"] == id) {
+            if report["ok"] == true {
+                return Ok(report["result"].clone());
+            }
+            return Err(error(report["error"].as_str().unwrap_or("cloud upload work failed")));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 impl Session {
@@ -654,6 +704,12 @@ impl Session {
                     && (self.cloud_uploads.include_failed || intent.state != UploadState::Failed)
                     && !self.cloud_uploads.attempted.contains(*id)
                     && !self.cloud_uploads.pending.iter().any(|pending| pending.ids.contains_key(*id))
+                    && !self.catalog.asset(&intent.asset_id).is_some_and(|asset| {
+                        self.cloud_uploads
+                            .pending
+                            .iter()
+                            .any(|pending| pending.maintenance.as_deref() == Some(asset.original.remote.connection.as_str()))
+                    })
             })
             .take(1)
             .map(|(id, _)| id.clone())
@@ -833,6 +889,8 @@ mod tests {
             resolver,
             connection_revision,
             ids: BTreeMap::from([("upload-ack-test".into(), intent.asset_id)]),
+            connections: BTreeSet::from(["test".into()]),
+            maintenance: None,
             guard,
             cancel,
         });

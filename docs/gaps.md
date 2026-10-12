@@ -63,7 +63,8 @@ Cloud storage is tracked separately in [../tasks.md](../tasks.md). The native ma
 read/cache foundation and device-local retention controls are described in [cloud-storage-implementation.md](cloud-storage-implementation.md).
 Durable managed import stages originals and renditions, journals the photo and upload intent atomically,
 and recovers staged work without duplicates. Resumable verified uploads publish initial imports conditionally;
-logical rename and album-folder organization preserve their immutable objects. Upload retention, associated XMP,
+logical rename and album-folder organization preserve their immutable objects. Explicit idle multipart cleanup
+includes deleted-photo receipts and preserves durable bytes. Staging/cache migration, associated XMP,
 external-edit ingestion, multi-device synchronization and browser transfers remain open. This closes none of the ranked Lightroom parity gaps
 or beta blockers above.
 
@@ -85,6 +86,7 @@ or beta blockers above.
 | 2026-10-12 | minor | Record the cloud storage follow-up and foundation evidence; no ranked gap closes |
 | 2026-10-12 | minor | Record verified cloud cache budgets, offline pin owners and local-copy removal; no ranked gap closes |
 | 2026-10-12 | minor | Record cloud logical rename and album-folder organization with immutable original preservation; no ranked gap closes |
+| 2026-10-12 | minor | Record explicit idle multipart cleanup, destination-bound receipts and native cancellation/retry; no ranked gap closes |
 | 2026-10-12 | minor | Record cloud download priority, byte progress, cancellation and reconnect acceptance; no ranked gap closes |
 | 2026-10-12 | minor | Record durable local cloud staging, atomic upload intent and duplicate-free recovery; uploads and synchronization remain open |
 | 2026-10-12 | minor | Record verified resumable cloud uploads, conditional initial publication and native retry acceptance; no ranked gap closes |
