@@ -80,19 +80,19 @@ Verified device experience (2026-10-12): recipe-matched remote thumbnails, edita
 
 **Dependencies:** Milestones 1–2. Full multi-device mutation synchronization follows in Milestone 4.
 
-Verified local staging (2026-10-12): durable original/proxy/thumbnail preparation, atomic photo/asset/upload-intent persistence, explicit manifest recovery without duplicate imports, and editable/exportable originals after source deletion and offline restart with a zero-byte cache budget. Native, CLI/MCP and fault-injection checks passed. Uploading, remote publication and external-editor ingestion remain unchecked.
+Verified staging and uploads (2026-10-12): durable original/proxy/thumbnail preparation, atomic photo/asset/upload intent, recovery without duplicate imports, resumable multipart transfer, SHA-256 readback verification and conditional initial publication. CLI/MCP response-loss, cancellation, credentials, process-crash and local-acknowledgement failure checks passed. Native connection/import dialogs, immediate editing/export, byte progress, failure and retry were visually inspected; retry reused its multipart ID and published once. All eight CI stages passed. Upload retention automation, staging/cache migration, path-dependent operations and external-editor ingestion remain open. Initial import publication does not synchronize subsequent edits between devices.
 
 ### Durable import and upload pipeline
 
 - [x] **CS3.1** Stage a durable local original before completing a managed import; probe it and generate its thumbnail and smart preview.
 - [x] **CS3.2** Persist the imported catalog record and its upload intent together; recover pending work after restart without losing or duplicating the import.
-- [ ] **CS3.3** Implement a durable upload queue with progress, cancellation, retry, and persisted state; allow editing immediately after the local save.
-- [ ] **CS3.4** Upload immutable originals and required supporting objects, verify successful storage, publish remote catalog references last, and mark work synchronized only after publication succeeds.
-- [ ] **CS3.5** Make retries idempotent when storage accepted a request but the client lost the response; reconcile uploaded objects whose catalog publication failed.
-- [ ] **CS3.6** Implement multipart uploads for large assets and persist upload IDs and completed-part information for resumption.
+- [x] **CS3.3** Implement a durable upload queue with progress, cancellation, retry, and persisted state; allow editing immediately after the local save.
+- [x] **CS3.4** Upload immutable originals and required supporting objects, verify successful storage, publish remote catalog references last, and mark work synchronized only after publication succeeds.
+- [x] **CS3.5** Make retries idempotent when storage accepted a request but the client lost the response; reconcile uploaded objects whose catalog publication failed.
+- [x] **CS3.6** Implement multipart uploads for large assets and persist upload IDs and completed-part information for resumption.
 - [ ] **CS3.7** Clean up abandoned multipart uploads with explicit retention and cancellation rules that preserve resumable work.
-- [ ] **CS3.8** Enforce that unuploaded originals and externally edited working copies awaiting upload are durable local data and cannot be evicted.
-- [ ] **CS3.9** Expose distinct saved-locally, uploading, failed/retryable, and synchronized states to the user.
+- [x] **CS3.8** Enforce that unuploaded originals and externally edited working copies awaiting upload are durable local data and cannot be evicted.
+- [x] **CS3.9** Expose distinct saved-locally, uploading, failed/retryable, and synchronized states to the user.
 
 ### Operations that assume local paths
 
@@ -105,8 +105,8 @@ Verified local staging (2026-10-12): durable original/proxy/thumbnail preparatio
 ### Acceptance checks
 
 - [ ] **CS3.A1** Inject crashes at each import stage: staging, preview generation, local save, multipart transfer, verification, remote publication, and local synchronization acknowledgement; verify recovery preserves data and publication ordering.
-- [ ] **CS3.A2** Test lost upload and publication responses, interrupted multipart uploads, insufficient disk space, revoked credentials, and restart with queued work.
-- [ ] **CS3.A3** Verify an imported photo is immediately editable, cannot be evicted before safe upload, and only appears remotely after all required objects exist.
+- [x] **CS3.A2** Test lost upload and publication responses, interrupted multipart uploads, insufficient disk space, revoked credentials, and restart with queued work.
+- [x] **CS3.A3** Verify an imported photo is immediately editable, cannot be evicted before safe upload, and only appears remotely after all required objects exist.
 - [ ] **CS3.A4** Exercise the adapted path-dependent operations and prove removing a local copy preserves library membership while library deletion follows the explicit policy.
 - [ ] **CS3.A5** Run `cargo xtask ci` and inspect the desktop import, upload-status, and external-edit flows through the control channel.
 

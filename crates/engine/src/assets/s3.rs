@@ -1,4 +1,4 @@
-//! Native S3 reads over the existing RustCrypto HTTPS transport, with AWS SigV4 signing.
+//! Native S3 requests over the existing RustCrypto HTTPS transport, with AWS SigV4 signing.
 //! Connection settings contain no secrets. Credentials are resolved for each request.
 
 use super::{AssetError, BlobStore, Result};
@@ -176,21 +176,44 @@ fn mac(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn signing_headers(url: &Url, region: &str, credentials: &Credentials, timestamp: &str) -> Result<Vec<(&'static str, String)>> {
+    sign_request(url, region, credentials, timestamp, Signing { method: http::Method::Get, payload: &super::sha256(b"").0, extra: &[] })
+}
+
+struct Signing<'a> {
+    method: http::Method,
+    payload: &'a str,
+    extra: &'a [(&'static str, String)],
+}
+
+fn sign_request(url: &Url, region: &str, credentials: &Credentials, timestamp: &str, request: Signing<'_>) -> Result<Vec<(&'static str, String)>> {
     if timestamp.len() != 16 || !timestamp.get(..8).is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit())) {
         return Err(AssetError::Invalid("invalid request date".into()));
     }
     let day = timestamp.get(..8).ok_or_else(|| AssetError::Invalid("invalid request date".into()))?;
     let host = if url.host.contains(':') { format!("[{}]", url.host) } else { url.host.clone() };
     let host = if url.port == if url.tls { 443 } else { 80 } { host } else { format!("{host}:{}", url.port) };
-    let payload = super::sha256(b"").0;
-    let mut headers = vec![("host", host), ("x-amz-content-sha256", payload.clone()), ("x-amz-date", timestamp.into())];
+    let payload = request.payload;
+    if payload.len() != 64 || !payload.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')) {
+        return Err(AssetError::Invalid("invalid request payload digest".into()));
+    }
+    let mut headers = vec![("host", host), ("x-amz-content-sha256", payload.into()), ("x-amz-date", timestamp.into())];
     if let Some(token) = &credentials.token {
         headers.push(("x-amz-security-token", token.clone()));
+    }
+    for (name, value) in request.extra {
+        if !matches!(*name, "if-match" | "if-none-match" | "content-type") || value.chars().any(char::is_control) || value.len() > 2048 {
+            return Err(AssetError::Invalid("invalid signed request header".into()));
+        }
+        headers.push((*name, value.clone()));
+    }
+    headers.sort_unstable_by_key(|(name, _)| *name);
+    if headers.windows(2).any(|pair| pair.first().zip(pair.get(1)).is_some_and(|(left, right)| left.0 == right.0)) {
+        return Err(AssetError::Invalid("duplicate signed header".into()));
     }
     let signed = headers.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(";");
     let canonical_headers = headers.iter().map(|(k, v)| format!("{k}:{}\n", v.split_whitespace().collect::<Vec<_>>().join(" "))).collect::<String>();
     let (path, query) = url.path.split_once('?').unwrap_or((&url.path, ""));
-    let canonical = format!("GET\n{path}\n{query}\n{canonical_headers}\n{signed}\n{payload}");
+    let canonical = format!("{}\n{path}\n{query}\n{canonical_headers}\n{signed}\n{payload}", request.method.as_str());
     let scope = format!("{day}/{region}/s3/aws4_request");
     let string_to_sign = format!("AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{:x}", Sha256::digest(canonical.as_bytes()));
     let date_key = mac(format!("AWS4{}", credentials.secret).as_bytes(), day.as_bytes())?;
@@ -249,6 +272,9 @@ fn http_error(error: http::HttpError) -> AssetError {
         _ => AssetError::Network(error.to_string()),
     }
 }
+
+mod requests;
+pub use requests::{ObjectReply, PutCondition};
 
 #[cfg(test)]
 mod tests {

@@ -137,6 +137,21 @@ impl Backend for Headless {
                 if id == "app.export" {
                     return self.export(&params);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                if matches!(id, "cloud.upload" | "cloud.abortUploads")
+                    && let Some(mut hook) = self.progress.take()
+                {
+                    let result = lightcraft_engine::cloud_upload::observed(
+                        &mut self.session,
+                        &params,
+                        id == "cloud.abortUploads",
+                        &mut |done, total, name| {
+                            hook(usize::try_from(done).unwrap_or(usize::MAX), usize::try_from(total).unwrap_or(usize::MAX), name)
+                        },
+                    );
+                    self.progress = Some(hook);
+                    return result.map_err(|e| e.to_string());
+                }
                 self.session.execute(id, &params).map_err(|e| e.to_string())
             }
             "engine.commands" => {

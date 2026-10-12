@@ -1,0 +1,438 @@
+//! Bounded signed object writes and multipart primitives. Callers own durable receipts,
+//! remote byte verification and publication ordering; an ETag is never a checksum.
+
+use super::{Credentials, S3Connection, Signing, encode, http_error, sign_request};
+use crate::assets::{AssetError, Result, sha256};
+use lightcraft_catalog::assets::{Blob, RemoteLocation};
+use lightcraft_fetch::http::{self, Limits, Method, RequestBody, Response, Url};
+use quick_xml::events::Event;
+use quick_xml::name::ResolveResult;
+use std::collections::BTreeMap;
+use std::io::{Cursor, Read};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+
+const MAX_REPLY: usize = 2 << 20;
+pub(super) const PART_BYTES: usize = 8 << 20;
+
+#[derive(Debug)]
+pub struct ObjectReply {
+    pub bytes: Vec<u8>,
+    pub etag: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+pub enum PutCondition<'a> {
+    Absent,
+    Matches(&'a str),
+}
+
+struct Request<'a> {
+    method: Method,
+    key: &'a str,
+    query: &'a [(&'a str, &'a str)],
+    headers: &'a [(&'static str, String)],
+    payload: &'a str,
+    body: Option<RequestBody<'a>>,
+}
+
+fn identifier(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 1024 || id.chars().any(char::is_control) {
+        return Err(AssetError::Invalid("invalid multipart upload identity".into()));
+    }
+    Ok(())
+}
+
+fn etag(value: &str) -> Result<String> {
+    if value.is_empty() || value == "*" || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(AssetError::Network("storage returned an invalid concurrency token".into()));
+    }
+    Ok(value.into())
+}
+
+fn condition_headers(condition: PutCondition<'_>) -> Result<Vec<(&'static str, String)>> {
+    Ok(vec![match condition {
+        PutCondition::Absent => ("if-none-match", "*".into()),
+        PutCondition::Matches(value) => ("if-match", etag(value)?),
+    }])
+}
+
+fn status(response: &Response) -> Result<()> {
+    match response.status {
+        200..=299 => Ok(()),
+        401 | 403 => Err(AssetError::Unauthorized),
+        404 => Err(AssetError::Missing),
+        409 | 412 => Err(AssetError::Conflict),
+        code => Err(AssetError::Network(format!("S3 returned HTTP {code}; check permissions, endpoint and region"))),
+    }
+}
+
+fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result<ObjectReply> {
+    status(&response)?;
+    if max > MAX_REPLY || response.content_length().is_some_and(|size| size > max as u64) {
+        return Err(AssetError::Network("S3 response exceeds its safety limit".into()));
+    }
+    let etag = response.header("etag").map(etag).transpose()?;
+    let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 64 << 10];
+    loop {
+        let n = response.read(&mut buffer, &limits).map_err(http_error)?;
+        if n == 0 {
+            break;
+        }
+        if bytes.len().saturating_add(n) > max {
+            return Err(AssetError::Network("S3 response exceeds its safety limit".into()));
+        }
+        bytes.try_reserve(n).map_err(|_| AssetError::Network("not enough memory for the S3 response".into()))?;
+        bytes.extend_from_slice(buffer.get(..n).ok_or(AssetError::Integrity)?);
+    }
+    Ok(ObjectReply { bytes, etag })
+}
+
+impl S3Connection {
+    fn request_url(&self, key: &str, query: &[(&str, &str)]) -> Result<Url> {
+        // Reuse the download boundary's connection/key/prefix validation.
+        let blob = Blob { id: sha256(b""), size: 1, remote: RemoteLocation { connection: self.id.clone(), key: key.into(), version: None } };
+        let mut url = self.url(&blob)?;
+        if query.len() > 8
+            || query.iter().any(|(key, value)| key.len() > 128 || value.len() > 1024 || key.chars().chain(value.chars()).any(char::is_control))
+        {
+            return Err(AssetError::Invalid("invalid S3 operation query".into()));
+        }
+        let mut encoded = query.iter().map(|(key, value)| (encode(key, false), encode(value, false))).collect::<Vec<_>>();
+        encoded.sort_unstable();
+        if !encoded.is_empty() {
+            url.path.push('?');
+            url.path.push_str(&encoded.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("&"));
+        }
+        Ok(url)
+    }
+
+    fn request(&self, request: Request<'_>, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<Response> {
+        let url = self.request_url(request.key, request.query)?;
+        let credentials = Credentials::load(self.profile.as_deref())?;
+        let now = time::OffsetDateTime::now_utc();
+        let timestamp =
+            format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", now.year(), u8::from(now.month()), now.day(), now.hour(), now.minute(), now.second());
+        let headers = sign_request(
+            &url,
+            &self.region,
+            &credentials,
+            &timestamp,
+            Signing { method: request.method, payload: request.payload, extra: request.headers },
+        )?;
+        let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
+        http::request(request.method, &url, &headers, request.body, &limits, progress).map_err(http_error)
+    }
+
+    /// Read only small protocol objects. Missing objects are distinct from access failures.
+    pub fn get_small(&self, key: &str, max: usize, cancel: &AtomicBool) -> Result<Option<ObjectReply>> {
+        if max > MAX_REPLY {
+            return Err(AssetError::Invalid("metadata limit exceeds 2 MiB".into()));
+        }
+        let response =
+            self.request(Request { method: Method::Get, key, query: &[], headers: &[], payload: &sha256(b"").0, body: None }, cancel, &mut |_| {})?;
+        if response.status == 404 {
+            return Ok(None);
+        }
+        read_reply(response, max, cancel).map(Some)
+    }
+
+    pub fn put_small(&self, key: &str, bytes: &[u8], condition: PutCondition<'_>, cancel: &AtomicBool) -> Result<String> {
+        if bytes.len() > MAX_REPLY {
+            return Err(AssetError::Invalid("metadata object exceeds 2 MiB".into()));
+        }
+        let headers = condition_headers(condition)?;
+        let response = self.request(
+            Request {
+                method: Method::Put,
+                key,
+                query: &[],
+                headers: &headers,
+                payload: &sha256(bytes).0,
+                body: Some(RequestBody { reader: &mut Cursor::new(bytes), length: bytes.len() as u64 }),
+            },
+            cancel,
+            &mut |_| {},
+        )?;
+        let reply = read_reply(response, MAX_REPLY, cancel)?;
+        reply.etag.ok_or_else(|| AssetError::Network("storage did not return an ETag; conditional publication is unavailable".into()))
+    }
+
+    pub fn put_blob(&self, blob: &Blob, reader: &mut dyn Read, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
+        blob.validate().map_err(AssetError::Invalid)?;
+        if blob.remote.version.is_some() {
+            return Err(AssetError::Invalid("uploads cannot target a historical object version".into()));
+        }
+        let headers = condition_headers(PutCondition::Absent)?;
+        let response = self.request(
+            Request {
+                method: Method::Put,
+                key: &blob.remote.key,
+                query: &[],
+                headers: &headers,
+                payload: &blob.id.0,
+                body: Some(RequestBody { reader, length: blob.size }),
+            },
+            cancel,
+            progress,
+        )?;
+        read_reply(response, MAX_REPLY, cancel)?;
+        Ok(())
+    }
+
+    pub fn start_multipart(&self, blob: &Blob, cancel: &AtomicBool) -> Result<String> {
+        blob.validate().map_err(AssetError::Invalid)?;
+        if blob.remote.version.is_some() {
+            return Err(AssetError::Invalid("multipart uploads cannot target a historical version".into()));
+        }
+        let response = self.request(
+            Request {
+                method: Method::Post,
+                key: &blob.remote.key,
+                query: &[("uploads", "")],
+                headers: &[],
+                payload: &sha256(b"").0,
+                body: Some(RequestBody { reader: &mut Cursor::new([]), length: 0 }),
+            },
+            cancel,
+            &mut |_| {},
+        )?;
+        let reply = read_reply(response, MAX_REPLY, cancel)?;
+        let xml = parse_xml(&reply.bytes, "InitiateMultipartUploadResult")?;
+        let id = xml.get("UploadId").ok_or_else(|| AssetError::Network("multipart response has no upload identity".into()))?;
+        identifier(id)?;
+        Ok(id.clone())
+    }
+
+    pub fn upload_part(
+        &self,
+        blob: &Blob,
+        upload_id: &str,
+        number: u16,
+        bytes: &[u8],
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(u64),
+    ) -> Result<String> {
+        blob.validate().map_err(AssetError::Invalid)?;
+        if blob.remote.version.is_some() {
+            return Err(AssetError::Invalid("multipart uploads cannot target a historical version".into()));
+        }
+        identifier(upload_id)?;
+        if !(1..=10_000).contains(&number) || bytes.is_empty() || bytes.len() > PART_BYTES {
+            return Err(AssetError::Invalid("invalid multipart part number or size".into()));
+        }
+        let number = number.to_string();
+        let response = self.request(
+            Request {
+                method: Method::Put,
+                key: &blob.remote.key,
+                query: &[("partNumber", &number), ("uploadId", upload_id)],
+                headers: &[],
+                payload: &sha256(bytes).0,
+                body: Some(RequestBody { reader: &mut Cursor::new(bytes), length: bytes.len() as u64 }),
+            },
+            cancel,
+            progress,
+        )?;
+        let reply = read_reply(response, MAX_REPLY, cancel)?;
+        reply.etag.ok_or_else(|| AssetError::Network("multipart response has no part ETag".into()))
+    }
+
+    pub fn complete_multipart(&self, blob: &Blob, upload_id: &str, parts: &[(u16, String)], cancel: &AtomicBool) -> Result<()> {
+        blob.validate().map_err(AssetError::Invalid)?;
+        if blob.remote.version.is_some() {
+            return Err(AssetError::Invalid("multipart uploads cannot target a historical version".into()));
+        }
+        identifier(upload_id)?;
+        if parts.is_empty() || parts.len() > 512 || parts.iter().enumerate().any(|(index, (number, _))| usize::from(*number) != index + 1) {
+            return Err(AssetError::Invalid("multipart completion requires consecutive parts in ascending order".into()));
+        }
+        let mut xml = String::from("<CompleteMultipartUpload>");
+        for (number, token) in parts {
+            let token = etag(token)?;
+            xml.push_str(&format!("<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>", quick_xml::escape::escape(&token)));
+        }
+        xml.push_str("</CompleteMultipartUpload>");
+        let mut headers = condition_headers(PutCondition::Absent)?;
+        headers.push(("content-type", "application/xml".into()));
+        let response = self.request(
+            Request {
+                method: Method::Post,
+                key: &blob.remote.key,
+                query: &[("uploadId", upload_id)],
+                headers: &headers,
+                payload: &sha256(xml.as_bytes()).0,
+                body: Some(RequestBody { reader: &mut Cursor::new(xml.as_bytes()), length: xml.len() as u64 }),
+            },
+            cancel,
+            &mut |_| {},
+        )?;
+        let reply = read_reply(response, MAX_REPLY, cancel)?;
+        // S3 may return HTTP 200 before deciding that completion failed.
+        let fields = parse_xml(&reply.bytes, "CompleteMultipartUploadResult")?;
+        etag(fields.get("ETag").ok_or_else(|| AssetError::Network("completion response has no ETag".into()))?)?;
+        Ok(())
+    }
+
+    /// Abort only a recorded upload identity. Cancellation alone retains resumable parts.
+    pub fn abort_multipart(&self, blob: &Blob, upload_id: &str, cancel: &AtomicBool) -> Result<()> {
+        blob.validate().map_err(AssetError::Invalid)?;
+        if blob.remote.version.is_some() {
+            return Err(AssetError::Invalid("multipart uploads cannot target a historical version".into()));
+        }
+        identifier(upload_id)?;
+        let response = self.request(
+            Request {
+                method: Method::Delete,
+                key: &blob.remote.key,
+                query: &[("uploadId", upload_id)],
+                headers: &[],
+                payload: &sha256(b"").0,
+                body: None,
+            },
+            cancel,
+            &mut |_| {},
+        )?;
+        if response.status != 404 {
+            read_reply(response, MAX_REPLY, cancel)?;
+        }
+        Ok(())
+    }
+}
+
+fn parse_xml(bytes: &[u8], expected: &str) -> Result<BTreeMap<String, String>> {
+    fn invalid() -> AssetError {
+        AssetError::Network("invalid or unsupported S3 XML response".into())
+    }
+    if bytes.len() > MAX_REPLY {
+        return Err(invalid());
+    }
+    let mut reader = quick_xml::NsReader::from_reader(bytes);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::new();
+    let mut path: Vec<String> = Vec::new();
+    let mut fields = BTreeMap::<String, String>::new();
+    let mut root = None;
+    let mut saw_error = false;
+    for _ in 0..20_000 {
+        let (namespace, event) = reader.read_resolved_event_into(&mut buffer).map_err(|_| invalid())?;
+        match event {
+            Event::Start(ref start) | Event::Empty(ref start) => {
+                if !matches!(
+                    namespace,
+                    ResolveResult::Unbound | ResolveResult::Bound(quick_xml::name::Namespace(b"http://s3.amazonaws.com/doc/2006-03-01/"))
+                ) {
+                    return Err(invalid());
+                }
+                let name = std::str::from_utf8(start.local_name().as_ref()).map_err(|_| invalid())?.to_string();
+                if name.len() > 80 || path.len() >= 16 {
+                    return Err(invalid());
+                }
+                for attribute in start.attributes() {
+                    attribute.map_err(|_| invalid())?;
+                }
+                if path.is_empty() {
+                    if root.is_some() {
+                        return Err(invalid());
+                    }
+                    root = Some(name.clone());
+                }
+                saw_error |= name == "Error";
+                path.push(name);
+                if path.len() == 2 && path.last().is_some_and(|name| matches!(name.as_str(), "UploadId" | "ETag" | "Code")) {
+                    let name = path.last().ok_or_else(invalid)?.clone();
+                    if fields.insert(name, String::new()).is_some() {
+                        return Err(invalid());
+                    }
+                }
+                if matches!(event, Event::Empty(_)) {
+                    path.pop();
+                }
+            }
+            Event::End(end) => {
+                let expected = path.pop().ok_or_else(invalid)?;
+                if expected != std::str::from_utf8(end.local_name().as_ref()).map_err(|_| invalid())? {
+                    return Err(invalid());
+                }
+            }
+            Event::Text(text) => {
+                let text = text.xml_content().map_err(|_| invalid())?;
+                if path.is_empty() && !text.trim().is_empty() {
+                    return Err(invalid());
+                }
+                if path.len() == 2
+                    && let Some(value) = path.last().and_then(|name| fields.get_mut(name))
+                {
+                    if value.len().saturating_add(text.len()) > 2048 {
+                        return Err(invalid());
+                    }
+                    value.push_str(&text);
+                }
+            }
+            Event::GeneralRef(reference) => {
+                let encoded = format!("&{};", reference.decode().map_err(|_| invalid())?);
+                let decoded = quick_xml::escape::unescape(&encoded).map_err(|_| invalid())?;
+                if path.len() == 2
+                    && let Some(value) = path.last().and_then(|name| fields.get_mut(name))
+                {
+                    if value.len().saturating_add(decoded.len()) > 2048 {
+                        return Err(invalid());
+                    }
+                    value.push_str(&decoded);
+                }
+            }
+            Event::DocType(_) | Event::CData(_) => return Err(invalid()),
+            Event::Eof => {
+                if !path.is_empty() || root.is_none() {
+                    return Err(invalid());
+                }
+                if saw_error {
+                    let code = fields
+                        .get("Code")
+                        .filter(|code| code.len() <= 64 && code.bytes().all(|b| b.is_ascii_alphanumeric()))
+                        .map(String::as_str)
+                        .unwrap_or("Error");
+                    return Err(AssetError::Network(format!("S3 multipart completion returned {code}; retain the upload and retry")));
+                }
+                if root.as_deref() != Some(expected) {
+                    return Err(invalid());
+                }
+                return Ok(fields);
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Err(invalid())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multipart_xml_resolves_namespaces_and_entities_and_refuses_errors() {
+        for xml in [
+            "<InitiateMultipartUploadResult><UploadId>a&amp;b&#43;</UploadId></InitiateMultipartUploadResult>",
+            "<s:InitiateMultipartUploadResult xmlns:s=\"http://s3.amazonaws.com/doc/2006-03-01/\"><s:UploadId>a&amp;b&#43;</s:UploadId></s:InitiateMultipartUploadResult>",
+        ] {
+            assert_eq!(parse_xml(xml.as_bytes(), "InitiateMultipartUploadResult").unwrap().get("UploadId").unwrap(), "a&b+");
+        }
+        for xml in [
+            "<Error><Code>InternalError</Code></Error>",
+            "<CompleteMultipartUploadResult><Error/></CompleteMultipartUploadResult>",
+            "<CompleteMultipartUploadResult xmlns=\"https://wrong.invalid/\"/>",
+            "<CompleteMultipartUploadResult/><CompleteMultipartUploadResult/>",
+            "<CompleteMultipartUploadResult><ETag>x</ETag><ETag>y</ETag></CompleteMultipartUploadResult>",
+            "<!DOCTYPE x [<!ENTITY token 'x'>]><CompleteMultipartUploadResult/>",
+            "<CompleteMultipartUploadResult><ETag>x</CompleteMultipartUploadResult>",
+        ] {
+            assert!(parse_xml(xml.as_bytes(), "CompleteMultipartUploadResult").is_err(), "{xml}");
+        }
+        assert!(parse_xml(&vec![b' '; MAX_REPLY + 1], "CompleteMultipartUploadResult").is_err());
+        let deep = format!("{}{}", "<x>".repeat(18), "</x>".repeat(18));
+        assert!(parse_xml(deep.as_bytes(), "x").is_err());
+    }
+}

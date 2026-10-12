@@ -1006,6 +1006,10 @@ impl LightcraftApp {
         self.renderer.poll(ctx, &mut self.session);
         #[cfg(not(target_arch = "wasm32"))]
         self.session.poll_cloud_imports();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.session.poll_cloud_uploads();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.session.resume_cloud_uploads();
         merge::poll(self, ctx);
         import::poll_scan(self, ctx);
         sync::poll(self, ctx);

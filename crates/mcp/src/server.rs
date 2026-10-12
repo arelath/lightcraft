@@ -180,10 +180,14 @@ impl Server {
                 let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing tool `name`".to_string()))?;
                 let args = params.get("arguments").cloned().unwrap_or(Value::Null);
                 check_args(name, &args).map_err(|e| (INVALID_PARAMS, e))?;
-                let long = matches!(name, "export" | "cmd_app_export")
+                let upload = matches!(name, "cmd_cloud_upload" | "cmd_cloud_abortUploads")
+                    || (name == "command_run" && matches!(args["id"].as_str(), Some("cloud.upload" | "cloud.abortUploads")))
+                    || (name == "run_command" && matches!(args["command"].as_str(), Some("cloud.upload" | "cloud.abortUploads")));
+                let long = upload
+                    || matches!(name, "export" | "cmd_app_export")
                     || (name == "command_run" && args["id"] == "app.export")
                     || (name == "run_command" && args["command"] == "app.export");
-                let hook = if long && !self.backend.has_ui() { self.progress_hook() } else { None };
+                let hook = if long && !self.backend.has_ui() { self.progress_hook(upload) } else { None };
                 let result = self.guarded(|b| {
                     b.set_progress(hook);
                     call_tool(b, name, &args)

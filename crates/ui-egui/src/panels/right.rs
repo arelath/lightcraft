@@ -703,8 +703,14 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 asset.smart_preview.as_ref().and_then(|blob| app.session.media.asset_resolver.as_ref().map(|r| r.availability(&blob.id)))
             });
             use lightcraft_engine::assets::AssetAvailability;
-            let upload = app.session.catalog.upload_intents().values().find(|intent| &intent.asset_id == asset_id);
-            let pending_upload = upload.is_some_and(|intent| intent.state != lightcraft_catalog::uploads::UploadState::Synchronized);
+            let upload = app
+                .session
+                .catalog
+                .upload_intents()
+                .iter()
+                .find(|(_, intent)| &intent.asset_id == asset_id)
+                .map(|(id, intent)| (id.clone(), intent.clone()));
+            let pending_upload = upload.as_ref().is_some_and(|(_, intent)| intent.state != lightcraft_catalog::uploads::UploadState::Synchronized);
             let text = match availability {
                 Some(AssetAvailability::Cached) if pending_upload => "Original saved on this device",
                 Some(AssetAvailability::Cached) => "Original downloaded",
@@ -714,7 +720,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 _ => "Original in cloud storage",
             };
             ui.add_space(6.0);
-            if let Some(upload) = upload {
+            if let Some((import_id, upload)) = upload {
                 use lightcraft_catalog::uploads::UploadState;
                 let label = match upload.state {
                     UploadState::SavedLocally => "Saved locally · upload pending",
@@ -722,9 +728,21 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     UploadState::Failed => "Upload failed · original kept on this device",
                     UploadState::ObjectsVerified => "Objects verified · publication pending",
                     UploadState::Published => "Published · saving synchronization state",
-                    UploadState::Synchronized => "Synchronized",
+                    UploadState::Synchronized => "Original synchronized",
                 };
                 ui.label(egui::RichText::new(crate::i18n::tr(label)).color(t.text_dim));
+                if let Some(message) = &upload.error {
+                    ui.label(egui::RichText::new(message).color(t.text_dim));
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if matches!(upload.state, UploadState::SavedLocally | UploadState::Failed | UploadState::ObjectsVerified | UploadState::Published) {
+                    let label = if upload.state == UploadState::Failed { "Retry upload" } else { "Upload now" };
+                    if text_button(ui, "cloudUploadOriginal", crate::i18n::tr(label), false).clicked()
+                        && let Err(error) = app.run("cloud.upload", json!({"imports":[import_id], "wait":false}))
+                    {
+                        app.toast(ui.ctx(), error);
+                    }
+                }
             }
             ui.label(egui::RichText::new(crate::i18n::tr(text)).color(t.text_dim));
             if let Some(AssetAvailability::Downloading { done, total }) = &availability {

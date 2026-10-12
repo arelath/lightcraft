@@ -60,6 +60,8 @@ pub enum AssetError {
     Network(String),
     #[error("download failed integrity verification")]
     Integrity,
+    #[error("conditional object write conflicted; reread the remote object before retrying")]
+    Conflict,
     #[error("asset cache: {0}")]
     Disk(String),
     #[error("asset transfer cancelled")]
@@ -194,6 +196,7 @@ pub struct AssetResolver {
     stores: Mutex<BTreeMap<String, Arc<dyn BlobStore>>>,
     entries: Arc<Mutex<BTreeMap<BlobId, Arc<Entry>>>>,
     generation: AtomicU64,
+    connection_revision: AtomicU64,
     wake: Mutex<Option<crate::availability::Waker>>,
     cache: Arc<cache::Cache>,
     transfers: transfers::Queue,
@@ -216,6 +219,7 @@ impl AssetResolver {
             stores: Mutex::new(BTreeMap::new()),
             entries,
             generation: AtomicU64::new(0),
+            connection_revision: AtomicU64::new(0),
             wake: Mutex::new(None),
             cache,
             transfers: transfers::Queue::new(4),
@@ -225,6 +229,9 @@ impl AssetResolver {
     }
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
+    }
+    pub(crate) fn connection_revision(&self) -> u64 {
+        self.connection_revision.load(Ordering::Relaxed)
     }
     pub fn set_waker(&self, wake: crate::availability::Waker) {
         *self.wake.lock().unwrap_or_else(PoisonError::into_inner) = Some(wake);
@@ -287,6 +294,7 @@ impl AssetResolver {
             return Err(AssetError::Invalid("invalid connection identity".into()));
         }
         self.stores.lock().unwrap_or_else(PoisonError::into_inner).insert(id, store);
+        self.connection_revision.fetch_add(1, Ordering::Relaxed);
         self.changed();
         Ok(())
     }
@@ -323,6 +331,14 @@ impl AssetResolver {
             return Err(AssetError::Pending);
         }
         self.acquire(&asset.original, cancel).map(|lease| (lease, false))
+    }
+
+    /// Uploads and remote verification share download admission limits and run
+    /// at background priority. The closure must not recursively acquire a source.
+    pub fn background_transfer<T>(&self, blob: &Blob, cancel: &AtomicBool, run: impl FnOnce() -> Result<T>) -> Result<T> {
+        blob.validate().map_err(AssetError::Invalid)?;
+        let _permit = self.transfers.enter(&blob.id, Arc::new(AtomicU32::new(0)), cancel)?;
+        run()
     }
 
     /// Verify and lease local bytes only; synchronous decoder callbacks never start transfers.

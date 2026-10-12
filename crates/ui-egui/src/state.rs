@@ -763,6 +763,18 @@ pub struct NameEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Dialog {
+    CloudStorage {
+        id: String,
+        bucket: String,
+        region: String,
+        prefix: String,
+        endpoint: String,
+        profile: String,
+    },
+    CloudImport {
+        connections: Vec<String>,
+        connection: String,
+    },
     ContactSheet {
         options: lightcraft_engine::contact_sheet::Options,
     },

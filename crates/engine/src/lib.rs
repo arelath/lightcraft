@@ -23,6 +23,10 @@ pub(crate) mod camera_preview;
 pub mod camera_profiles;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_import;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cloud_publication;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cloud_upload;
 pub mod cmd;
 pub mod config;
 pub mod contact_sheet;
@@ -289,6 +293,8 @@ pub struct Session {
     pub activity: activity::Activity,
     #[cfg(not(target_arch = "wasm32"))]
     pub cloud_imports: cloud_import::Imports,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub cloud_uploads: cloud_upload::Uploads,
     /// The last (or running) Build Previews.
     pub preview_build: Option<std::sync::Arc<cmd::previews::PreviewBuild>>,
     /// Develop defaults applied on import (persisted in prefs.json).
@@ -392,6 +398,8 @@ impl Session {
             activity: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             cloud_imports: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            cloud_uploads: Default::default(),
             preview_build: None,
             import_defaults: import::ImportDefaults::default(),
             cache_mb: 0,
@@ -436,6 +444,7 @@ impl Session {
         #[cfg(not(target_arch = "wasm32"))]
         if self.depth == 0 {
             self.poll_cloud_imports();
+            self.poll_cloud_uploads();
         }
         let log_start = self.pending_log.len();
         let was_active = self.active();

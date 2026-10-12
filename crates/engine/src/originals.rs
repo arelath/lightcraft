@@ -171,6 +171,8 @@ impl crate::Session {
             guard.add_root(resolver.root());
             if let Some(root) = resolver.durable_root() {
                 guard.add_root(&root.join("blobs"));
+                guard.add_root(&root.join("imports"));
+                guard.add_root(&root.join("uploads"));
             }
             for asset in self.catalog.assets().values() {
                 for blob in std::iter::once(&asset.original).chain(asset.smart_preview.iter()).chain(asset.thumbnail.iter()) {

@@ -29,6 +29,7 @@ fn configure(s: &mut Session, p: &Value) -> Result<Value> {
     lib.save_cloud_connections(&connections)?;
     resolver.connect(connection.id.clone(), Arc::new(connection)).map_err(|e| bad(C, e.to_string()))?;
     resume_offline_pins(s);
+    s.cloud_uploads.request_resume(true);
     Ok(json!({"connections": connections}))
 }
 
@@ -127,6 +128,7 @@ fn reconnect(s: &mut Session, p: &Value) -> Result<Value> {
     // Transports resolve external credentials again on each request. Connecting advances
     // availability generation so failed renders retry, without discarding verified bytes.
     resume_offline_pins(s);
+    s.cloud_uploads.request_resume(true);
     Ok(json!({"connections": connected}))
 }
 
@@ -376,6 +378,9 @@ fn start_offline_pins(s: &Session, wait: bool) -> std::result::Result<Option<u64
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(query "cloud.upload", "Upload Cloud Originals", [], None, "{imports?: [importId], wait?}; durable upload, multipart resume, remote verification and conditional catalog publication; defaults to background on desktop", always, crate::cloud_upload::start),
+        cmd!(query "cloud.uploadStatus", "Cloud Upload Status", [], None, "{}; persistent upload states, running tasks and recent completion reports", always, |s, _| Ok(json!({"running": s.cloud_uploads.running(), "reports": s.cloud_uploads.reports, "uploads": s.catalog.upload_intents()}))),
+        cmd!(query "cloud.abortUploads", "Abort Resumable Cloud Uploads", [], None, "{imports: [importId], wait?}; abort only recorded multipart identities while preserving staged originals and existing objects", always, crate::cloud_upload::abort),
         cmd!(
             "cloud.import",
             "Import Cloud Photos",
@@ -413,6 +418,10 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             attach
         ),
+        cmd!(query "cloud.connections", "Cloud Storage Connections", [], None, "{}; saved connection settings without credentials", always, |s, _| {
+            let connections = s.library.as_mut().ok_or_else(|| bad("cloud.connections", "open a library first"))?.cloud_connections()?;
+            Ok(json!({"connections": connections}))
+        }),
         cmd!(query "cloud.status", "Cloud Photo Status", [], None, "{ids?}; cached, downloading, remote, missing or failed state on this device", always, status),
         cmd!(query "cloud.fetch", "Download Cloud Photos", [], None, "{ids?, original?: true, wait?: false}; background download, byte progress and cancellation via activity; wait only in headless CLI/MCP", always, fetch),
         cmd!(query "cloud.reconnect", "Reconnect Cloud Storage", [], None, "{id?}; reload saved connections and external credentials, retry failed renders and offline pins", always, reconnect),

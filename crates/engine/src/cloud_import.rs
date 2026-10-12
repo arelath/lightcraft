@@ -407,6 +407,7 @@ fn commit(s: &mut Session, manifests: Vec<Manifest>) -> Result<Value> {
     if !ops.is_empty() {
         s.skip_auto_write = true;
         s.commit("Import cloud photos", Op::Batch { ops })?;
+        s.cloud_uploads.request_resume(false);
     }
     if let Some(id) = ids.first() {
         s.selection = Selection::single(PhotoId(*id));

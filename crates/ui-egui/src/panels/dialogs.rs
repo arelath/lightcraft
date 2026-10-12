@@ -226,6 +226,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::RenameAlbum { .. } => "Rename Album",
         Dialog::Rename { .. } => "Rename Photos",
         Dialog::Import { .. } => "Import Photos",
+        Dialog::CloudStorage { .. } => "Cloud Storage",
+        Dialog::CloudImport { .. } => "Import to Cloud Storage",
         Dialog::LabelNames { .. } => "Edit Color Label Names",
         Dialog::CaptureTime { .. } => "Edit Capture Time",
         Dialog::RenameKeyword { .. } => "Rename Keyword",
@@ -287,6 +289,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .default_width(match dlg {
             Dialog::Import { .. } => crate::import::DIALOG_SIZE[0],
+            Dialog::CloudStorage { .. } | Dialog::CloudImport { .. } => 480.0,
             Dialog::SmartRules { .. } => 680.0,
             Dialog::AllMetadata { .. } => 620.0,
             Dialog::FaceModel { .. } => 460.0,
@@ -969,6 +972,23 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 }
                 Dialog::Merge { opts } => crate::merge::body(app, ui, opts),
                 Dialog::Import { opts } => crate::import::body(app, ui, opts),
+                Dialog::CloudStorage { id, bucket, region, prefix, endpoint, profile } => {
+                    ui.label(crate::i18n::tr("Connect this library to your S3 bucket. Originals are saved on this device before background upload."));
+                    for (widget, label, text) in [
+                        ("cloudConnectionId", "Connection name", id), ("cloudBucket", "Bucket", bucket),
+                        ("cloudRegion", "Region", region), ("cloudPrefix", "Library prefix", prefix),
+                        ("cloudEndpoint", "Endpoint (optional)", endpoint), ("cloudProfile", "AWS profile (optional)", profile),
+                    ] {
+                        field(ui, label, |ui| { crate::text_field::TextField::singleline(widget, text).width(f32::INFINITY).show(ui); });
+                    }
+                    ui.label(egui::RichText::new(crate::i18n::tr("Authentication uses an externally managed AWS profile or environment credentials. No keys are stored in this dialog. Leave Endpoint empty for AWS S3.")).color(t.text_dim));
+                }
+                Dialog::CloudImport { connections, connection } => {
+                    ui.label(crate::i18n::tr("Choose where to upload these photos. You can edit as soon as their originals are saved locally; upload continues in the background."));
+                    egui::ComboBox::from_id_salt("cloudImportConnection").selected_text(connection.as_str()).show_ui(ui, |ui| {
+                        for saved in connections { ui.selectable_value(connection, saved.clone(), saved.as_str()); }
+                    });
+                }
                 Dialog::Settings { tab } => crate::panels::settings::body(app, ui, tab),
                 Dialog::SamModel { error, .. } => sam_model_body(app, ui, error.as_deref()),
                 Dialog::KeywordTag {
@@ -1210,6 +1230,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         add_label.as_str()
                     }
                     Dialog::ContactSheet { .. } => "Choose PDF…",
+                    Dialog::CloudStorage { .. } => "Save Connection",
+                    Dialog::CloudImport { .. } => "Choose Photos…",
                     Dialog::Merge { .. } => "Merge",
                     Dialog::DenoiseModel { info, .. } if info["download"].is_string() => "Accept & Download",
                     Dialog::DenoiseModel { .. } => "Install",
@@ -1281,6 +1303,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 if matches!(
                     dlg,
                     Dialog::Import { .. }
+                        | Dialog::CloudStorage { .. }
+                        | Dialog::CloudImport { .. }
                         | Dialog::Export { .. }
                         | Dialog::ContactSheet { .. }
                         | Dialog::NewAlbum { .. }
@@ -1682,6 +1706,17 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         }
         Dialog::Merge { opts } => crate::merge::start_final(app, opts),
         Dialog::Import { opts } => crate::import::start(app, opts),
+        Dialog::CloudStorage { id, bucket, region, prefix, endpoint, profile } => {
+            let mut params = json!({"id":id.trim(), "bucket":bucket.trim(), "region":region.trim(), "prefix":prefix.trim()});
+            if !endpoint.trim().is_empty() {
+                params["endpoint"] = json!(endpoint.trim());
+            }
+            if !profile.trim().is_empty() {
+                params["profile"] = json!(profile.trim());
+            }
+            app.run("cloud.configure", params)
+        }
+        Dialog::CloudImport { connection, .. } => app.run("file.importCloud", json!({"connection":connection})),
         Dialog::ConfirmDelete { .. } => app.run("photo.delete", json!({})),
         // the catalog found: no file dialog; none: File ▸ Import Lightroom Catalog… asks for it
         Dialog::LightroomCatalog { catalog, .. } => {

@@ -68,6 +68,8 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "file.addPhotos",
             "file.addFolder",
             "@Import from Device",
+            "file.importCloud",
+            "dialog.cloudStorage",
             "---",
             "app.newLibrary",
             "app.openLibrary",

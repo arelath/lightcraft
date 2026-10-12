@@ -1,4 +1,4 @@
-//! A small HTTP/1.1 GET client for model downloads, in pure Rust: `std::net` sockets and, for
+//! A small streaming HTTP/1.1 client for downloads and cloud uploads, in pure Rust: `std::net` sockets and, for
 //! `https://`, rustls with the RustCrypto provider (`rustls-rustcrypto`; no `ring` or
 //! `aws-lc-rs`, so nothing is compiled from C or assembly) and the Mozilla root certificates
 //! (`webpki-roots`).
@@ -457,22 +457,123 @@ impl Response {
 
 /// Send `GET url` with extra `headers` and read the status line and headers.
 pub fn get(url: &Url, headers: &[(&str, String)], limits: &Limits) -> Result<Response, HttpError> {
+    request(Method::Get, url, headers, None, limits, &mut |_| {})
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Head,
+    Put,
+    Post,
+    Delete,
+}
+
+impl Method {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Head => "HEAD",
+            Self::Put => "PUT",
+            Self::Post => "POST",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+/// A caller-controlled reader and the exact region to send. Bytes after `length`
+/// are not consumed, allowing a bounded region of a staged multipart file.
+pub struct RequestBody<'a> {
+    pub reader: &'a mut dyn Read,
+    pub length: u64,
+}
+
+/// One request per connection, with fixed-size body buffers and cancellable I/O.
+/// The caller bounds response bodies and decides whether to follow redirects.
+pub fn request(
+    method: Method,
+    url: &Url,
+    headers: &[(&str, String)],
+    mut body: Option<RequestBody<'_>>,
+    limits: &Limits,
+    progress: &mut dyn FnMut(u64),
+) -> Result<Response, HttpError> {
+    if body.as_ref().is_some_and(|body| body.length > 4 << 30) {
+        return Err(HttpError::BadUrl("request body exceeds 4 GiB".into()));
+    }
+    if body.is_some() && matches!(method, Method::Get | Method::Head) {
+        return Err(HttpError::BadUrl("GET and HEAD requests cannot have a body".into()));
+    }
     let mut req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: LightCraft/{}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: LightCraft/{}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+        method.as_str(),
         url.path,
         url.host_header(),
         env!("CARGO_PKG_VERSION")
     );
+    let mut names = std::collections::BTreeSet::new();
     for (k, v) in headers {
-        if v.chars().any(|c| c == '\r' || c == '\n') || k.chars().any(|c| c == '\r' || c == '\n' || c == ':') {
-            return Err(HttpError::BadUrl("header with a line break".into()));
+        if k.len() > 128 || v.len() > MAX_HEAD {
+            return Err(HttpError::BadUrl("request header exceeds its safety limit".into()));
+        }
+        let name = k.to_ascii_lowercase();
+        if k.is_empty()
+            || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+            || v.chars().any(char::is_control)
+            || matches!(name.as_str(), "host" | "content-length" | "transfer-encoding" | "connection" | "expect")
+            || !names.insert(name)
+        {
+            return Err(HttpError::BadUrl("invalid, reserved or duplicate request header".into()));
         }
         req.push_str(&format!("{k}: {v}\r\n"));
+        if req.len() > MAX_HEAD {
+            return Err(HttpError::BadUrl("request headers exceed 64 KiB".into()));
+        }
+    }
+    if let Some(body) = &body {
+        req.push_str(&format!("Content-Length: {}\r\n", body.length));
     }
     req.push_str("\r\n");
+    if req.len() > MAX_HEAD {
+        return Err(HttpError::BadUrl("request headers exceed 64 KiB".into()));
+    }
     let mut stream = Stream::connect(url, limits)?;
     stream.write_all(req.as_bytes(), limits)?;
-    let mut conn = Conn { stream, buf: Vec::new(), pos: 0 };
+    progress(0);
+    if let Some(body) = &mut body {
+        let mut buffer = [0u8; 64 * 1024];
+        let mut done = 0u64;
+        while done < body.length {
+            if limits.cancel.load(Ordering::Relaxed) {
+                return Err(HttpError::Cancelled);
+            }
+            let want = usize::try_from(body.length.saturating_sub(done)).unwrap_or(usize::MAX).min(buffer.len());
+            let n = body
+                .reader
+                .read(buffer.get_mut(..want).ok_or_else(|| HttpError::Protocol("invalid body buffer".into()))?)
+                .map_err(|e| HttpError::Io(e.to_string()))?;
+            if n == 0 {
+                return Err(HttpError::Protocol("request body ended before its declared length".into()));
+            }
+            stream.write_all(buffer.get(..n).ok_or_else(|| HttpError::Protocol("invalid body read count".into()))?, limits)?;
+            done = done.saturating_add(n as u64);
+            progress(done);
+        }
+    }
+    let mut response = read_response(Conn { stream, buf: Vec::new(), pos: 0 }, method, limits)?;
+    for _ in 0..8 {
+        if !(100..200).contains(&response.status) {
+            return Ok(response);
+        }
+        if response.status == 101 {
+            return Err(HttpError::Protocol("HTTP protocol upgrades are unsupported".into()));
+        }
+        response = read_response(response.conn, method, limits)?;
+    }
+    Err(HttpError::Protocol("too many interim HTTP responses".into()))
+}
+
+fn read_response(mut conn: Conn, method: Method, limits: &Limits) -> Result<Response, HttpError> {
     let status_line = conn.line(MAX_HEAD, limits)?;
     let mut parts = status_line.split_whitespace();
     let version = parts.next().unwrap_or_default();
@@ -496,7 +597,7 @@ pub fn get(url: &Url, headers: &[(&str, String)], limits: &Limits) -> Result<Res
         }
     }
     let find = |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
-    let body = if status == 204 || status == 304 || (100..200).contains(&status) {
+    let body = if method == Method::Head || status == 204 || status == 304 || (100..200).contains(&status) {
         BodyMode::Done
     } else if find("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked")) {
         BodyMode::Chunked { left: 0, done: false }
@@ -511,6 +612,85 @@ pub fn get(url: &Url, headers: &[(&str, String)], limits: &Limits) -> Result<Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_put_has_exact_framing_progress_etag_and_interim_response_support() {
+        use std::io::{BufRead, BufReader, Cursor};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/objects/test", listener.local_addr().unwrap())).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                lines.push(line);
+            }
+            assert_eq!(lines.first().unwrap(), "PUT /objects/test HTTP/1.1\r\n");
+            assert!(lines.iter().any(|line| line == "Content-Length: 70000\r\n"));
+            let mut bytes = vec![0u8; 70000];
+            reader.read_exact(&mut bytes).unwrap();
+            assert!(bytes.iter().all(|byte| *byte == 42));
+            reader.get_mut().write_all(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nETag: \"v1\"\r\nContent-Length: 2\r\n\r\nok").unwrap();
+        });
+        let cancel = AtomicBool::new(false);
+        let limits = Limits { connect: Duration::from_secs(2), stall: Duration::from_secs(2), cancel: &cancel };
+        let mut input = Cursor::new(vec![42u8; 70000]);
+        let mut progress = Vec::new();
+        let mut response = request(
+            Method::Put,
+            &url,
+            &[("If-None-Match", "*".into())],
+            Some(RequestBody { reader: &mut input, length: 70000 }),
+            &limits,
+            &mut |done| progress.push(done),
+        )
+        .unwrap();
+        assert_eq!(response.status, 201);
+        assert_eq!(response.header("etag"), Some("\"v1\""));
+        let mut body = [0u8; 2];
+        assert_eq!(response.read(&mut body, &limits).unwrap(), 2);
+        assert_eq!(&body, b"ok");
+        assert_eq!(progress.first(), Some(&0));
+        assert_eq!(progress.last(), Some(&70000));
+        assert!(progress.len() >= 3, "large bodies stream in bounded chunks");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn request_rejects_ambiguous_framing_and_short_bodies() {
+        use std::io::Cursor;
+        let cancel = AtomicBool::new(false);
+        let limits = Limits { connect: Duration::from_secs(2), stall: Duration::from_secs(2), cancel: &cancel };
+        let unused = Url::parse("http://127.0.0.1:9/test").unwrap();
+        for headers in [
+            vec![("Content-Length", "1".into())],
+            vec![("X-Test", "1".into()), ("x-test", "2".into())],
+            vec![("bad name", "1".into())],
+            vec![("X-Test", "line\r\nbreak".into())],
+        ] {
+            assert!(matches!(request(Method::Put, &unused, &headers, None, &limits, &mut |_| {}), Err(HttpError::BadUrl(_))));
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/test", listener.local_addr().unwrap())).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut bytes = Vec::new();
+            socket.read_to_end(&mut bytes).unwrap();
+            assert!(bytes.ends_with(b"x"));
+        });
+        assert!(matches!(
+            request(Method::Put, &url, &[], Some(RequestBody { reader: &mut Cursor::new(b"x"), length: 2 }), &limits, &mut |_| {}),
+            Err(HttpError::Protocol(_))
+        ));
+        worker.join().unwrap();
+    }
 
     #[test]
     fn rejects_oversized_and_control_character_urls() {

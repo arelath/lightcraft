@@ -559,6 +559,8 @@ impl Session {
         }
         #[cfg(not(target_arch = "wasm32"))]
         crate::cmd::cloud::resume_offline_pins(self);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.cloud_uploads.request_resume(true);
         Ok(())
     }
 
@@ -636,6 +638,7 @@ impl Session {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.cloud_imports = Default::default();
+            self.cloud_uploads = Default::default();
         }
         if self.library.is_none() {
             return Ok(());

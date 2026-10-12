@@ -173,6 +173,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("merge.panoramaLast", "Panorama with Last Settings", Some("Ctrl+Shift+M"), "Photo>Photo Merge"),
     ("merge.hdrPanoramaLast", "HDR Panorama with Last Settings", None, "Photo>Photo Merge"),
     ("file.addPhotos", "Import Photos…", Some("Cmd+Shift+I"), "File"),
+    ("file.importCloud", "Import to Cloud Storage…", None, "File"),
+    ("dialog.cloudStorage", "Cloud Storage…", None, "File"),
     ("file.addFolder", "Import from Folder…", None, "File"),
     ("file.importLightroom", "Import Lightroom Catalog…", None, "File"),
     ("file.addFromDevice", "Import from Device", None, ""),
@@ -1296,6 +1298,64 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             let path = p.get("path").and_then(Value::as_str)?;
             crate::import::browse(app, path, p.get("subfolders").and_then(Value::as_bool))
         }
+        "dialog.cloudStorage" => {
+            let configured = match app.run("cloud.connections", json!({})) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            };
+            let connection = configured["connections"]
+                .as_array()
+                .and_then(|connections| connections.iter().find(|connection| p.get("id").is_none_or(|id| id == &connection["id"])));
+            let value = |key: &str, fallback: &str| connection.and_then(|connection| connection[key].as_str()).unwrap_or(fallback).to_owned();
+            app.ui.dialog = Some(Dialog::CloudStorage {
+                id: value("id", "personal"),
+                bucket: value("bucket", ""),
+                region: value("region", "us-east-1"),
+                prefix: value("prefix", "lightcraft"),
+                endpoint: value("endpoint", ""),
+                profile: value("profile", ""),
+            });
+            Ok(Value::Null)
+        }
+        "file.importCloud" => {
+            let configured = match app.run("cloud.connections", json!({})) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            };
+            let connections = configured["connections"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|connection| connection["id"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>();
+            if connections.is_empty() {
+                return Some(Err(crate::i18n::tr("Configure Cloud Storage in the File menu before importing.").to_owned()));
+            }
+            let connection = match p.get("connection").and_then(Value::as_str) {
+                Some(connection) if connections.iter().any(|saved| saved == connection) => connection.to_owned(),
+                Some(_) => return Some(Err("unknown cloud connection".into())),
+                None => {
+                    app.ui.dialog = Some(Dialog::CloudImport { connection: connections.first().cloned().unwrap_or_default(), connections });
+                    return Some(Ok(Value::Null));
+                }
+            };
+            let mut params = p.clone();
+            params["connection"] = json!(connection);
+            let paths = match p.get("paths").and_then(Value::as_array) {
+                Some(paths) => paths.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+                None => {
+                    let request = PickRequest::files(None, crate::i18n::tr("Photos"), lightcraft_engine::import::EXTENSIONS);
+                    match crate::pick::ask(app, id, &params, "paths", request, |services| services.pick_files.as_mut().map(|pick| pick())) {
+                        Picked::Now(paths) => paths,
+                        Picked::Later | Picked::Unavailable => return Some(Ok(Value::Null)),
+                    }
+                }
+            };
+            if paths.is_empty() {
+                return Some(Ok(Value::Null));
+            }
+            app.run("cloud.import", json!({"connection": connection, "paths": paths, "wait": false}))
+        }
         "file.addPhotos" => {
             if crate::lightroom_import::is_running(app) {
                 return Some(Err("finish Lightroom catalog import before adding photos".into()));
@@ -1822,6 +1882,7 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
                     .and_then(|id| app.session.catalog.photo(id))
                     .is_some_and(|p| matches!(p.source, lightcraft_engine::catalog::Source::File { .. }))
         }
+        "file.importCloud" | "dialog.cloudStorage" => cfg!(not(target_arch = "wasm32")) && app.session.library.is_some(),
         "file.exportPresets" => app.session.presets.iter().any(|p| !p.builtin),
         "file.exportCurvePresets" => !app.session.curve_presets.is_empty(),
         "view.compare" => app.session.catalog.len() > 1,

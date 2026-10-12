@@ -82,7 +82,7 @@ impl Server {
     /// Called at photo boundaries, including completion. EOF finishes the pending export;
     /// cancellation stops before the next photo. No file scan or output deletion is needed:
     /// the existing writer replaces each whole file atomically.
-    pub(super) fn progress_hook(&self) -> Option<ProgressHook> {
+    pub(super) fn progress_hook(&self, upload: bool) -> Option<ProgressHook> {
         let wire = self.wire.clone()?;
         let (id, token) = self.current.clone()?;
         let suppress = self.suppress.clone();
@@ -124,19 +124,28 @@ impl Server {
                 return false;
             }
             if let Some(token) = &token
-                && total > 0
+                && (total > 0 || upload)
                 && last.is_none_or(|last| done > last)
                 && (done == total || reported.is_none_or(|at| at.elapsed() >= Duration::from_millis(100)))
             {
                 last = Some(done);
                 reported = Some(Instant::now());
-                let message = if done < total {
+                let message = if upload {
+                    format!("Cloud transfer {name} ({done} bytes)")
+                } else if done < total {
                     format!("Exporting {name} ({} of {total})", done.saturating_add(1))
                 } else {
                     format!("Exported {total} photo(s)")
                 };
                 let notification = json!({"jsonrpc":"2.0","method":"notifications/progress",
                     "params":{"progressToken":token,"progress":done,"total":total,"message":message}});
+                let mut notification = notification;
+                if upload
+                    && total == 0
+                    && let Some(params) = notification["params"].as_object_mut()
+                {
+                    params.remove("total");
+                }
                 let _ = wire.out.send(notification.to_string());
             }
             true

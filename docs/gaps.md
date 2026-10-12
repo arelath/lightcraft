@@ -85,6 +85,7 @@ or beta blockers above.
 | 2026-10-12 | minor | Record verified cloud cache budgets, offline pin owners and local-copy removal; no ranked gap closes |
 | 2026-10-12 | minor | Record cloud download priority, byte progress, cancellation and reconnect acceptance; no ranked gap closes |
 | 2026-10-12 | minor | Record durable local cloud staging, atomic upload intent and duplicate-free recovery; uploads and synchronization remain open |
+| 2026-10-12 | minor | Record verified resumable cloud uploads, conditional initial publication and native retry acceptance; no ranked gap closes |
 | 2026-10-12 | minor | Record recipe-matched remote thumbnail browsing and editable-proxy/original refresh evidence; no ranked gap closes |
 | 2026-10-11 | minor | Reviewed against main after 0.6.0: CR3 entry names the CRX variants `crx.rs` still refuses and the R7 / R6 Mark II C-RAW state (decoding, not verified, so the measured numbers don't move); CI and Windows / Linux entries note the riscv64 release build (#844); R7 fix added to Closed recently. Panel docking (UI.9, #869) closes no listed gap |
 | 2026-10-11 | minor | Camera colour entry: raws with a black-and-white camera JPEG take its tone curve (#577); gap not closed |

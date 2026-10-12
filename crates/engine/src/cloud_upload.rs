@@ -1,0 +1,903 @@
+//! Durable upload receipts live beside staged originals. Workers persist multipart
+//! progress themselves; owner-thread phase changes are acknowledged only after journal save.
+
+use crate::activity::{TaskGuard, TaskHandle};
+use crate::assets::s3::S3Connection;
+use crate::assets::{AssetError, AssetResolver, BlobStore, TransferManager, sha256};
+use crate::cloud_publication::{self, Imported};
+use crate::{EngineError, Result, Session};
+use lightcraft_catalog::assets::{Asset, Blob, BlobId, identifier};
+use lightcraft_catalog::uploads::{UploadIntent, UploadState};
+use lightcraft_catalog::{Op, Source};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
+
+const PART_BYTES: usize = 8 << 20;
+const MAX_RECEIPT: u64 = 4 << 20;
+fn error(value: impl Into<String>) -> EngineError {
+    EngineError::Other(value.into())
+}
+fn io(value: std::io::Error) -> EngineError {
+    error(value.to_string())
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Part {
+    etag: String,
+    hash: BlobId,
+    size: u64,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Multipart {
+    id: String,
+    parts: BTreeMap<u16, Part>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Receipt {
+    version: u32,
+    id: String,
+    imported: Imported,
+    state: UploadState,
+    verified: BTreeSet<String>,
+    multipart: BTreeMap<String, Multipart>,
+    generation: Option<u64>,
+    error: Option<String>,
+}
+
+impl Receipt {
+    fn validate(&self) -> Result<()> {
+        if self.version != 1
+            || !identifier(&self.id)
+            || self.id != self.imported.mutation_id
+            || self.id != self.imported.photo_id
+            || self.multipart.len() > 3
+            || self.error.as_ref().is_some_and(|message| message.len() > 4096 || message.contains('\0'))
+        {
+            return Err(error("invalid upload receipt; staged data preserved"));
+        }
+        self.imported.validate().map_err(|e| error(e.to_string()))?;
+        let intent = UploadIntent {
+            asset_id: self.imported.asset_id.clone(),
+            photo_id: self.imported.photo.id,
+            state: self.state,
+            verified: self.verified.clone(),
+            error: self.error.clone(),
+        };
+        intent.validate(&self.imported.asset).map_err(error)?;
+        for (key, upload) in &self.multipart {
+            let blob = blobs(&self.imported.asset)
+                .find(|blob| &blob.remote.key == key)
+                .ok_or_else(|| error("multipart receipt refers to another object"))?;
+            if upload.id.is_empty() || upload.id.len() > 1024 || upload.id.chars().any(char::is_control) || upload.parts.len() > 512 {
+                return Err(error("invalid multipart receipt; preserved"));
+            }
+            for (number, part) in &upload.parts {
+                let offset = u64::from(*number)
+                    .checked_sub(1)
+                    .and_then(|number| number.checked_mul(PART_BYTES as u64))
+                    .ok_or_else(|| error("invalid part offset"))?;
+                if offset >= blob.size
+                    || part.size != blob.size.saturating_sub(offset).min(PART_BYTES as u64)
+                    || part.hash.0.len() != 64
+                    || !part.hash.0.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                    || part.etag.is_empty()
+                    || part.etag == "*"
+                    || part.etag.len() > 512
+                    || part.etag.chars().any(char::is_control)
+                {
+                    return Err(error("invalid multipart part receipt; preserved"));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn write(&self, root: &Path) -> Result<()> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|e| error(e.to_string()))?;
+        if bytes.len() as u64 > MAX_RECEIPT {
+            return Err(error("upload receipt exceeds 4 MiB"));
+        }
+        std::fs::create_dir_all(root.join("uploads")).map_err(io)?;
+        lightcraft_catalog::safe_file::write_atomic(&root.join("uploads").join(format!("{}.json", self.id)), &bytes).map_err(io)
+    }
+}
+
+fn blobs(asset: &Asset) -> impl Iterator<Item = &Blob> {
+    std::iter::once(&asset.original).chain(asset.smart_preview.iter()).chain(asset.thumbnail.iter())
+}
+
+fn read_receipt(path: &Path) -> Result<Option<Receipt>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io(e)),
+    };
+    if file.metadata().map_err(io)?.len() > MAX_RECEIPT {
+        return Err(error("oversized upload receipt; preserved"));
+    }
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(MAX_RECEIPT as usize + 1).map_err(|_| error("not enough memory to recover upload receipt"))?;
+    file.take(MAX_RECEIPT + 1).read_to_end(&mut bytes).map_err(io)?;
+    if bytes.len() as u64 > MAX_RECEIPT {
+        return Err(error("upload receipt grew while reading; preserved"));
+    }
+    let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| error("invalid or future upload receipt; preserved for recovery"))?;
+    receipt.validate()?;
+    Ok(Some(receipt))
+}
+
+enum Event {
+    Phase { id: String, state: UploadState, verified: BTreeSet<String>, error: Option<String>, reply: mpsc::SyncSender<Result<()>> },
+    Finished(Result<Value>),
+}
+
+struct Item {
+    id: String,
+    imported: Imported,
+    connection: S3Connection,
+    root: PathBuf,
+    resolver: Arc<AssetResolver>,
+}
+
+struct UploadProgress {
+    handle: TaskHandle,
+    bytes: Arc<AtomicU64>,
+}
+impl UploadProgress {
+    fn detail(&self, text: &str) {
+        self.handle.detail(text);
+    }
+    fn progress(&self, done: u64, total: u64) {
+        self.handle.progress(done, total);
+    }
+    fn observe(&self, previous: &mut u64, done: u64, offset: u64, total: u64) {
+        let delta = done.saturating_sub(*previous);
+        let _ = self.bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| Some(value.saturating_add(delta)));
+        *previous = done;
+        self.progress(offset.saturating_add(done), total);
+    }
+}
+
+impl Item {
+    fn phase(&self, receipt: &Receipt, events: &mpsc::SyncSender<Event>, cancel: &AtomicBool) -> Result<()> {
+        let (reply, response) = mpsc::sync_channel(1);
+        events
+            .send(Event::Phase { id: self.id.clone(), state: receipt.state, verified: receipt.verified.clone(), error: receipt.error.clone(), reply })
+            .map_err(|_| error("upload owner closed; receipts retained"))?;
+        loop {
+            match response.recv_timeout(Duration::from_millis(20)) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(error("upload owner closed; receipts retained")),
+                Err(mpsc::RecvTimeoutError::Timeout) if cancel.load(Ordering::Relaxed) => {
+                    return Err(error("upload cancelled; staged data and resumable receipts retained"));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    fn remote_verified(&self, blob: &Blob, cancel: &AtomicBool, task: &UploadProgress) -> crate::assets::Result<bool> {
+        struct Check {
+            hash: Sha256,
+            count: u64,
+            expected: u64,
+        }
+        impl Write for Check {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.count = self.count.saturating_add(bytes.len() as u64);
+                if self.count > self.expected {
+                    return Err(std::io::Error::other("remote object exceeds its declared size"));
+                }
+                self.hash.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        task.detail(&format!("{} · verifying {}", self.imported.photo.file_name, self.rendition(blob)));
+        let mut check = Check { hash: Sha256::new(), count: 0, expected: blob.size };
+        let mut observed = 0;
+        let result = self.resolver.background_transfer(blob, cancel, || {
+            self.connection.download(blob, &mut check, cancel, &mut |done| task.observe(&mut observed, done, 0, blob.size))
+        });
+        match result {
+            Err(AssetError::Missing) => Ok(false),
+            Err(error) => Err(error),
+            Ok(()) if check.count == blob.size && format!("{:x}", check.hash.finalize()) == blob.id.0 => Ok(true),
+            Ok(()) => Err(AssetError::Integrity),
+        }
+    }
+
+    fn rendition(&self, blob: &Blob) -> &'static str {
+        if blob.remote.key == self.imported.asset.original.remote.key {
+            "original"
+        } else if self.imported.asset.smart_preview.as_ref().is_some_and(|preview| preview.remote.key == blob.remote.key) {
+            "editable preview"
+        } else {
+            "thumbnail"
+        }
+    }
+
+    fn upload_blob(&self, receipt: &mut Receipt, blob: &Blob, cancel: &AtomicBool, task: &UploadProgress) -> Result<()> {
+        if !self.root.join("blobs").join(&blob.id.0).is_file() {
+            return Err(error("durable staged bytes are missing; recover the original before uploading"));
+        }
+        let lease = self.resolver.acquire(blob, cancel).map_err(|e| error(e.to_string()))?;
+        if blob.size <= PART_BYTES as u64 {
+            let mut file = std::fs::File::open(lease.path()).map_err(io)?;
+            task.detail(&format!("{} · uploading {}", self.imported.photo.file_name, self.rendition(blob)));
+            let mut observed = 0;
+            let result = self.resolver.background_transfer(blob, cancel, || {
+                self.connection.put_blob(blob, &mut file, cancel, &mut |done| task.observe(&mut observed, done, 0, blob.size))
+            });
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e @ (AssetError::Conflict | AssetError::Network(_))) => {
+                    if self.remote_verified(blob, cancel, task).map_err(|e| error(e.to_string()))? {
+                        return Ok(());
+                    }
+                    return Err(error(e.to_string()));
+                }
+                Err(e) => return Err(error(e.to_string())),
+            }
+        }
+        for _ in 0..2 {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(error("upload cancelled; multipart receipt retained"));
+            }
+            if !receipt.multipart.contains_key(&blob.remote.key) {
+                let id = self
+                    .resolver
+                    .background_transfer(blob, cancel, || self.connection.start_multipart(blob, cancel))
+                    .map_err(|e| error(e.to_string()))?;
+                receipt.multipart.insert(blob.remote.key.clone(), Multipart { id: id.clone(), parts: BTreeMap::new() });
+                if let Err(error) = receipt.write(&self.root) {
+                    // No part may be sent before its upload identity is durable.
+                    let _ = self.connection.abort_multipart(blob, &id, &AtomicBool::new(false));
+                    return Err(error);
+                }
+            }
+            let upload_id = receipt.multipart.get(&blob.remote.key).ok_or_else(|| error("multipart receipt disappeared"))?.id.clone();
+            let mut file = std::fs::File::open(lease.path()).map_err(io)?;
+            let mut offset = 0u64;
+            let mut number = 1u16;
+            let mut restart = false;
+            while offset < blob.size {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(error("upload cancelled; multipart receipt retained"));
+                }
+                let count = usize::try_from(blob.size.saturating_sub(offset).min(PART_BYTES as u64)).map_err(|_| error("invalid part length"))?;
+                let mut bytes = Vec::new();
+                bytes.try_reserve_exact(count).map_err(|_| error("not enough memory for multipart upload"))?;
+                bytes.resize(count, 0);
+                file.read_exact(&mut bytes).map_err(io)?;
+                let hash = sha256(&bytes);
+                let saved = receipt.multipart.get(&blob.remote.key).and_then(|upload| upload.parts.get(&number));
+                if !saved.is_some_and(|part| part.hash == hash && part.size == count as u64) {
+                    task.detail(&format!("{} · uploading {} / part {number}", self.imported.photo.file_name, self.rendition(blob)));
+                    let mut observed = 0;
+                    let token = self.resolver.background_transfer(blob, cancel, || {
+                        self.connection
+                            .upload_part(blob, &upload_id, number, &bytes, cancel, &mut |done| task.observe(&mut observed, done, offset, blob.size))
+                    });
+                    match token {
+                        Ok(etag) => {
+                            receipt
+                                .multipart
+                                .get_mut(&blob.remote.key)
+                                .ok_or_else(|| error("multipart receipt disappeared"))?
+                                .parts
+                                .insert(number, Part { etag, hash, size: count as u64 });
+                            receipt.write(&self.root)?;
+                        }
+                        Err(AssetError::Missing) => {
+                            restart = true;
+                            break;
+                        }
+                        Err(e) => return Err(error(e.to_string())),
+                    }
+                }
+                offset = offset.saturating_add(count as u64);
+                number = number.checked_add(1).ok_or_else(|| error("multipart part number exhausted"))?;
+                task.progress(offset, blob.size);
+            }
+            if !restart {
+                let parts = receipt
+                    .multipart
+                    .get(&blob.remote.key)
+                    .ok_or_else(|| error("multipart receipt disappeared"))?
+                    .parts
+                    .iter()
+                    .map(|(number, part)| (*number, part.etag.clone()))
+                    .collect::<Vec<_>>();
+                task.detail(&format!("{} · completing {}", self.imported.photo.file_name, self.rendition(blob)));
+                let completed =
+                    self.resolver.background_transfer(blob, cancel, || self.connection.complete_multipart(blob, &upload_id, &parts, cancel));
+                match completed {
+                    Ok(()) => return Ok(()),
+                    Err(e @ (AssetError::Missing | AssetError::Conflict | AssetError::Network(_))) => {
+                        if self.remote_verified(blob, cancel, task).map_err(|e| error(e.to_string()))? {
+                            return Ok(());
+                        }
+                        if matches!(e, AssetError::Missing | AssetError::Conflict) {
+                            restart = true;
+                        } else {
+                            return Err(error(e.to_string()));
+                        }
+                    }
+                    Err(e) => return Err(error(e.to_string())),
+                }
+            }
+            if restart {
+                self.resolver
+                    .background_transfer(blob, cancel, || self.connection.abort_multipart(blob, &upload_id, cancel))
+                    .map_err(|e| error(e.to_string()))?;
+                receipt.multipart.remove(&blob.remote.key);
+                receipt.write(&self.root)?;
+            }
+        }
+        Err(error("multipart upload repeatedly expired or conflicted; staged bytes and receipts retained"))
+    }
+
+    fn run(&self, abort: bool, events: &mpsc::SyncSender<Event>, cancel: &AtomicBool, task: &UploadProgress) -> Result<Value> {
+        let path = self.root.join("uploads").join(format!("{}.json", self.id));
+        let mut receipt = read_receipt(&path)?.unwrap_or_else(|| Receipt {
+            version: 1,
+            id: self.id.clone(),
+            imported: self.imported.clone(),
+            state: UploadState::SavedLocally,
+            verified: Default::default(),
+            multipart: Default::default(),
+            generation: None,
+            error: None,
+        });
+        if receipt.id != self.id || receipt.imported.asset_id != self.imported.asset_id || receipt.imported.asset != self.imported.asset {
+            return Err(error("upload receipt describes another asset or rendition; preserved"));
+        }
+        let result = (|| {
+            receipt.state = UploadState::Uploading;
+            receipt.error = None;
+            receipt.write(&self.root)?;
+            self.phase(&receipt, events, cancel)?;
+            for blob in blobs(&receipt.imported.asset).cloned().collect::<Vec<_>>() {
+                if abort {
+                    if let Some(upload) = receipt.multipart.get(&blob.remote.key) {
+                        self.resolver
+                            .background_transfer(&blob, cancel, || self.connection.abort_multipart(&blob, &upload.id, cancel))
+                            .map_err(|e| error(e.to_string()))?;
+                        receipt.multipart.remove(&blob.remote.key);
+                        receipt.write(&self.root)?;
+                    }
+                    continue;
+                }
+                if !self.remote_verified(&blob, cancel, task).map_err(|e| error(e.to_string()))? {
+                    self.upload_blob(&mut receipt, &blob, cancel, task)?;
+                    if !self.remote_verified(&blob, cancel, task).map_err(|e| error(e.to_string()))? {
+                        return Err(error("uploaded object is not visible; retain the original and retry"));
+                    }
+                }
+                if let Some(upload) = receipt.multipart.get(&blob.remote.key) {
+                    // Completion may have lost its response, or another writer won.
+                    // A recorded unfinished upload is safe to retire after byte verification.
+                    self.resolver
+                        .background_transfer(&blob, cancel, || self.connection.abort_multipart(&blob, &upload.id, cancel))
+                        .map_err(|e| error(e.to_string()))?;
+                    receipt.multipart.remove(&blob.remote.key);
+                }
+                receipt.verified.insert(blob.remote.key.clone());
+                receipt.write(&self.root)?;
+                self.phase(&receipt, events, cancel)?;
+            }
+            if abort {
+                receipt.state = if receipt.generation.is_some() { UploadState::Published } else { UploadState::SavedLocally };
+                receipt.write(&self.root)?;
+                self.phase(&receipt, events, cancel)?;
+                return Ok(json!({"import": self.id, "aborted": true, "originalPreserved": true}));
+            }
+            receipt.state = UploadState::ObjectsVerified;
+            receipt.write(&self.root)?;
+            self.phase(&receipt, events, cancel)?;
+            task.detail(&format!("{} · publishing", self.imported.photo.file_name));
+            receipt.generation =
+                Some(cloud_publication::publish_import(&self.connection, &receipt.imported, cancel).map_err(|e| error(e.to_string()))?);
+            receipt.state = UploadState::Published;
+            receipt.write(&self.root)?;
+            self.phase(&receipt, events, cancel)?;
+            receipt.state = UploadState::Synchronized;
+            self.phase(&receipt, events, cancel)?; // Durable local acknowledgement before completion.
+            if let Err(e) = receipt.write(&self.root) {
+                log::warn!("final upload receipt marker: {e}; journal acknowledgement is durable");
+            }
+            Ok(json!({"import": self.id, "synchronized": true, "generation": receipt.generation}))
+        })();
+        if let Err(e) = &result {
+            receipt.state = UploadState::Failed;
+            let mut message = e.to_string().replace('\0', "�");
+            if message.len() > 4096 {
+                let mut end = 4096;
+                while !message.is_char_boundary(end) {
+                    end = end.saturating_sub(1);
+                }
+                message.truncate(end);
+            }
+            receipt.error = Some(message);
+            let _ = receipt.write(&self.root);
+            let _ = self.phase(&receipt, events, cancel);
+        }
+        result
+    }
+}
+
+struct Pending {
+    receiver: mpsc::Receiver<Event>,
+    library: Arc<()>,
+    resolver: Arc<AssetResolver>,
+    connection_revision: u64,
+    ids: BTreeMap<String, lightcraft_catalog::assets::AssetId>,
+    guard: TaskGuard,
+    cancel: Arc<AtomicBool>,
+}
+impl Drop for Pending {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+pub struct Uploads {
+    pending: Vec<Pending>,
+    pub reports: Vec<Value>,
+    requested: bool,
+    include_failed: bool,
+    attempted: BTreeSet<String>,
+}
+impl Uploads {
+    pub fn running(&self) -> usize {
+        self.pending.len()
+    }
+    pub fn request_resume(&mut self, include_failed: bool) {
+        self.requested = true;
+        self.include_failed |= include_failed;
+        if include_failed {
+            self.attempted.clear();
+        }
+    }
+}
+
+fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
+    let resolver = s.media.asset_resolver.clone().ok_or_else(|| error("open a persistent native library first"))?;
+    resolver.validate_storage().map_err(|e| error(e.to_string()))?;
+    let root = resolver.durable_root().ok_or_else(|| error("this library has no durable managed storage"))?;
+    let connections = s.library.as_mut().ok_or_else(|| error("open a library first"))?.cloud_connections()?;
+    if abort && p.get("imports").is_none() {
+        return Err(error("explicit import identities are required to abort multipart uploads"));
+    }
+    let selected = p
+        .get("imports")
+        .map(|value| {
+            let values = value.as_array().ok_or_else(|| error("imports must be an array of import identities"))?;
+            if values.is_empty() || values.len() > 32 {
+                return Err(error("select between 1 and 32 imports per upload task"));
+            }
+            values
+                .iter()
+                .map(|value| value.as_str().filter(|value| identifier(value)).map(str::to_owned).ok_or_else(|| error("invalid import identity")))
+                .collect::<Result<BTreeSet<_>>>()
+        })
+        .transpose()?;
+    let mut result = Vec::new();
+    for (id, intent) in s.catalog.upload_intents() {
+        if selected.as_ref().is_some_and(|selected| !selected.contains(id)) || intent.state == UploadState::Synchronized {
+            continue;
+        }
+        if result.len() == 32 {
+            break;
+        }
+        if s.cloud_uploads.pending.iter().any(|pending| pending.ids.contains_key(id)) {
+            continue;
+        }
+        let asset = s.catalog.asset(&intent.asset_id).ok_or_else(|| error("upload intent has no asset; original preserved"))?;
+        let photo = s.catalog.photo(intent.photo_id).ok_or_else(|| error("upload intent's photo was removed; staged original preserved"))?;
+        if photo.deleted || photo.source != (Source::Managed { asset_id: intent.asset_id.clone() }) {
+            continue;
+        }
+        let connection = connections
+            .iter()
+            .find(|connection| connection.id == asset.original.remote.connection)
+            .ok_or_else(|| error("configure the import's cloud connection before uploading"))?
+            .clone();
+        if blobs(asset).any(|blob| blob.remote.connection != connection.id) {
+            return Err(error("import renditions refer to different connections"));
+        }
+        let imported = Imported {
+            mutation_id: id.clone(),
+            photo_id: id.clone(),
+            asset_id: intent.asset_id.clone(),
+            photo: Box::new((**photo).clone()),
+            asset: Box::new(asset.clone()),
+        };
+        imported.validate().map_err(|e| error(e.to_string()))?;
+        result.push(Item { id: id.clone(), imported, connection, root: root.clone(), resolver: resolver.clone() });
+    }
+    if let Some(selected) = selected
+        && selected.iter().any(|id| !s.catalog.upload_intents().contains_key(id))
+    {
+        return Err(error("unknown import identity"));
+    }
+    Ok(result)
+}
+
+pub fn start(s: &mut Session, p: &Value) -> Result<Value> {
+    start_impl(s, p, false, None)
+}
+pub fn abort(s: &mut Session, p: &Value) -> Result<Value> {
+    start_impl(s, p, true, None)
+}
+
+/// The serving thread polls its transport hook while workers transfer bytes.
+/// A zero total means unknown: reads for verification and retry traffic are included.
+pub fn observed(s: &mut Session, p: &Value, abort: bool, observer: &mut dyn FnMut(u64, u64, &str) -> bool) -> Result<Value> {
+    s.execute_fn(if abort { "cloud.abortUploads" } else { "cloud.upload" }, |s| start_impl(s, p, abort, Some(observer)))
+}
+
+fn start_impl(s: &mut Session, p: &Value, abort: bool, mut observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
+    let wait = p
+        .get("wait")
+        .map(|value| value.as_bool().ok_or_else(|| error("wait must be true or false")))
+        .transpose()?
+        .unwrap_or(!crate::assets::is_cached_only());
+    if wait && crate::assets::is_cached_only() {
+        return Err(error("desktop uploads run in the background; omit wait"));
+    }
+    if s.cloud_uploads.pending.len() >= 4 {
+        return Err(error("four upload tasks are already running; wait or cancel before retrying"));
+    }
+    s.persist()?; // A queued import must be durable before any network operation.
+    let items = items(s, p, abort)?;
+    if items.is_empty() {
+        return Ok(json!({"tasks": [], "results": [], "remaining": 0}));
+    }
+    let task =
+        s.activity.start("upload", if abort { "Abort Resumable Cloud Uploads" } else { "Upload Cloud Originals" }, crate::activity::Cancel::Yes);
+    task.set_unit(crate::activity::Unit::Bytes);
+    let id = task.id();
+    let handle = task.handle();
+    let bytes = Arc::new(AtomicU64::new(0));
+    let worker_bytes = bytes.clone();
+    let cancel = task.cancel_flag().ok_or_else(|| error("upload cancellation flag unavailable"))?;
+    let ids = items.iter().map(|item| (item.id.clone(), item.imported.asset_id.clone())).collect();
+    let (sender, receiver) = mpsc::sync_channel(2);
+    let worker_cancel = cancel.clone();
+    let resolver = items.first().map(|item| item.resolver.clone()).ok_or_else(|| error("upload task is empty"))?;
+    let owner_resolver = resolver.clone();
+    let connection_revision = resolver.connection_revision();
+    std::thread::Builder::new()
+        .name("cloud-upload".into())
+        .spawn(move || {
+            let progress = UploadProgress { handle, bytes: worker_bytes };
+            let result = crate::guard::catch("cloud upload worker", || {
+                let mut results = Vec::new();
+                let mut failures = Vec::new();
+                for item in items {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        return Err(error("upload cancelled; originals and multipart receipts retained"));
+                    }
+                    match item.run(abort, &sender, &worker_cancel, &progress) {
+                        Ok(result) => results.push(result),
+                        Err(error) => failures.push(error.to_string()),
+                    }
+                }
+                if let Some(first) = failures.first() {
+                    return Err(error(format!("{} upload(s) failed; {} completed: {first}", failures.len(), results.len())));
+                }
+                Ok(json!({"results": results}))
+            })
+            .unwrap_or_else(|message| Err(error(message)));
+            let _ = sender.send(Event::Finished(result));
+            resolver.assets_changed();
+        })
+        .map_err(io)?;
+    s.cloud_uploads.pending.push(Pending {
+        receiver,
+        library: s.library_token(),
+        resolver: owner_resolver,
+        connection_revision,
+        ids,
+        guard: task,
+        cancel: cancel.clone(),
+    });
+    if wait {
+        loop {
+            s.poll_cloud_uploads();
+            if let Some(observer) = observer.as_mut() {
+                let detail = s.activity.list().into_iter().find(|task| task.id == id).map(|task| task.detail).unwrap_or_default();
+                if !observer(bytes.load(Ordering::Relaxed), 0, &detail) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            if let Some(report) = s.cloud_uploads.reports.iter().find(|report| report["task"] == id) {
+                if report["ok"] == true {
+                    return Ok(report["result"].clone());
+                }
+                return Err(error(report["error"].as_str().unwrap_or("cloud upload failed")));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    Ok(json!({"background": true, "task": id}))
+}
+
+impl Session {
+    /// Native hosts pump this after polling owner events. Headless one-shot commands
+    /// explicitly use `cloud.upload` so local import completion never waits for a bucket.
+    pub fn resume_cloud_uploads(&mut self) {
+        if !self.cloud_uploads.requested || self.cloud_uploads.pending.len() >= 4 {
+            return;
+        }
+        let ids = self
+            .catalog
+            .upload_intents()
+            .iter()
+            .filter(|(id, intent)| {
+                intent.state != UploadState::Synchronized
+                    && (self.cloud_uploads.include_failed || intent.state != UploadState::Failed)
+                    && !self.cloud_uploads.attempted.contains(*id)
+                    && !self.cloud_uploads.pending.iter().any(|pending| pending.ids.contains_key(*id))
+            })
+            .take(1)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            if !self.cloud_uploads.pending.is_empty() {
+                return;
+            }
+            self.cloud_uploads.requested = false;
+            self.cloud_uploads.include_failed = false;
+            return;
+        }
+        self.cloud_uploads.attempted.extend(ids.iter().cloned());
+        if let Err(e) = start(self, &json!({"imports": ids, "wait": false})) {
+            log::warn!("queued cloud uploads: {e}; originals remain durable");
+        }
+    }
+
+    pub fn poll_cloud_uploads(&mut self) {
+        let mut uploads = std::mem::take(&mut self.cloud_uploads);
+        uploads.pending.retain(|pending| {
+            for _ in 0..8 {
+                match pending.receiver.try_recv() {
+                    Ok(Event::Phase { id, state, verified, error: message, reply }) => {
+                        let result = (|| {
+                            if !Arc::ptr_eq(&pending.library, &self.library_token()) {
+                                return Err(error("library changed; staged data preserved"));
+                            }
+                            if pending.connection_revision != pending.resolver.connection_revision() {
+                                return Err(error("storage connection changed; retry using its current settings; staged data preserved"));
+                            }
+                            let mut intent =
+                                self.catalog.upload_intents().get(&id).ok_or_else(|| error("import was removed; staged original preserved"))?.clone();
+                            let previous = intent.clone();
+                            if pending.ids.get(&id) != Some(&intent.asset_id) {
+                                return Err(error("import's asset changed; staged data preserved"));
+                            }
+                            let photo = self.catalog.photo(intent.photo_id).ok_or_else(|| error("photo was removed; upload publication stopped"))?;
+                            if photo.deleted || photo.source != (Source::Managed { asset_id: intent.asset_id.clone() }) {
+                                return Err(error("photo was deleted or changed; upload stopped and original preserved"));
+                            }
+                            intent.state = state;
+                            intent.verified = verified;
+                            intent.error = message;
+                            self.apply_system(Op::SetUploadIntent { id: id.clone(), intent: Some(Box::new(intent)) })?;
+                            if let Err(e) = self.persist() {
+                                // Do not display synchronized after a failed local acknowledgement.
+                                // Both operations remain pending, preserving the previous durable state.
+                                self.apply_system(Op::SetUploadIntent { id, intent: Some(Box::new(previous)) })?;
+                                return Err(e);
+                            }
+                            Ok(()) // Worker may proceed only after durable acknowledgement.
+                        })();
+                        let _ = reply.send(result);
+                    }
+                    Ok(Event::Finished(result)) => {
+                        uploads.reports.push(match result {
+                            Ok(value) => json!({"task": pending.guard.id(), "ok": true, "result": value}),
+                            Err(e) => json!({"task": pending.guard.id(), "ok": false, "error": e.to_string()}),
+                        });
+                        return false;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => return true,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        uploads
+                            .reports
+                            .push(json!({"task": pending.guard.id(), "ok": false, "error": "upload worker closed; durable receipts retained"}));
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+        if uploads.reports.len() > 32 {
+            uploads.reports.drain(..uploads.reports.len() - 32);
+        }
+        self.cloud_uploads = uploads;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lightcraft_catalog::assets::{AssetId, RemoteLocation};
+    use lightcraft_catalog::{FsStore, Photo, PhotoId, Store};
+
+    struct FailingAppend {
+        inner: FsStore,
+        fail: Arc<AtomicBool>,
+    }
+    impl Store for FailingAppend {
+        fn read(&mut self, name: &str) -> std::io::Result<Option<Vec<u8>>> {
+            self.inner.read(name)
+        }
+        fn write_atomic(&mut self, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+            self.inner.write_atomic(name, bytes)
+        }
+        fn append(&mut self, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+            if self.fail.load(Ordering::Relaxed) {
+                return Err(std::io::Error::other("injected full disk during acknowledgement"));
+            }
+            self.inner.append(name, bytes)
+        }
+        fn truncate(&mut self, name: &str, size: u64) -> std::io::Result<()> {
+            self.inner.truncate(name, size)
+        }
+        fn describe(&self) -> String {
+            self.inner.describe()
+        }
+    }
+
+    fn session(root: &Path) -> (Session, Arc<AtomicBool>) {
+        let mut session = Session::new().with_fs();
+        let fail = Arc::new(AtomicBool::new(false));
+        session
+            .open_library_in(
+                crate::library::LibraryStores {
+                    catalog: Box::new(FailingAppend { inner: FsStore::open(root).unwrap(), fail: fail.clone() }),
+                    files: Box::new(FsStore::open(root).unwrap()),
+                    on_disk: true,
+                    dir: root.to_path_buf(),
+                },
+                false,
+            )
+            .unwrap();
+        let asset_id = AssetId("upload-ack-test".into());
+        let asset = Asset {
+            original: Blob {
+                id: sha256(b"original"),
+                size: 8,
+                remote: RemoteLocation { connection: "test".into(), key: "originals/test".into(), version: None },
+            },
+            smart_preview: None,
+            thumbnail: None,
+        };
+        session
+            .apply_system(Op::Batch {
+                ops: vec![
+                    Op::SetAsset { id: asset_id.clone(), asset: Some(Box::new(asset)) },
+                    Op::AddPhoto {
+                        photo: Box::new(Photo::new(PhotoId(1), Source::Managed { asset_id: asset_id.clone() }, "test.png", "PNG", 2, 2, "")),
+                    },
+                    Op::SetUploadIntent {
+                        id: "upload-ack-test".into(),
+                        intent: Some(Box::new(UploadIntent {
+                            asset_id,
+                            photo_id: PhotoId(1),
+                            state: UploadState::Published,
+                            verified: BTreeSet::from(["originals/test".into()]),
+                            error: None,
+                        })),
+                    },
+                ],
+            })
+            .unwrap();
+        session.persist().unwrap();
+        (session, fail)
+    }
+
+    fn acknowledgement(session: &mut Session, library: Arc<()>) -> mpsc::Receiver<Result<()>> {
+        acknowledgement_with_revision(session, library, None)
+    }
+    fn acknowledgement_with_revision(session: &mut Session, library: Arc<()>, revision: Option<u64>) -> mpsc::Receiver<Result<()>> {
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let (reply, response) = mpsc::sync_channel(1);
+        let intent = session.catalog.upload_intents()["upload-ack-test"].clone();
+        sender
+            .send(Event::Phase { id: "upload-ack-test".into(), state: UploadState::Synchronized, verified: intent.verified, error: None, reply })
+            .unwrap();
+        let guard = session.activity.start("upload", "Synthetic acknowledgement", crate::activity::Cancel::Yes);
+        let cancel = guard.cancel_flag().unwrap();
+        let resolver = session.media.asset_resolver.as_ref().unwrap().clone();
+        let connection_revision = revision.unwrap_or_else(|| resolver.connection_revision());
+        session.cloud_uploads.pending.push(Pending {
+            receiver,
+            library,
+            resolver,
+            connection_revision,
+            ids: BTreeMap::from([("upload-ack-test".into(), intent.asset_id)]),
+            guard,
+            cancel,
+        });
+        session.poll_cloud_uploads();
+        response
+    }
+
+    #[test]
+    fn failed_local_acknowledgement_never_displays_synchronized_and_retries_durably() {
+        let root = std::env::temp_dir().join(format!(
+            "lightcraft-upload-ack-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut session, fail) = session(&root);
+        fail.store(true, Ordering::Relaxed);
+        let library = session.library_token();
+        assert!(acknowledgement(&mut session, library).recv().unwrap().is_err());
+        assert_eq!(session.catalog.upload_intents()["upload-ack-test"].state, UploadState::Published);
+        fail.store(false, Ordering::Relaxed);
+        session.persist().unwrap();
+        session.close_library().unwrap();
+        drop(session);
+        let mut reopened = Session::new().with_fs();
+        reopened.open_library(&root, false).unwrap();
+        assert_eq!(reopened.catalog.upload_intents()["upload-ack-test"].state, UploadState::Published);
+        let library = reopened.library_token();
+        assert!(acknowledgement(&mut reopened, library).recv().unwrap().is_ok());
+        reopened.close_library().unwrap();
+        drop(reopened);
+        let mut final_session = Session::new().with_fs();
+        final_session.open_library(&root, false).unwrap();
+        assert_eq!(final_session.catalog.upload_intents()["upload-ack-test"].state, UploadState::Synchronized);
+        final_session.close_library().unwrap();
+        drop(final_session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_transfer_using_old_connection_settings_cannot_be_acknowledged() {
+        let root = std::env::temp_dir().join(format!("lightcraft-upload-connection-{}", std::process::id()));
+        let (mut session, _) = session(&root);
+        session
+            .execute(
+                "cloud.configure",
+                &json!({"id":"test","bucket":"photos","region":"us-east-1","prefix":"originals","endpoint":"http://127.0.0.1:9"}),
+            )
+            .unwrap();
+        let library = session.library_token();
+        assert!(acknowledgement_with_revision(&mut session, library, Some(0)).recv().unwrap().is_err());
+        assert_eq!(session.catalog.upload_intents()["upload-ack-test"].state, UploadState::Published);
+        session.close_library().unwrap();
+        drop(session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_old_library_worker_cannot_acknowledge_the_current_catalog() {
+        let root = std::env::temp_dir().join(format!("lightcraft-upload-library-{}", std::process::id()));
+        let (mut session, _) = session(&root);
+        assert!(acknowledgement(&mut session, Arc::new(())).recv().unwrap().is_err());
+        assert_eq!(session.catalog.upload_intents()["upload-ack-test"].state, UploadState::Published);
+        session.close_library().unwrap();
+        drop(session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
