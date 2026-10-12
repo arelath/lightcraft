@@ -11,6 +11,33 @@ use crate::{LightcraftApp, Services};
 
 const T: Duration = Duration::from_secs(20);
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn background_removal_reports_refusal_or_success_once_after_completion() {
+    let mut app = LightcraftApp::new(lightcraft_engine::Session::new(), Services::default());
+    let context = egui::Context::default();
+    app.ui.cloud_removals.insert(7);
+    app.session
+        .cloud_uploads
+        .reports
+        .push(json!({"task":7,"ok":true,"result":{"removed":[],"failed":[{"blob":"original","error":"offline copy is pinned; unpin first"}]}}));
+    app.cloud_removal_outcome(&context);
+    assert!(app.ui.toast.as_ref().unwrap().0.contains("preserved 1"));
+    assert!(app.ui.toast.as_ref().unwrap().0.contains("unpin first"));
+    app.ui.toast = None;
+    app.cloud_removal_outcome(&context);
+    assert!(app.ui.toast.is_none(), "completion must not repeat each frame");
+    app.ui.cloud_removals.insert(8);
+    app.session.cloud_uploads.reports.push(json!({"task":8,"ok":false,"error":"local-copy removal cancelled; remaining data preserved"}));
+    app.cloud_removal_outcome(&context);
+    assert!(app.ui.toast.as_ref().unwrap().0.contains("cancelled"));
+    app.ui.cloud_removals.insert(9);
+    app.session.cloud_uploads.reports.push(json!({"task":9,"ok":true,"result":{"removed":["original"],"failed":[]}}));
+    app.cloud_removal_outcome(&context);
+    assert!(app.ui.toast.as_ref().unwrap().0.contains("Removed 1"));
+    assert!(app.ui.toast.as_ref().unwrap().0.contains("Photos and remote copies are preserved"));
+}
+
 fn demo() -> Headless {
     let app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), Services { png: None, ..Default::default() });
     let mut h = Headless::new(app, [1200.0, 800.0], 1.0);

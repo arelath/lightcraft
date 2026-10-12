@@ -822,6 +822,12 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 if text_button(ui, "cloudRemoveLocal", crate::i18n::tr("Remove local original copy"), false).clicked() {
                     match app.run("cloud.removeLocalCopy", json!({"ids": [id.0]})) {
                         Ok(result) => {
+                            if result["background"] == true
+                                && let Some(task) = result["task"].as_u64()
+                            {
+                                app.ui.cloud_removals.insert(task);
+                                app.toast(ui.ctx(), "Removing local original copy…");
+                            }
                             if let Some(failed) = result.get("failed").and_then(serde_json::Value::as_array).and_then(|a| a.first()) {
                                 app.toast(
                                     ui.ctx(),

@@ -295,6 +295,8 @@ pub struct Session {
     pub cloud_imports: cloud_import::Imports,
     #[cfg(not(target_arch = "wasm32"))]
     pub cloud_uploads: cloud_upload::Uploads,
+    #[cfg(not(target_arch = "wasm32"))]
+    staging_dirty: std::collections::BTreeSet<String>,
     /// The last (or running) Build Previews.
     pub preview_build: Option<std::sync::Arc<cmd::previews::PreviewBuild>>,
     /// Develop defaults applied on import (persisted in prefs.json).
@@ -400,6 +402,8 @@ impl Session {
             cloud_imports: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             cloud_uploads: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            staging_dirty: Default::default(),
             preview_build: None,
             import_defaults: import::ImportDefaults::default(),
             cache_mb: 0,
@@ -539,7 +543,34 @@ impl Session {
                 resolver.assets_changed();
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.notice_staging(&op);
         Ok(inv)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn notice_staging(&mut self, op: &Op) {
+        if self.library.is_none() {
+            return;
+        }
+        let mut pending = vec![op];
+        while let Some(op) = pending.pop() {
+            match op {
+                Op::Batch { ops } => pending.extend(ops),
+                Op::SetUploadIntent { id, .. } => {
+                    self.staging_dirty.insert(id.clone());
+                    if let Some(resolver) = &self.media.asset_resolver {
+                        let value = self
+                            .catalog
+                            .upload_intents()
+                            .get(id)
+                            .and_then(|intent| self.catalog.asset(&intent.asset_id).map(|asset| (intent, asset)));
+                        resolver.note_staging_intent(id, value, false);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// [`Session::commit`] for an op that goes with a folder already renamed on disk; the undo
@@ -569,6 +600,8 @@ impl Session {
     pub(crate) fn apply_system(&mut self, op: Op) -> Result<()> {
         let fwd = op.clone();
         self.catalog.apply(op)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.notice_staging(&fwd);
         self.pending_log.push(fwd);
         Ok(())
     }

@@ -697,6 +697,48 @@ impl LightcraftApp {
         self.toast_for(ctx, text, TOAST_SECONDS);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cloud_removal_outcome(&mut self, ctx: &egui::Context) {
+        let reports: Vec<_> = self
+            .session
+            .cloud_uploads
+            .reports
+            .iter()
+            .filter(|report| report["task"].as_u64().is_some_and(|id| self.ui.cloud_removals.contains(&id)))
+            .cloned()
+            .collect();
+        for report in reports {
+            if let Some(id) = report["task"].as_u64() {
+                self.ui.cloud_removals.remove(&id);
+            }
+            let text = if report["ok"] != true {
+                report["error"].as_str().unwrap_or("Local copy could not be removed").to_owned()
+            } else {
+                let result = &report["result"];
+                let removed = result["removed"].as_array().map_or(0, Vec::len);
+                let failures = result["failed"].as_array();
+                let failed = failures.map_or(0, Vec::len);
+                if failed == 0 {
+                    format!("Removed {removed} local original copies. Photos and remote copies are preserved.")
+                } else {
+                    let details = failures
+                        .into_iter()
+                        .flatten()
+                        .take(8)
+                        .map(|failure| failure["error"].as_str().unwrap_or("Local copy could not be removed").chars().take(512).collect::<String>())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    format!("Removed {removed}; preserved {failed} local original copies: {details}")
+                }
+            };
+            self.toast_for(ctx, text, 10.0);
+        }
+        let active = self.session.activity.list();
+        self.ui.cloud_removals.retain(|id| active.iter().any(|task| task.id == *id));
+    }
+
     /// A toast that stays `secs` seconds (messages that say where to look or what to do next).
     pub fn toast_for(&mut self, ctx: &egui::Context, text: impl Into<String>, secs: f64) {
         let t = ctx.input(|i| i.time);
@@ -1008,6 +1050,8 @@ impl LightcraftApp {
         self.session.poll_cloud_imports();
         #[cfg(not(target_arch = "wasm32"))]
         self.session.poll_cloud_uploads();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.cloud_removal_outcome(ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.session.resume_cloud_uploads();
         merge::poll(self, ctx);

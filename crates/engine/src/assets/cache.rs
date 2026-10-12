@@ -4,6 +4,8 @@
 use super::{AssetError, Entry, Result, disk};
 use lightcraft_catalog::assets::BlobId;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
+use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::PathBuf;
@@ -21,6 +23,9 @@ pub enum OfflineQuality {
     Original,
     Preview,
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod managed_tests;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +82,7 @@ pub struct CacheStatus {
     pub pinned_bytes: u64,
     pub pins: BTreeMap<String, OfflinePin>,
     pub removed: BTreeSet<BlobId>,
+    pub staging_error: Option<String>,
     /// Damaged/future settings are preserved. Eviction and policy writes are disabled.
     pub error: Option<String>,
 }
@@ -90,6 +96,7 @@ struct State {
     tick: u64,
     used: u64,
     pinned: u64,
+    staging_error: Option<String>,
 }
 pub(super) struct Cache {
     root: PathBuf,
@@ -97,6 +104,12 @@ pub(super) struct Cache {
     entries: Weak<Entries>,
     state: Mutex<State>,
     maintenance: Mutex<()>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) durable_io: Mutex<()>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) durable_epoch: std::sync::atomic::AtomicU64,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) staging: Mutex<super::managed::Policy>,
     sender: Option<mpsc::SyncSender<()>>,
 }
 impl Cache {
@@ -127,8 +140,14 @@ impl Cache {
             root,
             durable_root: Mutex::new(None),
             entries,
-            state: Mutex::new(State { policy, pinned_ids, error, access: BTreeMap::new(), tick: 0, used: 0, pinned: 0 }),
+            state: Mutex::new(State { policy, pinned_ids, error, access: BTreeMap::new(), tick: 0, used: 0, pinned: 0, staging_error: None }),
             maintenance: Mutex::new(()),
+            #[cfg(not(target_arch = "wasm32"))]
+            durable_io: Mutex::new(()),
+            #[cfg(not(target_arch = "wasm32"))]
+            durable_epoch: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(not(target_arch = "wasm32"))]
+            staging: Mutex::new(super::managed::Policy::default()),
             #[cfg(not(target_arch = "wasm32"))]
             sender: Some(sender),
             #[cfg(target_arch = "wasm32")]
@@ -175,12 +194,17 @@ impl Cache {
             pinned_bytes: state.pinned,
             pins: state.policy.pins.clone(),
             removed: state.policy.removed.clone(),
+            staging_error: state.staging_error.clone(),
             error: state.error.clone(),
         }
     }
     pub(super) fn usage(&self) -> (u64, u64, u64) {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         (state.policy.budget_bytes, state.used, state.pinned)
+    }
+    pub(super) fn errors(&self) -> (Option<String>, Option<String>) {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        (state.error.clone(), state.staging_error.clone())
     }
     pub(super) fn pin(&self, owner: &str) -> Option<OfflinePin> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner).policy.pins.get(owner).cloned()
@@ -276,6 +300,13 @@ impl Cache {
         if let Some(error) = &self.state.lock().unwrap_or_else(PoisonError::into_inner).error {
             return Err(AssetError::Disk(error.clone()));
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // A bad ownership record prevents staging migration, while verified
+            // downloads retain their independent disposable-cache policy.
+            let error = self.promote_staging().err().map(|error| error.to_string());
+            self.state.lock().unwrap_or_else(PoisonError::into_inner).staging_error = error;
+        }
         let directory = match std::fs::read_dir(&self.root) {
             Ok(directory) => directory,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -337,5 +368,121 @@ impl Cache {
         state.used = used;
         state.pinned = pinned;
         Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn promote_staging(&self) -> Result<()> {
+        self.promote_staging_cancel(&std::sync::atomic::AtomicBool::new(false))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn promote_staging_cancel(&self, cancel: &std::sync::atomic::AtomicBool) -> Result<()> {
+        let Some(root) = self.durable_root.lock().unwrap_or_else(PoisonError::into_inner).clone() else {
+            return Ok(());
+        };
+        let epoch = self.durable_epoch.load(Ordering::Acquire);
+        let policy = self.staging.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if !policy.imports.values().any(|intent| intent.acknowledged) {
+            return Ok(());
+        }
+        let candidates = super::managed::candidates(&root, &policy)?;
+        let blob_directory = root.join("blobs");
+        match std::fs::symlink_metadata(&blob_directory) {
+            Ok(meta) if meta.file_type().is_dir() && !meta.file_type().is_symlink() => {}
+            Ok(_) => return Err(AssetError::Invalid("staged blob directory is redirected or invalid; preserved".into())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(disk(e)),
+        }
+        let _namespace = loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(AssetError::Cancelled);
+            }
+            match self.durable_io.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        };
+        if epoch != self.durable_epoch.load(Ordering::Acquire) {
+            self.schedule_trim();
+            return Ok(());
+        }
+        let Some(entries) = self.entries.upgrade() else {
+            return Ok(());
+        };
+        for (id, blob) in candidates {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(AssetError::Cancelled);
+            }
+            let source = root.join("blobs").join(&id.0);
+            let meta = match std::fs::symlink_metadata(&source) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(disk(e)),
+            };
+            if !meta.file_type().is_file() || meta.file_type().is_symlink() {
+                return Err(AssetError::Invalid("staged blob is not a regular file; preserved".into()));
+            }
+            let entry = {
+                let mut entries = entries.lock().unwrap_or_else(PoisonError::into_inner);
+                if entries.len() >= MAX_RECORDS && !entries.contains_key(&id) {
+                    continue;
+                }
+                entries.entry(id.clone()).or_insert_with(|| Arc::new(Entry::default())).clone()
+            };
+            let _gate = match entry.gate.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+            };
+            if entry.pins.load(Ordering::Relaxed) != 0 {
+                continue;
+            }
+            let destination = self.root.join(&id.0);
+            std::fs::create_dir_all(&self.root).map_err(disk)?;
+            lightcraft_catalog::safe_file::write_atomic_with(&destination, &mut |out| {
+                let mut file = std::fs::File::open(&source)?;
+                let mut writer = super::VerifiedWriter { out, hash: sha2::Sha256::new(), done: 0, expected: blob.size, cancel };
+                std::io::copy(&mut file.by_ref().take(blob.size.saturating_add(1)), &mut writer)?;
+                if writer.done != blob.size || format!("{:x}", writer.hash.finalize()) != blob.id.0 {
+                    return Err(std::io::Error::other("staged original failed integrity verification; preserved"));
+                }
+                Ok(())
+            })
+            .map_err(disk)?;
+            if !super::verify_file(&destination, &blob, cancel)? {
+                return Err(AssetError::Integrity);
+            }
+            // No path can be handed out while its gate is held; the verified cache
+            // copy is durable before the staged link is removed. Working data and
+            // other pending owners were excluded by the ownership scan.
+            if epoch != self.durable_epoch.load(Ordering::Acquire) {
+                self.schedule_trim();
+                return Ok(());
+            }
+            std::fs::remove_file(&source).map_err(disk)?;
+            *entry.state.lock().unwrap_or_else(PoisonError::into_inner) = super::AssetAvailability::Cached;
+            self.touch(&id);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn prepare_removal(&self, cancel: &std::sync::atomic::AtomicBool) -> Result<()> {
+        self.validate_root()?;
+        let _maintenance = loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(AssetError::Cancelled);
+            }
+            match self.maintenance.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        };
+        if let Some(error) = &self.state.lock().unwrap_or_else(PoisonError::into_inner).error {
+            return Err(AssetError::Disk(error.clone()));
+        }
+        self.promote_staging_cancel(cancel)
     }
 }

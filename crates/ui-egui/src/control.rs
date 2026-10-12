@@ -105,6 +105,7 @@ pub fn inspect(app: &LightcraftApp, ctx: &egui::Context) -> Value {
         })),
         "hoverPreview": app.hover_preview.as_ref().map(|h| h.label.clone()),
         "status": app.ui.status,
+        "toast": app.ui.toast.as_ref().map(|toast| &toast.0),
         "copied": app.copied,
         "notices": app.notices,
         "quitPrompt": app.quit_prompt.as_ref().map(crate::QuitPrompt::text),

@@ -42,6 +42,26 @@ fn pending_source() -> AssetError {
     AssetError::Pending
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod managed;
+
+/// A write publication changes the namespace epoch before releasing its mutex.
+/// Maintenance can scan outside the lock and reject a stale scan without holding
+/// up preparation or receipt writers during parsing.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct DurableGuard<'a> {
+    _lock: MutexGuard<'a, ()>,
+    cache: &'a cache::Cache,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DurableGuard<'_> {
+    fn drop(&mut self) {
+        self.cache.durable_epoch.fetch_add(1, Ordering::Release);
+        self.cache.schedule_trim();
+    }
+}
+
 use lightcraft_catalog::assets::{Asset, Blob, BlobId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -251,6 +271,52 @@ impl AssetResolver {
     pub(crate) fn validate_storage(&self) -> Result<()> {
         self.cache.validate_root()
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn connect_s3(&self, connection: s3::S3Connection) -> Result<()> {
+        connection.validate()?;
+        self.cache.staging.lock().unwrap_or_else(PoisonError::into_inner).connections.insert(connection.id.clone(), connection.storage_snapshot());
+        self.cache.durable_epoch.fetch_add(1, Ordering::Release);
+        self.connect(connection.id.clone(), Arc::new(connection))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn note_staging_intent(&self, id: &str, value: Option<(&lightcraft_catalog::uploads::UploadIntent, &Asset)>, durable: bool) {
+        let mut policy = self.cache.staging.lock().unwrap_or_else(PoisonError::into_inner);
+        match value {
+            Some((intent, asset)) => {
+                policy.imports.insert(
+                    id.into(),
+                    managed::Intent {
+                        asset_id: intent.asset_id.clone(),
+                        asset: Arc::new(asset.clone()),
+                        acknowledged: durable && intent.state == lightcraft_catalog::uploads::UploadState::Synchronized,
+                    },
+                );
+            }
+            None => {
+                policy.imports.remove(id);
+            }
+        }
+        drop(policy);
+        self.cache.durable_epoch.fetch_add(1, Ordering::Release);
+        self.cache.schedule_trim();
+    }
+    /// Worker-only guard shared by durable writers and future staging maintenance.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn durable_guard(&self, cancel: &AtomicBool) -> Result<DurableGuard<'_>> {
+        if is_cached_only() {
+            return Err(pending_source());
+        }
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(AssetError::Cancelled);
+            }
+            match self.cache.durable_io.try_lock() {
+                Ok(guard) => return Ok(DurableGuard { _lock: guard, cache: &self.cache }),
+                Err(TryLockError::Poisoned(error)) => return Ok(DurableGuard { _lock: error.into_inner(), cache: &self.cache }),
+                Err(TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+    }
     fn local_path(&self, blob: &Blob) -> Result<PathBuf> {
         self.cache.validate_root()?;
         if let Some(root) = self.durable_root() {
@@ -375,7 +441,7 @@ impl AssetResolver {
         blob.validate().map_err(AssetError::Invalid)?;
         if self.local_path(blob)?.parent().is_some_and(|parent| parent != self.root) {
             return Err(AssetError::Invalid(
-                "this original is durable local data awaiting safe cloud publication; it cannot be removed as cache".into(),
+                "this original is protected durable data; completed upload and matching storage proof are required before local-copy removal".into(),
             ));
         }
         let entry = self.entry(&blob.id)?;
@@ -388,6 +454,17 @@ impl AssetResolver {
         drop(_gate);
         self.changed();
         Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn prepare_cache_removal(&self, cancel: &AtomicBool) -> Result<()> {
+        self.cache.prepare_removal(cancel)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn evict_worker(&self, blob: &Blob, cancel: &AtomicBool) -> Result<()> {
+        let _guard = self.durable_guard(cancel)?;
+        self.evict(blob)
     }
 }
 
@@ -554,6 +631,9 @@ impl AssetResolver {
     }
     pub fn cache_status(&self) -> cache::CacheStatus {
         self.cache.status()
+    }
+    pub fn cache_errors(&self) -> (Option<String>, Option<String>) {
+        self.cache.errors()
     }
     pub fn set_cache_budget(&self, bytes: u64) -> Result<()> {
         self.cache.set_budget(bytes)

@@ -4,6 +4,10 @@ Based on [docs/cloud-storage.md](docs/cloud-storage.md). Checkboxes reflect veri
 
 The source document describes a particular source snapshot. Verify its implementation assumptions before changing code. Task IDs use the `CS` prefix to distinguish this backlog from the existing project plan.
 
+Scope confirmed by the user: complete direct S3 storage/synchronization and browser support (Milestones 1–5).
+Milestone 6 is deferred. A live S3-compatible test bucket will be supplied later; loopback fixtures provide
+current acceptance coverage, and live interoperability remains unverified.
+
 Verified on 2026-10-12: Milestone 1, including managed originals and proxies, catalog migration, integrity and failure recovery, real CLI/MCP acceptance, and native desktop control-channel acceptance with a generated RAW. Deferred metadata/render requests kept the UI responsive during a deliberately slow download, and attempts to overwrite managed cache data were rejected. The local S3-compatible test server verified request signing; live AWS interoperability remains unverified. `cargo +1.95.0 xtask ci` passed all eight stages. Long-lived keys cannot be entered into LightCraft; authentication uses externally managed AWS profiles or environment credentials.
 
 ## Milestone 1 — Read cloud-backed originals
@@ -80,7 +84,7 @@ Verified device experience (2026-10-12): recipe-matched remote thumbnails, edita
 
 **Dependencies:** Milestones 1–2. Full multi-device mutation synchronization follows in Milestone 4.
 
-Verified staging and uploads (2026-10-12): durable original/proxy/thumbnail preparation, atomic photo/asset/upload intent, recovery without duplicate imports, resumable multipart transfer, SHA-256 readback verification and conditional initial publication. CLI/MCP response-loss, cancellation, credentials, process-crash and local-acknowledgement failure checks passed. Native connection/import dialogs, immediate editing/export, byte progress, failure and retry were visually inspected; retry reused its multipart ID and published once. All eight CI stages passed. Explicit idle multipart cleanup includes deleted-photo receipts, destination binding and confirmed aborts; cancellation and retry preserve durable bytes. Staging/cache migration, path-dependent operations and external-editor ingestion remain open. Initial import publication does not synchronize subsequent edits between devices.
+Verified staging and uploads (2026-10-12): durable original/proxy/thumbnail preparation, atomic photo/asset/upload intent, recovery without duplicate imports, resumable multipart transfer, SHA-256 readback verification and conditional initial publication. CLI/MCP response-loss, cancellation, credentials, process-crash and local-acknowledgement failure checks passed. Native connection/import dialogs, immediate editing/export, byte progress, failure and retry were visually inspected; retry reused its multipart ID and published once. All eight CI stages passed. Explicit idle multipart cleanup includes deleted-photo receipts, destination binding and confirmed aborts; cancellation and retry preserve durable bytes. Verified staging/cache migration and explicit local-copy/library deletion policies preserve pending data and remote objects. Path-dependent operations and external-editor ingestion remain open. Initial import publication does not synchronize subsequent edits between devices.
 
 ### Durable import and upload pipeline
 
@@ -105,7 +109,13 @@ any changes. `target/cloud-organization-ci.log` records all eight CI stages pass
 - [x] **CS3.11** Implement logical rename and folder organization for managed assets without moving immutable image objects.
 - [ ] **CS3.12** Model XMP sidecars as associated assets and route reads, writes, and uploads through managed storage rather than neighboring-path assumptions.
 - [ ] **CS3.13** Materialize a pinned working file for external editing, detect and ingest the returned revision, and keep it durable until uploaded.
-- [ ] **CS3.14** Separate remove-local-copy behavior from delete-from-library behavior; define deletion and remote-object retention policies for managed assets.
+- [x] **CS3.14** Separate remove-local-copy behavior from delete-from-library behavior; define deletion and remote-object retention policies for managed assets.
+
+CS3.14 verified on 2026-10-12: six staging-retention regressions, eleven real CLI/MCP upload checks,
+and one desktop completion-feedback regression passed. Native Info-button refusal/removal, proxy export,
+full-original reacquisition, permanent deletion and Performance staging-error display were inspected.
+Remote objects and working data were preserved. `target/cloud-managed-retention-ci-final.log` records
+all eight CI stages passing. Legacy receipts require explicit re-verification before migration.
 
 ### Acceptance checks
 
@@ -172,6 +182,8 @@ any changes. `target/cloud-organization-ci.log` records all eight CI stages pass
 - [ ] **CS5.7** Run WASM and applicable web checks, including `cargo xtask ci`, and visually inspect browser cloud workflows.
 
 ## Milestone 6 — Optional managed metadata backend
+
+**Deferred at the user's request.** These tasks remain unchecked for a future decision.
 
 **Outcome:** A metadata service supports managed accounts, sharing, permissions, or larger device fleets while photo bytes transfer directly to object storage.
 

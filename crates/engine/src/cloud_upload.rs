@@ -150,6 +150,48 @@ fn read_receipt(path: &Path) -> Result<Option<Receipt>> {
     Ok(Some(receipt))
 }
 
+pub(crate) fn staging_proofs(root: &Path, policy: &crate::assets::managed::Policy) -> Result<crate::assets::managed::Proofs> {
+    let mut result = crate::assets::managed::Proofs { verified: BTreeMap::new(), protected: BTreeSet::new() };
+    let dir = root.join("uploads");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_dir() && !meta.file_type().is_symlink() => {}
+        Ok(_) => return Err(error("upload receipt directory is redirected or invalid; staged data preserved")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+        Err(e) => return Err(io(e)),
+    }
+    for (index, entry) in std::fs::read_dir(&dir).map_err(io)?.enumerate() {
+        if index >= 100_000 {
+            return Err(error("too many upload receipts to maintain safely; staged data preserved"));
+        }
+        let entry = entry.map_err(io)?;
+        if entry.path().extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        if !entry.file_type().map_err(io)?.is_file() {
+            return Err(error("upload receipt is not a regular file; staged data preserved"));
+        }
+        let receipt = read_receipt(&entry.path())?.ok_or_else(|| error("receipt changed while reading; staged data preserved"))?;
+        if entry.file_name() != std::ffi::OsStr::new(&format!("{}.json", receipt.id)) {
+            return Err(error("upload receipt identity differs from filename; preserved"));
+        }
+        let approved = policy.imports.get(&receipt.id).is_some_and(|intent| {
+            intent.acknowledged && intent.asset_id == receipt.imported.asset_id && intent.asset.as_ref() == receipt.imported.asset.as_ref()
+        }) && receipt.generation.is_some()
+            && receipt.multipart.is_empty()
+            && blobs(&receipt.imported.asset).all(|blob| receipt.verified.contains(&blob.remote.key))
+            && receipt
+                .storage
+                .as_ref()
+                .is_some_and(|storage| policy.connections.get(&storage.id).is_some_and(|connection| storage.same_destination(connection)));
+        if approved {
+            result.verified.insert(receipt.id, (receipt.imported.asset_id, *receipt.imported.asset));
+        } else {
+            result.protected.extend(blobs(&receipt.imported.asset).map(|blob| blob.id.clone()));
+        }
+    }
+    Ok(result)
+}
+
 enum Event {
     Phase { id: String, state: UploadState, verified: BTreeSet<String>, error: Option<String>, reply: mpsc::SyncSender<Result<()>> },
     Finished(Result<Value>),
@@ -183,6 +225,11 @@ impl UploadProgress {
 }
 
 impl Item {
+    fn write_receipt(&self, receipt: &Receipt, cancel: &AtomicBool) -> Result<()> {
+        let _guard = self.resolver.durable_guard(cancel).map_err(|e| error(e.to_string()))?;
+        receipt.write(&self.root)
+    }
+
     fn phase(&self, receipt: &Receipt, events: &mpsc::SyncSender<Event>, cancel: &AtomicBool) -> Result<()> {
         let (reply, response) = mpsc::sync_channel(1);
         events
@@ -276,7 +323,7 @@ impl Item {
                     .background_transfer(blob, cancel, || self.connection.start_multipart(blob, cancel))
                     .map_err(|e| error(e.to_string()))?;
                 receipt.multipart.insert(blob.remote.key.clone(), Multipart { id: id.clone(), parts: BTreeMap::new() });
-                if let Err(error) = receipt.write(&self.root) {
+                if let Err(error) = self.write_receipt(receipt, cancel) {
                     // No part may be sent before its upload identity is durable.
                     let _ = self.connection.abort_multipart(blob, &id, &AtomicBool::new(false));
                     return Err(error);
@@ -313,7 +360,7 @@ impl Item {
                                 .ok_or_else(|| error("multipart receipt disappeared"))?
                                 .parts
                                 .insert(number, Part { etag, hash, size: count as u64 });
-                            receipt.write(&self.root)?;
+                            self.write_receipt(receipt, cancel)?;
                         }
                         Err(AssetError::Missing) => {
                             restart = true;
@@ -358,7 +405,7 @@ impl Item {
                     .background_transfer(blob, cancel, || self.connection.abort_multipart(blob, &upload_id, cancel))
                     .map_err(|e| error(e.to_string()))?;
                 receipt.multipart.remove(&blob.remote.key);
-                receipt.write(&self.root)?;
+                self.write_receipt(receipt, cancel)?;
             }
         }
         Err(error("multipart upload repeatedly expired or conflicted; staged bytes and receipts retained"))
@@ -397,7 +444,7 @@ impl Item {
         let result = (|| {
             receipt.state = UploadState::Uploading;
             receipt.error = None;
-            receipt.write(&self.root)?;
+            self.write_receipt(&receipt, cancel)?;
             self.phase(&receipt, events, cancel)?;
             for blob in blobs(&receipt.imported.asset).cloned().collect::<Vec<_>>() {
                 if abort {
@@ -406,7 +453,7 @@ impl Item {
                             .background_transfer(&blob, cancel, || self.connection.abort_multipart(&blob, &upload.id, cancel))
                             .map_err(|e| error(e.to_string()))?;
                         receipt.multipart.remove(&blob.remote.key);
-                        receipt.write(&self.root)?;
+                        self.write_receipt(&receipt, cancel)?;
                     }
                     continue;
                 }
@@ -425,27 +472,27 @@ impl Item {
                     receipt.multipart.remove(&blob.remote.key);
                 }
                 receipt.verified.insert(blob.remote.key.clone());
-                receipt.write(&self.root)?;
+                self.write_receipt(&receipt, cancel)?;
                 self.phase(&receipt, events, cancel)?;
             }
             if abort {
                 receipt.state = if receipt.generation.is_some() { UploadState::Published } else { UploadState::SavedLocally };
-                receipt.write(&self.root)?;
+                self.write_receipt(&receipt, cancel)?;
                 self.phase(&receipt, events, cancel)?;
                 return Ok(json!({"import": self.id, "aborted": true, "originalPreserved": true}));
             }
             receipt.state = UploadState::ObjectsVerified;
-            receipt.write(&self.root)?;
+            self.write_receipt(&receipt, cancel)?;
             self.phase(&receipt, events, cancel)?;
             task.detail(&format!("{} · publishing", self.imported.photo.file_name));
             receipt.generation =
                 Some(cloud_publication::publish_import(&self.connection, &receipt.imported, cancel).map_err(|e| error(e.to_string()))?);
             receipt.state = UploadState::Published;
-            receipt.write(&self.root)?;
+            self.write_receipt(&receipt, cancel)?;
             self.phase(&receipt, events, cancel)?;
             receipt.state = UploadState::Synchronized;
             self.phase(&receipt, events, cancel)?; // Durable local acknowledgement before completion.
-            if let Err(e) = receipt.write(&self.root) {
+            if let Err(e) = self.write_receipt(&receipt, cancel) {
                 log::warn!("final upload receipt marker: {e}; journal acknowledgement is durable");
             }
             Ok(json!({"import": self.id, "synchronized": true, "generation": receipt.generation}))
@@ -461,7 +508,7 @@ impl Item {
                 message.truncate(end);
             }
             receipt.error = Some(message);
-            let _ = receipt.write(&self.root);
+            let _ = self.write_receipt(&receipt, &AtomicBool::new(false));
             let _ = self.phase(&receipt, events, cancel);
         }
         result
@@ -507,6 +554,10 @@ impl Uploads {
 }
 
 fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
+    let verify = p.get("verify").map(|value| value.as_bool().ok_or_else(|| error("verify must be true or false"))).transpose()?.unwrap_or(false);
+    if abort && verify {
+        return Err(error("verification is available through cloud.upload, not multipart abort"));
+    }
     let resolver = s.media.asset_resolver.clone().ok_or_else(|| error("open a persistent native library first"))?;
     resolver.validate_storage().map_err(|e| error(e.to_string()))?;
     let root = resolver.durable_root().ok_or_else(|| error("this library has no durable managed storage"))?;
@@ -529,7 +580,7 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
         .transpose()?;
     let mut result = Vec::new();
     for (id, intent) in s.catalog.upload_intents() {
-        if selected.as_ref().is_some_and(|selected| !selected.contains(id)) || intent.state == UploadState::Synchronized {
+        if selected.as_ref().is_some_and(|selected| !selected.contains(id)) || (intent.state == UploadState::Synchronized && !verify) {
             continue;
         }
         if result.len() == 32 {
@@ -580,6 +631,74 @@ pub fn start(s: &mut Session, p: &Value) -> Result<Value> {
 }
 pub fn abort(s: &mut Session, p: &Value) -> Result<Value> {
     start_impl(s, p, true, None)
+}
+
+pub(crate) fn remove_local(s: &mut Session, p: &Value, blobs: Vec<Blob>, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
+    let wait = p
+        .get("wait")
+        .map(|value| value.as_bool().ok_or_else(|| error("wait must be true or false")))
+        .transpose()?
+        .unwrap_or(!crate::assets::is_cached_only());
+    if wait && crate::assets::is_cached_only() {
+        return Err(error("desktop local-copy removal runs in the background; omit wait"));
+    }
+    if s.cloud_uploads.pending.len() >= 4 {
+        return Err(error("four storage tasks are running; wait or cancel before removing local copies"));
+    }
+    let resolver = s.media.asset_resolver.clone().ok_or_else(|| error("open a persistent library first"))?;
+    let task = s.activity.start("cache", "Remove Local Originals", crate::activity::Cancel::Yes);
+    let id = task.id();
+    let handle = task.handle();
+    let cancel = task.cancel_flag().ok_or_else(|| error("cache removal cancellation unavailable"))?;
+    let worker_cancel = cancel.clone();
+    let worker_resolver = resolver.clone();
+    let (sender, receiver) = mpsc::sync_channel(2);
+    std::thread::Builder::new()
+        .name("cloud-local-copy".into())
+        .spawn(move || {
+            let result = crate::guard::catch("local cloud copy removal", || {
+                handle.detail("Checking uploaded storage and staging ownership");
+                let prepared = worker_resolver.prepare_cache_removal(&worker_cancel);
+                let mut removed = Vec::new();
+                let mut failed = Vec::new();
+                let total = blobs.len() as u64;
+                for (index, blob) in blobs.into_iter().enumerate() {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        return Err(error("local-copy removal cancelled; remaining data preserved"));
+                    }
+                    let result = match &prepared {
+                        Ok(()) => worker_resolver.evict_worker(&blob, &worker_cancel),
+                        Err(error) => Err(error.clone()),
+                    };
+                    match result {
+                        Ok(()) => removed.push(blob.id),
+                        Err(error) => failed.push(json!({"blob":blob.id,"error":error.to_string()})),
+                    }
+                    handle.progress(index.saturating_add(1) as u64, total);
+                }
+                Ok(json!({"removed":removed,"failed":failed}))
+            })
+            .unwrap_or_else(|message| Err(error(message)));
+            worker_resolver.assets_changed();
+            let _ = sender.send(Event::Finished(result));
+        })
+        .map_err(io)?;
+    s.cloud_uploads.pending.push(Pending {
+        receiver,
+        library: s.library_token(),
+        connection_revision: resolver.connection_revision(),
+        resolver,
+        ids: BTreeMap::new(),
+        connections: BTreeSet::new(),
+        maintenance: None,
+        guard: task,
+        cancel: cancel.clone(),
+    });
+    if wait { wait_task(s, id, cancel, Arc::new(AtomicU64::new(0)), observer) } else { Ok(json!({"background":true,"task":id})) }
+}
+
+pub fn observed_removal(s: &mut Session, p: &Value, observer: &mut dyn FnMut(u64, u64, &str) -> bool) -> Result<Value> {
+    s.execute_fn("cloud.removeLocalCopy", |s| crate::cmd::cloud::remove_local_copy_impl(s, p, Some(observer)))
 }
 
 /// The serving thread polls its transport hook while workers transfer bytes.

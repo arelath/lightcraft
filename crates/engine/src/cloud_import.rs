@@ -92,6 +92,38 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Maintenance reads outside the durable guard and rechecks the namespace epoch
+/// before changing bytes. Every malformed ownership record conservatively stops it.
+pub(crate) fn visit_staging(root: &Path, mut visit: impl FnMut(&Manifest) -> Result<()>) -> Result<()> {
+    let dir = root.join("imports");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_dir() && !meta.file_type().is_symlink() => {}
+        Ok(_) => return Err(error("staging manifest directory is redirected or invalid; data preserved")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io(e)),
+    }
+    for (index, entry) in std::fs::read_dir(&dir).map_err(io)?.enumerate() {
+        if index >= 100_000 {
+            return Err(error("too many staging records to maintain safely; data preserved"));
+        }
+        let entry = entry.map_err(io)?;
+        if entry.path().extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        if !entry.file_type().map_err(io)?.is_file() {
+            return Err(error("staging ownership record is not a regular file; preserved"));
+        }
+        let manifest: Manifest = serde_json::from_slice(&read_bounded(&entry.path(), MAX_MANIFEST_BYTES)?)
+            .map_err(|_| error("invalid or future staging ownership record; data preserved"))?;
+        manifest.validate()?;
+        if entry.file_name() != std::ffi::OsStr::new(&format!("{}.json", manifest.id)) {
+            return Err(error("staging ownership identity differs from filename; preserved"));
+        }
+        visit(&manifest)?;
+    }
+    Ok(())
+}
+
 fn stage(root: &Path, blob: &Blob, bytes: &[u8]) -> Result<()> {
     blob.validate().map_err(error)?;
     if bytes.len() as u64 != blob.size || sha256(bytes) != blob.id {
@@ -233,8 +265,8 @@ impl Job {
             };
             // The identity and intended original precede its immutable copy. A crash here
             // preserves the user's source; recovery reports a missing staged copy.
-            manifest.write(&self.root)?;
-            stage(&self.root, &manifest.asset.original, &bytes)?;
+            self.write_manifest(&manifest, cancel)?;
+            self.stage(&manifest.asset.original, &bytes, cancel)?;
             drop(bytes);
             self.finish(&mut manifest, cancel)?;
             prepared.push(manifest);
@@ -330,13 +362,19 @@ impl Job {
         };
         photo.id = PhotoId(1);
         manifest.photo = Some(Box::new(photo.clone()));
-        manifest.write(&self.root)?;
+        manifest.prepared = false;
+        self.write_manifest(manifest, cancel)?;
         shadow.media.asset_resolver = Some(self.resolver.clone());
         shadow.commit(
             "Prepare cloud import",
             Op::Batch {
                 ops: vec![
-                    Op::SetAsset { id: manifest.asset_id.clone(), asset: Some(Box::new(manifest.asset.clone())) },
+                    // Recovery always regenerates from the original, even when a
+                    // partial manifest already names a prepared proxy.
+                    Op::SetAsset {
+                        id: manifest.asset_id.clone(),
+                        asset: Some(Box::new(Asset { original: manifest.asset.original.clone(), smart_preview: None, thumbnail: None })),
+                    },
                     Op::AddPhoto { photo: Box::new(photo.clone()) },
                 ],
             },
@@ -353,7 +391,9 @@ impl Job {
             )
             .map_err(|e| error(e.to_string()))?,
         );
-        stage(&self.root, &preview_blob, &preview)?;
+        manifest.asset.smart_preview = Some(preview_blob.clone());
+        self.write_manifest(manifest, cancel)?;
+        self.stage(&preview_blob, &preview, cancel)?;
         if cancel.load(Ordering::Relaxed) {
             return Err(error("cloud import cancelled; durable original and prepared data retained"));
         }
@@ -370,11 +410,21 @@ impl Job {
         )
         .map_err(|e| error(e.to_string()))?;
         let thumbnail = make_blob(&png, &self.connection.id, keys::in_library(&self.connection.prefix, &key).map_err(|e| error(e.to_string()))?);
-        stage(&self.root, &thumbnail, &png)?;
-        manifest.asset.smart_preview = Some(preview_blob);
-        manifest.asset.thumbnail = Some(thumbnail);
+        manifest.asset.thumbnail = Some(thumbnail.clone());
+        self.write_manifest(manifest, cancel)?;
+        self.stage(&thumbnail, &png, cancel)?;
         manifest.prepared = true;
+        self.write_manifest(manifest, cancel)
+    }
+
+    fn write_manifest(&self, manifest: &Manifest, cancel: &AtomicBool) -> Result<()> {
+        let _guard = self.resolver.durable_guard(cancel).map_err(|e| error(e.to_string()))?;
         manifest.write(&self.root)
+    }
+
+    fn stage(&self, blob: &Blob, bytes: &[u8], cancel: &AtomicBool) -> Result<()> {
+        let _guard = self.resolver.durable_guard(cancel).map_err(|e| error(e.to_string()))?;
+        stage(&self.root, blob, bytes)
     }
 }
 

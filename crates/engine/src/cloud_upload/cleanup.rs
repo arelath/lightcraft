@@ -91,7 +91,10 @@ fn run(
     let revision = resolver.connection_revision();
     task.detail("Inspecting idle multipart receipts; originals remain protected");
     resolver.validate_storage().map_err(|e| error(e.to_string()))?;
-    let (candidates, remaining) = scan(root, connection, retention, cancel)?;
+    let (candidates, remaining) = {
+        let _guard = resolver.durable_guard(cancel).map_err(|e| error(e.to_string()))?;
+        scan(root, connection, retention, cancel)?
+    };
     let preview = candidates
         .iter()
         .map(|candidate| {
@@ -108,7 +111,10 @@ fn run(
             }
             resolver.validate_storage().map_err(|e| error(e.to_string()))?;
             let path = root.join("uploads").join(format!("{}.json", candidate.receipt.id));
-            let mut receipt = read_receipt(&path)?.ok_or_else(|| error("upload receipt disappeared; cleanup stopped"))?;
+            let mut receipt = {
+                let _guard = resolver.durable_guard(cancel).map_err(|e| error(e.to_string()))?;
+                read_receipt(&path)?.ok_or_else(|| error("upload receipt disappeared; cleanup stopped"))?
+            };
             if receipt != candidate.receipt {
                 return Err(error("upload receipt changed after preview; cleanup stopped without discarding its new state"));
             }
@@ -129,6 +135,7 @@ fn run(
                 // If this atomic write fails, its old ID remains retryable; a confirmed
                 // remote 404 is safe to reconcile on the next explicit cleanup.
                 receipt.multipart.remove(&key);
+                let _guard = resolver.durable_guard(cancel).map_err(|e| error(e.to_string()))?;
                 receipt.write(root)?;
                 aborted += 1;
             }

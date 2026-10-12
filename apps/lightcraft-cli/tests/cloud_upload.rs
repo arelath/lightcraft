@@ -22,6 +22,92 @@ fn until(mut ready: impl FnMut() -> bool) {
 }
 
 #[test]
+fn uploaded_original_removal_preserves_library_previews_remote_data_and_reacquires() {
+    let fixture = Fixture::new();
+    let library = fixture.dir.join("library");
+    let (id, source) = fixture.import(&library, false);
+    let original_bytes = std::fs::read(&source).unwrap();
+    std::fs::remove_file(source).unwrap();
+    let (_, rows) = fixture.run(&library, &[("cloud.removeLocalCopy", json!({"ids":[1]}))]);
+    assert!(!rows[0]["result"]["failed"].as_array().unwrap().is_empty(), "unuploaded original remains durable: {rows:?}");
+    let (output, rows) = fixture.run(&library, &[("cloud.upload", json!({"imports":[id]}))]);
+    assert!(output.status.success(), "{rows:?}");
+    let receipt: Value = serde_json::from_slice(&std::fs::read(library.join("Managed/uploads").join(format!("{id}.json"))).unwrap()).unwrap();
+    let original = receipt["imported"]["asset"]["original"]["id"].as_str().unwrap();
+    let preview = receipt["imported"]["asset"]["smartPreview"]["id"].as_str().unwrap();
+    let objects = fixture.state.lock().unwrap().objects.clone();
+    let working = library.join("Managed/working/awaiting-upload.tif");
+    std::fs::create_dir_all(working.parent().unwrap()).unwrap();
+    std::fs::write(&working, b"durable external revision").unwrap();
+    let (_, rows) = fixture.run(
+        &library,
+        &[
+            ("cloud.pin", json!({"ids":[1],"wait":true})),
+            ("cloud.removeLocalCopy", json!({"ids":[1]})),
+            ("cloud.unpin", json!({"ids":[1]})),
+            ("cloud.removeLocalCopy", json!({"ids":[1]})),
+            ("cloud.status", json!({"ids":[1]})),
+        ],
+    );
+    assert!(rows.iter().all(|row| row["ok"] == true), "{rows:?}");
+    assert_eq!(rows[1]["result"]["failed"].as_array().unwrap().len(), 1, "pins survive restart");
+    assert_eq!(rows[3]["result"]["removed"], json!([original]));
+    assert!(rows[3]["result"]["failed"].as_array().unwrap().is_empty());
+    assert!(!library.join("Managed/blobs").join(original).exists());
+    assert!(library.join("assets-cache").join(preview).is_file(), "editable proxy survives original removal");
+    assert_eq!(std::fs::read(&working).unwrap(), b"durable external revision");
+    assert_eq!(fixture.state.lock().unwrap().objects, objects, "local removal never mutates remote objects");
+    let out = fixture.dir.join("restored.png");
+    let (output, rows) = fixture.run(
+        &library,
+        &[
+            ("cloud.fetch", json!({"ids":[1],"wait":true})),
+            ("app.export", json!({"ids":[1],"path":out,"format":"original"})),
+            ("photo.delete", json!({"ids":[1]})),
+            ("library.emptyRecentlyDeleted", json!({})),
+        ],
+    );
+    assert!(output.status.success(), "{rows:?}");
+    assert_eq!(std::fs::read(out).unwrap(), original_bytes);
+    assert_eq!(fixture.state.lock().unwrap().objects, objects, "library deletion retains immutable remote objects");
+    assert_eq!(std::fs::read(working).unwrap(), b"durable external revision");
+}
+
+#[test]
+fn legacy_synchronized_receipt_requires_explicit_remote_reverification_before_eviction() {
+    let fixture = Fixture::new();
+    let library = fixture.dir.join("library");
+    let (id, _) = fixture.import(&library, false);
+    let (_, rows) = fixture.run(&library, &[("cloud.upload", json!({"imports":[id]}))]);
+    assert_eq!(rows[0]["ok"], true, "{rows:?}");
+    let path = library.join("Managed/uploads").join(format!("{id}.json"));
+    let mut receipt: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let original = receipt["imported"]["asset"]["original"]["id"].as_str().unwrap().to_owned();
+    for field in ["original", "smartPreview", "thumbnail"] {
+        let blob = receipt["imported"]["asset"][field]["id"].as_str().unwrap();
+        let cached = library.join("assets-cache").join(blob);
+        let staged = library.join("Managed/blobs").join(blob);
+        if !staged.exists() {
+            std::fs::copy(&cached, &staged).unwrap();
+        }
+    }
+    receipt["version"] = json!(1);
+    receipt.as_object_mut().unwrap().remove("storage");
+    std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let (_, rows) = fixture.run(&library, &[("cloud.removeLocalCopy", json!({"ids":[1]}))]);
+    assert_eq!(rows[0]["result"]["failed"].as_array().unwrap().len(), 1);
+    assert!(library.join("Managed/blobs").join(&original).is_file());
+    let (_, rows) = fixture.run(&library, &[("cloud.upload", json!({"imports":[id],"verify":true})), ("cloud.removeLocalCopy", json!({"ids":[1]}))]);
+    assert!(rows.iter().all(|row| row["ok"] == true), "{rows:?}");
+    assert_eq!(rows[1]["result"]["removed"], json!([original]));
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()["version"], 2);
+    assert_eq!(
+        fixture.state.lock().unwrap().requests.iter().filter(|(method, key)| method == "PUT" && key.ends_with("/catalog/head.json")).count(),
+        1
+    );
+}
+
+#[test]
 fn process_crash_after_remote_publication_reconciles_before_local_acknowledgement() {
     let fixture = Fixture::new();
     let library = fixture.dir.join("library");

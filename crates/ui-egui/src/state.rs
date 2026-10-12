@@ -728,6 +728,9 @@ pub struct UiState {
     /// Transient toast text, expiry (seconds of app time), and optional colour-label styling.
     #[serde(skip)]
     pub toast: Option<(String, f64, Option<lightcraft_catalog::ColorLabel>)>,
+    /// Desktop cache-removal requests awaiting their actual completion result.
+    #[serde(skip)]
+    pub cloud_removals: std::collections::BTreeSet<u64>,
     /// The result of the last Find Missing Photos (it searches in the background).
     #[serde(skip)]
     pub last_find_missing: Option<serde_json::Value>,
@@ -1142,6 +1145,7 @@ impl Default for UiState {
             compare: None,
             reference: None,
             toast: None,
+            cloud_removals: Default::default(),
             last_find_missing: None,
             status: String::new(),
             dialog: None,

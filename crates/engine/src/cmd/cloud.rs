@@ -27,7 +27,7 @@ fn configure(s: &mut Session, p: &Value) -> Result<Value> {
     }
     connections.push(connection.clone());
     lib.save_cloud_connections(&connections)?;
-    resolver.connect(connection.id.clone(), Arc::new(connection)).map_err(|e| bad(C, e.to_string()))?;
+    resolver.connect_s3(connection).map_err(|e| bad(C, e.to_string()))?;
     resume_offline_pins(s);
     s.cloud_uploads.request_resume(true);
     Ok(json!({"connections": connections}))
@@ -120,7 +120,7 @@ fn reconnect(s: &mut Session, p: &Value) -> Result<Value> {
     let mut connected = Vec::new();
     for connection in connections.into_iter().filter(|connection| id.is_none_or(|id| connection.id == id)) {
         connected.push(connection.id.clone());
-        resolver.connect(connection.id.clone(), Arc::new(connection)).map_err(|e| bad(C, e.to_string()))?;
+        resolver.connect_s3(connection).map_err(|e| bad(C, e.to_string()))?;
     }
     if connected.is_empty() {
         return Err(bad(C, "no matching saved storage connection; connect it first"));
@@ -269,8 +269,12 @@ fn unpin(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn remove_local_copy(s: &mut Session, p: &Value) -> Result<Value> {
+    remove_local_copy_impl(s, p, None)
+}
+
+pub(crate) fn remove_local_copy_impl(s: &mut Session, p: &Value, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
     const C: &str = "cloud.removeLocalCopy";
-    let resolver = resolver(s, C)?;
+    resolver(s, C)?;
     let (album, ids) = pin_targets(s, p, C)?;
     if ids.is_empty() || ids.len() > 100_000 {
         return Err(bad(C, "select between 1 and 100,000 photos"));
@@ -302,15 +306,7 @@ fn remove_local_copy(s: &mut Session, p: &Value) -> Result<Value> {
     for id in affected {
         s.media.forget(id);
     }
-    let mut removed = Vec::new();
-    let mut failed = Vec::new();
-    for (id, blob) in blobs {
-        match resolver.evict(&blob) {
-            Ok(()) => removed.push(id),
-            Err(error) => failed.push(json!({"blob": id, "error": error.to_string()})),
-        }
-    }
-    Ok(json!({"removed": removed, "failed": failed}))
+    crate::cloud_upload::remove_local(s, p, blobs.into_values().collect(), observer)
 }
 
 /// Reconnecting/reopening retries durable offline intent. It never mutates the catalog.
@@ -378,7 +374,7 @@ fn start_offline_pins(s: &Session, wait: bool) -> std::result::Result<Option<u64
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!(query "cloud.upload", "Upload Cloud Originals", [], None, "{imports?: [importId], wait?}; durable upload, multipart resume, remote verification and conditional catalog publication; defaults to background on desktop", always, crate::cloud_upload::start),
+        cmd!(query "cloud.upload", "Upload Cloud Originals", [], None, "{imports?: [importId], verify?: false, wait?}; durable upload, multipart resume, remote verification and conditional catalog publication; verify also rechecks synchronized imports and upgrades legacy destination proof; defaults to background on desktop", always, crate::cloud_upload::start),
         cmd!(query "cloud.uploadStatus", "Cloud Upload Status", [], None, "{}; persistent upload states, running tasks and recent completion reports", always, |s, _| Ok(json!({"running": s.cloud_uploads.running(), "reports": s.cloud_uploads.reports, "uploads": s.catalog.upload_intents()}))),
         cmd!(query "cloud.abortUploads", "Abort Resumable Cloud Uploads", [], None, "{imports: [importId], wait?}; abort only recorded multipart identities while preserving staged originals and existing objects", always, crate::cloud_upload::abort),
         cmd!(query "cloud.cleanupUploads", "Retire Idle Cloud Uploads", [], None, "{connection, olderThanDays?: 7 (1..3650), apply?: false, wait?}; preview or explicitly retire recorded idle multipart sessions, including deleted-photo receipts; preserve originals and working files", always, crate::cloud_upload::cleanup),
@@ -429,6 +425,6 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "cloud.cache", "Cloud Cache Settings", [], None, "{budgetMb?}; device-local disk budget, usage and offline pins; 0 retains only pinned or active bytes", always, cache),
         cmd!(query "cloud.pin", "Keep Cloud Photos Offline", [], None, "{ids? or albumId?, quality?: original|preview, wait?: false}; persist pin intent and return download task; wait only headless; album pins snapshot current members", always, pin),
         cmd!(query "cloud.unpin", "Release Offline Pins", [], None, "{ids? or albumId? or owner?}; release only these owners' pins", always, unpin),
-        cmd!(query "cloud.removeLocalCopy", "Remove Local Original Copy", [], None, "{ids? or albumId?}; preserve library/remote objects/previews; return removed and failed blobs; refuse pinned or in-use bytes", always, remove_local_copy),
+        cmd!(query "cloud.removeLocalCopy", "Remove Local Original Copy", [], None, "{ids? or albumId?, wait?}; preserve library/remote objects/previews; uploaded staging migration runs in background on desktop (headless waits); inspect completion with cloud.uploadStatus; refuse pending, pinned or in-use bytes", always, remove_local_copy),
     ]
 }

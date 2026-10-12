@@ -132,7 +132,7 @@ Native commands use the shared engine registry, CLI, control channel and MCP:
 | `cloud.recoverImports` | `{connection, imports?, wait?}` | Recover validated staged manifests without duplicating recorded imports; optional import IDs limit recovery. |
 | `cloud.status` | `{ids?}` | Report original/proxy/thumbnail availability and active/queued transfers. |
 | `cloud.connections` | `{}` | List device-local connection settings without credentials. |
-| `cloud.upload` | `{imports?: [id], wait?}` | Upload staged imports, resume multipart receipts, verify every object and conditionally publish. Headless defaults to waiting; desktop returns an activity task. |
+| `cloud.upload` | `{imports?: [id], verify?: false, wait?}` | Upload staged imports, resume multipart receipts, verify every object and conditionally publish. `verify` explicitly rechecks synchronized imports and upgrades legacy receipts. Headless defaults to waiting; desktop returns an activity task. |
 | `cloud.uploadStatus` | `{}` | Inspect durable upload states, running tasks and recent reports. |
 | `cloud.abortUploads` | `{imports: [id], wait?}` | Explicitly abort known incomplete multipart sessions, retaining staged originals and complete remote objects. |
 | `cloud.cleanupUploads` | `{connection, olderThanDays?: 7, apply?: false, wait?}` | Preview/retire idle recorded multipart sessions, including deleted-photo receipts. Preserve original/working bytes; defaults to background on desktop. |
@@ -141,7 +141,7 @@ Native commands use the shared engine registry, CLI, control channel and MCP:
 | `cloud.cache` | `{budgetMb?}` | Inspect/set the device-local asset budget; return usage, persistent offline owners and recovery errors. |
 | `cloud.pin` | `{ids? or albumId?, quality?: "original" or "preview", wait?: false}` | Persist offline intent and return a download task; headless `wait` finishes before return. Album pins retain current managed members; repeat after membership changes. |
 | `cloud.unpin` | `{ids? or albumId? or owner?}` | Release those owners' pins, preserving other photos/albums that share the blob. `owner` can release a deleted photo/album's retained pin. |
-| `cloud.removeLocalCopy` | `{ids? or albumId?}` | Remove eligible original cache bytes; preserve library records, remote objects and previews. Report each removed or refused blob. |
+| `cloud.removeLocalCopy` | `{ids? or albumId?, wait?}` | Remove eligible original cache bytes; preserve library records, remote objects and previews. Desktop returns a cancellable activity task; CLI/MCP wait by default. Inspect completion in `cloud.uploadStatus`. |
 
 Pass a JSON parameter object after `cloud.configure` in `lightcraft-cli run --library LIBRARY`:
 
@@ -181,11 +181,35 @@ Physical folder moves reject managed photos and direct the user to albums and lo
 
 `assets-cache/retention.json` stores a versioned policy, a 20 GiB default budget, pin owners and explicitly removed originals. It is not catalog data. Zero budget retains only pinned or actively leased bytes. Original, smart-preview and thumbnail blobs share the asset budget; the existing rendered-thumbnail cache has its own budget. Pins and active operations may exceed the soft limit, and usage is measured asynchronously.
 
-A bounded maintenance worker evicts least recently used eligible flat SHA-256 cache files. Acquisitions and eviction share per-blob gates; decoded-source clones retain an `Arc<AssetLease>` throughout their memory-cache/job lifetime. Downloads, decoding and exports therefore keep their source bytes protected. Every cache blob is a verified download of an already uploaded object. Import staging and the reserved external-working-copy namespace use the separate durable `Managed/` directory and cannot enter this disposable cache.
+A bounded maintenance worker evicts least recently used eligible flat SHA-256 cache files. Acquisitions and eviction share per-blob gates; decoded-source clones retain an `Arc<AssetLease>` throughout their memory-cache/job lifetime. Downloads, decoding and exports therefore keep their source bytes protected. Cache bytes are verified downloads or verified copies of safely uploaded staging data.
+
+Staging migration requires an fsynced synchronized catalog acknowledgement, a matching version-2 receipt,
+verified remote objects, no unfinished multipart sessions, and the receipt's matching storage destination.
+Every other pending catalog intent, import manifest and upload receipt protects its referenced blobs,
+including shared bytes destined for another bucket. Missing, malformed, redirected, future or legacy
+ownership records fail closed. A worker atomically copies and verifies the cache file before removing
+the staged link; active leases defer migration and offline pins protect the resulting cache copy.
+Namespace guards and generation checks serialize this operation with staging and receipt writers.
+`cloud.cache` reports migration errors separately as `stagingError`.
+
+Legacy synchronized receipts remain durable until explicitly reverified with
+`cloud.upload {"imports":["import-id"],"verify":true}` using their original destination.
+This reads back object hashes, reconciles publication and saves the new destination proof before
+migration becomes eligible. It does not republish a matching mutation. Missing staged bytes needed
+to repair a missing remote object produce a recovery error rather than discarding local data.
+`Managed/working/` and unsynchronized originals never become cache eviction candidates.
 
 Photo and album pin owners are independent even when virtual copies share bytes. Preview pinning requires an editable `.lcsp` rendition and returns an actionable error if one is absent. The pin intent is atomically saved before downloading, retried when reopening or reconnecting, and retained after failed/cancelled transfers. Album pins snapshot their current cloud members; local-file members are already local and are skipped. Repeating a pin updates that owner's snapshot.
 
 Removing an original first releases decoded sources for every photo sharing it. Active workers and persistent pins still block removal. Removed originals are not automatically downloaded again for preview-allowed browsing; previews and disposable rendered thumbnails remain usable. Explicit download, metadata and original-required export can reacquire them. This operation never deletes the photo or the remote object.
+
+`photo.delete` moves library records to Recently Deleted; restoring or undoing preserves the managed
+asset reference. Emptying Recently Deleted removes local photo records and memberships while retaining
+asset/upload records and staged or working data for recovery. Neither deletion command issues an object
+DELETE. Immutable image objects, catalog history and deleted-photo receipts are retained indefinitely
+in this implementation; there is no automatic remote garbage collector. Explicit multipart retention
+only aborts incomplete uploads and preserves these objects. Multi-device tombstones and conflict
+recovery are separate synchronization work and are not yet provided by local library deletion.
 
 Malformed, oversized or future retention settings are preserved and reported. Policy writes and eviction are disabled until repaired; verified local bytes remain usable. Atomic-save failures preserve the previous policy. Settings and staging files, subdirectories and symbolic links are never eviction candidates.
 
@@ -199,7 +223,7 @@ Engine tests cover a cloud-only synthetic Bayer DNG opening, developing, exporti
 
 The native desktop acceptance also passed on 2026-10-12 using control port 18837 and a separate loopback server that independently checked SigV4 with Python's HMAC implementation. It attached the remote-only RAW, applied +0.75 exposure, reached a completed native render, saved its catalog and exported a 32×24 PNG. One verified request acquired the original; the export reused it. The inspected native screenshot and results are in gitignored `target/cloud-acceptance/`. The final inspected frame measured 0.82 ms for UI update and 6.29 ms for the last render, with no queued or in-flight renders. These measurements use a tiny synthetic fixture and are not a large-library performance benchmark. This does not establish live AWS interoperability. Per-task completion and actual validation results are recorded in `tasks.md`.
 
-Unchecked work includes staging/cache migration, associated XMP and external-editor ingestion, synchronization/conflicts, browser adapters and the optional backend. Durable local import, recovery, verified uploads, explicit idle multipart retention and initial conditional publication are implemented; staged originals and the reserved working directory are protected from cache eviction. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
+Unchecked work includes associated XMP and external-editor ingestion, synchronization/conflicts and browser adapters. The optional backend is deferred at the user's request. Durable local import, recovery, verified uploads, staging/cache migration, explicit idle multipart retention and initial conditional publication are implemented; unsynchronized originals and the reserved working directory are protected from cache eviction. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
 
 `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF checks, workspace tests, parity references, layering, asset attribution and WASM on Windows. The required Rust 1.95 toolchain exposed older Clippy suggestions and Unix-specific test assumptions, which were corrected. Recovery tests also exposed duplicate Windows `.xmp`/`.XMP` alias moves: sidecar operations now deduplicate physical aliases, preserve actual filename spelling and retain distinct packets on sensitive volumes. Synthetic and native regressions cover these cases.
 
@@ -242,6 +266,22 @@ CLI/MCP regressions cover deleted-photo cleanup, preview/young-session preservat
 rejected credentials/destination changes, ping/cancellation and uncertain-response recovery. Engine checks cover
 future timestamps, corrupt/future/legacy/misnamed receipts, connection reservations and failed retirement writes.
 
+## Staging migration and deletion acceptance
+
+Staging/cache and deletion acceptance passed on 2026-10-12 through native control port 18867.
+The generated 9 MiB RAW was editable while upload credentials were rejected. Pending and pinned
+removals were refused; the Info button displayed the actual refusal and later successful removal.
+Proxy export succeeded without original access, full-quality export reacquired the original, and
+permanent library deletion left every remote object and a durable working file unchanged. A corrupt
+ownership record appeared as a staging error in Performance settings and was preserved until repaired.
+Screenshots were inspected: `native-managed-retention-pinned-refusal.png`,
+`native-managed-retention-removed.png` and `native-managed-retention-staging-error.png`.
+Results and independently verified signed requests are in `target/cloud-acceptance/`.
+Maximum inspection latency was 48 ms; final UI update was 18.74 ms with empty render queues.
+These are tiny procedural images, not real-camera or large-library benchmarks. Live bucket testing
+remains pending. Engine regressions cover six durability, ownership, cancellation, corruption and
+restart scenarios; real CLI/MCP upload coverage includes legacy proof upgrade and retention/reacquisition.
+
 ## Revision history
 
 | Date | Change |
@@ -255,3 +295,4 @@ future timestamps, corrupt/future/legacy/misnamed receipts, connection reservati
 | 2026-10-12 | Durable upload receipts, resumable multipart transfer, SHA-256 readback verification, conditional initial publication and headless MCP byte progress/ping/cancellation; native connection/import and retry controls. |
 | 2026-10-12 | Logical managed rename and album-folder organization; mixed-source undo/restart and rename-sequence overflow regression, native offline organization/export acceptance. |
 | 2026-10-12 | Explicit idle multipart retention, deleted-photo receipt recovery, destination-bound receipts and abort verification; native activity cancellation/retry and durable-byte preservation. |
+| 2026-10-12 | Verified staging/cache migration after durable acknowledgement, legacy receipt re-verification, cancellable local-copy removal and explicit retained-object deletion policy; native completion feedback and staging-error display. |

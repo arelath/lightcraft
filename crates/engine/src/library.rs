@@ -548,13 +548,21 @@ impl Session {
                 Ok(connections) => {
                     if let Some(resolver) = &self.media.asset_resolver {
                         for connection in connections {
-                            resolver
-                                .connect(connection.id.clone(), std::sync::Arc::new(connection))
-                                .map_err(|e| EngineError::Other(e.to_string()))?;
+                            resolver.connect_s3(connection).map_err(|e| EngineError::Other(e.to_string()))?;
                         }
                     }
                 }
                 Err(e) => lib.settings_warnings.push(e.to_string()),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.staging_dirty.clear();
+            if let Some(resolver) = &self.media.asset_resolver {
+                for (id, intent) in self.catalog.upload_intents() {
+                    let value = self.catalog.asset(&intent.asset_id).map(|asset| (intent, asset));
+                    resolver.note_staging_intent(id, value, true);
+                }
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -597,6 +605,14 @@ impl Session {
         {
             log::error!("library: compaction: {e}");
             lib.last_error = Some(format!("compaction: {e}"));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(resolver) = &self.media.asset_resolver {
+            for id in std::mem::take(&mut self.staging_dirty) {
+                let value =
+                    self.catalog.upload_intents().get(&id).and_then(|intent| self.catalog.asset(&intent.asset_id).map(|asset| (intent, asset)));
+                resolver.note_staging_intent(&id, value, true);
+            }
         }
         let presets = presets_json(self);
         let Some(lib) = self.library.as_mut() else { return Ok(()) };

@@ -64,7 +64,8 @@ read/cache foundation and device-local retention controls are described in [clou
 Durable managed import stages originals and renditions, journals the photo and upload intent atomically,
 and recovers staged work without duplicates. Resumable verified uploads publish initial imports conditionally;
 logical rename and album-folder organization preserve their immutable objects. Explicit idle multipart cleanup
-includes deleted-photo receipts and preserves durable bytes. Staging/cache migration, associated XMP,
+includes deleted-photo receipts and preserves durable bytes. Verified staging/cache migration and
+local-copy removal are separate from retained-object library deletion. Associated XMP,
 external-edit ingestion, multi-device synchronization and browser transfers remain open. This closes none of the ranked Lightroom parity gaps
 or beta blockers above.
 

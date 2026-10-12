@@ -454,6 +454,7 @@ fn performance_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(resolver) = &app.session.media.asset_resolver {
         let (budget, used, pinned) = resolver.cache_usage();
+        let (policy_error, staging_error) = resolver.cache_errors();
         heading(ui, t, crate::i18n::tr("Cloud asset cache"));
         row(ui, t, crate::i18n::tr("Size limit"), |ui| {
             let opts = [(0u32, "Pinned only"), (1024, "1 GB"), (5120, "5 GB"), (20480, "20 GB"), (102400, "100 GB")];
@@ -467,6 +468,11 @@ fn performance_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
         row(ui, t, crate::i18n::tr("In use"), |ui| {
             ui.label(RichText::new(format!("{:.1} MB · {:.1} MB pinned", used as f64 / 1048576.0, pinned as f64 / 1048576.0)).color(t.text));
         });
+        for (label, error) in [("Cache policy", policy_error), ("Durable staging", staging_error)] {
+            if let Some(error) = error {
+                ui.label(RichText::new(format!("{label}: {error}")).color(t.caution));
+            }
+        }
         hint(
             ui,
             t,
