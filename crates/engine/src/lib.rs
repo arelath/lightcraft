@@ -497,16 +497,27 @@ impl Session {
     fn apply_catalog(&mut self, op: Op) -> Result<Op> {
         let inv = self.catalog.apply(op.clone())?;
         let mut pending = vec![&op];
+        let mut assets_changed = false;
         while let Some(op) = pending.pop() {
             match op {
                 Op::SetFile { id, .. } | Op::Relink { id, .. } | Op::SetContent { id, .. } | Op::RemovePhoto { id } => self.media.forget(*id),
                 Op::AddPhoto { photo } => self.media.forget(photo.id),
-                Op::SetAsset { .. } => {
-                    self.media.managed_assets = self.catalog.assets().clone();
-                    self.media.clear_sources();
+                Op::SetAsset { id, .. } => {
+                    if let Some(asset) = self.catalog.asset(id) {
+                        self.media.managed_assets.insert(id.clone(), asset.clone());
+                    } else {
+                        self.media.managed_assets.remove(id);
+                    }
+                    assets_changed = true;
                 }
                 Op::Batch { ops } => pending.extend(ops),
                 _ => {}
+            }
+        }
+        if assets_changed {
+            self.media.clear_sources();
+            if let Some(resolver) = &self.media.asset_resolver {
+                resolver.assets_changed();
             }
         }
         Ok(inv)

@@ -44,7 +44,7 @@ use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AssetError {
-    #[error("source is not ready on this device; download it with cloud.fetch and retry")]
+    #[error("this cloud photo is unavailable on this device; download its original or reconnect to load an available preview")]
     Pending,
     #[error("invalid asset: {0}")]
     Invalid(String),
@@ -206,6 +206,9 @@ impl AssetResolver {
     }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+    pub(crate) fn assets_changed(&self) {
+        self.changed();
     }
     pub fn connect(&self, id: String, store: Arc<dyn BlobStore>) -> Result<()> {
         if !lightcraft_catalog::assets::identifier(&id) {
@@ -426,6 +429,7 @@ impl TransferManager for AssetResolver {
 pub mod s3;
 
 pub mod cache;
+pub mod keys;
 
 impl AssetResolver {
     pub fn cache_status(&self) -> cache::CacheStatus {

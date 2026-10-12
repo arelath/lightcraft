@@ -470,3 +470,115 @@ fn pinned_preview_restarts_offline_edits_and_explicit_proxy_export_preserves_mem
     assert_eq!(reopened.execute("library.missing", &serde_json::json!({})).unwrap(), serde_json::json!([]));
     assert!(reopened.render_now(lightcraft_catalog::PhotoId(id), 16, 12).is_ok(), "removal retains the pinned editable preview");
 }
+
+#[test]
+fn managed_thumbnail_browses_without_original_and_is_not_reused_after_an_edit() {
+    let scratch = Scratch::new();
+    let pixels = lightcraft_raster::Rgb32f::from_fn(32, 24, |_, _| [0.2, 0.3, 0.4]).to_srgb8();
+    let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&pixels), &Default::default()).unwrap();
+    let original = lightcraft_codecs::encode_png(
+        &lightcraft_codecs::EncodeImage::rgba8(&pixels),
+        &lightcraft_codecs::EncodeMeta { ppi: Some(300), ..Default::default() },
+    )
+    .unwrap();
+    let provider = store(&png);
+    let mut session = crate::Session::new().with_fs();
+    session.open_library(&scratch.0, false).unwrap();
+    let resolver = session.media.asset_resolver.as_ref().unwrap().clone();
+    resolver.connect("memory".into(), provider.clone()).unwrap();
+    let mut asset = Asset { original: blob(&original), smart_preview: None, thumbnail: None };
+    let attached = session
+        .execute(
+            "cloud.attach",
+            &serde_json::json!({"assetId": "thumbnail", "asset": asset, "fileName": "cloud.png", "format": "PNG", "width": 32, "height": 24}),
+        )
+        .unwrap();
+    let id = lightcraft_catalog::PhotoId(attached["id"].as_u64().unwrap());
+    let photo = session.catalog.photo(id).unwrap();
+    let mut thumbnail = blob(&png);
+    thumbnail.remote.key = keys::in_library(
+        "library",
+        &keys::thumbnail(&asset.original.id, photo.develop.hash64(), crate::Session::cloud_thumbnail_parameters(photo, true).0, 512, &thumbnail.id)
+            .unwrap(),
+    )
+    .unwrap();
+    asset.thumbnail = Some(thumbnail.clone());
+    if let Some(path) = std::env::var_os("LIGHTCRAFT_CLOUD_PREVIEW_ACCEPTANCE_DIR") {
+        let path = PathBuf::from(path);
+        std::fs::create_dir_all(&path).unwrap();
+        let working = lightcraft_codecs::decode(&original, Default::default()).unwrap().to_working();
+        let preview = crate::smart::encode(&working, None).unwrap();
+        let mut preview_blob = blob(&preview);
+        preview_blob.remote.key = keys::in_library("library", &keys::smart_preview(&asset.original.id, &preview_blob.id).unwrap()).unwrap();
+        let mut fixture_asset = asset.clone();
+        fixture_asset.smart_preview = Some(preview_blob);
+        let attach =
+            serde_json::json!({"assetId": "thumbnail", "asset": fixture_asset, "fileName": "cloud.png", "format": "PNG", "width": 32, "height": 24});
+        std::fs::write(path.join("preview-original.png"), &original).unwrap();
+        std::fs::write(path.join("preview-thumbnail.png"), &png).unwrap();
+        std::fs::write(path.join("preview-smart.lcsp"), &preview).unwrap();
+        std::fs::write(path.join("preview-attach.json"), serde_json::to_vec_pretty(&attach).unwrap()).unwrap();
+    }
+    session
+        .commit(
+            "Publish thumbnail",
+            lightcraft_catalog::Op::SetAsset { id: lightcraft_catalog::assets::AssetId("thumbnail".into()), asset: Some(Box::new(asset.clone())) },
+        )
+        .unwrap();
+    let job = session.thumb_job(id, 384).unwrap();
+    assert!(session.quick_thumb_is_final(session.catalog.photo(id).unwrap(), 384));
+    assert!(!session.quick_thumb_is_final(session.catalog.photo(id).unwrap(), 1024));
+    let quick = session.quick_thumb_job(&job).unwrap().run();
+    assert_eq!(quick.quick, Some(crate::media::QuickSource::ManagedThumbnail));
+    assert_eq!(quick.rendered.unwrap().image.data, pixels.data);
+    assert_eq!(provider.reads.load(Ordering::Relaxed), 1);
+    assert_eq!(resolver.availability(&asset.original.id), AssetAvailability::Remote);
+    assert!(!resolver.root().join(&asset.original.id.0).exists());
+    assert!(session.quick_view_job(id, 1600, true).unwrap().managed.is_some());
+    assert!(session.quick_view_job(id, 1600, false).unwrap().managed.is_none(), "a cropped rendition cannot stand in for an uncropped view");
+    let old_variant = session.variant_job(id, &session.catalog.photo(id).unwrap().develop.clone(), 256).unwrap().key;
+    resolver.evict(&thumbnail).unwrap();
+    let new_variant = session.variant_job(id, &session.catalog.photo(id).unwrap().develop.clone(), 256).unwrap().key;
+    assert_ne!(old_variant, new_variant, "managed variant renders invalidate with asset availability");
+    session.execute("develop.set", &serde_json::json!({"id": id.0, "control": "light.exposure", "value": 1.0})).unwrap();
+    let edited = session.thumb_job(id, 384).unwrap();
+    assert!(session.quick_thumb_job(&edited).is_none(), "another recipe never reuses the shared asset thumbnail");
+    assert!(!session.quick_thumb_is_final(session.catalog.photo(id).unwrap(), 384));
+}
+
+#[test]
+fn adding_a_rendition_invalidates_queued_sources_and_quick_render_keys() {
+    let scratch = Scratch::new();
+    let mut session = crate::Session::new().with_fs();
+    session.open_library(&scratch.0, false).unwrap();
+    let image = lightcraft_raster::Rgb32f::from_fn(16, 12, |_, _| [0.2, 0.3, 0.4]);
+    let preview = crate::smart::encode(&image, None).unwrap();
+    let mut asset = Asset { original: blob(b"unavailable original"), smart_preview: Some(blob(&preview)), thumbnail: None };
+    let resolver = session.media.asset_resolver.as_ref().unwrap().clone();
+    resolver.connect("memory".into(), store(&preview)).unwrap();
+    let attached = session
+        .execute(
+            "cloud.attach",
+            &serde_json::json!({"assetId": "updated", "asset": asset, "fileName": "cloud.raw", "width": 32, "height": 24, "kind": "raw"}),
+        )
+        .unwrap();
+    let id = lightcraft_catalog::PhotoId(attached["id"].as_u64().unwrap());
+    let old = session.render_job(id, 16, 12, false, true).unwrap().run();
+    assert!(old.loaded.is_some());
+    let quick_before = session.quick_view_job(id, 512, true).unwrap().key;
+    let generation = resolver.generation();
+    asset.thumbnail = Some(blob(b"new rendition"));
+    session
+        .commit(
+            "Add rendition",
+            lightcraft_catalog::Op::SetAsset { id: lightcraft_catalog::assets::AssetId("updated".into()), asset: Some(Box::new(asset)) },
+        )
+        .unwrap();
+    assert!(resolver.generation() > generation);
+    assert_ne!(quick_before, session.quick_view_job(id, 512, true).unwrap().key);
+    session.accept(&old);
+    assert!(
+        session.media.get(id, crate::media::SourceLevel::Thumb).is_none(),
+        "a result captured before a rendition update cannot repopulate the decoded cache"
+    );
+}

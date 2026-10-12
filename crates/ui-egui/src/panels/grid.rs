@@ -468,11 +468,15 @@ pub fn request_thumb(app: &mut LightcraftApp, id: PhotoId, size: usize, priority
     {
         app.renderer.thumb_jobs_built += 1;
     }
-    let quick = if app.renderer.textures.contains_key(&Slot::Thumb(id)) { None } else { app.session.quick_thumb_job(&job) };
+    let quick = if app.renderer.textures.contains_key(&Slot::Thumb(id)) || app.renderer.thumb_quick_failed(id, job.key) {
+        None
+    } else {
+        app.session.quick_thumb_job(&job)
+    };
     // A cached render is a stand-in for whatever comes next; an embedded camera preview of an
     // unedited raw is the picture itself, so no sensor decode is scheduled behind it.
     let embedded_is_final =
-        quick.is_some() && app.session.catalog.photo(id).is_some_and(|p| skips_the_real_render(app.session.embedded_thumb_is_final(p), true));
+        quick.is_some() && app.session.catalog.photo(id).is_some_and(|p| skips_the_real_render(app.session.quick_thumb_is_final(p, bucket), true));
     if let Some(photo) = app.session.catalog.photo(id) {
         if embedded_is_final {
             app.renderer.remember_embedded_thumb(photo, bucket, job.key);

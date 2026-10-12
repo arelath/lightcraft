@@ -1034,6 +1034,8 @@ fn develop_image(
 pub enum QuickSource {
     /// The photo's own develop render for its current settings (cached view or thumbnail render).
     Cached,
+    /// An immutable cloud thumbnail for this exact recipe and rendering context.
+    ManagedThumbnail,
     /// The camera's embedded JPEG (unedited raws).
     Embedded,
     /// A thumbnail-level develop render made for the occasion.
@@ -1049,10 +1051,43 @@ pub struct QuickJob {
     pub key: u64,
     /// Cached renders to try first, in order: (cache, key).
     pub cached: Vec<(Arc<PreviewCache>, Hash128)>,
+    pub managed: Option<ManagedThumbnail>,
     /// Embedded preview of an unedited raw: (path, loader, max edge).
     pub embedded: Option<(String, PreviewLoader, usize)>,
     /// Last resort: run this thumbnail job.
     pub small: Option<Box<RenderJob>>,
+}
+
+#[derive(Clone)]
+pub struct ManagedThumbnail {
+    pub blob: lightcraft_catalog::assets::Blob,
+    pub resolver: Arc<crate::assets::AssetResolver>,
+    pub edge: u32,
+    pub stored_edge: u32,
+}
+
+impl ManagedThumbnail {
+    fn load(&self) -> Result<Rgba8, String> {
+        use crate::assets::TransferManager;
+        if self.blob.size > 16 << 20 {
+            return Err("cloud thumbnail exceeds the 16 MiB limit".into());
+        }
+        let lease = self.resolver.acquire(&self.blob, &std::sync::atomic::AtomicBool::new(false)).map_err(|e| e.to_string())?;
+        let bytes = lease.read_bytes().map_err(|e| e.to_string())?;
+        if lightcraft_codecs::sniff(&bytes) != Some(lightcraft_codecs::Format::Png) {
+            return Err("cloud thumbnail must be a display-ready PNG".into());
+        }
+        let edge = self.edge.clamp(1, crate::assets::keys::MAX_THUMB_EDGE);
+        let decoded = lightcraft_codecs::decode(
+            &bytes,
+            lightcraft_codecs::DecodeOptions { max_size: Some((edge, edge)), max_pixels: u64::from(crate::assets::keys::MAX_THUMB_EDGE).pow(2) },
+        )
+        .map_err(|e| e.to_string())?;
+        if decoded.orientation != 1 {
+            return Err("cloud thumbnail must already be oriented".into());
+        }
+        Ok(decoded.to_srgb8())
+    }
 }
 
 impl QuickJob {
@@ -1079,6 +1114,11 @@ impl QuickJob {
             if let Some(img) = cache.get(*k) {
                 return done(rendered(Arc::unwrap_or_clone(img)), Some(QuickSource::Cached));
             }
+        }
+        if let Some(thumbnail) = &self.managed
+            && let Ok(image) = thumbnail.load()
+        {
+            return done(rendered(image), Some(QuickSource::ManagedThumbnail));
         }
         if let Some((path, loader, edge)) = &self.embedded
             && let Some(image) = loader(path, *edge)
@@ -1129,6 +1169,67 @@ pub fn source_info(p: &Photo) -> SourceInfo {
 }
 
 impl crate::Session {
+    fn source_key(&self, p: &Photo) -> Hash128 {
+        let mut hash = Hasher128::new();
+        hash.str(&content_key(p));
+        if let Source::Managed { asset_id } = &p.source
+            && let Some(asset) = self.catalog.asset(asset_id)
+        {
+            hash.str(&asset.original.id.0)
+                .str(asset.smart_preview.as_ref().map_or("", |b| &b.id.0))
+                .str(asset.thumbnail.as_ref().map_or("", |b| &b.id.0));
+        }
+        hash.finish()
+    }
+
+    pub fn cloud_thumbnail_parameters(p: &Photo, apply_crop: bool) -> Hash128 {
+        let info = source_info(p);
+        let mut hash = Hasher128::new();
+        hash.str("cloud-thumbnail-srgb8-png")
+            .u64(RENDER_CACHE_VERSION)
+            .u64(crate::camera_profiles::cache_key())
+            .u64(apply_crop as u64)
+            .u64(u64::from(p.width))
+            .u64(u64::from(p.height))
+            .u64(info.raw as u64)
+            .u64(info.as_shot_temp.to_bits())
+            .u64(info.as_shot_tint.to_bits())
+            .u64(info.relative_wb as u64)
+            .u64(info.legacy_relative_wb as u64);
+        if let Ok(lens) = serde_json::to_string(&p.embedded_lens) {
+            hash.str(&lens);
+        }
+        hash.finish()
+    }
+
+    fn cloud_thumbnail(&self, p: &Photo, edge: usize, apply_crop: bool) -> Option<ManagedThumbnail> {
+        let Source::Managed { asset_id } = &p.source else { return None };
+        let asset = self.catalog.asset(asset_id)?;
+        let blob = asset.thumbnail.as_ref()?;
+        let params = Self::cloud_thumbnail_parameters(p, apply_crop);
+        let stored_edge = crate::assets::keys::thumbnail_edge(blob, &asset.original.id, p.develop.hash64(), params.0)?;
+        Some(ManagedThumbnail {
+            blob: blob.clone(),
+            resolver: self.media.asset_resolver.clone()?,
+            edge: u32::try_from(edge.clamp(1, 1024)).ok()?,
+            stored_edge,
+        })
+    }
+
+    /// Exact cloud renditions can be final grid thumbnails, like camera previews of unedited raws.
+    pub fn quick_thumb_is_final(&self, p: &Photo, edge: usize) -> bool {
+        self.embedded_thumb_is_final(p) || self.cloud_thumbnail(p, edge, true).is_some_and(|thumb| thumb.stored_edge as usize >= edge)
+    }
+
+    fn current_variant_key(&self, p: &Photo, settings: &DevelopSettings, edge: usize) -> Hash128 {
+        let key = Self::variant_key(p, settings, edge);
+        if matches!(p.source, Source::Managed { .. }) {
+            Hasher128::new().u64(key.0 as u64).u64((key.0 >> 64) as u64).u64(self.media.asset_salt(p)).finish()
+        } else {
+            key
+        }
+    }
+
     /// Build a render job for `id` fitting `max_w × max_h`. `before` renders the unedited look.
     pub fn render_job(&mut self, id: PhotoId, max_w: usize, max_h: usize, before: bool, apply_crop: bool) -> Option<RenderJob> {
         self.build_job(id, max_w, max_h, before, apply_crop, None)
@@ -1170,7 +1271,7 @@ impl crate::Session {
         // share a result (a view slot showing photo A would otherwise look current for photo B)
         // …and so is the file's content: a file changed on disk (Reload) renders afresh
         let content_key = content_key(&p);
-        let source_key = Hasher128::new().str(&content_key).finish();
+        let source_key = self.source_key(&p);
         let content = source_key.0 as u64;
         // Temporary "before" settings must not replace the photo's cached develop hash.
         let settings_hash = if before { settings.hash64() } else { self.media.settings_hashes.get(id, &settings) };
@@ -1243,12 +1344,12 @@ impl crate::Session {
         let edge = edge.clamp(16, SourceLevel::Thumb.max_edge());
         let level = SourceLevel::Thumb;
         let source = self.media.source_ref(&p, level);
-        let ck = Self::variant_key(&p, settings, edge);
+        let ck = self.current_variant_key(&p, settings, edge);
         Some(RenderJob {
             proxy_export: false,
             request_id: 0,
             cache_generation: self.media.rendered.generation(),
-            source_key: Some(Hasher128::new().str(&content_key(&p)).finish()),
+            source_key: Some(self.source_key(&p)),
             photo: id,
             level,
             source,
@@ -1290,12 +1391,12 @@ impl crate::Session {
         let needed = (edge as f64 * w.max(h) / side).ceil().min(SourceLevel::Preview.max_edge() as f64);
         let level = SourceLevel::for_size(needed as usize);
         let source = self.media.source_ref(&p, level);
-        let ck = Self::variant_key(&p, &settings, edge);
+        let ck = self.current_variant_key(&p, &settings, edge);
         Some(RenderJob {
             proxy_export: false,
             request_id: 0,
             cache_generation: self.media.rendered.generation(),
-            source_key: Some(Hasher128::new().str(&content_key(&p)).finish()),
+            source_key: Some(self.source_key(&p)),
             photo: id,
             level,
             source,
@@ -1466,9 +1567,10 @@ impl crate::Session {
         // (the thumbnail job itself starts with the cached thumbnail, after the sharper embedded preview)
         let cached = vec![(self.media.rendered.clone(), self.view_key(&p, apply_crop))];
         let h = Hasher128::new().str(&content_key(&p)).str("quick").u64(p.develop.hash64()).u64(apply_crop as u64).finish();
-        let key = h.0 as u64;
+        let key = (h.0 as u64) ^ self.media.asset_salt(&p);
+        let managed = self.cloud_thumbnail(&p, max_edge, apply_crop);
         let embedded = self.embedded_of(&p).map(|(path, l)| (path, l, max_edge.clamp(1, SourceLevel::Preview.max_edge())));
-        Some(QuickJob { request_id: 0, photo: id, key, cached, embedded, small: apply_crop.then(|| Box::new(small)) })
+        Some(QuickJob { request_id: 0, photo: id, key, cached, managed, embedded, small: apply_crop.then(|| Box::new(small)) })
     }
 
     /// A first grid thumbnail for an unedited raw: the cached render for `job` (the real
@@ -1477,14 +1579,19 @@ impl crate::Session {
     /// other photos (render them directly).
     pub fn quick_thumb_job(&mut self, job: &RenderJob) -> Option<QuickJob> {
         let p = self.catalog.photo(job.photo)?.clone();
-        let (path, l) = self.embedded_of(&p)?;
         let edge = job.request.max_w.max(job.request.max_h);
+        let embedded = self.embedded_of(&p).map(|(path, loader)| (path, loader, edge));
+        let managed = self.cloud_thumbnail(&p, edge, true);
+        if embedded.is_none() && managed.is_none() {
+            return None;
+        }
         Some(QuickJob {
             request_id: 0,
             photo: job.photo,
             key: job.key,
             cached: job.cache.clone().into_iter().collect(),
-            embedded: Some((path, l, edge)),
+            managed,
+            embedded,
             small: None,
         })
     }
@@ -1493,7 +1600,7 @@ impl crate::Session {
     /// has wrong is corrected too ([`Self::learn_as_shot_wb`]).
     pub fn accept(&mut self, r: &RenderResult) {
         if let Some(src) = &r.loaded
-            && r.source_key.is_none_or(|key| self.catalog.photo(r.photo).is_some_and(|p| Hasher128::new().str(&content_key(p)).finish() == key))
+            && r.source_key.is_none_or(|key| self.catalog.photo(r.photo).is_some_and(|p| self.source_key(p) == key))
         {
             if let Some(info) = &src.info {
                 self.learn_as_shot_wb(r.photo, info);

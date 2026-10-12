@@ -50,9 +50,9 @@ Verified retention slice (2026-10-12): configurable asset budgets, independent p
 
 ### Previews and background transfers
 
-- [ ] **CS2.1** Define versioned remote keys for smart previews and thumbnails, with thumbnails keyed by source, edits, and rendering parameters; retain the existing thumbnail cache as a separate disposable cache.
-- [ ] **CS2.2** Adapt `.lcsp` smart-preview loading and discovery to managed assets; load thumbnails and editable proxies before fetching originals where the operation permits.
-- [ ] **CS2.3** Show an available preview immediately when opening a photo and refresh the rendering when a better source arrives.
+- [x] **CS2.1** Define versioned remote keys for smart previews and thumbnails, with thumbnails keyed by source, edits, and rendering parameters; retain the existing thumbnail cache as a separate disposable cache.
+- [x] **CS2.2** Adapt `.lcsp` smart-preview loading and discovery to managed assets; load thumbnails and editable proxies before fetching originals where the operation permits.
+- [x] **CS2.3** Show an available preview immediately when opening a photo and refresh the rendering when a better source arrives.
 - [ ] **CS2.4** Deduplicate simultaneous transfers for the same object and prioritize active photos, nearby photos, visible thumbnails, then background work.
 - [ ] **CS2.5** Add transfer progress, cancellation, retry, and reconnect handling through shared engine commands and consistent desktop, CLI, and MCP behavior.
 - [x] **CS2.6** Invalidate source and availability state after download completion and retry previously failed renders even when their render key and catalog revision have not changed.
@@ -68,7 +68,7 @@ Verified retention slice (2026-10-12): configurable asset budgets, independent p
 
 ### Acceptance checks
 
-- [ ] **CS2.A1** Verify library browsing and preview editing remain responsive during slow downloads; inspect UI performance through the control channel.
+- [x] **CS2.A1** Verify library browsing and preview editing remain responsive during slow downloads; inspect UI performance through the control channel.
 - [x] **CS2.A2** Verify pinned originals and smart previews survive restart and remain usable offline; uncached remote photos do not enter the missing-file/relink workflow.
 - [x] **CS2.A3** Verify full-quality export waits for the original, reports unavailable originals offline, and only exports a proxy when explicitly requested.
 - [ ] **CS2.A4** Test request deduplication, cancellation, retry after reconnect, render recovery, cache-budget enforcement, and eviction protection for active leases and offline pins.

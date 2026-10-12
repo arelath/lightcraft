@@ -309,7 +309,14 @@ impl Renderer {
     /// embedded JPEG already covers — see `grid::skips_the_real_render`.
     pub fn thumb_quick_is_final(&self, photo: &Arc<lightcraft_catalog::Photo>, bucket: usize, priority: u32) -> bool {
         let Some((old, size, key)) = self.embedded_thumbs.get(&photo.id) else { return false };
-        old.as_ptr() == Arc::as_ptr(photo) && *size == bucket && !self.request_needed(Slot::ThumbQuick(photo.id), *key, priority)
+        old.as_ptr() == Arc::as_ptr(photo)
+            && *size == bucket
+            && self.textures.get(&Slot::ThumbQuick(photo.id)).is_some_and(|texture| texture.key == *key)
+            && !self.request_needed(Slot::ThumbQuick(photo.id), *key, priority)
+    }
+
+    pub fn thumb_quick_failed(&self, id: PhotoId, key: u64) -> bool {
+        self.failed.get(&Slot::ThumbQuick(id)).is_some_and(|(failed, _, revision)| *failed == key && *revision == self.catalog_rev)
     }
 
     /// Whether this photo's embedded-preview thumbnail is being fetched right now: the grid has
@@ -486,6 +493,7 @@ impl Renderer {
         self.preview_generation = None;
         self.pool.reprioritize(|_, _| None);
         self.thumb_inputs.clear();
+        self.embedded_thumbs.clear();
         self.textures.clear();
         self.stages.clear();
         self.quick_tried.clear();
@@ -974,6 +982,19 @@ mod thumbnail_tests {
         assert!(r.thumb_inputs.is_empty());
     }
     #[test]
+    fn failed_final_quick_thumbnails_require_a_real_render_fallback() {
+        let photo = photo();
+        let mut renderer = Renderer::default();
+        renderer.remember_embedded_thumb(&photo, 384, 77);
+        renderer.failed.insert(Slot::ThumbQuick(photo.id), (77, "corrupt cloud thumbnail".into(), renderer.catalog_rev));
+        assert!(!renderer.thumb_quick_is_final(&photo, 384, 10), "failure cannot count as a finished image");
+        assert!(renderer.thumb_quick_failed(photo.id, 77), "grid skips the failed quick input and schedules a real source render");
+        assert!(!renderer.thumb_quick_pending(&photo, 384));
+        renderer.forget_all();
+        assert!(renderer.embedded_thumbs.is_empty());
+        assert!(!renderer.thumb_quick_failed(photo.id, 77), "reconnect/rendition changes permit a new quick attempt");
+    }
+    #[test]
     fn queue_promotions_running_work_and_cancellation() {
         let p = photo();
         let slot = Slot::Thumb(p.id);
@@ -1027,6 +1048,81 @@ mod thumbnail_tests {
     }
     fn fixture() -> (crate::LightcraftApp, std::rc::Rc<std::cell::RefCell<Work>>, egui::Context) {
         fixture_with(Session::new(), (*photo()).clone())
+    }
+    #[test]
+    fn missing_and_corrupt_cloud_thumbnails_fall_back_to_a_real_grid_render() {
+        use lightcraft_catalog::assets::{Asset, AssetId, Blob, RemoteLocation};
+        use lightcraft_engine::assets::{AssetError, AssetResolver, BlobStore, TransferManager, keys, sha256};
+        use std::sync::atomic::AtomicBool;
+        struct Store {
+            missing: bool,
+            original: lightcraft_catalog::assets::BlobId,
+        }
+        impl BlobStore for Store {
+            fn download(&self, blob: &Blob, out: &mut dyn std::io::Write, _: &AtomicBool, _: &mut dyn FnMut(u64)) -> Result<(), AssetError> {
+                if blob.id == self.original {
+                    return out.write_all(b"original").map_err(|e| AssetError::Disk(e.to_string()));
+                }
+                if self.missing {
+                    return Err(AssetError::Missing);
+                }
+                out.write_all(b"broken").map_err(|e| AssetError::Disk(e.to_string()))
+            }
+        }
+        for missing in [true, false] {
+            let root = std::env::temp_dir().join(format!("lightcraft-cloud-thumb-fallback-{}-{missing}", std::process::id()));
+            let resolver = Arc::new(AssetResolver::new(root.clone()));
+            let original = Blob {
+                id: sha256(b"original"),
+                size: 8,
+                remote: RemoteLocation { connection: "test".into(), key: "library/original".into(), version: None },
+            };
+            resolver.connect("test".into(), Arc::new(Store { missing, original: original.id.clone() })).unwrap();
+            drop(resolver.acquire(&original, &AtomicBool::new(false)).unwrap());
+            let asset_id = AssetId("fallback".into());
+            let mut photo = (*photo()).clone();
+            photo.source = Source::Managed { asset_id: asset_id.clone() };
+            let thumbnail_id = sha256(b"thumbnail");
+            let thumbnail = Blob {
+                id: thumbnail_id.clone(),
+                size: 9,
+                remote: RemoteLocation {
+                    connection: "test".into(),
+                    version: None,
+                    key: keys::thumbnail(
+                        &original.id,
+                        photo.develop.hash64(),
+                        Session::cloud_thumbnail_parameters(&photo, true).0,
+                        512,
+                        &thumbnail_id,
+                    )
+                    .unwrap(),
+                },
+            };
+            let mut session = Session::new();
+            session.media.asset_resolver = Some(resolver.clone());
+            session
+                .catalog
+                .apply(Op::SetAsset { id: asset_id, asset: Some(Box::new(Asset { original, smart_preview: None, thumbnail: Some(thumbnail) })) })
+                .unwrap();
+            let (mut app, work, ctx) = fixture_with(session, photo);
+            request(&mut app);
+            assert!(work.borrow().jobs.is_empty(), "the matching cloud thumbnail is initially preferred");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while app.renderer.failure(Slot::ThumbQuick(PhotoId(1))).is_none() && std::time::Instant::now() < deadline {
+                app.renderer.poll(&ctx, &mut app.session);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert!(app.renderer.failure(Slot::ThumbQuick(PhotoId(1))).is_some());
+            request(&mut app);
+            let (slot, job) = take_job(&work);
+            assert_eq!(slot, Slot::Thumb(PhotoId(1)), "a failed quick rendition must schedule the ordinary source path");
+            finish(&mut app, &work, &ctx, slot, job.run());
+            assert!(app.renderer.thumb(PhotoId(1)).is_some(), "the grid recovers with rendered pixels");
+            drop(app);
+            drop(resolver);
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
     fn fixture_with(mut s: Session, photo: Photo) -> (crate::LightcraftApp, std::rc::Rc<std::cell::RefCell<Work>>, egui::Context) {
         s.media.file_loader = Some(Arc::new(|_, _| {
