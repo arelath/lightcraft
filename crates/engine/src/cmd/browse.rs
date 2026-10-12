@@ -350,6 +350,9 @@ fn move_to_folder(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad(C, format!("{} is not in the library (Local): add it first", ph.file_name)));
         }
         let lightcraft_catalog::Source::File { path } = &ph.source else {
+            if matches!(ph.source, lightcraft_catalog::Source::Managed { .. }) {
+                return Err(bad(C, "organize cloud photos with albums and logical folders in My Photos"));
+            }
             return Err(bad(C, format!("{} has no file on disk", ph.file_name)));
         };
         if plans.iter().any(|pl| pl.from_path.as_deref() == Some(path.as_str())) {

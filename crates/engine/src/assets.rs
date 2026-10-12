@@ -230,6 +230,7 @@ impl AssetResolver {
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn connection_revision(&self) -> u64 {
         self.connection_revision.load(Ordering::Relaxed)
     }
@@ -246,6 +247,7 @@ impl AssetResolver {
     pub fn durable_root(&self) -> Option<PathBuf> {
         self.durable_root.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn validate_storage(&self) -> Result<()> {
         self.cache.validate_root()
     }

@@ -153,6 +153,12 @@ The Info panel identifies cloud storage, reports original availability and offer
 
 ## Device-local retention
 
+Managed photos use logical names and albums: `photo.renamePreview`/`photo.rename` update the displayed
+name, and `album.create` with `folder: true`, `album.move`, `album.rename` and `album.addPhotos` organize
+My Photos. These operations never move immutable cloud keys or staged blobs. Mixed local/cloud renaming
+still moves local files and sidecars where appropriate. Undo, redo and restart preserve both behaviors.
+Physical folder moves reject managed photos and direct the user to albums and logical folders.
+
 `assets-cache/retention.json` stores a versioned policy, a 20 GiB default budget, pin owners and explicitly removed originals. It is not catalog data. Zero budget retains only pinned or actively leased bytes. Original, smart-preview and thumbnail blobs share the asset budget; the existing rendered-thumbnail cache has its own budget. Pins and active operations may exceed the soft limit, and usage is measured asynchronously.
 
 A bounded maintenance worker evicts least recently used eligible flat SHA-256 cache files. Acquisitions and eviction share per-blob gates; decoded-source clones retain an `Arc<AssetLease>` throughout their memory-cache/job lifetime. Downloads, decoding and exports therefore keep their source bytes protected. Every cache blob is a verified download of an already uploaded object. Import staging and the reserved external-working-copy namespace use the separate durable `Managed/` directory and cannot enter this disposable cache.
@@ -195,6 +201,14 @@ Native upload acceptance passed on 2026-10-12 through port 18867 against an inde
 
 Six real CLI/MCP upload tests cover response loss, restart after remote publication, embedded HTTP-200 completion errors, explicit abort, rejected credentials, independent queued work and byte-progress/ping/cancellation. Owner-event tests cover failed local acknowledgement and retry, old-library events and changed connection settings. Staging/cache promotion and the remaining path-dependent flows stay unchecked until their own checks pass.
 
+Native organization acceptance passed on 2026-10-12 through control port 18867 with storage offline.
+The renamed `Trip-12.dng` appeared under Cloud archive → Trip, retained its synchronized original and
+asset identity, and exported at 32×24. All staged bytes stayed identical. The inspected screenshot is
+`target/cloud-acceptance/native-cloud-organization.png`, with results in `native-organization-results.json`.
+The last render took 14.04 ms; the captured UI update took 33.37 ms with empty render queues. These
+measurements use a tiny procedural fixture. Regression tests additionally cover mixed local/cloud
+rename, undo/redo, folder membership across restart and overflow rejection before any name or path changes.
+
 ## Revision history
 
 | Date | Change |
@@ -206,3 +220,4 @@ Six real CLI/MCP upload tests cover response loss, restart after remote publicat
 | 2026-10-12 | Bounded priority downloads, byte progress and shared cancellation, headless wait completion, reconnect/retry controls and preset-aware foreground acquisition; signed native progress/cancellation/retry acceptance passed. |
 | 2026-10-12 | Durable local managed import and explicit manifest recovery; atomic photo/asset/upload-intent journal records (format 9), pending-original protection and cached-proxy replacement in direct renders. |
 | 2026-10-12 | Durable upload receipts, resumable multipart transfer, SHA-256 readback verification, conditional initial publication and headless MCP byte progress/ping/cancellation; native connection/import and retry controls. |
+| 2026-10-12 | Logical managed rename and album-folder organization; mixed-source undo/restart and rename-sequence overflow regression, native offline organization/export acceptance. |

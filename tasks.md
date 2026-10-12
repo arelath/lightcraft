@@ -96,8 +96,13 @@ Verified staging and uploads (2026-10-12): durable original/proxy/thumbnail prep
 
 ### Operations that assume local paths
 
+Logical organization verified on 2026-10-12: mixed local/cloud rename, undo/redo, album-folder membership
+and restart preserve managed asset references and original bytes. Native offline rename/organization and
+full-quality export passed and its screenshot was inspected. Rename sequence overflow is rejected before
+any changes. `target/cloud-organization-ci.log` records all eight CI stages passing.
+
 - [ ] **CS3.10** Audit and adapt original export, DNG conversion, merge, and denoise to acquire required originals through the resolver.
-- [ ] **CS3.11** Implement logical rename and folder organization for managed assets without moving immutable image objects.
+- [x] **CS3.11** Implement logical rename and folder organization for managed assets without moving immutable image objects.
 - [ ] **CS3.12** Model XMP sidecars as associated assets and route reads, writes, and uploads through managed storage rather than neighboring-path assumptions.
 - [ ] **CS3.13** Materialize a pinned working file for external editing, detect and ingest the returned revision, and keep it durable until uploaded.
 - [ ] **CS3.14** Separate remove-local-copy behavior from delete-from-library behavior; define deletion and remote-object retention policies for managed assets.

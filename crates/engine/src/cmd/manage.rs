@@ -9,8 +9,21 @@ use crate::Result;
 
 fn rename_args(s: &crate::Session, p: &Value, c: &str) -> Result<(Vec<lightcraft_catalog::PhotoId>, String, usize)> {
     let template = str_param(p, "template").ok_or_else(|| bad(c, "missing `template`"))?.to_string();
-    let start = p.get("start").and_then(Value::as_u64).unwrap_or(1) as usize;
-    Ok((s.targets(p), template, start))
+    let start = p
+        .get("start")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| bad(c, "start must be a nonnegative sequence number supported on this platform"))
+        })
+        .transpose()?
+        .unwrap_or(1);
+    let ids = s.targets(p);
+    if start.checked_add(ids.len().saturating_sub(1)).is_none() {
+        return Err(bad(c, "the sequence range is too large"));
+    }
+    Ok((ids, template, start))
 }
 
 /// A named set of colour-label names (red, yellow, green, blue, purple; empty = the colour's name).
@@ -155,7 +168,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "photo.renameTokens", "Rename Template Tags", [], None, "{} → {tokens: [{tag, aliases, meaning, example}], dateDirectives: [{directive, meaning}], notes: [..], sample} — the file-name template tags shared by photo.rename, library.import (rename) and app.export (naming); examples are for a sample photo", always, |_, _| {
             Ok(crate::rename::token_help_json())
         }),
-        cmd!(query "photo.renamePreview", "Rename Preview", [], None, "{template: e.g. `{date}_{name}`, `Trip-{seq:3}` (tokens: {name} {num} {seq} {seq:N} {date} {date:%Y%m%d} {folder} {camera} {lens} {iso} {rating} {title} {creator} {ext}; photo.renameTokens explains each), start?: first sequence number (1), ids?} — renames the files on disk (sidecars too, never overwriting: collisions get -1, -2…); undoable", has_selection, |s, p| {
+        cmd!(query "photo.renamePreview", "Rename Preview", [], None, "{template: e.g. `{date}_{name}`, `Trip-{seq:3}` (tokens: {name} {num} {seq} {seq:N} {date} {date:%Y%m%d} {folder} {camera} {lens} {iso} {rating} {title} {creator} {ext}; photo.renameTokens explains each), start?: first sequence number (1), ids?} — preview local-file moves and logical cloud-photo names; cloud objects retain their immutable keys; collisions get -1, -2…", has_selection, |s, p| {
             let (ids, template, start) = rename_args(s, p, "photo.renamePreview")?;
             Ok(serde_json::to_value(s.plan_rename(&ids, &template, start)).unwrap_or_default())
         }),
@@ -164,7 +177,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Rename Photos",
             [],
             None,
-            "{template: e.g. `{date}_{name}`, `Trip-{seq:3}` (tokens: {name} {num} {seq} {seq:N} {date} {date:%Y%m%d} {folder} {camera} {lens} {iso} {rating} {title} {creator} {ext}; photo.renameTokens explains each), start?: first sequence number (1), ids?} — renames the files on disk (sidecars too, never overwriting: collisions get -1, -2…); undoable",
+            "{template: e.g. `{date}_{name}`, `Trip-{seq:3}` (tokens: {name} {num} {seq} {seq:N} {date} {date:%Y%m%d} {folder} {camera} {lens} {iso} {rating} {title} {creator} {ext}; photo.renameTokens explains each), start?: first sequence number (1), ids?} — local files and sidecars move without overwriting; cloud-photo names change logically while immutable object keys stay fixed; collisions get -1, -2…; undoable",
             has_selection,
             |s, p| {
                 let (ids, template, start) = rename_args(s, p, "photo.rename")?;

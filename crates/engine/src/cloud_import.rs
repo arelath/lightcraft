@@ -553,6 +553,98 @@ mod tests {
     }
 
     #[test]
+    fn managed_names_and_logical_folders_preserve_blobs_through_mixed_rename_undo_and_restart() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let imported = session.execute("cloud.import", &fixture.params()).unwrap();
+        let managed = PhotoId(imported["ids"][0].as_u64().unwrap());
+        let source = session.catalog.photo(managed).unwrap().source.clone();
+        let assets = session.catalog.assets().clone();
+        let original =
+            session.media.asset_resolver.as_ref().unwrap().durable_root().unwrap().join("blobs").join(&assets.values().next().unwrap().original.id.0);
+        let bytes = std::fs::read(&original).unwrap();
+        let local = session.catalog.alloc_photo_id();
+        session
+            .commit(
+                "Local rename fixture",
+                Op::AddPhoto {
+                    photo: Box::new(Photo::new(
+                        local,
+                        Source::File { path: fixture.original.to_string_lossy().into() },
+                        "source.png",
+                        "PNG",
+                        32,
+                        24,
+                        "",
+                    )),
+                },
+            )
+            .unwrap();
+        let params = json!({"ids":[managed.0,local.0],"template":"Cloud-{seq:2}","start":3});
+        let moved = fixture.root.join("Cloud-04.png");
+        let preview = session.execute("photo.renamePreview", &params).unwrap();
+        assert!(preview[0].get("from_path").is_none() && preview[0].get("to_path").is_none());
+        assert_eq!(preview[1]["to_path"], moved.to_string_lossy().as_ref());
+        let renamed = session.execute("photo.rename", &params).unwrap();
+        assert_eq!(renamed["renamed"], 2);
+        assert_eq!(session.catalog.photo(managed).unwrap().file_name, "Cloud-03.png");
+        assert!(moved.is_file() && !fixture.original.exists());
+        assert_eq!(session.catalog.photo(managed).unwrap().source, source);
+        assert_eq!(session.catalog.assets(), &assets);
+        assert_eq!(std::fs::read(&original).unwrap(), bytes);
+        session.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(session.catalog.photo(managed).unwrap().file_name, "source.png");
+        assert!(fixture.original.is_file() && !moved.exists());
+        session.execute("edit.redo", &json!({})).unwrap();
+        assert!(moved.is_file());
+        let first = session.execute("album.create", &json!({"name":"Cloud photos","folder":true})).unwrap()["id"].as_u64().unwrap();
+        let second = session.execute("album.create", &json!({"name":"Archive","folder":true})).unwrap()["id"].as_u64().unwrap();
+        let album = session.execute("album.create", &json!({"name":"Trip","parent":first})).unwrap()["id"].as_u64().unwrap();
+        session.execute("album.addPhotos", &json!({"id":album,"ids":[managed.0]})).unwrap();
+        session.execute("album.move", &json!({"id":album,"parent":second})).unwrap();
+        session.execute("album.rename", &json!({"id":second,"name":"Cloud archive"})).unwrap();
+        session.execute("library.source", &json!({"kind":"album","id":album})).unwrap();
+        assert_eq!(session.visible_cloned(), vec![managed]);
+        let physical = fixture.root.join("physical");
+        std::fs::create_dir(&physical).unwrap();
+        assert!(
+            session.execute("photo.moveToFolder", &json!({"ids":[managed.0],"folder":physical})).unwrap_err().to_string().contains("logical folders")
+        );
+        assert_eq!(session.catalog.assets(), &assets);
+        session.close_library().unwrap();
+        drop(session);
+        let reopened = fixture.session();
+        assert_eq!(reopened.catalog.photo(managed).unwrap().file_name, "Cloud-03.png");
+        assert_eq!(reopened.catalog.photo(managed).unwrap().source, source);
+        assert_eq!(reopened.catalog.assets(), &assets);
+        let album = reopened.catalog.album(lightcraft_catalog::AlbumId(album)).unwrap();
+        assert_eq!(album.parent, Some(lightcraft_catalog::AlbumId(second)));
+        assert_eq!(album.photos, vec![managed]);
+        assert_eq!(std::fs::read(original).unwrap(), bytes);
+    }
+
+    #[test]
+    fn oversized_rename_sequence_is_rejected_before_any_name_or_path_changes() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session.execute("cloud.import", &fixture.params()).unwrap();
+        let copy = session.execute("photo.virtualCopy", &json!({})).unwrap();
+        let copy = copy["ids"][0].as_u64().unwrap();
+        let before = session.catalog.to_snapshot();
+        for start in [json!(u64::MAX), json!(-1), json!("bad")] {
+            for command in ["photo.renamePreview", "photo.rename"] {
+                let error = session.execute(command, &json!({"ids":[1,copy],"template":"{seq}","start":start})).unwrap_err();
+                assert!(!error.to_string().contains("panic"), "input is validated without reaching the panic guard: {error}");
+                assert_eq!(session.catalog.to_snapshot(), before);
+            }
+        }
+        // Direct planning also stays total at the integer boundary.
+        let plans = session.plan_rename(&[PhotoId(1), PhotoId(copy)], "{seq}", usize::MAX);
+        assert_eq!(plans.len(), 2);
+        assert_ne!(plans[0].to, plans[1].to);
+    }
+
+    #[test]
     fn import_is_editable_after_source_removal_and_originals_survive_zero_cache_budget_and_restart() {
         let fixture = Fixture::new();
         let mut session = fixture.session();
