@@ -413,6 +413,11 @@ impl Session {
         static LOADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         catalog.revision = LOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed).wrapping_add(1) << 32;
         self.catalog = catalog;
+        // Publication and migration preparation belong to the replaced library only.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.cloud_replication_jobs = Default::default();
+        }
         self.library_generation = crate::LIBRARY_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for entry in self.undo.iter_mut().chain(self.redo.iter_mut()) {
             self.pending_sidecar_repairs.append(&mut entry.retry_sidecars);

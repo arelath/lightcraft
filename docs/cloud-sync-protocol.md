@@ -323,10 +323,24 @@ All checkpoint pages are verified and merged; no listing-page snapshot guarantee
 Staged dependencies are capped at 64 MiB, and up to 1,000 gap IDs are shown. Pending dependencies
 still exist in the retained log and are rediscovered on the next scan.
 
-For an existing CAS catalog, stop every writer and upgrade every client, then invoke
-`cloud.migrateAppend {"writersStopped":true}` on each catalog. Native CLI/MCP waits; the browser
-returns a background task. Migration verifies the committed CAS state, publishes/readbacks an
-immutable seed, then saves the local mode/progress without discarding pending IDs or mappings.
+For an existing CAS catalog, choose File → Migrate Cloud Library… (also available in Cloud
+Synchronization and Info). Opening the dialog calls `cloud.prepareMigration`: this device's
+automatic uploads and synchronization pause, and active catalog synchronization is cancelled.
+Wait for running uploads to finish or cancel them in Activity. Stop synchronization on every
+other device, upgrade every client, and confirm the dialog's peer checkbox before migration.
+Cancel keeps preparation paused in this session; explicit Sync now resumes it. Preparation is
+not persisted across app restarts, so keep paused devices closed until cutover is ready.
+
+`cloud.migrateAppend {"writersStopped":true,"wait":false}` performs the same cutover. Desktop
+and browser return a cancellable Activity task; native CLI/MCP wait by default. Inspect
+`cloud.syncStatus` (`preparingMigration`, `migrating`, reports) for progress and completion.
+Migration verifies committed CAS history on a worker, publishes/readbacks an immutable seed,
+then atomically saves mode/progress on the catalog owner. Unsent pending IDs and mappings,
+including edits made while the worker runs, remain intact. A failed native journal save rolls
+back the local cutover. Cancellation can leave a verified remote marker/seed behind; retry
+migration rather than reverting protocols or deleting remote objects. Apply the migration to
+every local catalog before resuming the fleet. This confirmation is operator coordination;
+LightCraft cannot remotely stop or upgrade other devices.
 Failed legacy upload receipts are explicitly rebound during this migration and retain their
 staged bytes and multipart identities. This version rejects CAS synchronization when it finds
 an append manifest for the same library. It cannot control older binaries: keep those stopped.
@@ -369,3 +383,18 @@ browser CORS rule was removed and the original absent configuration verified.
 An extra post-build recheck later hit B2's download bandwidth/Class B cap (object GET 403,
 scoped LIST 200). Complete live acceptance passed before that limit. See
 `target/cloud-acceptance/b2-final-access-probe.json`; account caps were not changed.
+
+
+Coordinated workflow acceptance (2026-10-14) passed on the native release and Chromium OPFS/
+IndexedDB adapters against an independently signed loopback S3 fixture. It exercised disabled
+peer confirmation, cancelled preparation/explicit resume, cancellation after remote marker
+publication, retry, preserved pending edits, append convergence and browser reload. Native
+and browser Activity/Info progress and completion were visually inspected. Evidence:
+`target/cloud-acceptance/migration-native-results.json`, `migration-browser-results.json`
+and `migration-*.png`. A fresh B2 GET still returned 403 `AccessDenied` with an explicit download/
+Class B cap-exceeded response (`migration-b2-access-probe.json`); the new live workflow recheck
+remains pending. No account caps or billing settings were changed.
+
+All eight final CI stages passed (`target/migration-ci-final.log`), including the owner-worker
+rollback/cancellation/library-switch regressions and the shared modal confirmation test. Native
+release and web builds passed; fixture/static helpers were stopped after acceptance.

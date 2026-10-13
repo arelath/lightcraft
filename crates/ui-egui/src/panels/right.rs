@@ -748,12 +748,16 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     let status = app.run("cloud.syncStatus", json!({})).unwrap_or_default();
                     let running = status["running"].as_bool().unwrap_or(false);
                     ui.label(
-                        egui::RichText::new(if running {
+                        egui::RichText::new(if status["migrating"].as_bool() == Some(true) {
+                            "Migrating cloud library…".to_owned()
+                        } else if running {
                             "Synchronizing library…".to_owned()
                         } else if status["protocol"].as_str() == Some("append-log-v1") {
                             let gaps = status["gaps"].as_array().map_or(0, Vec::len);
                             let authors = status["frontiers"].as_object().map_or(0, serde_json::Map::len);
                             format!("Append synchronization · {authors} authors · {pending} pending changes · {gaps} gaps")
+                        } else if status["preparingMigration"].as_bool() == Some(true) {
+                            format!("Synchronization paused for migration · {pending} pending changes")
                         } else {
                             format!("Library generation {generation} · {pending} pending changes")
                         })
@@ -768,6 +772,12 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     if !running
                         && text_button(ui, "cloudSyncNow", crate::i18n::tr("Sync now"), false).clicked()
                         && let Err(error) = app.run("cloud.sync", json!({"wait":false}))
+                    {
+                        app.toast(ui.ctx(), error);
+                    }
+                    if status["protocol"].as_str() == Some("conditional-head-v1")
+                        && text_button(ui, "cloudSyncMigrate", crate::i18n::tr("Migrate to append-only…"), false).clicked()
+                        && let Err(error) = app.run("dialog.cloudMigrate", json!({}))
                     {
                         app.toast(ui.ctx(), error);
                     }

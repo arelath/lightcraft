@@ -862,6 +862,9 @@ pub fn observed(s: &mut Session, p: &Value, abort: bool, observer: &mut dyn FnMu
 }
 
 fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
+    if s.cloud_replication_jobs.migrating() || s.cloud_replication_jobs.preparing_migration() {
+        return Err(error("uploads are paused for migration; finish migration or resume synchronization first"));
+    }
     s.claim_cloud_owner()?;
     let wait = p
         .get("wait")
@@ -982,6 +985,9 @@ impl Session {
     /// Native hosts pump this after polling owner events. Headless one-shot commands
     /// explicitly use `cloud.upload` so local import completion never waits for a bucket.
     pub fn resume_cloud_uploads(&mut self) {
+        if self.cloud_replication_jobs.migrating() || self.cloud_replication_jobs.preparing_migration() {
+            return;
+        }
         if !self.cloud_uploads.requested || self.cloud_uploads.pending.len() >= 4 {
             return;
         }
@@ -1203,6 +1209,11 @@ mod tests {
             guard,
             cancel,
         });
+        // An in-flight upload must finish its durable acknowledgement before cutover.
+        let before = session.catalog.to_snapshot();
+        let error = crate::cloud_replication::start_migration(session, &json!({"writersStopped":true})).unwrap_err();
+        assert!(error.to_string().contains("finish or cancel uploads"));
+        assert_eq!(session.catalog.to_snapshot(), before);
         session.poll_cloud_uploads();
         response
     }

@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, mpsc};
 
 struct Pending {
+    migration_owner: Option<String>,
     receiver: mpsc::Receiver<crate::Result<Outcome>>,
     library: Arc<()>,
     resolver: Arc<AssetResolver>,
@@ -20,6 +21,7 @@ impl Drop for Pending {
 }
 #[derive(Default)]
 pub struct Jobs {
+    preparing_migration: bool,
     pending: Option<Pending>,
     pub reports: Vec<Value>,
     next_poll: Option<web_time::Instant>,
@@ -27,6 +29,12 @@ pub struct Jobs {
     last_audit: Option<web_time::Instant>,
 }
 impl Jobs {
+    pub fn preparing_migration(&self) -> bool {
+        self.preparing_migration
+    }
+    pub fn migrating(&self) -> bool {
+        self.pending.as_ref().is_some_and(|p| p.migration_owner.is_some())
+    }
     pub fn running(&self) -> bool {
         self.pending.is_some()
     }
@@ -35,6 +43,35 @@ fn error(message: impl Into<String>) -> EngineError {
     EngineError::Other(message.into())
 }
 pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
+    start_impl(s, p, false)
+}
+pub fn prepare_migration(s: &mut Session, _: &Value) -> crate::Result<Value> {
+    if s.cloud_replication_jobs.migrating() {
+        return Err(error("migration is already running"));
+    }
+    if s.catalog.sync_state().is_none_or(|state| !state.protocol.is_head()) {
+        return Err(error("migration requires an enabled conditional-head library"));
+    }
+    s.cloud_replication_jobs.preparing_migration = true;
+    s.cloud_replication_jobs.paused = true;
+    if let Some(pending) = &s.cloud_replication_jobs.pending {
+        pending.cancel.store(true, Ordering::Relaxed);
+    }
+    Ok(json!({"paused":true,"running":s.cloud_replication_jobs.running()}))
+}
+pub fn start_migration(s: &mut Session, p: &Value) -> crate::Result<Value> {
+    if p.get("writersStopped").and_then(Value::as_bool) != Some(true) {
+        return Err(error("migration requires writersStopped:true after stopping and upgrading every other device"));
+    }
+    if s.catalog.sync_state().is_some_and(|state| !state.protocol.is_head()) {
+        return s.execute("cloud.syncStatus", p);
+    }
+    if s.cloud_uploads.running() > 0 {
+        return Err(error("finish or cancel uploads before migration"));
+    }
+    start_impl(s, p, true)
+}
+fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Value> {
     s.claim_cloud_owner()?;
     if s.cloud_replication_jobs.running() {
         return Err(error("cloud synchronization is already running"));
@@ -64,8 +101,10 @@ pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
         .into_iter()
         .find(|connection| connection.id == state.connection)
         .ok_or_else(|| error("synchronization storage connection is not configured"))?;
+    let migration_owner = if migrating { Some(crate::cloud_append::owner::identity(&lib.dir)?) } else { None };
     let resolver = s.media.asset_resolver.clone().ok_or_else(|| error("native asset storage is unavailable"))?;
-    let guard = s.activity.start("cloudSync", "Synchronize cloud library", crate::activity::Cancel::Yes);
+    let guard =
+        s.activity.start("cloudSync", if migrating { "Migrate cloud library" } else { "Synchronize cloud library" }, crate::activity::Cancel::Yes);
     let id = guard.id();
     let handle = guard.handle();
     let cancel = guard.cancel_flag().ok_or_else(|| error("synchronization cancellation flag unavailable"))?;
@@ -74,9 +113,15 @@ pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
     std::thread::Builder::new()
         .name("cloud-catalog-sync".into())
         .spawn(move || {
-            handle.detail("Reconciling and publishing saved library changes");
+            handle.detail(if migrating {
+                "Verifying committed history and publishing the migration seed"
+            } else {
+                "Reconciling and publishing saved library changes"
+            });
             let result = crate::guard::catch("cloud synchronization worker", || {
-                if !state.protocol.is_head() {
+                if migrating {
+                    crate::cloud_append::migration::seed(&connection, &state, &worker_cancel).map_err(|e| AssetError::Invalid(e.to_string()))
+                } else if !state.protocol.is_head() {
                     crate::cloud_append::native::synchronize_with_audit(&connection, &state, checkpoint, audit, &worker_cancel)
                 } else {
                     synchronize(&connection, &state, checkpoint, &worker_cancel)
@@ -88,6 +133,7 @@ pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
         })
         .map_err(|e| error(format!("could not start cloud synchronization: {e}")))?;
     s.cloud_replication_jobs.pending = Some(Pending {
+        migration_owner,
         receiver,
         library: s.library_token(),
         connection_revision: resolver.connection_revision(),
@@ -97,6 +143,7 @@ pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
         ready: None,
     });
     s.cloud_replication_jobs.paused = false;
+    s.cloud_replication_jobs.preparing_migration = false;
     s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
     if !wait {
         return Ok(json!({"task":id,"background":true}));
@@ -156,25 +203,42 @@ impl Session {
         }
         let id = pending.guard.id();
         let result = result.and_then(|outcome| {
+            if pending.guard.is_cancelled() { return Err(error("synchronization cancelled; pending work and prior protocol retained")); }
             if !Arc::ptr_eq(&pending.library, &self.library_token()) || pending.connection_revision != pending.resolver.connection_revision() {
                 return Err(error("library or storage connection changed; remote result ignored and local pending work retained"));
             }
-            let op = if let Some(progress)=outcome.append.clone() {crate::cloud_sync::incoming_append(&self.catalog,progress,&outcome.acknowledged)?}else{crate::cloud_sync::incoming_checkpoint(
+            let mut migrated = None;
+            let binding = if let Some(owner) = &pending.migration_owner {
+                let mut next = self.catalog.clone();
+                let mut state = next.sync_state().cloned().ok_or_else(|| error("synchronization identity unavailable"))?;
+                if !state.protocol.is_head() { return Err(error("protocol changed during migration; result retained remotely")); }
+                state.protocol = lightcraft_catalog::replication::SyncProtocol::AppendLog;
+                state.migrated_from_head = true;
+                state.cursor = None;
+                state.generation = 0;
+                state.claim_owner(owner.clone(), crate::cloud_append::owner::random()?)?;
+                let op = lightcraft_catalog::Op::SetSyncState { state: Some(Box::new(state)) };
+                next.apply(op.clone())?;
+                migrated = Some(next);
+                Some(op)
+            } else { None };
+            let op = if let Some(progress)=outcome.append.clone() {crate::cloud_sync::incoming_append(migrated.as_ref().unwrap_or(&self.catalog),progress,&outcome.acknowledged)?}else{crate::cloud_sync::incoming_checkpoint(
                 &self.catalog,
                 &outcome.state,
                 &outcome.acknowledged,
                 outcome.cursor.clone(),
                 outcome.generation,
             )?};
+            let op = if let Some(binding) = binding { lightcraft_catalog::Op::Batch { ops: vec![binding, op] } } else { op };
             let inverse = self.apply_catalog_mode(op, false)?;
             if let Err(error) = self.persist() {
                 self.apply_received(inverse)?;
                 return Err(error);
             }
-            Ok(json!({"protocol":self.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len(),
+            Ok(json!({"migrated":pending.migration_owner.is_some(),"legacyHistoryRetained":true,"protocol":self.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len(),
                 "pending":self.catalog.sync_state().map_or(0,|state|state.pending.len())}))
         });
-        self.cloud_replication_jobs.paused = result.is_err();
+        self.cloud_replication_jobs.paused = result.is_err() || self.cloud_replication_jobs.preparing_migration;
         self.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
         let report = match result {
             Ok(result) => json!({"task":id,"ok":true,"result":result}),
@@ -258,6 +322,7 @@ mod tests {
         let cancel = guard.cancel_flag().unwrap();
         let (_, receiver) = mpsc::sync_channel(1);
         s.cloud_replication_jobs.pending = Some(Pending {
+            migration_owner: None,
             receiver,
             library: s.library_token(),
             resolver: resolver.clone(),
@@ -305,6 +370,126 @@ mod tests {
         s.poll_cloud_replication();
         assert_eq!(s.catalog.to_snapshot(), before);
         assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["ok"], false);
+    }
+    fn ready_migration(s: &mut Session) {
+        ready(s);
+        let pending = s.cloud_replication_jobs.pending.as_mut().unwrap();
+        pending.migration_owner = Some("migration-owner".into());
+        let outcome = pending.ready.as_mut().unwrap().as_mut().unwrap();
+        outcome.acknowledged.clear();
+        outcome.append = Some(lightcraft_catalog::replication::AppendProgress {
+            version: 1,
+            manifest: crate::assets::sha256(&crate::cloud_append::manifest("library").unwrap()).0,
+            frontiers: lightcraft_catalog::replication::publication_prefixes(&outcome.state).unwrap(),
+            remote: outcome.state.clone(),
+            gaps: Default::default(),
+        });
+        outcome.cursor.clear();
+        outcome.generation = 0;
+    }
+    #[test]
+    fn migration_owner_retains_late_edits_and_rolls_back_mode_on_failed_save() {
+        let (mut s, files) = session();
+        ready_migration(&mut s);
+        let mut late = s.catalog.sync_state().unwrap().clone();
+        late.enqueue(vec![lightcraft_catalog::replication::Change {
+            entity: "library:library".into(),
+            field: "label.Blue".into(),
+            base: None,
+            value: json!("Late blue"),
+        }])
+        .unwrap();
+        s.apply_system(Op::SetSyncState { state: Some(Box::new(late)) }).unwrap();
+        s.persist().unwrap();
+        let before = s.catalog.sync_state().unwrap().clone();
+        assert!(crate::cloud_upload::start(&mut s, &json!({})).unwrap_err().to_string().contains("paused for migration"));
+        files.fail.store(true, Ordering::Relaxed);
+        s.poll_cloud_replication();
+        assert_eq!(s.catalog.sync_state(), Some(&before));
+        let (_, loaded, _) = Journal::open(Box::new(files.files.clone())).unwrap();
+        assert_eq!(loaded.sync_state(), Some(&before));
+        files.fail.store(false, Ordering::Relaxed);
+        s.persist().unwrap();
+        ready_migration(&mut s);
+        // Simulate another edit after the worker captured its seed.
+        let mut newest = s.catalog.sync_state().unwrap().clone();
+        let m = newest
+            .enqueue(vec![lightcraft_catalog::replication::Change {
+                entity: "library:library".into(),
+                field: "label.Red".into(),
+                base: None,
+                value: json!("Newest red"),
+            }])
+            .unwrap()
+            .unwrap();
+        let pending = newest.pending.clone();
+        s.apply_system(Op::SetSyncState { state: Some(Box::new(newest)) }).unwrap();
+        s.poll_cloud_replication();
+        let state = s.catalog.sync_state().unwrap();
+        assert!(!state.protocol.is_head());
+        assert_eq!(state.pending, pending);
+        assert!(state.previous_authors.contains(&before.device));
+        assert!(!state.append.as_ref().unwrap().remote.received.contains_key(&m.revision.id()));
+        assert_eq!(s.catalog.custom_label_name(lightcraft_catalog::ColorLabel::Red), Some("Newest red"));
+        let (_, loaded, _) = Journal::open(Box::new(files.files)).unwrap();
+        assert_eq!(loaded.sync_state(), s.catalog.sync_state());
+    }
+    #[test]
+    fn cancelled_or_stale_migration_never_switches_the_local_protocol() {
+        for reason in ["cancelled", "library", "connection"] {
+            let (mut s, files) = session();
+            ready_migration(&mut s);
+            let before = s.catalog.to_snapshot();
+            let pending = s.cloud_replication_jobs.pending.as_mut().unwrap();
+            match reason {
+                "cancelled" => pending.cancel.store(true, Ordering::Relaxed),
+                "library" => pending.library = Arc::new(()),
+                _ => pending.connection_revision = pending.connection_revision.saturating_add(1),
+            }
+            s.poll_cloud_replication();
+            assert_eq!(s.catalog.to_snapshot(), before, "{reason}");
+            assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["ok"], false);
+            let (_, loaded, _) = Journal::open(Box::new(files.files)).unwrap();
+            assert_eq!(loaded.sync_state(), s.catalog.sync_state());
+        }
+    }
+    #[test]
+    fn preparing_migration_cancels_publication_and_stays_paused_after_completion() {
+        let (mut s, _) = session();
+        ready(&mut s);
+        let before = s.catalog.to_snapshot();
+        prepare_migration(&mut s, &json!({})).unwrap();
+        s.poll_cloud_replication();
+        assert_eq!(s.catalog.to_snapshot(), before);
+        assert!(s.cloud_replication_jobs.preparing_migration());
+        assert!(s.cloud_replication_jobs.paused);
+        assert!(!s.cloud_replication_jobs.running());
+        assert!(start_migration(&mut s, &json!({"writersStopped":false})).is_err());
+        let reports = s.cloud_replication_jobs.reports.len();
+        s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now());
+        s.resume_cloud_replication();
+        assert_eq!(s.cloud_replication_jobs.reports.len(), reports);
+    }
+    #[test]
+    fn replacing_a_library_clears_migration_preparation_and_cancels_its_worker() {
+        let (mut s, _) = session();
+        ready(&mut s);
+        let cancel = s.cloud_replication_jobs.pending.as_ref().unwrap().cancel.clone();
+        prepare_migration(&mut s, &json!({})).unwrap();
+        s.open_library_in(
+            LibraryStores {
+                dir: "migration-other-library".into(),
+                catalog: Box::new(MemStore::new()),
+                files: Box::new(MemStore::new()),
+                on_disk: false,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(!s.cloud_replication_jobs.preparing_migration());
+        assert!(!s.cloud_replication_jobs.running());
+        assert!(!s.cloud_replication_jobs.paused);
     }
     #[test]
     fn slow_sync_completion_leaves_a_window_for_explicit_retry_before_auto_polling() {

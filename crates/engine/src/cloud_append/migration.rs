@@ -1,31 +1,21 @@
 //! Explicit, coordinated migration. Legacy objects remain available for recovery.
 use crate::{EngineError, Result, Session};
-use lightcraft_catalog::{
-    Op,
-    replication::{AppendProgress, SyncProtocol, publication_prefixes},
-};
-use serde_json::{Value, json};
+use lightcraft_catalog::replication::{AppendProgress, publication_prefixes};
+use serde_json::Value;
 use std::sync::atomic::AtomicBool;
 fn error(message: impl Into<String>) -> EngineError {
     EngineError::Other(message.into())
 }
 pub fn migrate(s: &mut Session, p: &Value) -> Result<Value> {
-    if p.get("writersStopped").and_then(Value::as_bool) != Some(true) {
-        return Err(error("migration requires writersStopped:true after pausing every device; older clients must remain stopped until upgraded"));
-    }
-    if s.cloud_replication_jobs.running() || s.cloud_uploads.running() > 0 {
-        return Err(error("finish or cancel active transfers before migration"));
-    }
-    s.persist()?;
-    let mut state = s.catalog.sync_state().cloned().ok_or_else(|| error("enable synchronization first"))?;
-    if !state.protocol.is_head() {
-        return s.execute("cloud.syncStatus", p);
-    }
-    let lib = s.library.as_mut().ok_or_else(|| error("persistent library required"))?;
-    let conn = lib.cloud_connections()?.into_iter().find(|c| c.id == state.connection).ok_or_else(|| error("storage connection unavailable"))?;
-    let owner = super::owner::identity(&lib.dir)?;
-    let cancel = AtomicBool::new(false);
-    let remote = crate::cloud_replication::read(&conn, &state.library, &cancel).map_err(|e| error(e.to_string()))?;
+    crate::cloud_replication::start_migration(s, p)
+}
+/// Only the remotely committed seed is published; owner-thread persistence changes local mode.
+pub(crate) fn seed(
+    conn: &crate::assets::s3::S3Connection,
+    state: &lightcraft_catalog::replication::SyncState,
+    cancel: &AtomicBool,
+) -> Result<crate::cloud_replication::Outcome> {
+    let remote = crate::cloud_replication::read(conn, &state.library, cancel).map_err(|e| error(e.to_string()))?;
     let portable = remote.state.portable();
     let progress = AppendProgress {
         version: 1,
@@ -38,7 +28,7 @@ pub fn migrate(s: &mut Session, p: &Value) -> Result<Value> {
     conn.put_immutable_verified(
         &super::manifest_key(&conn.prefix, &state.library).map_err(|e| error(e.to_string()))?,
         &super::manifest(&state.library).map_err(|e| error(e.to_string()))?,
-        &cancel,
+        cancel,
     )
     .map_err(|e| error(e.to_string()))?;
     let bytes = super::encode(&progress).map_err(|e| error(e.to_string()))?;
@@ -48,20 +38,12 @@ pub fn migrate(s: &mut Session, p: &Value) -> Result<Value> {
         state.device,
         crate::assets::sha256(&bytes).0
     );
-    conn.put_immutable_verified(&key, &bytes, &cancel).map_err(|e| error(e.to_string()))?;
-    state.protocol = SyncProtocol::AppendLog;
-    state.migrated_from_head = true;
-    state.cursor = None;
-    state.generation = 0;
-    state.claim_owner(owner, super::owner::random()?)?;
-    let binding = Op::SetSyncState { state: Some(Box::new(state)) };
-    let mut next = s.catalog.clone();
-    next.apply(binding.clone())?;
-    let incoming = crate::cloud_sync::incoming_append(&next, progress, &Default::default())?;
-    let inverse = s.apply_catalog_mode(Op::Batch { ops: vec![binding, incoming] }, false)?;
-    if let Err(e) = s.persist() {
-        s.apply_received(inverse)?;
-        return Err(e);
-    }
-    Ok(json!({"migrated":true,"protocol":"append-log-v1","legacyHistoryRetained":true,"pending":s.catalog.sync_state().map_or(0,|s|s.pending.len())}))
+    conn.put_immutable_verified(&key, &bytes, cancel).map_err(|e| error(e.to_string()))?;
+    Ok(crate::cloud_replication::Outcome {
+        state: progress.remote.clone(),
+        acknowledged: Default::default(),
+        cursor: String::new(),
+        generation: 0,
+        append: Some(progress),
+    })
 }

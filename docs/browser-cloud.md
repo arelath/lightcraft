@@ -166,10 +166,17 @@ claim a new current author while keeping historical pending IDs. Browser Web Loc
 writers in the same browser storage.
 
 Select Append-only (Backblaze B2) in Cloud Synchronization, or pass `protocol:"append-log-v1"`
-to `cloud.syncEnable`. The default remains conditional S3. For migration, stop every old writer,
-configure an append-capable signer/root, and dispatch `cloud.migrateAppend {writersStopped:true}`.
-Observe its background report before retrying `cloud.sync`. Migration saves the remotely
-verified seed and local mode atomically without acknowledging unsent pending work.
+to `cloud.syncEnable`. The default remains conditional S3. For migration, configure an
+append-capable signer/root and use File → Migrate Cloud Library… or the setup/Info migration
+button. The shared dialog pauses this session's automatic publication and requires confirmation
+that every other device is stopped and upgraded. Cancel keeps it paused; reconfiguring the
+signer or reconnecting does not resume it. Explicit Sync now resumes cancelled preparation.
+The pause does not survive app restart; keep other devices closed until cutover is ready.
+`cloud.prepareMigration` and `cloud.migrateAppend {writersStopped:true}` expose the same control
+flow. Observe Activity and the background report before retrying `cloud.sync`. Cancellation
+after remote seed publication preserves local mode/pending work; retry migration to finish.
+Migration saves the remotely verified seed and local mode durably without acknowledging
+unsent pending work. Each catalog must migrate; the app cannot stop old binaries remotely.
 
 Existing requests retain the original JSON contract. Append requests add:
 
@@ -224,3 +231,17 @@ bandwidth/Class B cap had been reached; scoped listing still worked. The native 
 currently labels a 403 as rejected credentials, so check B2 Caps & Alerts as well as key
 permissions. Further live download rechecks await a cap reset or an owner-approved cap change.
 The complete earlier acceptance results remain recorded; account caps were not changed.
+
+
+The coordinated migration dialog was additionally verified on 2026-10-14 in Chromium with
+both OPFS and IndexedDB against the independently signed loopback fixture. Preparation pause,
+confirmation, reconnect without resuming, cancellation after seed publication, retry, pending
+retention, native-peer convergence and durable completed-mode reload passed. Visible Activity/
+Info migration progress and confirmation/completion were inspected. Results:
+`target/cloud-acceptance/migration-browser-results.json` and `migration-browser-*.png`.
+The account cap above still blocks a fresh live-B2 workflow test; this fixture evidence is
+separate from the earlier completed live append tests.
+
+The final native release and browser bundle built successfully; all eight CI stages passed
+(`target/migration-native-final.log`, `target/migration-web-final.log`, `target/migration-ci-final.log`).
+Owned fixture/static helpers were stopped after acceptance.

@@ -43,6 +43,7 @@ impl Drop for Job {
 }
 #[derive(Default)]
 struct Data {
+    preparing_migration: bool,
     providers: BTreeMap<String, Provider>,
     jobs: Vec<Job>,
     reports: Vec<Value>,
@@ -149,10 +150,12 @@ impl Host {
             "cloud.syncEnable" => Some(self.enable(s, p)),
             "cloud.sync" => Some(self.start(s, p)),
             "cloud.migrateAppend" => Some(self.migrate(s, p)),
+            "cloud.prepareMigration" => Some(self.prepare_migration(s)),
             "cloud.syncStatus" => Some(self.status(s)),
             "cloud.reconnect" => Some({
                 self.memory.retry();
-                self.data.borrow_mut().paused = false;
+                let mut data = self.data.borrow_mut();
+                data.paused = data.preparing_migration;
                 Ok(json!({"ready":true}))
             }),
             "cloud.fetch" => Some(self.acquire(s, "cloud.fetch", p)),
@@ -194,7 +197,7 @@ impl Host {
         let configs: Vec<_> = data.providers.values().map(|v| v.connection.clone()).collect();
         self.files.write(CONFIG_FILE, &serde_json::to_vec(&configs).map_err(|e| e.to_string())?);
         self.memory.retry();
-        data.paused = false;
+        data.paused = data.preparing_migration;
         Ok(json!({"configured":true,"savePending":true,"credentials":"ephemeral authorized URLs"}))
     }
     fn enable(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
@@ -234,6 +237,8 @@ impl Host {
         let data = self.data.borrow();
         status["transportAvailable"] = json!(self.backend.is_some() && !data.providers.is_empty());
         status["running"] = json!(data.sync_running);
+        status["preparingMigration"] = json!(data.preparing_migration);
+        status["migrating"] = json!(data.jobs.iter().any(|job| job.migrating));
         status["reports"] = json!(data.reports);
         status["cache"] = self.memory.status();
         status["savePending"] = json!(self.files.is_dirty());
@@ -265,7 +270,7 @@ impl Host {
             return Err("browser cloud task queue is full".into());
         }
         s.persist().map_err(|e| e.to_string())?;
-        let guard = s.activity.start("cloudSync", "Synchronize cloud library", Cancel::Yes);
+        let guard = s.activity.start("cloudSync", if migrating { "Migrate cloud library" } else { "Synchronize cloud library" }, Cancel::Yes);
         let task = guard.id();
         let audit = p.get("audit").map(|v| v.as_bool().ok_or("audit must be true or false")).transpose()?.unwrap_or(true)
             || data.last_audit == 0.
@@ -276,6 +281,7 @@ impl Host {
         data.jobs.push(Job { migrating, guard, owner: s.library_token(), stage: Stage::SaveThenSync { checkpoint, audit } });
         data.sync_running = true;
         data.paused = false;
+        data.preparing_migration = false;
         data.next_poll = js_sys::Date::now() + 5000.;
         self.memory.retry();
         Ok(json!({"task":task,"background":true}))
@@ -287,6 +293,25 @@ impl Host {
         let mut params = p.as_object().cloned().ok_or("migration parameters must be an object")?;
         params.insert("migrate".into(), json!(true));
         self.start(s, &Value::Object(params))
+    }
+    fn prepare_migration(&self, s: &Session) -> Result<Value, String> {
+        if s.catalog.sync_state().is_none_or(|state| !state.protocol.is_head()) {
+            return Err("migration requires an enabled conditional-head library".into());
+        }
+        let mut data = self.data.borrow_mut();
+        if data.jobs.iter().any(|job| job.migrating) {
+            return Err("migration is already running".into());
+        }
+        data.preparing_migration = true;
+        data.paused = true;
+        for job in &data.jobs {
+            if matches!(job.stage, Stage::SaveThenSync { .. } | Stage::Network(_))
+                && let Some(cancel) = job.guard.cancel_flag()
+            {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        Ok(json!({"paused":true,"running":data.sync_running}))
     }
     fn acquire(&self, s: &mut Session, command: &str, p: &Value) -> Result<Value, String> {
         let backend = self.backend.clone().ok_or("persistent browser storage is unavailable")?;
@@ -372,7 +397,7 @@ impl Host {
                     let mut data = self.data.borrow_mut();
                     if sync {
                         data.sync_running = false;
-                        data.paused = result.is_err();
+                        data.paused = result.is_err() || data.preparing_migration;
                         // Leave a retry/explicit-sync window even when a remote scan takes
                         // longer than the polling interval.
                         data.next_poll = js_sys::Date::now() + 5000.;
@@ -432,7 +457,11 @@ impl Host {
                     let migrating = job.migrating;
                     let ready = Rc::new(RefCell::new(None));
                     let result = ready.clone();
-                    job.guard.handle().detail("Reconciling and publishing saved library changes");
+                    job.guard.handle().detail(if migrating {
+                        "Verifying committed history and publishing the migration seed"
+                    } else {
+                        "Reconciling and publishing saved library changes"
+                    });
                     wasm_bindgen_futures::spawn_local(async move {
                         *result.borrow_mut() = Some(if migrating {
                             super::append::migrate(&provider, &local).await

@@ -176,6 +176,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("file.importCloud", "Import to Cloud Storage…", None, "File"),
     ("dialog.cloudStorage", "Cloud Storage…", None, "File"),
     ("dialog.cloudSync", "Cloud Synchronization…", None, "File"),
+    ("dialog.cloudMigrate", "Migrate Cloud Library…", None, "File"),
     ("file.addFolder", "Import from Folder…", None, "File"),
     ("file.importLightroom", "Import Lightroom Catalog…", None, "File"),
     ("file.addFromDevice", "Import from Device", None, ""),
@@ -1321,6 +1322,10 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             });
             Ok(Value::Null)
         }
+        "dialog.cloudMigrate" => app.run("cloud.prepareMigration", json!({})).map(|_| {
+            app.ui.dialog = Some(Dialog::CloudMigration { writers_stopped: false });
+            Value::Null
+        }),
         "dialog.cloudSync" => {
             let configured = match app.run("cloud.connections", json!({})) {
                 Ok(value) => value,
@@ -1914,6 +1919,7 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
         "dialog.cloudStorage" | "dialog.cloudSync" => {
             (cfg!(not(target_arch = "wasm32")) || app.services.cloud_action.is_some()) && app.session.library.is_some()
         }
+        "dialog.cloudMigrate" => app.session.catalog.sync_state().is_some_and(|state| state.protocol.is_head()),
         "file.exportPresets" => app.session.presets.iter().any(|p| !p.builtin),
         "file.exportCurvePresets" => !app.session.curve_presets.is_empty(),
         "view.compare" => app.session.catalog.len() > 1,

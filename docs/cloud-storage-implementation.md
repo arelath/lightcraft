@@ -8,7 +8,7 @@ The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed
 
 `crates/catalog/src/assets.rs` describes originals and optional smart-preview/thumbnail blobs, with connection IDs, object keys and optional object versions. Device cache paths, transfer state and connection settings are excluded from the catalog. Existing SipHash duplicate-detection and cache hashes retain their semantics.
 
-`crates/engine/src/assets.rs` separates `BlobStore` (transport), `TransferManager` (verified acquisition and availability), and `CatalogSync` (a future conditional metadata-publication interface). **Catalog synchronization is not implemented yet.**
+`crates/engine/src/assets.rs` separates `BlobStore` (transport), `TransferManager` (verified acquisition and availability), and `CatalogSync` (a future conditional metadata-publication interface). Catalog synchronization uses the durable mutation protocols described in [cloud-sync-protocol.md](cloud-sync-protocol.md).
 
 The resolver streams to an atomic-write temporary file, checks the declared size and SHA-256, then publishes it. Failed, cancelled, interrupted or corrupt transfers never become valid cached files. Reopening verifies cached content before use. Per-blob locks deduplicate simultaneous downloads; leases protect files during use. Errors distinguish confirmed missing objects, rejected credentials and temporary failures.
 
@@ -363,6 +363,17 @@ button passed; a deliberately failed post-publication acknowledgement retained p
 then recovered its saved proof on reload. Backup inspection verified cloud hashes and excluded
 session login tokens and signed URLs.
 
+## Coordinated migration workflow
+
+File → Migrate Cloud Library… and the Cloud Synchronization/Info buttons pause this session's
+automatic publication. Confirm that every other device is stopped and upgraded, then start the
+cancellable background migration in Activity. Cancelled preparation stays paused until explicit
+Sync now; restart does not preserve this pause. Each device must complete its own cutover before
+resuming the fleet. Native owner persistence changes protocol/progress together, preserves edits
+made during the worker's remote scan, and rolls back on journal failure. A partially published
+remote seed is retained for safe retry. See [migration operation](cloud-sync-protocol.md#setup-cutover-and-retention)
+and [browser requirements](browser-cloud.md).
+
 ## Revision history
 
 | Date | Change |
@@ -380,3 +391,4 @@ session login tokens and signed URLs.
 | 2026-10-13 | Managed DNG/XMP revisions, durable external-editor return ingestion, immutable pending revision publication, partial-rendition recovery and hard-link output protection; native actual-editor and CLI/MCP acceptance passed. |
 | 2026-10-13 | Durable causal mutation synchronization, conditional head reconciliation, incremental tails/checkpoints, conflict versions and explicit tombstone recovery; shared-engine and CLI failure/rebootstrap checks. |
 | 2026-10-13 | Browser Fetch authorization, verified managed worker media, durable OPFS/IndexedDB outbox acknowledgements, cloud backups and native/browser synchronization acceptance; optional metadata backend remains deferred. |
+| 2026-10-14 | Coordinated migration dialog and asynchronous desktop cutover; operator-confirmed peer pause, cancellation/retry and local save rollback. |

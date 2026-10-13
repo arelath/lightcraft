@@ -22,10 +22,34 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
     #[cfg(target_arch = "wasm32")]
     let (running, reports) = (false, Vec::<Value>::new());
     Ok(json!({"enabled":true,"library":state.library,"device":state.device,"connection":state.connection,
+        "preparingMigration":preparing_migration(s),
+        "migrating":migrating(s),
         "protocol":state.protocol,"frontiers":state.append.as_ref().map(|p|&p.frontiers),"gaps":state.append.as_ref().map(|p|&p.gaps),
         "pending":state.pending.len(),"generation":state.generation,"cursor":state.cursor,"conflicts":conflicts,
         "running":running,"reports":reports,
         "transportAvailable":cfg!(not(target_arch="wasm32"))}))
+}
+fn preparing_migration(s: &Session) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        s.cloud_replication_jobs.preparing_migration()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = s;
+        false
+    }
+}
+fn migrating(s: &Session) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        s.cloud_replication_jobs.migrating()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = s;
+        false
+    }
 }
 #[cfg(not(target_arch = "wasm32"))]
 fn enable(s: &mut Session, p: &Value) -> Result<Value> {
@@ -90,11 +114,21 @@ pub fn specs() -> Vec<CommandSpec> {
     ));
     #[cfg(not(target_arch = "wasm32"))]
     specs.push(cmd!(
+        "cloud.prepareMigration",
+        "Pause this device for cloud migration",
+        [],
+        None,
+        "{}; stop local automatic publication; Sync now explicitly resumes",
+        always,
+        crate::cloud_replication::prepare_migration
+    ));
+    #[cfg(not(target_arch = "wasm32"))]
+    specs.push(cmd!(
         "cloud.migrateAppend",
         "Migrate cloud library to append synchronization",
         [],
         None,
-        "{writersStopped:true}; explicitly seed verified remote state; pause all old clients first",
+        "{writersStopped:true,wait?}; background on desktop; seed verified remote state after every old writer stops",
         always,
         crate::cloud_append::migration::migrate
     ));
@@ -121,6 +155,7 @@ pub fn specs() -> Vec<CommandSpec> {
     specs.push(cmd!(query "cloud.configureBrowser","Configure browser cloud storage",[],None,"{id, prefix, authorizeEndpoint, storageOrigin, token?}; device-local settings and ephemeral login",always, browser_host));
     #[cfg(target_arch = "wasm32")]
     specs.extend([
+        cmd!(query "cloud.prepareMigration","Pause this device for cloud migration",[],None,"{}; stop automatic publication; Sync now resumes",always,browser_host),
         cmd!(query "cloud.migrateAppend","Migrate cloud library to append synchronization",[],None,"{writersStopped:true}; seed verified remote history; pause every old writer",always,browser_host),
         cmd!(query "cloud.connections","Cloud storage connections",[],None,"{}",always,browser_host),
         cmd!(query "cloud.syncEnable","Enable cloud synchronization",[],None,"{connection,library?,protocol?}",always,browser_host),

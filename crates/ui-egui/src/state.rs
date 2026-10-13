@@ -769,6 +769,9 @@ pub struct NameEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Dialog {
+    CloudMigration {
+        writers_stopped: bool,
+    },
     CloudSync {
         #[serde(default)]
         protocol: lightcraft_catalog::replication::SyncProtocol,

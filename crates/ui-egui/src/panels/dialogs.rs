@@ -228,6 +228,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::Import { .. } => "Import Photos",
         Dialog::CloudStorage { .. } => "Cloud Storage",
         Dialog::CloudSync { .. } => "Cloud Synchronization",
+        Dialog::CloudMigration { .. } => "Migrate Cloud Library",
         Dialog::CloudImport { .. } => "Import to Cloud Storage",
         Dialog::LabelNames { .. } => "Edit Color Label Names",
         Dialog::CaptureTime { .. } => "Edit Capture Time",
@@ -290,7 +291,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .default_width(match dlg {
             Dialog::Import { .. } => crate::import::DIALOG_SIZE[0],
-            Dialog::CloudStorage { .. } | Dialog::CloudImport { .. } | Dialog::CloudSync { .. } => 480.0,
+            Dialog::CloudStorage { .. } | Dialog::CloudImport { .. } | Dialog::CloudSync { .. } | Dialog::CloudMigration { .. } => 480.0,
             Dialog::SmartRules { .. } => 680.0,
             Dialog::AllMetadata { .. } => 620.0,
             Dialog::FaceModel { .. } => 460.0,
@@ -1003,6 +1004,20 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         for saved in connections { ui.selectable_value(connection, saved.clone(), saved.as_str()); }
                     });
                 }
+                Dialog::CloudMigration { writers_stopped } => {
+                    ui.label(crate::i18n::tr("Switch this library to append-only synchronization for Backblaze B2 and compatible storage."));
+                    ui.label(crate::i18n::tr("This device's automatic synchronization is paused. Stop synchronization on every other device and upgrade them before continuing."));
+                    if let Some(state) = app.session.catalog.sync_state() {
+                        ui.label(format!("Library ID: {}", state.library));
+                        ui.label(format!("{} pending changes stay on this device.", state.pending.len()));
+                    }
+                    ui.label(crate::i18n::tr("Saved edits, staged originals and cloud history are preserved. Keep older clients stopped after migration."));
+                    let check = ui.checkbox(writers_stopped, crate::i18n::tr("All other devices have stopped synchronization and have been upgraded."));
+                    crate::widgets::register(ui.ctx(), "checkbox:cloudMigrationStopped", check.rect);
+                    let status = app.run("cloud.syncStatus", json!({})).unwrap_or_default();
+                    if status["running"].as_bool() == Some(true) { ui.label(crate::i18n::tr("Waiting for the current synchronization to stop…")); }
+                    ui.label(crate::i18n::tr("Cancel leaves this device paused. Use Sync now to resume without migrating."));
+                }
                 Dialog::CloudSync { connection, library,protocol } => {
                     ui.label(crate::i18n::tr("Use the same storage prefix and library ID on each device. Leave Library ID empty only when creating a shared library."));
                     field(ui, "Connection name", |ui| { crate::text_field::TextField::singleline("cloudSyncConnection", connection).width(f32::INFINITY).show(ui); });
@@ -1013,6 +1028,11 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         });
                     });
                     field(ui, "Library ID", |ui| { crate::text_field::TextField::singleline("cloudSyncLibrary", library).width(f32::INFINITY).show(ui); });
+                    if app.session.catalog.sync_state().is_some_and(|state| state.protocol.is_head()) {
+                        let button = ui.button(crate::i18n::tr("Migrate to append-only…"));
+                        crate::widgets::register(ui.ctx(), "button:cloudSyncMigrate", button.rect);
+                        if button.clicked() && let Err(error) = app.run("dialog.cloudMigrate", json!({})) { app.toast(ui.ctx(), error); }
+                    }
                     ui.label(crate::i18n::tr("After a failed synchronization, retry from Info. Originals and pending edits stay on this device."));
                     let deleted: Vec<_> = app.session.catalog.sync_state().into_iter().flat_map(|state| {
                         state.documents.keys().filter(|entity| entity.starts_with("photo:") && state.winning(entity,"deleted").is_some_and(|(_,v)| v.as_bool()==Some(true)))
@@ -1274,6 +1294,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::ContactSheet { .. } => "Choose PDF…",
                     Dialog::CloudStorage { .. } => "Save Connection",
                     Dialog::CloudSync { .. } => "Enable & Synchronize",
+                    Dialog::CloudMigration { .. } => "Migrate Library",
                     Dialog::CloudImport { .. } => "Choose Photos…",
                     Dialog::Merge { .. } => "Merge",
                     Dialog::DenoiseModel { info, .. } if info["download"].is_string() => "Accept & Download",
@@ -1301,7 +1322,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 let can_confirm = informational
                     || !matches!(
                         &dlg,
-                        Dialog::DenoiseModel { accepted: false, .. } | Dialog::FaceModel { accepted: false, .. } | Dialog::SynchronizeFolder { counts: None, .. }
+                        Dialog::DenoiseModel { accepted: false, .. } | Dialog::FaceModel { accepted: false, .. } | Dialog::SynchronizeFolder { counts: None, .. } | Dialog::CloudMigration { writers_stopped: false }
                     )
                         // smart-album rules that can't mean anything wait to be fixed
                         && !matches!(&dlg, Dialog::SmartRules { id, rules, .. } if !rules.check_for(&app.session.catalog, id.map(lightcraft_catalog::AlbumId)).is_empty());
@@ -1348,6 +1369,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::Import { .. }
                         | Dialog::CloudStorage { .. }
                         | Dialog::CloudSync { .. }
+                        | Dialog::CloudMigration { .. }
                         | Dialog::CloudImport { .. }
                         | Dialog::Export { .. }
                         | Dialog::ContactSheet { .. }
@@ -1771,6 +1793,7 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
             }
         }
         Dialog::CloudImport { connection, .. } => app.run("file.importCloud", json!({"connection":connection})),
+        Dialog::CloudMigration { writers_stopped } => app.run("cloud.migrateAppend", json!({"writersStopped":writers_stopped,"wait":false})),
         Dialog::CloudSync { connection, library, protocol } => {
             let mut params = json!({"connection":connection.trim(),"protocol":protocol});
             if !library.trim().is_empty()

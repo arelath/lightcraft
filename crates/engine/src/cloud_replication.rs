@@ -377,4 +377,4 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
 }
 
 mod worker;
-pub use worker::{Jobs, start};
+pub use worker::{Jobs, prepare_migration, start, start_migration};

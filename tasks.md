@@ -237,6 +237,23 @@ Live B2 acceptance (2026-10-14) used isolated `lightcraft-acceptance/append/` an
 
 After the complete live acceptance runs, an additional post-build B2 recheck reached the account's download bandwidth/Class B cap. Scoped listing still returned 200, while object GET returned 403 `AccessDenied` with the explicit cap-exceeded message (`target/cloud-acceptance/b2-final-access-probe.json`). This blocks further live download rechecks until the cap resets or the owner changes Caps & Alerts. It does not invalidate the earlier completed native/browser runs. The current native 403 error labels this as rejected credentials; the isolated diagnostic established the cap as the actual cause. Account caps were not changed.
 
+## Coordinated migration workflow — follow-up
+
+The migration command already verifies and seeds committed history. This follow-up exposes the coordinated cutover in desktop/browser UI and moves desktop network work off the UI thread.
+
+- [x] **MIG.1** Run native migration on the cancellable replication worker; apply protocol/progress atomically on its owner, preserving edits created during migration, with save-failure rollback and retry.
+- [x] **MIG.2** Add a shared migration dialog and File/setup/Info entry points; pause local publication, require stopped/upgraded peer confirmation and keep cancelled preparation paused until explicit Sync now.
+- [x] **MIG.3** Verify CLI migration, active-transfer exclusion, cancellation after publication, stale owner/connection handling, pending-ID retention and durable failure recovery.
+- [x] **MIG.4** Inspect and drive native/browser migration through their control paths, including preparation, confirmation, progress, cancellation/retry and completion; preserve credentials and staged originals.
+- [x] **MIG.5** Update migration/progress documentation and run full CI, native and WASM/web builds; record live B2 verification or an actual service-cap limitation separately.
+- [ ] **MIG.B2** Repeat the coordinated desktop/browser migration workflow against live B2 after its download/Class B cap clears. Current GET recheck returned HTTP 403 `AccessDenied` with the explicit cap-exceeded response (`target/cloud-acceptance/migration-b2-access-probe.json`); account limits were not changed.
+
+Owner/CLI verification (2026-10-14): all eight replication-worker tests and nine real CLI append scenarios passed in the final workspace run. Migration regressions cover late-edit preservation, atomic full-disk rollback/retry, cancelled/stale owner or connection results, preparation cancellation and direct library replacement clearing the pause. Upload acknowledgement tests also reject cutover while a transfer is active and retain the catalog. Shared modal tests verify disabled confirmation and cancellation leaving preparation paused.
+
+Workflow acceptance (2026-10-14) passed on the final native release and browser development bundle against an independently signed loopback S3 fixture. Desktop control requests and Chromium OPFS/IndexedDB exercised setup → migration, disabled confirmation, cancellation of preparation with pause retained, explicit resume, cancellation after the remote marker committed, retry, cutover without acknowledging the pending edit, subsequent append publication and native-peer convergence. Browser reconnect/reconfiguration preserved preparation pause; reload retained completed append mode and no pending work. Desktop Activity and browser Activity/Info migration progress, confirmation and completion screenshots were inspected. Native control inspections stayed below 39 ms during the deliberate network delay. Evidence: `target/cloud-acceptance/migration-native-results.json`, `migration-browser-results.json`, `migration-native-*.png` and `migration-browser-*.png`. These fixtures do not constitute a new live-B2 migration test; MIG.B2 remains blocked by the measured service cap.
+
+Quality gates (2026-10-14): all eight stages of `cargo +1.95.0 xtask ci` passed on the final source (`target/migration-ci-final.log`). Native release and WASM/browser builds passed (`target/migration-native-final.log`, `target/migration-web-final.log`). The fixture independently verified all 429 requests across the final workflow runs and retained legacy heads (`target/cloud-acceptance/migration-fixture-summary.json`). Owned fixture/static helpers were stopped. The final signed B2 GET recheck at 2026-10-13 21:56 UTC again returned the explicit cap-exceeded response, so MIG.B2 stays unchecked.
+
 ## Milestone 6 — Optional managed metadata backend
 
 **Deferred at the user's request.** These tasks remain unchecked for a future decision.

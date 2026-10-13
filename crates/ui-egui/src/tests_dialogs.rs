@@ -96,3 +96,68 @@ fn modal_dialogs_close_background_menus() {
     h.step();
     assert!(!egui::Popup::is_any_open(&h.view.ctx), "background menus cannot remain above the modal window");
 }
+
+#[test]
+fn cloud_migration_dialog_requires_peer_confirmation_and_cancel_keeps_pause() {
+    use std::{cell::RefCell, rc::Rc};
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let output = calls.clone();
+    let paused = Rc::new(RefCell::new(false));
+    let control = paused.clone();
+    let services = Services {
+        cloud_action: Some(Box::new(move |_, id, p| match id {
+            "cloud.prepareMigration" => {
+                *control.borrow_mut() = true;
+                Some(Ok(json!({"paused":true})))
+            }
+            "cloud.syncStatus" => Some(Ok(json!({"running":false,"preparingMigration":*control.borrow()}))),
+            "cloud.migrateAppend" => {
+                output.borrow_mut().push(p.clone());
+                if p["writersStopped"] != true { Some(Err("confirm stopped peers".into())) } else { Some(Ok(json!({"task":1,"background":true}))) }
+            }
+            "cloud.sync" => {
+                *control.borrow_mut() = false;
+                Some(Ok(json!({"task":2,"background":true})))
+            }
+            _ => None,
+        })),
+        ..Default::default()
+    };
+    let mut session = lightcraft_engine::Session::with_demo();
+    session
+        .catalog
+        .apply(lightcraft_engine::catalog::Op::SetSyncState {
+            state: Some(Box::new(
+                lightcraft_engine::catalog::replication::SyncState::new("library".into(), "device".into(), "personal".into()).unwrap(),
+            )),
+        })
+        .unwrap();
+    let mut h = Headless::new(LightcraftApp::new(session, services), [1400., 1000.], 1.);
+    h.settle(Duration::from_secs(120));
+    h.app.run("dialog.cloudMigrate", json!({})).unwrap();
+    h.step();
+    h.step();
+    assert!(*paused.borrow());
+    let r = h.request("ui.clickWidget", json!({"id":"button:dialogOk"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    assert!(h.app.ui.dialog.is_some());
+    assert!(calls.borrow().is_empty());
+    let r = h.request("ui.clickWidget", json!({"id":"button:dialogCancel"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    assert!(h.app.ui.dialog.is_none());
+    assert!(*paused.borrow());
+    h.app.run("cloud.sync", json!({"wait":false})).unwrap();
+    assert!(!*paused.borrow());
+    h.app.run("dialog.cloudMigrate", json!({})).unwrap();
+    h.step();
+    let r = h.request("ui.clickWidget", json!({"id":"checkbox:cloudMigrationStopped"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    let r = h.request("ui.clickWidget", json!({"id":"button:dialogOk"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    assert!(h.app.ui.dialog.is_none());
+    assert_eq!(calls.borrow().as_slice(), &[json!({"writersStopped":true,"wait":false})]);
+}
