@@ -181,13 +181,15 @@ Native synchronization acceptance (2026-10-13) passed through control port 18877
 
 **Dependencies:** Milestones 1–3 for cloud storage; Milestone 4 for shared multi-device libraries.
 
-- [ ] **CS5.1** Trace browser storage and asynchronous original-loading hooks and adapt them to managed assets, local caches, and smart previews.
-- [ ] **CS5.2** Implement a browser transfer provider using `fetch` and authorized URLs; keep native provider dependencies outside the browser build.
-- [ ] **CS5.3** Define browser-safe authentication and URL refresh behavior, including expiration during transfers.
-- [ ] **CS5.4** Document required bucket CORS configuration for the browser adapter's requests, authorization, and conditional operations.
-- [ ] **CS5.5** Persist browser cache and pending work through existing browser storage mechanisms, respecting quota limits and the no-eviction rule for unsynchronized data.
-- [ ] **CS5.6** Test browser browse/edit/export, reload with pending work, smart-preview fallback, offline operation, storage-quota errors, expired URLs, and multi-device synchronization where enabled.
-- [ ] **CS5.7** Run WASM and applicable web checks, including `cargo xtask ci`, and visually inspect browser cloud workflows.
+- [x] **CS5.1** Trace browser storage and asynchronous original-loading hooks and adapt them to managed assets, local caches, and smart previews.
+- [x] **CS5.2** Implement a browser transfer provider using `fetch` and authorized URLs; keep native provider dependencies outside the browser build.
+- [x] **CS5.3** Define browser-safe authentication and URL refresh behavior, including expiration during transfers.
+- [x] **CS5.4** Document required bucket CORS configuration for the browser adapter's requests, authorization, and conditional operations.
+- [x] **CS5.5** Persist browser cache and pending work through existing browser storage mechanisms, respecting quota limits and the no-eviction rule for unsynchronized data.
+- [x] **CS5.6** Test browser browse/edit/export, reload with pending work, smart-preview fallback, offline operation, storage-quota errors, expired URLs, and multi-device synchronization where enabled.
+- [x] **CS5.7** Run WASM and applicable web checks, including `cargo xtask ci`, and visually inspect browser cloud workflows.
+
+Browser acceptance (2026-10-13) passed in Chromium with two render workers on both OPFS and IndexedDB. A native CLI peer and browser converged after independent develop/rating/flag edits. Browser checks covered verified smart-preview browsing, full-quality refusal without originals, explicit preview export, genuine offline editing/export, reload with a durable pending outbox and cached preview, reauthorization after reload, a 403 URL refresh, lost conditional-head responses, checkpoints, quota failures that retain pending work, retry, and original reacquisition/full-quality export. All 205 fixture requests passed independent SigV4 checks; every write was conditional. Results and inspected screenshots are under `target/cloud-acceptance/browser-acceptance-results.json` and `browser-*.png`. These procedural, development-build tests establish neither live bucket interoperability nor large-library performance. Final UI updates were 2 ms, with startup/update maxima of 6.8–7.2 seconds and thumbnail work still in flight. All eight CI stages passed in `target/browser-cloud-ci.log`; the WASM bundle and native release binaries built successfully. Setup, masked credentials, preview/original renders, reload, failed acknowledgement saving and Info authorization/retry screenshots were inspected. The browser Info Sync now button completed retry; the rebuilt native app also synchronized to the browser's generation through its Info button. Additional IndexedDB acceptance rejected saving an acknowledgement after remote publication, retained pending work, then completed the saved proof after storage recovered and the page reloaded (`browser-durability-results.json`). Backup verification confirmed cloud hashes and excluded login tokens/signed URLs (`browser-backup-results.json`).
 
 ## Milestone 6 — Optional managed metadata backend
 

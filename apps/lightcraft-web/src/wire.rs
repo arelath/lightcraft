@@ -22,6 +22,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::hash_of_path;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ManagedSource {
+    pub blob: lightcraft_engine::catalog::assets::Blob,
+    pub proxy: bool,
+}
+
 /// One render request for a worker.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WireJob {
@@ -31,6 +37,8 @@ pub struct WireJob {
     pub source_identity: Option<String>,
     pub level: SourceLevel,
     pub origin: Source,
+    #[serde(default)]
+    pub managed: Option<ManagedSource>,
     /// Decode the source at most this long.
     pub max_edge: usize,
     pub raw: bool,
@@ -73,6 +81,21 @@ impl WireJob {
             source_identity: job.source_key.map(|key| key.to_string()),
             level: job.level,
             origin: job.origin.clone(),
+            managed: match &job.source {
+                SourceRef::Managed { asset: Some(asset), reader, requirement, .. } => {
+                    let original = *requirement == lightcraft_engine::assets::SourceRequirement::OriginalRequired
+                        || reader.as_ref().is_some_and(|read| read(&asset.original).is_ok())
+                        || asset.smart_preview.is_none();
+                    let blob = if original { Some(&asset.original) } else { asset.smart_preview.as_ref() };
+                    blob.map(|blob| {
+                        if let Some(read) = reader {
+                            let _ = read(blob);
+                        }
+                        ManagedSource { blob: blob.clone(), proxy: !original }
+                    })
+                }
+                _ => None,
+            },
             max_edge,
             raw: job.info.raw,
             relative_wb: job.info.relative_wb,
@@ -126,7 +149,9 @@ impl WireJob {
         match &self.origin {
             Source::File { path } => format!("{}:{:?}:{}:{path}", self.cache_generation, self.source_identity, self.max_edge),
             Source::Demo { scene } => format!("{}:{:?}:{}:demo:{scene}", self.cache_generation, self.source_identity, self.max_edge),
-            Source::Managed { asset_id } => format!("{}:{:?}:{}:asset:{}", self.cache_generation, self.source_identity, self.max_edge, asset_id.0),
+            Source::Managed { asset_id } => {
+                format!("{}:{:?}:{}:asset:{}:{:?}", self.cache_generation, self.source_identity, self.max_edge, asset_id.0, self.managed)
+            }
         }
     }
 
@@ -165,7 +190,8 @@ impl WorkerCore {
         }
         match &job.origin {
             Source::File { path } => hash_of_path(path).map(str::to_string),
-            Source::Demo { .. } | Source::Managed { .. } => None,
+            Source::Demo { .. } => None,
+            Source::Managed { .. } => job.managed.as_ref().map(|source| format!("cloud:{}", source.blob.id.0)),
         }
     }
 
@@ -181,7 +207,21 @@ impl WorkerCore {
                         DecodedSource::new(Arc::new(image), Some(info))
                     }
                     (Source::File { path }, None) => return Err(format!("{path}: original not found in browser storage")),
-                    (Source::Managed { .. }, _) => return Err("cloud asset transfers are not supported in this browser build yet".into()),
+                    (Source::Managed { .. }, Some(bytes)) => {
+                        let source = job.managed.as_ref().ok_or("managed worker source has no immutable blob description")?;
+                        crate::cloud::verify_blob(&source.blob, bytes)?;
+                        if source.proxy {
+                            let (image, tone) = lightcraft_engine::smart::decode(bytes)?;
+                            let mut decoded = DecodedSource::new(Arc::new(image), None);
+                            decoded.proxy = true;
+                            decoded.camera_tone = tone;
+                            decoded
+                        } else {
+                            let (image, info) = lightcraft_engine::files::load_bytes(bytes, job.max_edge)?;
+                            DecodedSource::new(Arc::new(image), Some(info))
+                        }
+                    }
+                    (Source::Managed { .. }, None) => return Err("cloud source is not cached; connect and retry".into()),
                     (origin @ Source::Demo { .. }, _) => self.media.origin_ref(origin, job.max_edge).load_source()?,
                 };
                 let cost = src.image.width * src.image.height * 12 + 64;
@@ -464,6 +504,7 @@ mod tests {
             source_identity: None,
             level: SourceLevel::Thumb,
             origin,
+            managed: None,
             max_edge: 512,
             raw: false,
             relative_wb: false,
@@ -567,5 +608,61 @@ mod tests {
         let j = ThumbIndex::from_json(&i.to_json());
         assert_eq!((j.len(), j.total()), (2, 200));
         assert!(j.contains("a") && j.contains("d"));
+    }
+
+    #[test]
+    fn managed_worker_and_foreground_read_verified_proxies_then_refresh_to_original_without_catalog_edit() {
+        use crate::cloud::memory::ManagedBytes;
+        use lightcraft_engine::catalog::assets::{Asset, AssetId, Blob, RemoteLocation};
+        use lightcraft_engine::catalog::{Op, Photo, PhotoId};
+        let bytes = crate::store::png_bytes(64, 48);
+        let (image, _) = lightcraft_engine::files::load_bytes(&bytes, 0).unwrap();
+        let preview = lightcraft_engine::smart::encode(&image, None).unwrap();
+        let blob = |bytes: &[u8], name: &str| Blob {
+            id: lightcraft_engine::assets::sha256(bytes),
+            size: bytes.len() as u64,
+            remote: RemoteLocation { connection: "browser".into(), key: format!("library/{name}"), version: None },
+        };
+        let original = blob(&bytes, "original.png");
+        let proxy = blob(&preview, "preview.lcsp");
+        let asset = Asset { original: original.clone(), smart_preview: Some(proxy.clone()), thumbnail: None, associated: Default::default() };
+        let mut session = lightcraft_engine::Session::new();
+        let memory = ManagedBytes::default();
+        memory.install(&mut session);
+        let origin = Source::Managed { asset_id: AssetId("managed".into()) };
+        session
+            .commit(
+                "managed",
+                Op::Batch {
+                    ops: vec![
+                        Op::SetAsset { id: AssetId("managed".into()), asset: Some(Box::new(asset)) },
+                        Op::AddPhoto { photo: Box::new(Photo::new(PhotoId(1), origin.clone(), "original.png", "PNG", 64, 48, "")) },
+                    ],
+                },
+            )
+            .unwrap();
+        memory.insert(&proxy, Arc::from(preview.clone())).unwrap();
+        let job = session.render_job(PhotoId(1), 32, 32, false, true).unwrap();
+        assert!(job.source.load_source().unwrap().proxy);
+        let wire = WireJob::from_job(&job, false, "Main");
+        assert!(wire.managed.as_ref().unwrap().proxy);
+        let mut core = WorkerCore::default();
+        assert_eq!(core.needs_original(&wire), Some(format!("cloud:{}", proxy.id.0)));
+        assert!(core.render(&wire, Some(b"corrupt")).is_err());
+        assert_eq!(core.render(&wire, Some(&preview)).unwrap().image.width, 32);
+        let read = session.original_reader_for(std::slice::from_ref(&origin));
+        let path = lightcraft_engine::assets::source_path(&origin).unwrap();
+        assert!(read(&path).is_err(), "full-original access never substitutes the proxy");
+        let revision = session.catalog.revision;
+        memory.insert(&original, Arc::from(bytes.clone())).unwrap();
+        session.media.clear_sources();
+        let updated = session.render_job(PhotoId(1), 32, 32, false, true).unwrap();
+        assert_eq!(session.catalog.revision, revision);
+        assert_ne!(job.source_key, updated.source_key);
+        let updated_wire = WireJob::from_job(&updated, false, "Main");
+        assert!(!updated_wire.managed.as_ref().unwrap().proxy);
+        assert_eq!(core.needs_original(&updated_wire), Some(format!("cloud:{}", original.id.0)));
+        assert_eq!(core.render(&updated_wire, Some(&bytes)).unwrap().image.width, 32);
+        assert_eq!(read(&path).unwrap(), bytes);
     }
 }

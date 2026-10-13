@@ -105,7 +105,10 @@ async fn handle(scope: &web_sys::DedicatedWorkerGlobalScope, backend: Option<Bac
         set(&out, "cacheMiss", &cache_miss.into());
         let original = match CORE.with(|c| c.borrow_mut().needs_original(&job)) {
             Some(hash) => match &backend {
-                Some(b) => b.read(&crate::store::storage_key(&hash)).await?,
+                Some(b) => {
+                    let key = hash.strip_prefix("cloud:").map_or_else(|| crate::store::storage_key(&hash), |hash| format!("cloud/blobs/{hash}"));
+                    b.read(&key).await?
+                }
                 None => None,
             },
             None => None,

@@ -692,12 +692,34 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         }
         // offline originals / smart previews
         if let lightcraft_catalog::Source::Managed { asset_id } = &p.source {
+            #[cfg(target_arch = "wasm32")]
+            let availability = app.session.catalog.asset(asset_id).and_then(|asset| {
+                app.session.media.managed_reader.as_ref().map(|read| match read(&asset.original) {
+                    Ok(_) => lightcraft_engine::assets::AssetAvailability::Cached,
+                    Err(error) if error.contains("loading asynchronously") => {
+                        lightcraft_engine::assets::AssetAvailability::Downloading { done: 0, total: asset.original.size }
+                    }
+                    Err(error) => lightcraft_engine::assets::AssetAvailability::Failed { error },
+                })
+            });
+            #[cfg(not(target_arch = "wasm32"))]
             let availability = app.session.catalog.asset(asset_id).and_then(|asset| {
                 app.session.media.asset_resolver.as_ref().map(|resolver| {
                     use lightcraft_engine::assets::TransferManager;
                     resolver.availability(&asset.original.id)
                 })
             });
+            #[cfg(target_arch = "wasm32")]
+            let preview = app.session.catalog.asset(asset_id).and_then(|asset| asset.smart_preview.as_ref()).and_then(|blob| {
+                app.session.media.managed_reader.as_ref().map(|read| match read(blob) {
+                    Ok(_) => lightcraft_engine::assets::AssetAvailability::Cached,
+                    Err(error) if error.contains("loading asynchronously") => {
+                        lightcraft_engine::assets::AssetAvailability::Downloading { done: 0, total: blob.size }
+                    }
+                    Err(error) => lightcraft_engine::assets::AssetAvailability::Failed { error },
+                })
+            });
+            #[cfg(not(target_arch = "wasm32"))]
             let preview = app.session.catalog.asset(asset_id).and_then(|asset| {
                 use lightcraft_engine::assets::TransferManager;
                 asset.smart_preview.as_ref().and_then(|blob| app.session.media.asset_resolver.as_ref().map(|r| r.availability(&blob.id)))
@@ -720,11 +742,11 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 _ => "Original in cloud storage",
             };
             ui.add_space(6.0);
-            #[cfg(not(target_arch = "wasm32"))]
             {
                 let sync = app.session.catalog.sync_state().map(|state| (state.library.clone(), state.pending.len(), state.generation));
                 if let Some((library, pending, generation)) = sync {
-                    let running = app.session.cloud_replication_jobs.running();
+                    let status = app.run("cloud.syncStatus", json!({})).unwrap_or_default();
+                    let running = status["running"].as_bool().unwrap_or(false);
                     ui.label(
                         egui::RichText::new(if running {
                             "Synchronizing library…".to_owned()
@@ -734,7 +756,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                         .color(t.text_dim),
                     );
                     ui.label(egui::RichText::new(format!("Library ID: {library}")).small().color(t.text_dim));
-                    if let Some(report) = app.session.cloud_replication_jobs.reports.last()
+                    if let Some(report) = status["reports"].as_array().and_then(|reports| reports.last())
                         && let Some(error) = report.get("error").and_then(serde_json::Value::as_str)
                     {
                         ui.label(egui::RichText::new(error).color(t.text_dim));
@@ -774,7 +796,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     }
                 }
             }
-            if let Some((import_id, upload)) = upload {
+            if let Some((_import_id, upload)) = upload {
                 use lightcraft_catalog::uploads::UploadState;
                 let label = match upload.state {
                     UploadState::SavedLocally => "Saved locally · upload pending",
@@ -792,7 +814,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 if matches!(upload.state, UploadState::SavedLocally | UploadState::Failed | UploadState::ObjectsVerified | UploadState::Published) {
                     let label = if upload.state == UploadState::Failed { "Retry upload" } else { "Upload now" };
                     if text_button(ui, "cloudUploadOriginal", crate::i18n::tr(label), false).clicked()
-                        && let Err(error) = app.run("cloud.upload", json!({"imports":[import_id], "wait":false}))
+                        && let Err(error) = app.run("cloud.upload", json!({"imports":[_import_id], "wait":false}))
                     {
                         app.toast(ui.ctx(), error);
                     }

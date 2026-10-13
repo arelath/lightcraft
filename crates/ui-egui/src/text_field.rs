@@ -50,6 +50,7 @@ pub struct TextField<'a> {
     widget: &'a str,
     text: &'a mut String,
     multiline: bool,
+    password: bool,
     hint: Option<String>,
     width: Option<f32>,
     select_on_focus: bool,
@@ -80,6 +81,7 @@ impl<'a> TextField<'a> {
             widget,
             text,
             multiline: false,
+            password: false,
             hint: None,
             width: None,
             select_on_focus: false,
@@ -101,6 +103,12 @@ impl<'a> TextField<'a> {
     /// Grey text shown while the field is empty.
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    /// Mask a session credential and let egui suppress copying its contents.
+    pub fn password(mut self, on: bool) -> Self {
+        self.password = on;
         self
     }
 
@@ -183,7 +191,7 @@ impl<'a> TextField<'a> {
             }
         }
         let mut edit = if self.multiline { egui::TextEdit::multiline(self.text) } else { egui::TextEdit::singleline(self.text) };
-        edit = edit.id(id);
+        edit = edit.id(id).password(self.password);
         if let Some(hint) = self.hint {
             edit = edit.hint_text(hint);
         }

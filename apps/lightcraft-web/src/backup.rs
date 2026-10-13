@@ -37,7 +37,8 @@ const DOS_DATE: u16 = (1 << 5) | 1;
 /// The readme inside every backup.
 pub const README: &str = "LightCraft library backup (browser version)\n\n\
 library/      the catalog (catalog.snap + catalog.log), presets, view state and preferences\n\
-originals/    every imported photo, as originals/<content hash>/<file name>\n\n\
+originals/    every imported photo, as originals/<content hash>/<file name>\n\
+cloud/blobs/ downloaded cloud originals and previews, verified by SHA-256\n\n\
 Restore it in LightCraft for the web with File > Restore Library from Backup...\n\
 The photos in originals/ are the untouched files you imported; edits live in the catalog.\n";
 
@@ -52,6 +53,17 @@ pub fn valid_hash(h: &str) -> bool {
     !h.is_empty() && h.len() <= 128 && h.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
+/// Managed blobs use strict SHA-256 keys, unlike the older browser original hash.
+pub fn cloud_hash(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+}
+pub fn verify_cloud(hash: &str, data: &[u8]) -> Result<(), String> {
+    if !cloud_hash(hash) || lightcraft_engine::assets::sha256(data).0 != hash {
+        return Err("cloud cache does not match its SHA-256 storage key; library retained".into());
+    }
+    Ok(())
+}
+
 /// Zip entry name for an original.
 pub fn original_entry(hash: &str, file_name: &str) -> String {
     let name: String = file_name.chars().map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c }).collect();
@@ -64,6 +76,9 @@ pub fn original_entry(hash: &str, file_name: &str) -> String {
 pub fn restore_key(entry: &str, dir: &str) -> Option<String> {
     if let Some(name) = entry.strip_prefix("library/") {
         return crate::files::LIBRARY_FILES.contains(&name).then(|| format!("{dir}/{name}"));
+    }
+    if let Some(hash) = entry.strip_prefix("cloud/blobs/") {
+        return cloud_hash(hash).then(|| format!("cloud/blobs/{hash}"));
     }
     let rest = entry.strip_prefix("originals/")?;
     let (hash, _) = rest.split_once('/').unwrap_or((rest, ""));
@@ -270,6 +285,24 @@ mod tests {
         }
         out.extend(w.finish().unwrap());
         out
+    }
+
+    #[test]
+    fn cloud_backup_paths_and_bytes_require_exact_sha256_identity() {
+        let data = b"cloud cached preview";
+        let hash = lightcraft_engine::assets::sha256(data).0;
+        let key = format!("cloud/blobs/{hash}");
+        assert_eq!(restore_key(&key, "library-restored-test"), Some(key));
+        verify_cloud(&hash, data).unwrap();
+        assert!(verify_cloud(&hash, b"wrong").is_err());
+        for bad in [
+            "cloud/blobs/../catalog.log",
+            "cloud/blobs/short",
+            "cloud/blobs/",
+            "cloud/blobs/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/other",
+        ] {
+            assert!(restore_key(bad, "library").is_none());
+        }
     }
 
     #[test]

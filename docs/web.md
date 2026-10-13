@@ -189,3 +189,9 @@ lightcraft-bench {"first_frame_ms":…,"thumbs_done_ms":…,"slider_draft_ms":[�
 - `slider_draft_ms`: time from the `develop.set` command until the new loupe texture is ready.
 - `slider_job_ms`: the pipeline's share of that time.
 - `release_full_ms`: the full-quality render after the drag ends.
+
+## Shared cloud libraries
+
+File → Cloud Storage configures the browser's authorized-URL adapter; File → Cloud
+Synchronization joins an existing native library ID. See [browser-cloud.md](browser-cloud.md)
+for authentication, bucket CORS, storage durability and offline/export behavior.

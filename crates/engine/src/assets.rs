@@ -653,6 +653,7 @@ impl crate::Session {
     /// so preparing an export on the UI thread does not perform any network I/O.
     pub fn original_reader_for(&self, sources: &[lightcraft_catalog::Source]) -> crate::merge::ByteReader {
         let resolver = self.media.asset_resolver.clone();
+        let resident = self.media.managed_reader.clone();
         let assets: BTreeMap<_, _> = sources
             .iter()
             .filter_map(|source| {
@@ -664,6 +665,9 @@ impl crate::Session {
         Arc::new(move |path| {
             if let Some(id) = path.strip_prefix("lcasset:\0") {
                 let blob = assets.get(&lightcraft_catalog::assets::AssetId(id.into())).ok_or("managed asset record is missing")?;
+                if let Some(reader) = &resident {
+                    return reader(blob).map(|bytes| bytes.to_vec());
+                }
                 let resolver = resolver.as_ref().ok_or("cloud storage is not configured on this device")?;
                 let lease = resolver.source_transfer(|cancel| resolver.acquire(blob, cancel)).map_err(|e| e.to_string())?;
                 return lease.read_bytes().map_err(|e| e.to_string());

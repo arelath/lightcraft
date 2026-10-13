@@ -160,6 +160,9 @@ pub type CheckEditorFn = Box<dyn Fn(&str) -> Result<(), String>>;
 /// Something the host does with the session (web: back up or restore the library in browser
 /// storage); the work may finish asynchronously.
 pub type HostAction = Box<dyn FnMut(&mut Session) -> Result<Value, String>>;
+/// Optional asynchronous platform adapter. `None` delegates ordinary commands to the
+/// shared registry; handled commands return a task whose durable result arrives later.
+pub type CloudAction = Box<dyn FnMut(&mut Session, &str, &Value) -> Option<Result<Value, String>>>;
 
 /// The system's dark/light appearance where egui doesn't report one (Linux desktops whose
 /// windowing layer says nothing, e.g. many Wayland compositors). The host answers from what it
@@ -169,6 +172,7 @@ pub type SystemThemeFn = Box<dyn Fn(&egui::Context) -> Option<egui::Theme>>;
 /// Platform services injected by the host app (desktop or web).
 #[derive(Default)]
 pub struct Services {
+    pub cloud_action: Option<CloudAction>,
     /// Native file dialogs for commands, shown off the UI thread and answered later
     /// (`pick`; #191). With it, the synchronous pickers below serve only the buttons inside
     /// dialogs; without it (the web, tests) they answer the commands too.
@@ -490,6 +494,13 @@ impl LightcraftApp {
     /// Run a UI or engine command by id. The single entry point for every frontend path.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
         let _cached_only = lightcraft_engine::assets::CachedOnly::enter(!self.headless_host);
+        if let Some(mut action) = self.services.cloud_action.take() {
+            let result = action(&mut self.session, id, &params);
+            self.services.cloud_action = Some(action);
+            if let Some(result) = result {
+                return result;
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(deferred) = cloud_tasks::defer_command(self, id, &params) {
             return deferred;

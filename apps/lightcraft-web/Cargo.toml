@@ -30,6 +30,9 @@ wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 js-sys = { workspace = true }
 web-sys = { workspace = true, features = [
+    "Crypto",
+    "AbortController",
+    "AbortSignal",
     "Blob",
     "BlobPropertyBag",
     "DedicatedWorkerGlobalScope",
@@ -66,6 +69,14 @@ web-sys = { workspace = true, features = [
     "StorageManager",
     "Url",
     "Window",
+    "Headers",
+    "Request",
+    "RequestInit",
+    "RequestCredentials",
+    "RequestRedirect",
+    "Response",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
     "Worker",
     "WorkerOptions",
     "WorkerType",

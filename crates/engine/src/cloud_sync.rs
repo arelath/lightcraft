@@ -400,8 +400,7 @@ pub fn enable(catalog: &Catalog, library: String, device: String, connection: St
     Ok(Op::Batch { ops })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn legacy_changes(imported: &crate::cloud_publication::Imported, state: &SyncState) -> Result<Vec<Change>> {
+pub fn legacy_changes(imported: &crate::cloud_records::Imported, state: &SyncState) -> Result<Vec<Change>> {
     let mut catalog = Catalog::new();
     let mut photo = (*imported.photo).clone();
     photo.id = lightcraft_catalog::PhotoId(1);

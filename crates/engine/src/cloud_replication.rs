@@ -5,7 +5,6 @@ use crate::assets::{AssetError, BlobStore, Result, keys, sha256};
 use crate::cloud_publication::{self as publication, Batch, CheckpointRef, Head, Imported, RecordRef};
 use lightcraft_catalog::assets::{Asset, identifier};
 use lightcraft_catalog::replication::{Mutation, Portable, Stamp, SyncState};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -22,15 +21,7 @@ fn catalog_error(error: lightcraft_catalog::CatalogError) -> AssetError {
     invalid(error.to_string())
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Checkpoint {
-    pub version: u32,
-    pub generation: u64,
-    pub covers: RecordRef,
-    pub state: Portable,
-    pub imports: BTreeMap<String, String>,
-}
+pub use crate::cloud_records::Checkpoint;
 pub fn read_checkpoint(connection: &S3Connection, reference: &CheckpointRef, cancel: &AtomicBool) -> Result<Checkpoint> {
     let reply = connection.get_small(&reference.object.key, MAX_CHECKPOINT, cancel)?.ok_or(AssetError::Missing)?;
     if reply.bytes.len() as u64 != reference.object.size || sha256(&reply.bytes) != reference.object.hash {

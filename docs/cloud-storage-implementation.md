@@ -238,7 +238,7 @@ Engine tests cover a cloud-only synthetic Bayer DNG opening, developing, exporti
 
 The native desktop acceptance also passed on 2026-10-12 using control port 18837 and a separate loopback server that independently checked SigV4 with Python's HMAC implementation. It attached the remote-only RAW, applied +0.75 exposure, reached a completed native render, saved its catalog and exported a 32×24 PNG. One verified request acquired the original; the export reused it. The inspected native screenshot and results are in gitignored `target/cloud-acceptance/`. The final inspected frame measured 0.82 ms for UI update and 6.29 ms for the last render, with no queued or in-flight renders. These measurements use a tiny synthetic fixture and are not a large-library performance benchmark. This does not establish live AWS interoperability. Per-task completion and actual validation results are recorded in `tasks.md`.
 
-Synchronization/conflicts and browser adapters remain open. The optional backend is deferred at the user's request. Durable local import, recovery, verified uploads, staging/cache migration, explicit idle multipart retention and conditional publication are implemented; unsynchronized originals and external working files are protected from cache eviction. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
+Synchronization/conflicts and browser adapters are implemented and verified, as described below. The optional backend is deferred at the user's request. Durable local import, recovery, verified uploads, staging/cache migration, explicit idle multipart retention and conditional publication are implemented; unsynchronized originals and external working files are protected from cache eviction. Browser workers accept verified managed original/preview bytes; the separate acceptance evidence below establishes synchronization behavior.
 
 Managed DNG conversion, XMP saves and external-edit return ingestion use the durable preparation worker.
 They create new asset and upload identities while retaining the photo's stable cloud identity. DNG
@@ -332,9 +332,29 @@ DNG encoding verifies decoded sample identity before publication. XMP is a bound
 
 Catalog format 11 adds the provider-independent, bounded causal mutation model, durable outbox and cursor. Shared engine capture covers commands, system operations, undo/redo and finalized slider groups, excluding device-local storage and preferences. Native conditional publication, incremental polling, checkpoints, deterministic field reconciliation, explicit conflict resolution and retained-tombstone recovery are described in [cloud-sync-protocol.md](cloud-sync-protocol.md).
 
-Verified core evidence is in `target/cloud-sync-engine-tests.log`, `target/cloud-sync-owner-tests.log`, `target/cloud-sync-cli-tests.log` and `target/cloud-sync-ci-final.log`. Eleven shared-engine scenarios, two owner/persistence tests and four real CLI scenarios complement five catalog reconciliation tests. They cover independent offline imports, metadata/membership convergence, competing recipes, deletion recovery, revision-aware undo, bounded migration, compaction, atomic failure/retry, conditional races/response loss, incremental downloads and checkpoint rebootstrap with pending work. Browser adapters remain in progress.
+Verified core evidence is in `target/cloud-sync-engine-tests.log`, `target/cloud-sync-owner-tests.log`, `target/cloud-sync-cli-tests.log` and `target/cloud-sync-ci-final.log`. Eleven shared-engine scenarios, two owner/persistence tests and four real CLI scenarios complement five catalog reconciliation tests. They cover independent offline imports, metadata/membership convergence, competing recipes, deletion recovery, revision-aware undo, bounded migration, compaction, atomic failure/retry, conditional races/response loss, incremental downloads and checkpoint rebootstrap with pending work. Browser acceptance and its authorization/storage contract are described in [browser-cloud.md](browser-cloud.md).
 
 Native synchronization acceptance (2026-10-13) passed through control port 18877 with a signed loopback S3 fixture. Two catalogs converged after independent metadata/develop edits; the Info conflict controls opened Versions and explicitly resolved a recipe while preserving its alternative. Permanent deletion followed by an offline peer edit did not recreate the photo; clicking Recover restored the retained five-star edit, then both catalogs synchronized. Cancellation retained pending work, rejected credentials produced actionable Info text, and clicking Sync now completed retry. Setup, progress, failure, conflict, versions and recovery screenshots were inspected. All 140 scenario requests passed independent signing checks; every write was conditional. Results are in `target/cloud-acceptance/native-sync-results.json`. The isolated delayed-head check recorded 61 inspection samples with a maximum of 52 ms; the complete feedback flow recorded a 493 ms outlier around screenshot/control interaction. Final UI update time was 8.87 ms with empty render queues. These tiny procedural checks do not establish large-library performance or live AWS compatibility. All eight CI stages passed in `target/cloud-sync-ci-final.log`.
+
+## Browser support
+
+[The browser adapter](browser-cloud.md) shares wire records, causal reconciliation and source
+requirements with the engine. Fetch uses scoped authorized URLs with conditional writes,
+expiration refresh and cancellation/deadlines. OPFS/IndexedDB retain verified blobs and pending
+work. The owner-thread scheduler waits for actual storage completion of catalog/cursor and
+acknowledgement proof before removing pending IDs. Worker/foreground readers use smart previews
+only where explicitly allowed, and source-generation changes reject stale results.
+
+Both browser stores passed Chromium browse/edit/export, offline preview, pending reload,
+reauthorization, expired URL, lost response, checkpoint, native-peer convergence, quota retention
+and original reacquisition checks. All 205 fixture requests verified and every write was
+conditional. Results: `target/cloud-acceptance/browser-acceptance-results.json`. The development
+bundle's final UI updates were 2 ms; initial/update maxima were 6.8–7.2 seconds with procedural
+thumbnail work in flight. No live provider or large-library performance claim follows. All eight CI stages passed in
+`target/browser-cloud-ci.log`. Browser Info retry and the rebuilt desktop Info synchronization
+button passed; a deliberately failed post-publication acknowledgement retained pending work,
+then recovered its saved proof on reload. Backup inspection verified cloud hashes and excluded
+session login tokens and signed URLs.
 
 ## Revision history
 
@@ -352,3 +372,4 @@ Native synchronization acceptance (2026-10-13) passed through control port 18877
 | 2026-10-12 | Verified staging/cache migration after durable acknowledgement, legacy receipt re-verification, cancellable local-copy removal and explicit retained-object deletion policy; native completion feedback and staging-error display. |
 | 2026-10-13 | Managed DNG/XMP revisions, durable external-editor return ingestion, immutable pending revision publication, partial-rendition recovery and hard-link output protection; native actual-editor and CLI/MCP acceptance passed. |
 | 2026-10-13 | Durable causal mutation synchronization, conditional head reconciliation, incremental tails/checkpoints, conflict versions and explicit tombstone recovery; shared-engine and CLI failure/rebootstrap checks. |
+| 2026-10-13 | Browser Fetch authorization, verified managed worker media, durable OPFS/IndexedDB outbox acknowledgements, cloud backups and native/browser synchronization acceptance; optional metadata backend remains deferred. |

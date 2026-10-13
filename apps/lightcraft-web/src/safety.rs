@@ -184,6 +184,17 @@ pub async fn backup(files: Files, backend: Backend, names: HashMap<String, Strin
             Err(e) => return Err(format!("reading an original from browser storage: {e}")),
         }
     }
+    for hash in backend.list("cloud/blobs").await? {
+        if !crate::backup::cloud_hash(&hash) {
+            continue;
+        }
+        let key = format!("cloud/blobs/{hash}");
+        if let Some(data) = backend.read(&key).await? {
+            crate::backup::verify_cloud(&hash, &data)?;
+            add(&mut zip, &key, &data)?;
+            originals += 1;
+        }
+    }
     let tail = zip.finish()?;
     parts.push(&Uint8Array::from(&tail[..]));
     let opts = web_sys::BlobPropertyBag::new();
@@ -226,6 +237,13 @@ pub async fn restore(file: web_sys::File, backend: Backend) -> Result<String, St
         verify(e, &data)?;
         if let Some(hash) = key.strip_prefix("originals/") {
             verify_original(e, hash, &data)?;
+        }
+        if let Some(hash) = key.strip_prefix("cloud/blobs/") {
+            crate::backup::verify_cloud(hash, &data)?;
+            if let Some(existing) = backend.read(&key).await? {
+                crate::backup::verify_cloud(hash, &existing)?;
+                continue;
+            }
         }
         backend.write(&key, &data).await.map_err(|err| format!("storing {}: {err}", e.name))?;
         written += 1;

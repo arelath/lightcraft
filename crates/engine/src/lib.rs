@@ -28,6 +28,7 @@ pub mod cloud_import;
 pub(crate) mod cloud_import;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_publication;
+pub mod cloud_records;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_replication;
 pub mod cloud_sync;
@@ -539,7 +540,9 @@ impl Session {
         self.apply_catalog_mode(op, true)
     }
 
-    pub(crate) fn apply_received(&mut self, op: Op) -> Result<()> {
+    /// Apply a validated provider result without echoing it into the local mutation outbox.
+    /// The host must persist the operation before reporting synchronization success.
+    pub fn apply_received(&mut self, op: Op) -> Result<()> {
         self.apply_catalog_mode(op, false)?;
         Ok(())
     }

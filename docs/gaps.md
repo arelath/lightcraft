@@ -66,7 +66,7 @@ and recovers staged work without duplicates. Resumable verified uploads publish 
 logical rename and album-folder organization preserve their immutable objects. Explicit idle multipart cleanup
 includes deleted-photo receipts and preserves durable bytes. Verified staging/cache migration and
 local-copy removal are separate from retained-object library deletion. Managed DNG conversion, associated XMP
-and durable external-editor revision ingestion passed native and CLI/MCP acceptance. Direct-bucket mutation synchronization has passed shared-engine, CLI protocol and native control-channel checks (see [cloud-sync-protocol.md](cloud-sync-protocol.md)); browser transfers remain open. This closes none of the ranked Lightroom parity gaps
+and durable external-editor revision ingestion passed native and CLI/MCP acceptance. Direct-bucket mutation synchronization has passed shared-engine, CLI protocol and native control-channel checks (see [cloud-sync-protocol.md](cloud-sync-protocol.md)); browser OPFS/IndexedDB transfers and native-peer convergence also passed acceptance (see [browser-cloud.md](browser-cloud.md)). This closes none of the ranked Lightroom parity gaps
 or beta blockers above.
 
 ## Closed recently (kept for calibration)
@@ -104,3 +104,4 @@ or beta blockers above.
 | 2026-10-13 | minor | Record managed DNG/XMP and external-editor revision acceptance; multi-device synchronization and browser transfers remain open, no ranked parity gap closes |
 | 2026-10-13 | minor | Record managed DNG/XMP and external-editor revision acceptance; multi-device synchronization and browser transfers remain open, no ranked parity gap closes |
 | 2026-10-13 | minor | Direct-bucket mutation synchronization, conflict versions and recovery passed native and CLI acceptance; browser adapters remain open; no ranked parity gap closes |
+| 2026-10-13 | minor | Browser managed media and direct-bucket synchronization verified on OPFS/IndexedDB; no ranked Lightroom parity gap closes |

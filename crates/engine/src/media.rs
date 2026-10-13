@@ -121,6 +121,10 @@ fn source_edge_needed(p: &Photo, settings: &DevelopSettings, apply_crop: bool, o
 /// Decodes a file into a linear Rec.2020 image no larger than `max_edge` (set by the app).
 pub type FileLoader = Arc<dyn Fn(&str, usize) -> Result<(Rgb32f, SourceInfo), String> + Send + Sync>;
 
+/// Reads already verified resident bytes. A browser miss queues asynchronous acquisition;
+/// callbacks must never perform synchronous network or browser-storage I/O.
+pub type BlobReader = Arc<dyn Fn(&lightcraft_catalog::assets::Blob) -> Result<Arc<[u8]>, String> + Send + Sync>;
+
 /// A raw file's embedded (camera-rendered) preview as display sRGB, oriented, no larger than
 /// `max_edge` (set by the app). `None`: no usable preview.
 pub type PreviewLoader = Arc<dyn Fn(&str, usize) -> Option<Rgba8> + Send + Sync>;
@@ -229,6 +233,7 @@ pub enum SourceRef {
     Managed {
         asset: Option<Box<lightcraft_catalog::assets::Asset>>,
         resolver: Option<Arc<crate::assets::AssetResolver>>,
+        reader: Option<BlobReader>,
         requirement: crate::assets::SourceRequirement,
         max_edge: usize,
         loader: Option<FileLoader>,
@@ -262,8 +267,28 @@ impl SourceRef {
 
     pub fn load_source(&self) -> Result<DecodedSource, String> {
         let image = match self {
-            SourceRef::Managed { asset, resolver, requirement, max_edge, loader, denoise } => {
+            SourceRef::Managed { asset, resolver, reader, requirement, max_edge, loader, denoise } => {
                 let asset = asset.as_ref().ok_or("managed asset record is missing from the catalog")?;
+                if let Some(reader) = reader {
+                    let original = reader(&asset.original);
+                    let (bytes, proxy) = match original {
+                        Ok(bytes) => (bytes, false),
+                        Err(original_error) if *requirement == crate::assets::SourceRequirement::PreviewAllowed => {
+                            let preview = asset.smart_preview.as_ref().ok_or(original_error)?;
+                            (reader(preview)?, true)
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if proxy {
+                        let (image, tone) = crate::smart::decode(&bytes)?;
+                        let mut decoded = DecodedSource::new(Arc::new(image), None);
+                        decoded.proxy = true;
+                        decoded.camera_tone = tone;
+                        return Ok(decoded);
+                    }
+                    let (image, info) = crate::files::load_bytes(&bytes, *max_edge)?;
+                    return Ok(DecodedSource::new(Arc::new(image), Some(info)));
+                }
                 let resolver = resolver.as_ref().ok_or("cloud storage is not configured on this device")?;
                 let (lease, preview) =
                     resolver.source_transfer(|cancel| resolver.acquire_asset(asset, *requirement, cancel)).map_err(|e| e.to_string())?;
@@ -363,6 +388,8 @@ pub struct MediaCache {
     pub preview_loader: Option<PreviewLoader>,
     /// Reads a photo file's bytes (Photo Merge); `None` = the local file system.
     pub file_bytes: Option<crate::merge::ByteReader>,
+    pub managed_reader: Option<BlobReader>,
+    pub managed_generation: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// The library's smart previews folder (originals offline: render from the proxy).
     pub smart_dir: Option<std::path::PathBuf>,
     /// Whether originals (and smart previews) are on disk: cached and checked off the UI thread
@@ -438,6 +465,8 @@ impl Default for MediaCache {
             file_probe: None,
             preview_loader: None,
             file_bytes: None,
+            managed_reader: None,
+            managed_generation: None,
             smart_dir: None,
             availability: Default::default(),
             scenes: Vec::new(),
@@ -455,7 +484,11 @@ fn rendered_budget(share: usize) -> usize {
 impl MediaCache {
     fn asset_salt(&self, p: &Photo) -> u64 {
         if matches!(p.source, Source::Managed { .. }) {
-            self.asset_resolver.as_ref().map_or(0, |r| r.generation()).wrapping_mul(0x1656_67b1_9e37_79f9)
+            self.asset_resolver
+                .as_ref()
+                .map_or(0, |r| r.generation())
+                .wrapping_add(self.managed_generation.as_ref().map_or(0, |g| g.load(std::sync::atomic::Ordering::Relaxed)))
+                .wrapping_mul(0x1656_67b1_9e37_79f9)
         } else {
             0
         }
@@ -711,6 +744,7 @@ impl MediaCache {
             Source::Managed { asset_id } => SourceRef::Managed {
                 asset: self.managed_assets.get(asset_id).cloned().map(Box::new),
                 resolver: self.asset_resolver.clone(),
+                reader: self.managed_reader.clone(),
                 requirement: if max_edge > SourceLevel::Preview.max_edge() {
                     crate::assets::SourceRequirement::OriginalRequired
                 } else {

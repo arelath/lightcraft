@@ -3,66 +3,16 @@
 
 use crate::assets::s3::{PutCondition, S3Connection};
 use crate::assets::{AssetError, Result, keys, sha256};
-use lightcraft_catalog::assets::{Asset, AssetId, BlobId, identifier};
-use lightcraft_catalog::{Photo, Source};
-use serde::{Deserialize, Serialize};
+use lightcraft_catalog::Source;
+use lightcraft_catalog::assets::identifier;
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAX_BYTES: usize = 2 << 20;
 const MAX_CHAIN: usize = 4096;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RecordRef {
-    pub key: String,
-    pub hash: BlobId,
-    pub size: u64,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Head {
-    pub version: u32,
-    pub generation: u64,
-    pub tip: RecordRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub library: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint: Option<CheckpointRef>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CheckpointRef {
-    pub object: RecordRef,
-    pub covers: RecordRef,
-    pub generation: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Imported {
-    pub mutation_id: String,
-    pub photo_id: String,
-    pub asset_id: AssetId,
-    pub photo: Box<Photo>,
-    pub asset: Box<Asset>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_asset: Option<AssetId>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Batch {
-    pub version: u32,
-    pub parent: Option<RecordRef>,
-    pub imports: Vec<Imported>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mutations: Vec<lightcraft_catalog::replication::Mutation>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub checkpoint_marker: bool,
-}
+pub use crate::cloud_records::{Batch, CheckpointRef, Head, Imported, RecordRef};
 
 fn invalid(message: &str) -> AssetError {
     AssetError::Invalid(message.into())

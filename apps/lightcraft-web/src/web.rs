@@ -168,6 +168,7 @@ fn services(originals: Originals, backend: Option<Backend>, files: Files, frozen
     let (backup_backend, backup_files) = (backend.clone(), files);
     let restore_backend = backend.clone();
     Services {
+        cloud_action: None,
         picker: None,
         pick_display_profile: None,
         screen_profile: None,
@@ -187,7 +188,7 @@ fn services(originals: Originals, backend: Option<Backend>, files: Files, frozen
             wasm_bindgen_futures::spawn_local(async move {
                 match safety::backup(files, b, names).await {
                     Ok((n, bytes)) => notice(format!(
-                        "Library backed up: {n} original{} ({:.1} MB). Keep the file somewhere safe.",
+                        "Library backed up: {n} stored media file{} ({:.1} MB). Keep the file somewhere safe.",
                         if n == 1 { "" } else { "s" },
                         bytes / 1e6
                     )),
@@ -368,6 +369,8 @@ async fn boot(opts: Options) -> Boot {
 
 struct WebApp {
     app: LightcraftApp,
+    cloud: crate::cloud::host::Host,
+    managed_generation: u64,
     originals: Originals,
     files: Files,
     backend: Option<Backend>,
@@ -430,8 +433,11 @@ impl WebApp {
         // previews are large (≤ 2560 px, f32): keep few in a 32-bit address space
         session.media.preview_capacity = 3;
         let frozen = Rc::new(Cell::new(false));
-        let mut app = LightcraftApp::new(session, services(originals.clone(), backend.clone(), files.clone(), frozen.clone(), cc.egui_ctx.clone()))
-            .with_chinese_font(chinese_font);
+        let cloud = crate::cloud::host::Host::new(backend.clone(), files.clone(), frozen.clone());
+        cloud.install(&mut session, &cc.egui_ctx);
+        let mut platform = services(originals.clone(), backend.clone(), files.clone(), frozen.clone(), cc.egui_ctx.clone());
+        platform.cloud_action = Some(cloud.action());
+        let mut app = LightcraftApp::new(session, platform).with_chinese_font(chinese_font);
         let ui_written = files.get("ui.json").unwrap_or_default();
         if let Ok(ui) = serde_json::from_slice::<UiState>(&ui_written) {
             app.ui = ui;
@@ -462,6 +468,8 @@ impl WebApp {
         let origin = lightcraft_ui_egui::now_ms() - perf_now();
         WebApp {
             app,
+            managed_generation: cloud.memory.generation(),
+            cloud,
             originals,
             files,
             backend,
@@ -607,11 +615,22 @@ impl WebApp {
         })
     }
 
-    fn run_inbox(&mut self) {
+    fn run_inbox(&mut self, ctx: &egui::Context) {
         let inbox = INBOX.with(|q| std::mem::take(&mut *q.borrow_mut()));
         for (id, params, (resolve, reject)) in inbox {
             let params: serde_json::Value = serde_json::from_str(&params).unwrap_or(json!({}));
-            let r = if id == "web.stats" { Ok(self.web_stats()) } else { self.app.run(&id, params) };
+            let r = if id == "web.stats" {
+                Ok(self.web_stats())
+            } else if id.starts_with("ui.") || id.starts_with("engine.") {
+                let (request, _) = lightcraft_ui_egui::control::ControlRequest::new(id, params);
+                match lightcraft_ui_egui::control::handle(&mut self.app, ctx, &request) {
+                    lightcraft_ui_egui::control::Outcome::Done(value) if value["ok"] == true => Ok(value["result"].clone()),
+                    lightcraft_ui_egui::control::Outcome::Done(value) => Err(value["error"].as_str().unwrap_or("browser control failed").to_owned()),
+                    _ => Err("this control operation requires the native host; capture the browser canvas with browser automation".into()),
+                }
+            } else {
+                self.app.run(&id, params)
+            };
             let _ = match r {
                 Ok(v) => resolve.call1(&JsValue::NULL, &v.to_string().into()),
                 Err(e) => reject.call1(&JsValue::NULL, &e.into()),
@@ -626,7 +645,15 @@ impl eframe::App for WebApp {
             let now = ctx.input(|i| i.time);
             self.app.ui.toast = Some((text, now + NOTICE_SECS, None));
         }
-        self.run_inbox();
+        self.run_inbox(ctx);
+        self.cloud.tick(&mut self.app, self.flushing.get(), ctx);
+        let generation = self.cloud.memory.generation();
+        if generation != self.managed_generation {
+            self.managed_generation = generation;
+            self.app.renderer.forget_all();
+            self.app.session.media.clear_sources();
+        }
+        self.cloud.load_wanted(ctx);
         self.import_dropped(ctx);
         self.load_originals(ctx);
         if let Some(w) = &self.workers {

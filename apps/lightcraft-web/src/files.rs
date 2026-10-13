@@ -196,7 +196,8 @@ impl Store for FilesStore {
 }
 
 /// Names of the library files read at start-up.
-pub const LIBRARY_FILES: [&str; 6] = ["catalog.snap", "catalog.log", "presets.json", "view.json", "prefs.json", "ui.json"];
+pub const LIBRARY_FILES: [&str; 8] =
+    ["catalog.snap", "catalog.log", "presets.json", "view.json", "prefs.json", "ui.json", "browser-cloud.json", "browser-cloud-ack.json"];
 
 #[cfg(test)]
 mod tests {

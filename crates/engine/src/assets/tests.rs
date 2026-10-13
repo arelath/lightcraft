@@ -640,6 +640,7 @@ fn decoded_source_clones_keep_the_managed_original_leased() {
     let source = crate::media::SourceRef::Managed {
         asset: Some(Box::new(asset.clone())),
         resolver: Some(resolver.clone()),
+        reader: None,
         requirement: SourceRequirement::OriginalRequired,
         max_edge: 4,
         denoise: None,

@@ -1311,7 +1311,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.dialog = Some(Dialog::CloudStorage {
                 id: value("id", "personal"),
                 bucket: value("bucket", ""),
-                region: value("region", "us-east-1"),
+                region: value("region", if cfg!(target_arch = "wasm32") { "" } else { "us-east-1" }),
                 prefix: value("prefix", "lightcraft"),
                 endpoint: value("endpoint", ""),
                 profile: value("profile", ""),
@@ -1898,7 +1898,10 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
                     .and_then(|id| app.session.catalog.photo(id))
                     .is_some_and(|p| matches!(p.source, lightcraft_engine::catalog::Source::File { .. }))
         }
-        "file.importCloud" | "dialog.cloudStorage" | "dialog.cloudSync" => cfg!(not(target_arch = "wasm32")) && app.session.library.is_some(),
+        "file.importCloud" => cfg!(not(target_arch = "wasm32")) && app.session.library.is_some(),
+        "dialog.cloudStorage" | "dialog.cloudSync" => {
+            (cfg!(not(target_arch = "wasm32")) || app.services.cloud_action.is_some()) && app.session.library.is_some()
+        }
         "file.exportPresets" => app.session.presets.iter().any(|p| !p.builtin),
         "file.exportCurvePresets" => !app.session.curve_presets.is_empty(),
         "view.compare" => app.session.catalog.len() > 1,

@@ -974,6 +974,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 Dialog::Merge { opts } => crate::merge::body(app, ui, opts),
                 Dialog::Import { opts } => crate::import::body(app, ui, opts),
                 Dialog::CloudStorage { id, bucket, region, prefix, endpoint, profile } => {
+                    #[cfg(not(target_arch="wasm32"))]
+                    {
                     ui.label(crate::i18n::tr("Connect this library to your S3 bucket. Originals are saved on this device before background upload."));
                     for (widget, label, text) in [
                         ("cloudConnectionId", "Connection name", id), ("cloudBucket", "Bucket", bucket),
@@ -983,6 +985,18 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         field(ui, label, |ui| { crate::text_field::TextField::singleline(widget, text).width(f32::INFINITY).show(ui); });
                     }
                     ui.label(egui::RichText::new(crate::i18n::tr("Authentication uses an externally managed AWS profile or environment credentials. No keys are stored in this dialog. Leave Endpoint empty for AWS S3.")).color(t.text_dim));
+                    }
+                    #[cfg(target_arch="wasm32")]
+                    {
+                        let _=endpoint;
+                        ui.label("Connect to your shared library using a storage origin and authorization service.");
+                        for (widget,label,text) in [
+                            ("cloudConnectionId","Connection name",id),("cloudBucket","Storage origin",bucket),
+                            ("cloudRegion","Authorization endpoint",region),("cloudPrefix","Library prefix",prefix),
+                        ] {field(ui,label,|ui|{crate::text_field::TextField::singleline(widget,text).width(f32::INFINITY).show(ui);});}
+                        field(ui,"Login token (this session only)",|ui|{crate::text_field::TextField::singleline("cloudProfile",profile).password(true).width(f32::INFINITY).show(ui);});
+                        ui.label(egui::RichText::new("Login tokens stay in memory. Reauthorize after reloading when your service requires a login.").color(t.text_dim));
+                    }
                 }
                 Dialog::CloudImport { connections, connection } => {
                     ui.label(crate::i18n::tr("Choose where to upload these photos. You can edit as soon as their originals are saved locally; upload continues in the background."));
@@ -1732,14 +1746,25 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         Dialog::Merge { opts } => crate::merge::start_final(app, opts),
         Dialog::Import { opts } => crate::import::start(app, opts),
         Dialog::CloudStorage { id, bucket, region, prefix, endpoint, profile } => {
-            let mut params = json!({"id":id.trim(), "bucket":bucket.trim(), "region":region.trim(), "prefix":prefix.trim()});
-            if !endpoint.trim().is_empty() {
-                params["endpoint"] = json!(endpoint.trim());
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut params = json!({"id":id.trim(), "bucket":bucket.trim(), "region":region.trim(), "prefix":prefix.trim()});
+                if !endpoint.trim().is_empty() {
+                    params["endpoint"] = json!(endpoint.trim());
+                }
+                if !profile.trim().is_empty() {
+                    params["profile"] = json!(profile.trim());
+                }
+                app.run("cloud.configure", params)
             }
-            if !profile.trim().is_empty() {
-                params["profile"] = json!(profile.trim());
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = endpoint;
+                app.run(
+                    "cloud.configureBrowser",
+                    json!({"id":id.trim(),"storageOrigin":bucket.trim(),"authorizeEndpoint":region.trim(),"prefix":prefix.trim(),"token":profile}),
+                )
             }
-            app.run("cloud.configure", params)
         }
         Dialog::CloudImport { connection, .. } => app.run("file.importCloud", json!({"connection":connection})),
         Dialog::CloudSync { connection, library } => {

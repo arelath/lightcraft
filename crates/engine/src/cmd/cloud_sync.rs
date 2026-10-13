@@ -98,7 +98,19 @@ pub fn specs() -> Vec<CommandSpec> {
         always,
         crate::cloud_replication::start
     ));
+    specs.push(cmd!(query "cloud.configureBrowser","Configure browser cloud storage",[],None,"{id, prefix, authorizeEndpoint, storageOrigin, token?}; device-local settings and ephemeral login",always, browser_host));
+    #[cfg(target_arch = "wasm32")]
+    specs.extend([
+        cmd!(query "cloud.connections","Cloud storage connections",[],None,"{}",always,browser_host),
+        cmd!(query "cloud.syncEnable","Enable cloud synchronization",[],None,"{connection,library?}",always,browser_host),
+        cmd!(query "cloud.sync","Synchronize cloud library",[],None,"{checkpoint?}; durable async synchronization",always,browser_host),
+        cmd!(query "cloud.fetch","Download cloud originals",[],None,"{ids?}; verified asynchronous acquisition",always,browser_host),
+        cmd!(query "cloud.reconnect","Retry cloud transfers",[],None,"{}",always,browser_host),
+    ]);
     specs
+}
+fn browser_host(_: &mut Session, _: &Value) -> Result<Value> {
+    Err(bad("cloud.browser", "this operation requires the browser host and persistent browser storage"))
 }
 
 fn resolve(s: &mut Session, p: &Value) -> Result<Value> {
