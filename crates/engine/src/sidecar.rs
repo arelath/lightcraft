@@ -446,6 +446,14 @@ fn sidecar_contents(path: &Path, fresh: String, stamp: &str) -> std::io::Result<
     }
 }
 
+/// Immutable managed packets preserve foreign properties. An unreadable packet is retained
+/// and reported rather than replaced; the caller can explicitly repair the associated asset.
+pub fn merge_managed_packet(old: &[u8], fresh: &str) -> std::result::Result<String, String> {
+    let old = std::str::from_utf8(old).map_err(|e| format!("associated XMP is unreadable and was retained: {e}"))?;
+    lightcraft_meta::merge_xmp(old, fresh, lightcraft_meta::MergeRules { owned: OWNED, owned_if_present: OWNED_IF_STATED })
+        .map_err(|e| format!("associated XMP could not be merged and was retained: {e}"))
+}
+
 /// Key of the stem sidecar a file maps to (case-insensitive).
 fn stem_key(original: &str) -> String {
     sidecar_path(original, SidecarNaming::Stem).to_string_lossy().to_lowercase()
@@ -589,8 +597,27 @@ impl Session {
     /// Like [`Session::read_sidecar_op`], retaining transient diagnostics for the command report.
     pub fn read_sidecar_op_with_warnings(&self, id: PhotoId) -> Result<Option<(Op, PathBuf, Vec<crate::import::ImportWarning>)>> {
         let p = self.catalog.photo(id).ok_or(lightcraft_catalog::CatalogError::NoPhoto(id))?;
-        let Some(orig) = file_path(p) else { return Ok(None) };
-        let Some((packet, from)) = read_packet(orig, p.kind, self.sidecar_naming(id)) else { return Ok(None) };
+        let managed;
+        let (packet, from, orig) = if let Source::Managed { asset_id } = &p.source {
+            use crate::assets::TransferManager;
+            let asset = self.catalog.asset(asset_id).ok_or_else(|| EngineError::Other("managed asset is missing".into()))?;
+            let resolver = self.media.asset_resolver.as_ref().ok_or_else(|| EngineError::Other("managed storage is unavailable".into()))?;
+            let blob = asset.associated.get("xmp").unwrap_or(&asset.original);
+            let lease = resolver.acquire(blob, &std::sync::atomic::AtomicBool::new(false)).map_err(|e| EngineError::Other(e.to_string()))?;
+            let bytes = lease.read_bytes().map_err(|e| EngineError::Other(e.to_string()))?;
+            let packet = if asset.associated.contains_key("xmp") {
+                String::from_utf8(bytes).map_err(|_| EngineError::Other("associated XMP is not UTF-8; retained".into()))?
+            } else {
+                let Some(packet) = lightcraft_meta::embedded(&bytes).xmp else { return Ok(None) };
+                packet
+            };
+            managed = blob.remote.key.clone();
+            (packet, PathBuf::from(&managed), managed.as_str())
+        } else {
+            let Some(orig) = file_path(p) else { return Ok(None) };
+            let Some((packet, from)) = read_packet(orig, p.kind, self.sidecar_naming(id)) else { return Ok(None) };
+            (packet, from, orig)
+        };
         let sc = parse_sidecar(&packet, crate::crs::Target::for_photo(p)).map_err(|e| EngineError::Other(format!("{}: {e}", from.display())))?;
         let mut warnings = sc.warnings.clone();
         for warning in &mut warnings {

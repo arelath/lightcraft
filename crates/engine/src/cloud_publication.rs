@@ -36,6 +36,8 @@ pub struct Imported {
     pub asset_id: AssetId,
     pub photo: Box<Photo>,
     pub asset: Box<Asset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_asset: Option<AssetId>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -55,6 +57,7 @@ impl Imported {
         if !identifier(&self.mutation_id)
             || !identifier(&self.photo_id)
             || !identifier(&self.asset_id.0)
+            || self.base_asset.as_ref().is_some_and(|base| !identifier(&base.0) || base == &self.asset_id)
             || self.photo.source != (Source::Managed { asset_id: self.asset_id.clone() })
             || self.photo.file_name.is_empty()
             || self.photo.file_name.len() > 1024
@@ -117,7 +120,11 @@ pub fn read_batch(connection: &S3Connection, reference: &RecordRef, cancel: &Ato
         return Err(AssetError::Integrity);
     }
     let batch: Batch = serde_json::from_slice(&reply.bytes).map_err(|_| invalid("remote catalog batch is malformed; preserved"))?;
-    if batch.version != 1 || batch.imports.is_empty() || batch.imports.len() > 1000 {
+    if !matches!(batch.version, 1 | 2)
+        || batch.imports.is_empty()
+        || batch.imports.len() > 1000
+        || (batch.version == 1 && batch.imports.iter().any(|imported| imported.base_asset.is_some() || !imported.asset.associated.is_empty()))
+    {
         return Err(invalid("unsupported remote catalog batch"));
     }
     if let Some(parent) = &batch.parent {
@@ -174,7 +181,8 @@ pub fn publish_import(connection: &S3Connection, imported: &Imported, cancel: &A
         {
             return Ok(head.generation);
         }
-        let batch = Batch { version: 1, parent: current.as_ref().map(|(head, _)| head.tip.clone()), imports: vec![imported.clone()] };
+        let version = if imported.base_asset.is_some() || !imported.asset.associated.is_empty() { 2 } else { 1 };
+        let batch = Batch { version, parent: current.as_ref().map(|(head, _)| head.tip.clone()), imports: vec![imported.clone()] };
         let bytes = encode(&batch)?;
         let hash = sha256(&bytes);
         let reference =

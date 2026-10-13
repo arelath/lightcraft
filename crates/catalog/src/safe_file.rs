@@ -267,7 +267,24 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
         use std::os::unix::fs::MetadataExt;
         ma.dev() == mb.dev() && ma.ino() == mb.ino()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Query both live handles: canonical paths cannot identify differently named hard
+        // links, and a Windows file index can be reused after its handle is closed.
+        if let (Ok(a), Ok(b)) = (winapi_util::Handle::from_path(a), winapi_util::Handle::from_path(b))
+            && let (Ok(a), Ok(b)) = (winapi_util::file::information(&a), winapi_util::file::information(&b))
+        {
+            return a.volume_serial_number() == b.volume_serial_number() && a.file_index() == b.file_index();
+        }
+        if ma.len() != mb.len() {
+            return false;
+        }
+        match (fs::canonicalize(a), fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x == y || x.to_string_lossy().to_lowercase() == y.to_string_lossy().to_lowercase(),
+            _ => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         if ma.len() != mb.len() {
             return false;
@@ -277,6 +294,26 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
             _ => false,
         }
     }
+}
+
+/// Classify an existing output before the guard's rare, complete identity scan.
+/// No handles remain open after this call; identity comparisons open both paths together.
+pub fn hard_linked(path: &Path) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(fs::metadata(path)?.nlink() > 1)
+    }
+    #[cfg(windows)]
+    {
+        let handle = winapi_util::Handle::from_path(path)?;
+        Ok(winapi_util::file::information(&handle)?.number_of_links() > 1)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Ok(true)
+    } // conservative identity scan on other filesystem hosts
 }
 
 #[cfg(test)]
@@ -379,6 +416,9 @@ mod tests {
         let p = d.join("x.jpg");
         fs::write(&p, b"x").unwrap();
         fs::write(d.join("y.jpg"), b"x").unwrap();
+        fs::hard_link(&p, d.join("different-name.jpg")).unwrap();
+        assert!(same_file(&p, &d.join("different-name.jpg")));
+        assert!(hard_linked(&p).unwrap());
         fs::create_dir_all(d.join("sub")).unwrap();
         assert!(same_file(&p, &d.join("sub/../x.jpg")));
         assert!(!same_file(&p, &d.join("y.jpg")));

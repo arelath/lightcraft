@@ -2007,6 +2007,18 @@ fn edit_in(app: &mut LightcraftApp, ctx: &egui::Context, p: &Value, photocraft: 
         }
     }
     let r = app.session.execute("photo.editExternal", &params).map_err(|e| e.to_string())?;
+    if r["background"] == true {
+        if let Some(task) = r["task"].as_u64() {
+            app.ui.cloud_preparations.insert(task, Some(editor));
+        }
+        app.toast(ctx, "Preparing a durable working file for the external editor");
+        return Ok(r);
+    }
+    open_edit_result(app, ctx, &r, &editor);
+    Ok(r)
+}
+
+pub(crate) fn open_edit_result(app: &mut LightcraftApp, ctx: &egui::Context, r: &Value, editor: &str) {
     // every selected photo got a copy (#920); each opens in the editor
     let copies: Vec<(String, Option<u64>)> = r["copies"]
         .as_array()
@@ -2014,10 +2026,12 @@ fn edit_in(app: &mut LightcraftApp, ctx: &egui::Context, p: &Value, photocraft: 
         .unwrap_or_else(|| vec![(r["path"].as_str().unwrap_or_default().to_string(), r["id"].as_u64())]);
     let mut failed = None;
     for (path, id) in &copies {
-        if let Some(id) = id {
+        if let Some(id) = id
+            && !app.ui.external_edits.contains(id)
+        {
             app.ui.external_edits.push(*id);
         }
-        if let Some(Err(e)) = app.services.open_with.as_mut().map(|f| f(path, &editor)) {
+        if let Some(Err(e)) = app.services.open_with.as_mut().map(|f| f(path, editor)) {
             failed = Some(e);
         }
     }
@@ -2029,5 +2043,4 @@ fn edit_in(app: &mut LightcraftApp, ctx: &egui::Context, p: &Value, photocraft: 
         }
         _ => app.toast(ctx, crate::i18n::tr_format!("{n} photos opened for editing; each is stacked with its original", n = copies.len())),
     }
-    Ok(r)
 }

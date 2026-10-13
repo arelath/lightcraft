@@ -23,6 +23,9 @@ pub(crate) mod camera_preview;
 pub mod camera_profiles;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_import;
+#[cfg(target_arch = "wasm32")]
+#[path = "cloud_import_web.rs"]
+pub(crate) mod cloud_import;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_publication;
 #[cfg(not(target_arch = "wasm32"))]
@@ -554,21 +557,31 @@ impl Session {
             return;
         }
         let mut pending = vec![op];
+        let mut changed_assets = std::collections::BTreeSet::new();
+        let mut changed_imports = std::collections::BTreeSet::new();
         while let Some(op) = pending.pop() {
             match op {
                 Op::Batch { ops } => pending.extend(ops),
+                Op::SetAsset { id, .. } => {
+                    changed_assets.insert(id.clone());
+                }
                 Op::SetUploadIntent { id, .. } => {
-                    self.staging_dirty.insert(id.clone());
-                    if let Some(resolver) = &self.media.asset_resolver {
-                        let value = self
-                            .catalog
-                            .upload_intents()
-                            .get(id)
-                            .and_then(|intent| self.catalog.asset(&intent.asset_id).map(|asset| (intent, asset)));
-                        resolver.note_staging_intent(id, value, false);
-                    }
+                    changed_imports.insert(id.clone());
                 }
                 _ => {}
+            }
+        }
+        if !changed_assets.is_empty() {
+            changed_imports.extend(
+                self.catalog.upload_intents().iter().filter(|(_, intent)| changed_assets.contains(&intent.asset_id)).map(|(id, _)| id.clone()),
+            );
+        }
+        for id in changed_imports {
+            self.staging_dirty.insert(id.clone());
+            if let Some(resolver) = &self.media.asset_resolver {
+                let value =
+                    self.catalog.upload_intents().get(&id).and_then(|intent| self.catalog.asset(&intent.asset_id).map(|asset| (intent, asset)));
+                resolver.note_staging_intent(&id, value, false);
             }
         }
     }

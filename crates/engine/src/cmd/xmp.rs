@@ -13,7 +13,12 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
     let mut backups = Vec::new();
     let mut failed = Vec::new();
     let owners = crate::sidecar::StemOwners::of(&s.catalog);
+    let mut managed = Vec::new();
     for id in s.targets(p) {
+        if s.catalog.photo(id).is_some_and(|photo| matches!(photo.source, lightcraft_catalog::Source::Managed { .. })) {
+            managed.push(id);
+            continue;
+        }
         match s.save_sidecar_with(id, &owners) {
             Ok(r) => {
                 let path = r.path.display().to_string();
@@ -28,7 +33,8 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
             Err(e) => failed.push(json!({"id": id.0, "error": e.to_string()})),
         }
     }
-    Ok(json!({"written": written, "merged": merged, "backups": backups, "failed": failed}))
+    let cloud = if managed.is_empty() { Value::Null } else { crate::cloud_import::save_xmp(s, &managed, p)? };
+    Ok(json!({"written": written, "merged": merged, "backups": backups, "failed": failed, "managed":cloud}))
 }
 
 fn read(s: &mut Session, p: &Value) -> Result<Value> {
@@ -81,7 +87,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Save Metadata to File",
             ["Photo"],
             Some("Cmd+S"),
-            "{ids?} — writes each photo's XMP sidecar (metadata + develop settings) next to the original, merged into an existing one (other apps' data kept; an unreadable one is backed up first) → {written: [path], merged: [path], backups: [{path, backup}], failed}",
+            "{ids?, wait?} — write metadata and develop settings to local sidecars or immutable managed associated XMP assets, preserving foreign properties. Unreadable local packets are backed up; unreadable managed packets are retained and reported. Native managed writes run in the background; headless calls wait by default → {written,merged,backups,failed,managed}",
             has_selection,
             save
         ),

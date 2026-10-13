@@ -439,3 +439,36 @@ fn immediate_library_commands_and_auto_sync_show_completion() {
     assert!(h.app.run("library.compact", json!({})).is_err());
     assert!(h.app.ui.toast.is_none());
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn managed_external_editor_launch_waits_for_durable_preparation_and_failed_jobs_never_launch() {
+    let opened: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let calls = opened.clone();
+    let services = crate::Services {
+        open_with: Some(Box::new(move |path, editor| {
+            assert_eq!(editor, "test-editor");
+            calls.lock().unwrap().push(path.to_owned());
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::new(), services);
+    let ctx = egui::Context::default();
+    let task = app.session.activity.start("import", "External preparation", Cancel::Yes);
+    app.ui.cloud_preparations.insert(task.id(), Some("test-editor".into()));
+    app.cloud_preparation_outcome(&ctx);
+    assert!(opened.lock().unwrap().is_empty());
+    app.session.cloud_imports.reports.push(json!({"task":task.id(),"ok":true,"result":{"copies":[{"id":7,"path":"working/edit.tif"}]}}));
+    app.cloud_preparation_outcome(&ctx);
+    assert_eq!(*opened.lock().unwrap(), vec!["working/edit.tif"]);
+    assert_eq!(app.ui.external_edits, vec![7]);
+    app.cloud_preparation_outcome(&ctx);
+    assert_eq!(opened.lock().unwrap().len(), 1);
+    let failed = app.session.activity.start("import", "External preparation", Cancel::Yes);
+    app.ui.cloud_preparations.insert(failed.id(), Some("test-editor".into()));
+    app.session.cloud_imports.reports.push(json!({"task":failed.id(),"ok":false,"error":"disk full; working bytes retained"}));
+    app.cloud_preparation_outcome(&ctx);
+    assert_eq!(opened.lock().unwrap().len(), 1);
+    assert!(app.ui.toast.as_ref().unwrap().0.contains("disk full"));
+}

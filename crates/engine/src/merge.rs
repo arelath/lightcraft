@@ -80,6 +80,10 @@ pub struct MergeJob {
     /// `Some(edge)`: preview at that frame size; `None`: the full-resolution merge.
     pub preview: Option<usize>,
     pub read: ByteReader,
+    output_base: String,
+    working_root: Option<std::path::PathBuf>,
+    library: Arc<()>,
+    guard: Arc<crate::originals::OriginalGuard>,
 }
 
 /// What a merge produced.
@@ -357,18 +361,58 @@ impl Session {
         }
         let origins: Vec<_> = ids.iter().filter_map(|id| self.catalog.photo(*id).map(|p| p.source.clone())).collect();
         let read = self.original_reader_for(&origins);
-        Ok(MergeJob { kind, finish, sources, preview: preview.then_some(PREVIEW_EDGE), read })
+        let first_id = sources.first().ok_or_else(|| EngineError::Other("nothing selected".into()))?.0;
+        let first = self.catalog.photo(first_id).ok_or(lightcraft_catalog::CatalogError::NoPhoto(first_id))?;
+        let (output_base, working_root) = if matches!(first.source, Source::Managed { .. }) {
+            let root = self
+                .media
+                .asset_resolver
+                .as_ref()
+                .and_then(|resolver| resolver.durable_root())
+                .ok_or_else(|| EngineError::Other("merge needs durable working storage".into()))?;
+            (root.join("working").join("merges").join(&first.file_name).to_string_lossy().to_string(), Some(root))
+        } else {
+            (sources.first().ok_or_else(|| EngineError::Other("nothing selected".into()))?.1.clone(), None)
+        };
+        Ok(MergeJob {
+            kind,
+            finish,
+            sources,
+            preview: preview.then_some(PREVIEW_EDGE),
+            read,
+            output_base,
+            working_root,
+            library: self.library_token(),
+            guard: Arc::new(self.original_guard()),
+        })
     }
 
     /// Write a finished (non-preview) merge next to its first source, import it, select it and
     /// apply Auto Settings / the auto crop. Returns `{id, path, …info}`.
     pub fn finish_merge(&mut self, job: &MergeJob, out: MergeOutput) -> Result<Value> {
-        let first = &job.sources.first().ok_or_else(|| EngineError::Other("nothing merged".into()))?.1;
+        if !Arc::ptr_eq(&job.library, &self.library_token()) {
+            return Err(EngineError::Other("library changed during merge; retry in the original library".into()));
+        }
+        let first = &job.output_base;
+        if let Some(root) = &job.working_root {
+            let parent = std::path::Path::new(first).parent().ok_or_else(|| EngineError::Other("merge output has no parent".into()))?;
+            if !crate::originals::prospective_path(parent)
+                .map_err(EngineError::Other)?
+                .starts_with(crate::originals::prospective_path(root).map_err(EngineError::Other)?)
+            {
+                return Err(EngineError::Other("merge working directory is redirected outside the library".into()));
+            }
+            std::fs::create_dir_all(parent).map_err(|e| EngineError::Other(e.to_string()))?;
+        }
+        let candidate = output_names(first, job.kind.suffix())
+            .take(10_000)
+            .find(|path| !path.exists())
+            .ok_or_else(|| EngineError::Other("no free merge output name".into()))?;
+        job.guard.check(&candidate).map_err(EngineError::Other)?;
         // a new file under a free name (never replacing one), complete and synced before it appears
-        let path = lightcraft_catalog::safe_file::write_new_unique(&mut output_names(first, job.kind.suffix()), &out.dng)
-            .map_err(|e| EngineError::Other(format!("could not write the merged DNG next to {first}: {e}")))?
-            .to_string_lossy()
-            .to_string();
+        lightcraft_catalog::safe_file::write_new(&candidate, &out.dng)
+            .map_err(|e| EngineError::Other(format!("could not write the merged DNG next to {first}: {e}")))?;
+        let path = candidate.to_string_lossy().to_string();
         let report = crate::import::import(self, std::slice::from_ref(&path), crate::import::ImportMode::Add)?;
         let id = report
             .imported

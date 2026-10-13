@@ -35,11 +35,18 @@ pub(crate) fn write_dng_with(file_bytes: Option<&crate::merge::ByteReader>, path
         Some(r) => r(path)?,
         None => std::fs::read(path).map_err(|e| format!("{path}: {e}"))?,
     };
-    let raw = lightcraft_raw::decode(&bytes).map_err(|e| format!("{path}: {e}"))?;
-    drop(bytes);
+    let dng = encode_dng(&bytes, packet).map_err(|e| format!("{path}: {e}"))?;
+    let out = lightcraft_catalog::safe_file::write_new_unique(&mut dng_names(path), &dng)
+        .map_err(|e| format!("{path}: could not write its DNG ({e}); the raw is kept"))?;
+    Ok(out.to_string_lossy().to_string())
+}
+
+/// Encode and verify before either a local path or an immutable managed revision is published.
+pub(crate) fn encode_dng(bytes: &[u8], packet: String) -> std::result::Result<Vec<u8>, String> {
+    let raw = lightcraft_raw::decode(bytes).map_err(|e| e.to_string())?;
     let dng = lightcraft_raw::write_dng(&raw, &lightcraft_raw::DngWriteOptions { xmp: (!packet.is_empty()).then_some(packet), ..Default::default() })
         .map_err(|e| e.to_string())?;
-    let back = lightcraft_raw::decode(&dng).map_err(|e| format!("{path}: the DNG written for it doesn't decode ({e}); the raw is kept"))?;
+    let back = lightcraft_raw::decode(&dng).map_err(|e| format!("the DNG doesn't decode ({e}); the raw is kept"))?;
     let same = match (&back.data, &raw.data) {
         (lightcraft_raw::RawData::U16(a), lightcraft_raw::RawData::U16(b)) => a == b,
         (lightcraft_raw::RawData::F32(a), lightcraft_raw::RawData::F32(b)) => {
@@ -48,12 +55,10 @@ pub(crate) fn write_dng_with(file_bytes: Option<&crate::merge::ByteReader>, path
         _ => false,
     };
     if (back.width, back.height, back.cpp) != (raw.width, raw.height, raw.cpp) || !same {
-        return Err(format!("{path}: the DNG written for it doesn't hold the same raw data; the raw is kept"));
+        return Err("the DNG doesn't hold the same raw data; the raw is kept".into());
     }
     drop((raw, back));
-    let out = lightcraft_catalog::safe_file::write_new_unique(&mut dng_names(path), &dng)
-        .map_err(|e| format!("{path}: could not write its DNG ({e}); the raw is kept"))?;
-    Ok(out.to_string_lossy().to_string())
+    Ok(dng)
 }
 
 fn convert(s: &mut Session, p: &Value) -> Result<Value> {
@@ -62,12 +67,9 @@ fn convert(s: &mut Session, p: &Value) -> Result<Value> {
     let mut ops = Vec::new();
     let mut converted = Vec::new();
     let mut skipped = Vec::new();
+    let mut managed = Vec::new();
     for id in ids {
         let Some(ph) = s.catalog.photo(id).cloned() else { continue };
-        let Source::File { path } = &ph.source else {
-            skipped.push(json!([id.0, "not a file"]));
-            continue;
-        };
         if ph.kind != MediaKind::Raw || ph.format.eq_ignore_ascii_case("DNG") || ph.copy_of.is_some() {
             skipped.push(json!([
                 id.0,
@@ -81,6 +83,14 @@ fn convert(s: &mut Session, p: &Value) -> Result<Value> {
             ]));
             continue;
         }
+        if matches!(ph.source, Source::Managed { .. }) {
+            managed.push(id);
+            continue;
+        }
+        let Source::File { path } = &ph.source else {
+            skipped.push(json!([id.0, "not a file"]));
+            continue;
+        };
         let packet = crate::sidecar::sidecar_packet(&ph, &s.catalog);
         match write_dng_for(s, path, packet) {
             Ok(out) => {
@@ -104,7 +114,8 @@ fn convert(s: &mut Session, p: &Value) -> Result<Value> {
         let n = converted.len();
         s.commit(&format!("Convert {n} Photo{} to DNG", if n == 1 { "" } else { "s" }), Op::Batch { ops }).map_err(|e| bad(C, e.to_string()))?;
     }
-    Ok(json!({"converted": converted, "skipped": skipped}))
+    let cloud = if managed.is_empty() { Value::Null } else { crate::cloud_import::convert_dng(s, &managed, p)? };
+    Ok(json!({"converted": converted, "skipped": skipped, "managed": cloud}))
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -113,7 +124,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "Convert to DNG",
         ["Photo"],
         None,
-        "{ids?} — write each raw photo as a lossless DNG next to it (settings embedded) and relink the photo to it; originals are kept → {converted: [{id, path, original}], skipped}",
+        "{ids?, wait?} — verify a lossless DNG with embedded settings, then relink the photo and its virtual copies; local files are written beside their originals, managed photos become durable immutable revisions. Originals are retained. Native managed work returns managed:{background,task}; headless calls wait by default → {converted, skipped, managed}",
         has_selection,
         convert
     )]
@@ -157,8 +168,20 @@ fn edit_external(s: &mut Session, p: &Value) -> Result<Value> {
         ..Default::default()
     };
     let mut copies = Vec::new();
+    let mut managed = Vec::new();
     for id in ids {
+        if s.catalog.photo(id).is_some_and(|photo| matches!(photo.source, Source::Managed { .. })) {
+            managed.push(id);
+            continue;
+        }
         copies.push(edit_copy(s, p, id, &opts)?);
+    }
+    if !managed.is_empty() {
+        let mut result = crate::cloud_import::edit_external(s, &managed, &opts, p)?;
+        if let Some(cloud_copies) = result.get_mut("copies").and_then(Value::as_array_mut) {
+            cloud_copies.extend(copies);
+        }
+        return Ok(result);
     }
     let new: Vec<lightcraft_catalog::PhotoId> = copies.iter().filter_map(|c| c["id"].as_u64()).map(lightcraft_catalog::PhotoId).collect();
     s.selection = crate::Selection { active: new.first().copied(), ids: new };
@@ -275,6 +298,13 @@ pub(crate) fn as_shot_wb_op(id: lightcraft_catalog::PhotoId, ph: &lightcraft_cat
 /// dimensions and content hash, cached sources dropped. → {reloaded: [ids]}
 fn reload(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = s.targets(p);
+    let managed: Vec<_> = ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            s.catalog.working_copy(*id).is_some() && s.catalog.photo(*id).is_some_and(|photo| matches!(photo.source, Source::Managed { .. }))
+        })
+        .collect();
     let paths: Vec<(lightcraft_catalog::PhotoId, String)> = ids
         .iter()
         .filter_map(|id| match s.catalog.photo(*id).map(|ph| ph.source.clone()) {
@@ -312,7 +342,11 @@ fn reload(s: &mut Session, p: &Value) -> Result<Value> {
     if !ops.is_empty() {
         s.commit("Reload Changed Files", Op::Batch { ops })?;
     }
-    Ok(json!({"reloaded": reloaded.iter().map(|i| i.0).collect::<Vec<_>>()}))
+    let cloud = if managed.is_empty() { Value::Null } else { crate::cloud_import::reload_working(s, &managed, p)? };
+    if let Some(ids) = cloud["ids"].as_array() {
+        reloaded.extend(ids.iter().filter_map(Value::as_u64).map(lightcraft_catalog::PhotoId));
+    }
+    Ok(json!({"reloaded": reloaded.iter().map(|i| i.0).collect::<Vec<_>>(), "managed":cloud}))
 }
 
 /// Duplicate: copy the file next to itself (`<name>-copy`, never overwriting) and add it with the
@@ -377,7 +411,7 @@ pub fn edit_specs() -> Vec<CommandSpec> {
             "Reload from Disk",
             ["Photo"],
             None,
-            "{ids?} — re-read photos whose files changed on disk (e.g. saved by an external editor), or raws shown from their embedded preview that can be decoded now; camera fields the catalog lacks are filled in, and so is the lens data the file carries (an untouched photo then gets its lens correction turned on as import would; an edited one keeps its settings) → {reloaded}",
+            "{ids?, wait?} — re-read changed local files or ingest changed managed external-editor working files as durable immutable revisions. Photo identities and edits are preserved; unchanged working bytes are not re-imported. Missing camera/lens fields are filled for local files. Native managed ingestion runs in the background; headless calls wait by default → {reloaded, managed}",
             has_selection,
             reload
         ),
@@ -386,7 +420,7 @@ pub fn edit_specs() -> Vec<CommandSpec> {
             "Edit Copy for External Editor",
             [],
             None,
-            "{ids?, colorSpace?: adobeRgb (default) | proPhoto | displayP3 | srgb, format?: tiff (default) | psd, bitDepth?: 16 (default) | 8, dir?} — render each selected photo (or `ids`, at most 50) with its edits as `<name>-Edit.tif` (or `.psd`, flat, which PhotoCraft saves back to in place) next to it, add each stacked on its original and select the copies → {path, id, original (the first copy), copies: [{path, id, original}]} (the app then opens them in the external editor)",
+            "{ids?, colorSpace?: adobeRgb|proPhoto|displayP3|srgb, format?: tiff|psd, bitDepth?: 16|8, dir?, wait?} — render at most 50 selected photos with their edits, add and stack each copy. Local copies are written beside the original; managed copies use durable working storage and an upload intent. Native managed preparation returns {background,task}; headless calls wait by default. Completed copies return {path,id,original,copies} for the host to launch in the editor",
             has_active,
             edit_external
         ),

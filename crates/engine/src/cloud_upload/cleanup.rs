@@ -253,12 +253,18 @@ mod tests {
                 size: 1,
                 remote: RemoteLocation { connection: connection.id.clone(), key: format!("library/{key}"), version: None },
             };
-            let asset = Asset { original: blob("original"), smart_preview: Some(blob("preview")), thumbnail: Some(blob("thumbnail")) };
+            let asset = Asset {
+                associated: Default::default(),
+                original: blob("original"),
+                smart_preview: Some(blob("preview")),
+                thumbnail: Some(blob("thumbnail")),
+            };
             let asset_id = AssetId("asset-1".into());
             let receipt = Receipt {
                 version: 2,
                 id: "import-1".into(),
                 imported: Imported {
+                    base_asset: None,
                     mutation_id: "import-1".into(),
                     photo_id: "import-1".into(),
                     asset_id: asset_id.clone(),

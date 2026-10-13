@@ -1,6 +1,6 @@
 # Gaps: where LightCraft falls short of Lightroom
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-12 · **Change:** minor (CR3 entry names the EOS R7 C-RAW fix and the refused CRX variants; CI and Windows / Linux entries note the 0.6.0 riscv64 build; camera colour: tone curve from black-and-white camera JPEGs; Compare and Reference get sharp zoom windows; gap 4 shrinks; gap 14: the HDR switch is read from crs XMP; gaps 2 and 10: EOS R5 Mark II CR3 verified) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-13 · **Change:** minor (CR3 entry names the EOS R7 C-RAW fix and the refused CRX variants; CI and Windows / Linux entries note the 0.6.0 riscv64 build; camera colour: tone curve from black-and-white camera JPEGs; Compare and Reference get sharp zoom windows; gap 4 shrinks; gap 14: the HDR switch is read from crs XMP; gaps 2 and 10: EOS R5 Mark II CR3 verified) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 Every known shortfall, one entry each, ranked by user impact (how many Lightroom users hit it, and
 how hard it blocks them), then by effort. **Agents pick work from the top** (the first entry nobody is
@@ -65,8 +65,9 @@ Durable managed import stages originals and renditions, journals the photo and u
 and recovers staged work without duplicates. Resumable verified uploads publish initial imports conditionally;
 logical rename and album-folder organization preserve their immutable objects. Explicit idle multipart cleanup
 includes deleted-photo receipts and preserves durable bytes. Verified staging/cache migration and
-local-copy removal are separate from retained-object library deletion. Associated XMP,
-external-edit ingestion, multi-device synchronization and browser transfers remain open. This closes none of the ranked Lightroom parity gaps
+local-copy removal are separate from retained-object library deletion. Managed DNG conversion, associated XMP
+and durable external-editor revision ingestion passed native and CLI/MCP acceptance. Multi-device synchronization
+and browser transfers remain open. This closes none of the ranked Lightroom parity gaps
 or beta blockers above.
 
 ## Closed recently (kept for calibration)
@@ -101,3 +102,5 @@ or beta blockers above.
 | 2026-10-10 | minor | RAW gaps re-measured model by model (raw-parity.md): CR3, compressed ORF and verification entries carry measured shares; HE NEF no longer a beta blocker (+1.1 points for 20–40 h); verification entry absorbs the cheap per-body fixes (#769, #702, A200 series) |
 | 2026-10-10 | minor | Beta total raised to 340–600 h to include the ~92 open core-path user issues |
 | 2026-10-10 | major | Created from the checklist's Top gaps (whose items 1–2 had been duplicated by a merge) and ROADMAP's Where we stand; re-ranked; added evidence, impact, hours and beta flags; added platform-CI, lens-database, HE NEF and localization gaps |
+| 2026-10-13 | minor | Record managed DNG/XMP and external-editor revision acceptance; multi-device synchronization and browser transfers remain open, no ranked parity gap closes |
+| 2026-10-13 | minor | Record managed DNG/XMP and external-editor revision acceptance; multi-device synchronization and browser transfers remain open, no ranked parity gap closes |

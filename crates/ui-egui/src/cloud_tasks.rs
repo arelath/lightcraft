@@ -13,6 +13,7 @@ struct Plan {
     requirement: SourceRequirement,
     library: Arc<()>,
     params: Value,
+    associated: bool,
 }
 
 fn plan(app: &LightcraftApp, command: &str, params: &Value) -> Option<Plan> {
@@ -29,9 +30,13 @@ fn plan(app: &LightcraftApp, command: &str, params: &Value) -> Option<Plan> {
     let single = matches!(command, "ui.render" | "dialog.allMetadata" | "photo.allMetadata");
     let requirement = match command {
         "ui.render" if params.get("size").and_then(Value::as_u64).unwrap_or(1600) <= 2560 => SourceRequirement::PreviewAllowed,
-        "ui.render" | "dialog.allMetadata" | "photo.allMetadata" | "photo.editExternal" | "photo.editInExternal" | "photo.editInPhotoCraft" => {
-            SourceRequirement::OriginalRequired
-        }
+        "ui.render"
+        | "dialog.allMetadata"
+        | "photo.allMetadata"
+        | "photo.editExternal"
+        | "photo.editInExternal"
+        | "photo.editInPhotoCraft"
+        | "photo.readMetadataFromFile" => SourceRequirement::OriginalRequired,
         "app.export" if params.get("background").and_then(Value::as_bool) != Some(true) => {
             if params.get("allowSmartPreview").and_then(Value::as_bool) == Some(true) {
                 SourceRequirement::PreviewAllowed
@@ -56,6 +61,7 @@ fn plan(app: &LightcraftApp, command: &str, params: &Value) -> Option<Plan> {
         captured.insert("ids".into(), json!(ids.iter().map(|id| id.0).collect::<Vec<_>>()));
     }
     let resolver = app.session.media.asset_resolver.clone()?;
+    let associated = command == "photo.readMetadataFromFile";
     let assets: Vec<_> = ids
         .into_iter()
         .filter_map(|id| {
@@ -66,14 +72,15 @@ fn plan(app: &LightcraftApp, command: &str, params: &Value) -> Option<Plan> {
         })
         .collect();
     let ready = |asset: &Asset| {
-        resolver.availability(&asset.original.id) == AssetAvailability::Cached
+        let required = if associated { asset.associated.get("xmp").unwrap_or(&asset.original) } else { &asset.original };
+        resolver.availability(&required.id) == AssetAvailability::Cached
             || (requirement == SourceRequirement::PreviewAllowed
                 && asset.smart_preview.as_ref().is_some_and(|blob| resolver.availability(&blob.id) == AssetAvailability::Cached))
     };
     if assets.is_empty() || assets.iter().all(|(_, _, asset)| ready(asset)) {
         return None;
     }
-    Some(Plan { resolver, assets, requirement, library: app.session.library_token(), params: Value::Object(captured) })
+    Some(Plan { resolver, assets, requirement, library: app.session.library_token(), params: Value::Object(captured), associated })
 }
 
 fn still_current(app: &LightcraftApp, library: &Arc<()>, sources: &[(PhotoId, Source, Asset)]) -> bool {
@@ -98,7 +105,7 @@ fn start(
     let cancel = task.cancel_flag().ok_or("could not create source-acquisition cancellation flag")?;
     task.set_unit(lightcraft_engine::activity::Unit::Bytes);
     let handle = task.handle();
-    let Plan { resolver, assets, requirement, library, params } = plan;
+    let Plan { resolver, assets, requirement, library, params, associated } = plan;
     let captured_sources = assets.clone();
     crate::tasks::spawn(
         app,
@@ -109,7 +116,11 @@ fn start(
                 lightcraft_engine::assets::transfers::with_progress(handle, || {
                     let mut leases = Vec::with_capacity(assets.len());
                     for (_, _, asset) in &assets {
-                        let (lease, _) = resolver.acquire_asset(asset, requirement, &cancel).map_err(|e| e.to_string())?;
+                        let lease = if associated {
+                            resolver.acquire(asset.associated.get("xmp").unwrap_or(&asset.original), &cancel).map_err(|e| e.to_string())?
+                        } else {
+                            resolver.acquire_asset(asset, requirement, &cancel).map_err(|e| e.to_string())?.0
+                        };
                         leases.push(lease);
                     }
                     drop(task);
@@ -227,6 +238,7 @@ mod tests {
             session.media.asset_resolver = Some(resolver);
             let asset_id = AssetId("first".into());
             let asset = Asset {
+                associated: Default::default(),
                 original: Blob {
                     id: lightcraft_engine::assets::sha256(&bytes),
                     size: bytes.len() as u64,

@@ -213,8 +213,9 @@ fn op_variants_are_versioned() {
             Op::SetAsShotWb { .. } => 7,
             Op::SetAsset { .. } => 8,
             Op::SetUploadIntent { .. } => 9,
+            Op::SetCloudIdentity { .. } | Op::SetWorkingCopy { .. } => 10,
         }
     }
-    let newest = since(&Op::SetUploadIntent { id: "import".into(), intent: None });
+    let newest = since(&Op::SetCloudIdentity { entity: "library".into(), id: None });
     assert_eq!(newest, VERSION, "the newest op's version must be the current format version");
 }

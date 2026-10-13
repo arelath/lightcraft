@@ -63,6 +63,7 @@ fn status(response: &Response) -> Result<()> {
         401 | 403 => Err(AssetError::Unauthorized),
         404 => Err(AssetError::Missing),
         409 | 412 => Err(AssetError::Conflict),
+        501 => Err(AssetError::Unsupported("endpoint rejected this S3 operation (HTTP 501); safe catalog publication requires If-None-Match and If-Match support; staged data is retained".into())),
         code => Err(AssetError::Network(format!("S3 returned HTTP {code}; check permissions, endpoint and region"))),
     }
 }
@@ -430,6 +431,11 @@ fn parse_xml(bytes: &[u8], expected: &str) -> Result<BTreeMap<String, String>> {
                         .filter(|code| code.len() <= 64 && code.bytes().all(|b| b.is_ascii_alphanumeric()))
                         .map(String::as_str)
                         .unwrap_or("Error");
+                    if matches!(code, "NotImplemented" | "NotSupported") {
+                        return Err(AssetError::Unsupported(format!(
+                            "multipart completion returned {code}; conditional writes are required; upload receipt and staged bytes are retained"
+                        )));
+                    }
                     return Err(AssetError::Network(format!("S3 multipart completion returned {code}; retain the upload and retry")));
                 }
                 if root.as_deref() != Some(expected) {
@@ -450,6 +456,7 @@ mod tests {
 
     #[test]
     fn multipart_xml_resolves_namespaces_and_entities_and_refuses_errors() {
+        assert!(matches!(parse_xml(b"<Error><Code>NotImplemented</Code></Error>", "CompleteMultipartUploadResult"), Err(AssetError::Unsupported(_))));
         for xml in [
             "<InitiateMultipartUploadResult><UploadId>a&amp;b&#43;</UploadId></InitiateMultipartUploadResult>",
             "<s:InitiateMultipartUploadResult xmlns:s=\"http://s3.amazonaws.com/doc/2006-03-01/\"><s:UploadId>a&amp;b&#43;</s:UploadId></s:InitiateMultipartUploadResult>",

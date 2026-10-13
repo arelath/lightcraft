@@ -1,10 +1,10 @@
 # Cloud storage implementation
 
-Last updated: 2026-10-12. Completion and acceptance checks are tracked in [../tasks.md](../tasks.md). The proposal is [cloud-storage.md](cloud-storage.md).
+Last updated: 2026-10-13. Completion and acceptance checks are tracked in [../tasks.md](../tasks.md). The proposal is [cloud-storage.md](cloud-storage.md).
 
 ## Current architecture
 
-The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–8 still load and upgrade; older builds refuse format 9. Upload intents must be excluded from future shared checkpoints and mutation publication.
+The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–9 still load and upgrade; older builds refuse format 10. Format 10 adds associated XMP, stable identity mappings and device-local working-copy bindings. Upload intents must be excluded from future shared checkpoints and mutation publication.
 
 `crates/catalog/src/assets.rs` describes originals and optional smart-preview/thumbnail blobs, with connection IDs, object keys and optional object versions. Device cache paths, transfer state and connection settings are excluded from the catalog. Existing SipHash duplicate-detection and cache hashes retain their semantics.
 
@@ -215,6 +215,21 @@ Malformed, oversized or future retention settings are preserved and reported. Po
 
 ## Verification and remaining work
 
+Live Backblaze B2 acceptance on 2026-10-12 used a private bucket at the
+`s3.us-east-005.backblazeb2.com` endpoint and a dedicated random test prefix. Download,
+develop, full-quality export, explicit preview export, local-original removal and original
+reacquisition passed with the generated RAW. Credentials were supplied only through process
+environment variables and were not stored in the library, app settings or test evidence.
+The endpoint returned HTTP 501 `NotImplemented` for both `If-None-Match: *` and `If-Match`.
+Safe catalog publication therefore remains unavailable on this B2 endpoint. LightCraft
+reports unsupported conditional writes and retains staged bytes and multipart receipts;
+it never falls back to an unconditional catalog overwrite. Live AWS remains unverified.
+Sanitized results are `target/cloud-acceptance/live-b2-results.json` and
+`live-b2-read-results.json`. Only the dedicated procedural test objects were written;
+existing objects and bucket policies were left untouched. Provider setup follows the
+[Backblaze S3 API documentation](https://www.backblaze.com/apidocs/introduction-to-the-s3-compatible-api);
+the conditional-write limitation above was observed directly in the live test.
+
 Catalog tests cover malformed references, shared originals/virtual copies, journal replay and compaction, format-7 upgrade and legacy file sources. A synthetic regression rejects `PhotoId(u64::MAX)` as an error instead of overflowing.
 
 Engine tests cover a cloud-only synthetic Bayer DNG opening, developing, exporting and reopening from verified cache; concurrent requests; lease protection; corrupt/interrupted/cancelled/auth-failed transfers; injected failed writes; and path traversal rejection. A proxy-only render cannot satisfy a managed export's original requirement. A UI regression verifies retry after download completion without a catalog edit.
@@ -223,7 +238,33 @@ Engine tests cover a cloud-only synthetic Bayer DNG opening, developing, exporti
 
 The native desktop acceptance also passed on 2026-10-12 using control port 18837 and a separate loopback server that independently checked SigV4 with Python's HMAC implementation. It attached the remote-only RAW, applied +0.75 exposure, reached a completed native render, saved its catalog and exported a 32×24 PNG. One verified request acquired the original; the export reused it. The inspected native screenshot and results are in gitignored `target/cloud-acceptance/`. The final inspected frame measured 0.82 ms for UI update and 6.29 ms for the last render, with no queued or in-flight renders. These measurements use a tiny synthetic fixture and are not a large-library performance benchmark. This does not establish live AWS interoperability. Per-task completion and actual validation results are recorded in `tasks.md`.
 
-Unchecked work includes associated XMP and external-editor ingestion, synchronization/conflicts and browser adapters. The optional backend is deferred at the user's request. Durable local import, recovery, verified uploads, staging/cache migration, explicit idle multipart retention and initial conditional publication are implemented; unsynchronized originals and the reserved working directory are protected from cache eviction. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
+Synchronization/conflicts and browser adapters remain open. The optional backend is deferred at the user's request. Durable local import, recovery, verified uploads, staging/cache migration, explicit idle multipart retention and conditional publication are implemented; unsynchronized originals and external working files are protected from cache eviction. Browser workers currently return an unsupported error for managed sources. The presence of managed records or `CatalogSync` does not establish multi-device synchronization.
+
+Managed DNG conversion, XMP saves and external-edit return ingestion use the durable preparation worker.
+They create new asset and upload identities while retaining the photo's stable cloud identity. DNG
+conversion verifies decoded samples before relinking the photo and its virtual copies. Existing
+originals and revisions are retained for undo and recovery. Managed XMP uses
+`associated/xmp/<sha256>.xmp` under the library prefix, preserves foreign properties, and is verified
+and uploaded with the image dependencies before catalog publication. An unreadable associated packet
+is retained with an error. Automatic neighboring-file XMP writing remains specific to local files;
+managed XMP is explicitly saved through the shared metadata command.
+
+External edit copies are rendered into durable `Managed/working/<identity>/<name>` files, staged as
+managed photos, and stacked with their sources in one journal record. The native host launches the
+editor after successful preparation. On focus return, Reload stages changed bytes as an immutable
+revision with the same photo identity; unchanged bytes create no additional upload. Working paths
+and ingested-byte baselines remain device-local. Cache eviction never visits this working namespace,
+even after upload; ordinary exports cannot overwrite a bound working file. Merge results from managed
+inputs are durable local DNG files in `Managed/working/merges`, acquired through the original resolver
+and imported normally; they can subsequently be imported into cloud storage. Denoise continues to
+acquire original bytes through the resolver on its worker.
+
+Catalog format 10 adds associated assets, global identity mappings and working-copy bindings while
+preserving older catalogs. Staging manifest version 2 identifies a revision's target and base asset,
+so recovery relinks the existing photo rather than duplicating it. Publication batch version 2 records
+the base asset explicitly and accepts legacy version-1 imports; a previously pending binary revision
+uses its retained immutable description when a newer revision has replaced it locally. This binary
+publication support does not synchronize later ratings or develop edits between devices.
 
 `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF checks, workspace tests, parity references, layering, asset attribution and WASM on Windows. The required Rust 1.95 toolchain exposed older Clippy suggestions and Unix-specific test assumptions, which were corrected. Recovery tests also exposed duplicate Windows `.xmp`/`.XMP` alias moves: sidecar operations now deduplicate physical aliases, preserve actual filename spelling and retain distinct packets on sensitive volumes. Synthetic and native regressions cover these cases.
 
@@ -243,7 +284,7 @@ Native staging acceptance passed on 2026-10-12 through port 18857 with storage u
 
 Native upload acceptance passed on 2026-10-12 through port 18867 against an independently signed S3-compatible loopback fixture. The connection and import dialogs, byte-progress activity, failure text, Retry upload and Original synchronized state were visually inspected. A generated RAW padded to 9 MiB was saved locally, edited and exported at 32×24 after its private source was deleted, while multipart upload was still pending. A deliberately lost part response retained the original and refused local-copy removal. Clicking Retry upload resumed the same upload ID, verified all three object keys and published one catalog head. All requests passed independent Python HMAC/SigV4 checks. Results/screenshots are in gitignored `target/cloud-acceptance/native-upload-*`; maximum observed inspection latency was 43 ms and the final UI update was 0.50 ms with empty render queues. This procedural fixture is not a large-library performance or real-camera fidelity benchmark; live AWS remains unverified.
 
-Six real CLI/MCP upload tests cover response loss, restart after remote publication, embedded HTTP-200 completion errors, explicit abort, rejected credentials, independent queued work and byte-progress/ping/cancellation. Owner-event tests cover failed local acknowledgement and retry, old-library events and changed connection settings. Staging/cache promotion and the remaining path-dependent flows stay unchecked until their own checks pass.
+Six real CLI/MCP upload tests cover response loss, restart after remote publication, embedded HTTP-200 completion errors, explicit abort, rejected credentials, independent queued work and byte-progress/ping/cancellation. Owner-event tests cover failed local acknowledgement and retry, old-library events and changed connection settings. Staging/cache promotion and managed path-dependent flows subsequently passed their own acceptance checks below.
 
 Native organization acceptance passed on 2026-10-12 through control port 18867 with storage offline.
 The renamed `Trip-12.dng` appeared under Cloud archive → Trip, retained its synchronized original and
@@ -278,9 +319,14 @@ Screenshots were inspected: `native-managed-retention-pinned-refusal.png`,
 `native-managed-retention-removed.png` and `native-managed-retention-staging-error.png`.
 Results and independently verified signed requests are in `target/cloud-acceptance/`.
 Maximum inspection latency was 48 ms; final UI update was 18.74 ms with empty render queues.
-These are tiny procedural images, not real-camera or large-library benchmarks. Live bucket testing
-remains pending. Engine regressions cover six durability, ownership, cancellation, corruption and
+These are tiny procedural images, not real-camera or large-library benchmarks. Live B2 read/export acceptance passed; B2 conditional publication is unsupported as recorded above. Engine regressions cover six durability, ownership, cancellation, corruption and
 restart scenarios; real CLI/MCP upload coverage includes legacy proof upgrade and retention/reacquisition.
+
+## Managed revision acceptance
+
+Managed revision acceptance (2026-10-13): all eight CI stages passed in `target/cloud-managed-revisions-ci-final.log`. Fifteen focused preparation/recovery tests and real CLI/MCP revision tests cover partial rendition recovery, source changes, protected hard-link aliases and immutable upload descriptions. Native control-channel checks converted a procedural RAW to DNG, saved/read associated XMP, launched an actual test editor, ingested its returned 16×12 TIFF under the same derived photo ID, exported at full dimensions and removed eligible cache data while retaining the working file. All 54 fixture requests passed independent signing checks. Screenshots `native-revisions-dng.png` and `native-revisions-external.png` were inspected; results are in `target/cloud-acceptance/native-revisions-results.json`. Maximum inspection latency was 59 ms on this tiny fixture.
+
+DNG encoding verifies decoded sample identity before publication. XMP is a bounded associated immutable blob; explicit reads and writes use managed storage, while automatic neighboring-file sidecar writes remain local-file-only. External working copies are durable device data, never disposable cache. Recovery refuses changed source bindings and keeps staged originals. Full-resolution merges acquire originals on workers and produce durable local outputs. These checks do not establish synchronization of subsequent edits between devices.
 
 ## Revision history
 
@@ -296,3 +342,4 @@ restart scenarios; real CLI/MCP upload coverage includes legacy proof upgrade an
 | 2026-10-12 | Logical managed rename and album-folder organization; mixed-source undo/restart and rename-sequence overflow regression, native offline organization/export acceptance. |
 | 2026-10-12 | Explicit idle multipart retention, deleted-photo receipt recovery, destination-bound receipts and abort verification; native activity cancellation/retry and durable-byte preservation. |
 | 2026-10-12 | Verified staging/cache migration after durable acknowledgement, legacy receipt re-verification, cancellable local-copy removal and explicit retained-object deletion policy; native completion feedback and staging-error display. |
+| 2026-10-13 | Managed DNG/XMP revisions, durable external-editor return ingestion, immutable pending revision publication, partial-rendition recovery and hard-link output protection; native actual-editor and CLI/MCP acceptance passed. |

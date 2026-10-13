@@ -19,6 +19,9 @@ crc32fast = { workspace = true }
 log = { workspace = true }
 web-time = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+winapi-util = "=0.1.11"
+
 [dev-dependencies]
 lightcraft-geom = { workspace = true }
 proptest = { workspace = true }

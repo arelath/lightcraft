@@ -20,6 +20,7 @@ pub mod journal;
 pub mod keywords;
 pub mod local;
 pub mod lock;
+pub mod managed;
 pub mod model;
 pub mod query;
 pub mod rules;
@@ -76,6 +77,14 @@ pub const HISTORY_LIMIT: usize = 200;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum Op {
+    SetCloudIdentity {
+        entity: String,
+        id: Option<String>,
+    },
+    SetWorkingCopy {
+        id: PhotoId,
+        working: Option<Box<managed::WorkingCopy>>,
+    },
     SetUploadIntent {
         id: String,
         intent: Option<Box<uploads::UploadIntent>>,
@@ -262,6 +271,11 @@ pub enum Op {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    cloud_identities: BTreeMap<String, String>,
+    /// Device-local paths and return-detection baselines, excluded from cloud metadata.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    working_copies: BTreeMap<PhotoId, managed::WorkingCopy>,
     /// Local durable work and receipts, never synchronized to other devices.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     upload_intents: BTreeMap<String, uploads::UploadIntent>,
@@ -293,6 +307,18 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn cloud_identity(&self, entity: &str) -> Option<&str> {
+        self.cloud_identities.get(entity).map(String::as_str)
+    }
+    pub fn cloud_identities(&self) -> &BTreeMap<String, String> {
+        &self.cloud_identities
+    }
+    pub fn working_copy(&self, id: PhotoId) -> Option<&managed::WorkingCopy> {
+        self.working_copies.get(&id)
+    }
+    pub fn working_copies(&self) -> &BTreeMap<PhotoId, managed::WorkingCopy> {
+        &self.working_copies
+    }
     pub fn upload_intents(&self) -> &BTreeMap<String, uploads::UploadIntent> {
         &self.upload_intents
     }
@@ -316,12 +342,12 @@ impl Catalog {
     }
     pub fn alloc_album_id(&mut self) -> AlbumId {
         let id = AlbumId(self.next_album.max(1));
-        self.next_album = id.0 + 1;
+        self.next_album = id.0.saturating_add(1);
         id
     }
     pub fn alloc_stack_id(&mut self) -> StackId {
         let id = StackId(self.next_stack.max(1));
-        self.next_stack = id.0 + 1;
+        self.next_stack = id.0.saturating_add(1);
         id
     }
 
@@ -511,6 +537,44 @@ impl Catalog {
 
     fn apply_inner(&mut self, op: Op) -> Result<Op> {
         Ok(match op {
+            Op::SetCloudIdentity { entity, id } => {
+                if !managed::entity_key(&entity) {
+                    return Err(CatalogError::Invalid("invalid cloud entity identity key".into()));
+                }
+                let old = if let Some(id) = id {
+                    if !assets::identifier(&id)
+                        || self.cloud_identities.get(&entity).is_some_and(|old| old != &id)
+                        || self.cloud_identities.iter().any(|(key, value)| key != &entity && value == &id)
+                        || (!self.cloud_identities.contains_key(&entity) && self.cloud_identities.len() >= 100_000)
+                    {
+                        return Err(CatalogError::Invalid("cloud identities must be unique and stable".into()));
+                    }
+                    self.cloud_identities.insert(entity.clone(), id)
+                } else {
+                    self.cloud_identities.remove(&entity)
+                };
+                Op::SetCloudIdentity { entity, id: old }
+            }
+            Op::SetWorkingCopy { id, working } => {
+                if id.0 == 0 || id.0 == u64::MAX {
+                    return Err(CatalogError::Invalid("invalid working-copy photo identity".into()));
+                }
+                let old = if let Some(working) = working {
+                    working.validate().map_err(CatalogError::Invalid)?;
+                    if self
+                        .assets
+                        .get(&working.asset_id)
+                        .is_none_or(|asset| asset.original.id != working.ingested || asset.original.remote.connection != working.connection)
+                        || (!self.working_copies.contains_key(&id) && self.working_copies.len() >= 100_000)
+                    {
+                        return Err(CatalogError::Invalid("working-copy asset is absent or binding limit reached".into()));
+                    }
+                    self.working_copies.insert(id, *working)
+                } else {
+                    self.working_copies.remove(&id)
+                };
+                Op::SetWorkingCopy { id, working: old.map(Box::new) }
+            }
             Op::SetUploadIntent { id, intent } => {
                 if !assets::identifier(&id) {
                     return Err(CatalogError::Invalid("invalid upload intent identity".into()));
@@ -543,6 +607,7 @@ impl Catalog {
                 } else {
                     if self.photos.values().any(|p| matches!(&p.source, Source::Managed { asset_id } if *asset_id == id))
                         || self.upload_intents.values().any(|intent| intent.asset_id == id)
+                        || self.working_copies.values().any(|working| working.asset_id == id)
                     {
                         return Err(CatalogError::Invalid("asset is still referenced by a photo".into()));
                     }
@@ -637,7 +702,7 @@ impl Catalog {
                     self.validate_rules(rules)?;
                 }
                 let id = album.id;
-                self.next_album = self.next_album.max(id.0 + 1);
+                self.next_album = self.next_album.max(id.0.checked_add(1).ok_or_else(|| CatalogError::Invalid("album identity exhausted".into()))?);
                 self.albums.insert(id, album);
                 Op::RemoveAlbum { id }
             }
@@ -709,7 +774,7 @@ impl Catalog {
                 }
                 self.validate_stack(stack.id, &stack.photos)?;
                 let id = stack.id;
-                self.next_stack = self.next_stack.max(id.0 + 1);
+                self.next_stack = self.next_stack.max(id.0.checked_add(1).ok_or_else(|| CatalogError::Invalid("stack identity exhausted".into()))?);
                 self.stacks.insert(id, stack);
                 Op::RemoveStack { id }
             }

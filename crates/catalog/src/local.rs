@@ -305,6 +305,8 @@ impl Op {
             | Op::SetBrowsed { .. }
             | Op::SetFolderRecord { .. }
             | Op::SetAsset { .. }
+            | Op::SetCloudIdentity { .. }
+            | Op::SetWorkingCopy { .. }
             | Op::SetUploadIntent { .. } => {}
         }
     }

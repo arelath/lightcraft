@@ -5,8 +5,10 @@ Based on [docs/cloud-storage.md](docs/cloud-storage.md). Checkboxes reflect veri
 The source document describes a particular source snapshot. Verify its implementation assumptions before changing code. Task IDs use the `CS` prefix to distinguish this backlog from the existing project plan.
 
 Scope confirmed by the user: complete direct S3 storage/synchronization and browser support (Milestones 1–5).
-Milestone 6 is deferred. A live S3-compatible test bucket will be supplied later; loopback fixtures provide
-current acceptance coverage, and live interoperability remains unverified.
+Milestone 6 is deferred. Live Backblaze B2 read/edit/export and original reacquisition passed on 2026-10-12.
+B2 rejected `If-None-Match` and `If-Match` with HTTP 501, so conditional catalog publication remains
+unavailable there; the failed upload retained its staged original. Loopback fixtures cover publication
+and synchronization failure scenarios. Evidence: `target/cloud-acceptance/live-b2*-results.json`.
 
 Verified on 2026-10-12: Milestone 1, including managed originals and proxies, catalog migration, integrity and failure recovery, real CLI/MCP acceptance, and native desktop control-channel acceptance with a generated RAW. Deferred metadata/render requests kept the UI responsive during a deliberately slow download, and attempts to overwrite managed cache data were rejected. The local S3-compatible test server verified request signing; live AWS interoperability remains unverified. `cargo +1.95.0 xtask ci` passed all eight stages. Long-lived keys cannot be entered into LightCraft; authentication uses externally managed AWS profiles or environment credentials.
 
@@ -50,7 +52,7 @@ Verified on 2026-10-12: Milestone 1, including managed originals and proxies, ca
 
 **Dependencies:** Milestone 1.
 
-Verified device experience (2026-10-12): recipe-matched remote thumbnails, editable proxies and original refresh; four concurrent downloads with active/nearby/visible/background priorities, deduplication, byte progress, cancellation and reconnect; configurable budgets, separate photo/album offline pins and local-original removal. CLI/MCP, native Info/Performance controls and all eight CI stages passed. Native checks covered delayed transfers, cancellation/retry, preview editing and explicit export, and offline reopening/export of a pinned RAW. Durable pending-upload and external-working-copy protection remains unchecked until the safe-import workflow lands.
+Verified device experience (2026-10-12): recipe-matched remote thumbnails, editable proxies and original refresh; four concurrent downloads with active/nearby/visible/background priorities, deduplication, byte progress, cancellation and reconnect; configurable budgets, separate photo/album offline pins and local-original removal. CLI/MCP, native Info/Performance controls and all eight CI stages passed. Native checks covered delayed transfers, cancellation/retry, preview editing and explicit export, and offline reopening/export of a pinned RAW. Durable pending-upload and external-working-copy protection passed with the managed revision workflow on 2026-10-13.
 
 ### Previews and background transfers
 
@@ -65,7 +67,7 @@ Verified device experience (2026-10-12): recipe-matched remote thumbnails, edita
 
 - [x] **CS2.7** Add a configurable original-cache disk budget and eviction of eligible, safely uploaded, unused content.
 - [x] **CS2.8** Add explicit offline pinning for individual photos and albums, with a choice of originals or previews.
-- [ ] **CS2.9** Preserve temporary lease pins while decoders, exports, or external editors use cached files; never evict pending uploads or unsynchronized working copies.
+- [x] **CS2.9** Preserve temporary lease pins while decoders, exports, or external editors use cached files; never evict pending uploads or unsynchronized working copies.
 - [x] **CS2.10** Add a remove-local-copy command that evicts eligible cached content while preserving the photo and its remote references.
 - [x] **CS2.11** Keep cache paths, budgets, pins, progress, selection, and hardware preferences device-local.
 - [x] **CS2.12** Define enabled operations and actionable errors for offline states with an original, only a smart preview, or no usable source.
@@ -84,7 +86,7 @@ Verified device experience (2026-10-12): recipe-matched remote thumbnails, edita
 
 **Dependencies:** Milestones 1–2. Full multi-device mutation synchronization follows in Milestone 4.
 
-Verified staging and uploads (2026-10-12): durable original/proxy/thumbnail preparation, atomic photo/asset/upload intent, recovery without duplicate imports, resumable multipart transfer, SHA-256 readback verification and conditional initial publication. CLI/MCP response-loss, cancellation, credentials, process-crash and local-acknowledgement failure checks passed. Native connection/import dialogs, immediate editing/export, byte progress, failure and retry were visually inspected; retry reused its multipart ID and published once. All eight CI stages passed. Explicit idle multipart cleanup includes deleted-photo receipts, destination binding and confirmed aborts; cancellation and retry preserve durable bytes. Verified staging/cache migration and explicit local-copy/library deletion policies preserve pending data and remote objects. Path-dependent operations and external-editor ingestion remain open. Initial import publication does not synchronize subsequent edits between devices.
+Verified staging and uploads (2026-10-12): durable original/proxy/thumbnail preparation, atomic photo/asset/upload intent, recovery without duplicate imports, resumable multipart transfer, SHA-256 readback verification and conditional initial publication. CLI/MCP response-loss, cancellation, credentials, process-crash and local-acknowledgement failure checks passed. Native connection/import dialogs, immediate editing/export, byte progress, failure and retry were visually inspected; retry reused its multipart ID and published once. All eight CI stages passed. Explicit idle multipart cleanup includes deleted-photo receipts, destination binding and confirmed aborts; cancellation and retry preserve durable bytes. Verified staging/cache migration and explicit local-copy/library deletion policies preserve pending data and remote objects. Managed DNG conversion, associated XMP and external-editor revision ingestion passed on 2026-10-13; merge and denoise acquire originals through the resolver. Initial import publication does not synchronize subsequent edits between devices.
 
 ### Durable import and upload pipeline
 
@@ -105,10 +107,10 @@ and restart preserve managed asset references and original bytes. Native offline
 full-quality export passed and its screenshot was inspected. Rename sequence overflow is rejected before
 any changes. `target/cloud-organization-ci.log` records all eight CI stages passing.
 
-- [ ] **CS3.10** Audit and adapt original export, DNG conversion, merge, and denoise to acquire required originals through the resolver.
+- [x] **CS3.10** Audit and adapt original export, DNG conversion, merge, and denoise to acquire required originals through the resolver.
 - [x] **CS3.11** Implement logical rename and folder organization for managed assets without moving immutable image objects.
-- [ ] **CS3.12** Model XMP sidecars as associated assets and route reads, writes, and uploads through managed storage rather than neighboring-path assumptions.
-- [ ] **CS3.13** Materialize a pinned working file for external editing, detect and ingest the returned revision, and keep it durable until uploaded.
+- [x] **CS3.12** Model XMP sidecars as associated assets and route reads, writes, and uploads through managed storage rather than neighboring-path assumptions.
+- [x] **CS3.13** Materialize a pinned working file for external editing, detect and ingest the returned revision, and keep it durable until uploaded.
 - [x] **CS3.14** Separate remove-local-copy behavior from delete-from-library behavior; define deletion and remote-object retention policies for managed assets.
 
 CS3.14 verified on 2026-10-12: six staging-retention regressions, eleven real CLI/MCP upload checks,
@@ -117,13 +119,15 @@ full-original reacquisition, permanent deletion and Performance staging-error di
 Remote objects and working data were preserved. `target/cloud-managed-retention-ci-final.log` records
 all eight CI stages passing. Legacy receipts require explicit re-verification before migration.
 
+Managed revision acceptance (2026-10-13): all eight CI stages passed in `target/cloud-managed-revisions-ci-final.log`. Fifteen focused preparation/recovery tests and real CLI/MCP revision tests cover partial rendition recovery, source changes, protected hard-link aliases and immutable upload descriptions. Native control-channel checks converted a procedural RAW to DNG, saved/read associated XMP, launched an actual test editor, ingested its returned 16×12 TIFF under the same derived photo ID, exported at full dimensions and removed eligible cache data while retaining the working file. All 54 fixture requests passed independent signing checks. Screenshots `native-revisions-dng.png` and `native-revisions-external.png` were inspected; results are in `target/cloud-acceptance/native-revisions-results.json`. Maximum inspection latency was 59 ms on this tiny fixture.
+
 ### Acceptance checks
 
-- [ ] **CS3.A1** Inject crashes at each import stage: staging, preview generation, local save, multipart transfer, verification, remote publication, and local synchronization acknowledgement; verify recovery preserves data and publication ordering.
+- [x] **CS3.A1** Inject crashes at each import stage: staging, preview generation, local save, multipart transfer, verification, remote publication, and local synchronization acknowledgement; verify recovery preserves data and publication ordering.
 - [x] **CS3.A2** Test lost upload and publication responses, interrupted multipart uploads, insufficient disk space, revoked credentials, and restart with queued work.
 - [x] **CS3.A3** Verify an imported photo is immediately editable, cannot be evicted before safe upload, and only appears remotely after all required objects exist.
-- [ ] **CS3.A4** Exercise the adapted path-dependent operations and prove removing a local copy preserves library membership while library deletion follows the explicit policy.
-- [ ] **CS3.A5** Run `cargo xtask ci` and inspect the desktop import, upload-status, and external-edit flows through the control channel.
+- [x] **CS3.A4** Exercise the adapted path-dependent operations and prove removing a local copy preserves library membership while library deletion follows the explicit policy.
+- [x] **CS3.A5** Run `cargo xtask ci` and inspect the desktop import, upload-status, and external-edit flows through the control channel.
 
 ## Milestone 4 — Synchronize libraries between devices
 

@@ -513,6 +513,16 @@ impl LightcraftApp {
             params
         };
         let r = self.session.execute(id, &params).map_err(|e| e.to_string());
+        if matches!(id, "photo.convertToDng" | "photo.saveMetadataToFile" | "photo.reload" | "photo.editExternal")
+            && let Ok(result) = &r
+        {
+            let preparation = if result["background"] == true { result } else { &result["managed"] };
+            if preparation["background"] == true
+                && let Some(task) = preparation["task"].as_u64()
+            {
+                self.ui.cloud_preparations.entry(task).or_insert(None);
+            }
+        }
         if r.is_ok() && matches!(id, "crop.aspect" | "crop.rotateAspect") {
             self.ui.crop_default_aspect = if id == "crop.aspect" && params.get("aspect").and_then(Value::as_str) == Some("original") {
                 Some(serde_json::json!("original"))
@@ -737,6 +747,31 @@ impl LightcraftApp {
         }
         let active = self.session.activity.list();
         self.ui.cloud_removals.retain(|id| active.iter().any(|task| task.id == *id));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cloud_preparation_outcome(&mut self, ctx: &egui::Context) {
+        let reports: Vec<_> = self
+            .session
+            .cloud_imports
+            .reports
+            .iter()
+            .filter(|report| report["task"].as_u64().is_some_and(|task| self.ui.cloud_preparations.contains_key(&task)))
+            .cloned()
+            .collect();
+        for report in reports {
+            let Some(task) = report["task"].as_u64() else { continue };
+            let editor = self.ui.cloud_preparations.remove(&task).flatten();
+            if report["ok"] != true {
+                self.toast_error(ctx, report["error"].as_str().unwrap_or("Managed preparation failed; durable data was retained"));
+            } else if let Some(editor) = editor {
+                menus::open_edit_result(self, ctx, &report["result"], &editor);
+            } else {
+                self.toast(ctx, "Managed revision saved locally; upload is pending");
+            }
+        }
+        let active: std::collections::BTreeSet<_> = self.session.activity.list().iter().map(|task| task.id).collect();
+        self.ui.cloud_preparations.retain(|task, _| active.contains(task));
     }
 
     /// A toast that stays `secs` seconds (messages that say where to look or what to do next).
@@ -1049,6 +1084,8 @@ impl LightcraftApp {
         #[cfg(not(target_arch = "wasm32"))]
         self.session.poll_cloud_imports();
         #[cfg(not(target_arch = "wasm32"))]
+        self.cloud_preparation_outcome(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
         self.session.poll_cloud_uploads();
         #[cfg(not(target_arch = "wasm32"))]
         self.cloud_removal_outcome(ctx);
@@ -1069,7 +1106,7 @@ impl LightcraftApp {
         let focused = ctx.input(|i| i.focused);
         if focused && !self.ui.was_focused && !self.ui.external_edits.is_empty() {
             let ids = self.ui.external_edits.clone();
-            if let Ok(r) = self.session.execute("photo.reload", &serde_json::json!({"ids": ids}))
+            if let Ok(r) = self.run("photo.reload", serde_json::json!({"ids": ids}))
                 && r["reloaded"].as_array().is_some_and(|a| !a.is_empty())
             {
                 self.toast(ctx, "Updated the edits saved in the external editor");

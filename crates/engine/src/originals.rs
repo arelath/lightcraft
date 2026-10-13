@@ -41,6 +41,9 @@ impl OriginalGuard {
                 g.add(Path::new(path), &p.file_name);
             }
         }
+        for working in catalog.working_copies().values() {
+            g.add_file(Path::new(&working.path), "a durable external-editor working file");
+        }
         g
     }
 
@@ -86,6 +89,16 @@ impl OriginalGuard {
                     "{} is {what} in the library: LightCraft never writes over an original (choose another folder or file name)",
                     target.display()
                 ));
+            }
+        }
+        // Different hard-link names miss the filename index. Query only linked outputs;
+        // ordinary exports keep the fast path, and the scan never retains many open handles.
+        if lightcraft_catalog::safe_file::hard_linked(target).map_err(|e| format!("could not verify output file identity: {e}"))? {
+            let mut seen = std::collections::HashSet::new();
+            for (p, what) in self.by_name.values().flatten() {
+                if seen.insert(p) && same_file(p, target) {
+                    return Err(format!("{} is a hard link to {what} in the library; choose another file name", target.display()));
+                }
             }
         }
         Ok(())
@@ -175,8 +188,11 @@ impl crate::Session {
                 guard.add_root(&root.join("uploads"));
             }
             for asset in self.catalog.assets().values() {
-                for blob in std::iter::once(&asset.original).chain(asset.smart_preview.iter()).chain(asset.thumbnail.iter()) {
+                for blob in asset.blobs() {
                     guard.add_file(&resolver.root().join(&blob.id.0), "a managed original or rendition");
+                    if let Some(root) = resolver.durable_root() {
+                        guard.add_file(&root.join("blobs").join(&blob.id.0), "a durable managed blob");
+                    }
                 }
             }
         }
@@ -193,6 +209,8 @@ impl crate::Session {
                 guard.add_root(resolver.root());
                 if let Some(root) = resolver.durable_root() {
                     guard.add_root(&root.join("blobs"));
+                    guard.add_root(&root.join("imports"));
+                    guard.add_root(&root.join("uploads"));
                 }
                 guard.check_roots(path)?;
             }

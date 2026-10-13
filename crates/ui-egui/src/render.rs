@@ -1129,7 +1129,10 @@ mod thumbnail_tests {
             session.media.asset_resolver = Some(resolver.clone());
             session
                 .catalog
-                .apply(Op::SetAsset { id: asset_id, asset: Some(Box::new(Asset { original, smart_preview: None, thumbnail: Some(thumbnail) })) })
+                .apply(Op::SetAsset {
+                    id: asset_id,
+                    asset: Some(Box::new(Asset { associated: Default::default(), original, smart_preview: None, thumbnail: Some(thumbnail) })),
+                })
                 .unwrap();
             let (mut app, work, ctx) = fixture_with(session, photo);
             request(&mut app);

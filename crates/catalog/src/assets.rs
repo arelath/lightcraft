@@ -1,6 +1,7 @@
 //! Location-independent asset records. Credentials and cache paths never belong in the catalog.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -36,6 +37,9 @@ pub struct Asset {
     pub smart_preview: Option<Blob>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<Blob>,
+    /// Immutable supporting documents, currently XMP. Mutable editor files are device-local.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub associated: BTreeMap<String, Blob>,
 }
 
 pub const MAX_BLOB_BYTES: u64 = 4 << 30;
@@ -73,10 +77,25 @@ impl Blob {
 }
 
 impl Asset {
+    pub fn blobs(&self) -> impl Iterator<Item = &Blob> {
+        std::iter::once(&self.original).chain(self.smart_preview.iter()).chain(self.thumbnail.iter()).chain(self.associated.values())
+    }
     pub fn validate(&self) -> Result<(), String> {
         self.original.validate()?;
         for blob in [&self.smart_preview, &self.thumbnail].into_iter().flatten() {
             blob.validate()?;
+        }
+        if self.associated.len() > 16 {
+            return Err("too many associated asset documents".into());
+        }
+        for (kind, blob) in &self.associated {
+            if kind != "xmp" || blob.size > 16 << 20 {
+                return Err("associated documents currently support XMP up to 16 MiB".into());
+            }
+            blob.validate()?;
+            if blob.remote.connection != self.original.remote.connection {
+                return Err("associated documents must use the original's connection".into());
+            }
         }
         Ok(())
     }
@@ -116,7 +135,7 @@ mod tests {
         use crate::{Catalog, Journal, MemStore, Op, Photo, PhotoId, Source};
         let mut catalog = Catalog::new();
         let id = AssetId("shared-original".into());
-        let asset = Asset { original: blob(), smart_preview: None, thumbnail: None };
+        let asset = Asset { associated: Default::default(), original: blob(), smart_preview: None, thumbnail: None };
         let mut copy = Photo::new(PhotoId(2), Source::Managed { asset_id: id.clone() }, "photo.raw", "RAW", 12, 8, "2026-10-12");
         copy.copy_of = Some(PhotoId(1));
         let ops = vec![

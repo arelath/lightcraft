@@ -35,21 +35,14 @@ impl UploadIntent {
             return Err("invalid upload identity".into());
         }
         asset.validate()?;
-        if self.verified.len() > 3
-            || self.verified.iter().any(|key| {
-                !std::iter::once(&asset.original).chain(asset.smart_preview.iter()).chain(asset.thumbnail.iter()).any(|blob| &blob.remote.key == key)
-            })
-        {
+        if self.verified.len() > asset.blobs().count() || self.verified.iter().any(|key| !asset.blobs().any(|blob| &blob.remote.key == key)) {
             return Err("upload verification refers to another asset".into());
         }
         if self.error.as_ref().is_some_and(|error| error.len() > 4096 || error.contains('\0')) {
             return Err("invalid upload error".into());
         }
         if matches!(self.state, UploadState::ObjectsVerified | UploadState::Published | UploadState::Synchronized)
-            && std::iter::once(&asset.original)
-                .chain(asset.smart_preview.iter())
-                .chain(asset.thumbnail.iter())
-                .any(|blob| !self.verified.contains(&blob.remote.key))
+            && asset.blobs().any(|blob| !self.verified.contains(&blob.remote.key))
         {
             return Err("upload completion requires verification of every object key".into());
         }
@@ -68,6 +61,7 @@ mod tests {
         let mut catalog = Catalog::new();
         let asset_id = AssetId("staged".into());
         let asset = Asset {
+            associated: Default::default(),
             original: Blob {
                 id: BlobId("a".repeat(64)),
                 size: 12,

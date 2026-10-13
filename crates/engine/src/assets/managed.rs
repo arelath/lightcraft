@@ -28,7 +28,7 @@ pub(crate) struct Proofs {
 }
 
 pub(crate) fn blobs(asset: &Asset) -> impl Iterator<Item = &Blob> {
-    std::iter::once(&asset.original).chain(asset.smart_preview.iter()).chain(asset.thumbnail.iter())
+    asset.blobs()
 }
 
 pub(crate) fn candidates(root: &Path, policy: &Policy) -> Result<BTreeMap<BlobId, Blob>> {

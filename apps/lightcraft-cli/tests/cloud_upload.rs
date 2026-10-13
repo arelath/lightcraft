@@ -2,6 +2,7 @@
 mod support;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::Stdio;
 use support::Fixture;
 
@@ -18,6 +19,99 @@ fn until(mut ready: impl FnMut() -> bool) {
     while !ready() {
         assert!(std::time::Instant::now() < deadline, "fixture operation timed out");
         std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn xmp_and_external_revisions_publish_dependencies_with_stable_photo_identity() {
+    let fixture = Fixture::new();
+    let library = fixture.dir.join("revision-library");
+    let (initial, source) = fixture.import(&library, false);
+    std::fs::remove_file(source).unwrap();
+    let (output, rows) = fixture.run(
+        &library,
+        &[
+            ("cloud.upload", json!({})),
+            ("photo.rate", json!({"ids":[1],"rating":4})),
+            ("photo.saveMetadataToFile", json!({"ids":[1]})),
+            ("cloud.upload", json!({})),
+            ("photo.editExternal", json!({"ids":[1],"format":"tiff","bitDepth":16})),
+        ],
+    );
+    assert!(output.status.success(), "{rows:?} {}", String::from_utf8_lossy(&output.stderr));
+    let edit = &rows[4]["result"];
+    let derived = edit["id"].as_u64().unwrap();
+    let working = PathBuf::from(edit["path"].as_str().unwrap());
+    let image = lightcraft_raster::Rgba8::from_fn(13, 9, |_, _| [60, 120, 180, 255]);
+    let bytes = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&image), &Default::default()).unwrap();
+    std::fs::write(&working, &bytes).unwrap();
+    let exported = fixture.dir.join("returned-export.png");
+    let (output, rows) = fixture.run(
+        &library,
+        &[
+            ("photo.reload", json!({"ids":[derived]})),
+            ("cloud.upload", json!({})),
+            ("cloud.uploadStatus", json!({})),
+            ("app.export", json!({"ids":[derived],"path":exported,"format":"png"})),
+            ("cloud.removeLocalCopy", json!({"ids":[derived]})),
+        ],
+    );
+    assert!(output.status.success(), "{rows:?} {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(rows[2]["result"]["uploads"].as_object().unwrap().len(), 4);
+    assert!(rows[2]["result"]["uploads"].as_object().unwrap().values().all(|intent| intent["state"] == "synchronized"), "{rows:?}");
+    assert_eq!((rows[3]["result"]["width"].as_u64(), rows[3]["result"]["height"].as_u64()), (Some(13), Some(9)));
+    assert!(rows[4]["result"]["failed"].as_array().unwrap().is_empty(), "{rows:?}");
+    assert_eq!(std::fs::read(&working).unwrap(), bytes);
+    let state = fixture.state.lock().unwrap();
+    assert_eq!(state.signature_errors, 0);
+    let mut xmp_seen = false;
+    let mut derived_identity = None;
+    for entry in std::fs::read_dir(library.join("Managed/uploads")).unwrap() {
+        let receipt: Value = serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        let imported = &receipt["imported"];
+        if imported["photo"]["id"] == 1 {
+            assert_eq!(imported["photoId"], initial);
+        } else {
+            let identity = imported["photoId"].as_str().unwrap();
+            if let Some(previous) = &derived_identity {
+                assert_eq!(previous, identity);
+            } else {
+                derived_identity = Some(identity.to_owned());
+            }
+        }
+        let asset = &imported["asset"];
+        let documents = asset["associated"].as_object();
+        xmp_seen |= documents.is_some_and(|documents| documents.contains_key("xmp"));
+        for blob in [&asset["original"], &asset["smartPreview"], &asset["thumbnail"]]
+            .into_iter()
+            .chain(documents.into_iter().flat_map(|documents| documents.values()))
+        {
+            let key = blob["remote"]["key"].as_str().unwrap();
+            assert_eq!(support::hash(state.objects.get(&format!("/photos/{key}")).unwrap()), blob["id"].as_str().unwrap());
+        }
+    }
+    assert!(xmp_seen && derived_identity.is_some());
+}
+
+#[test]
+fn unsupported_conditional_writes_preserve_staging_and_multipart_without_publishing() {
+    for large in [false, true] {
+        let fixture = Fixture::new();
+        let library = fixture.dir.join("library");
+        let (id, source) = fixture.import(&library, large);
+        std::fs::remove_file(source).unwrap();
+        fixture.state.lock().unwrap().unsupported_conditional = true;
+        let (_, rows) = fixture.run(&library, &[("cloud.upload", json!({"imports":[id]})), ("cloud.uploadStatus", json!({}))]);
+        assert_eq!(rows[0]["ok"], false);
+        assert!(rows[0]["error"].as_str().unwrap().contains("If-Match"), "{rows:?}");
+        assert_eq!(rows[1]["result"]["uploads"][&id]["state"], "failed");
+        let receipt: Value = serde_json::from_slice(&std::fs::read(library.join("Managed/uploads").join(format!("{id}.json"))).unwrap()).unwrap();
+        let original = receipt["imported"]["asset"]["original"]["id"].as_str().unwrap();
+        assert!(library.join("Managed/blobs").join(original).is_file());
+        assert_eq!(receipt["multipart"].as_object().unwrap().len(), usize::from(large));
+        let state = fixture.state.lock().unwrap();
+        assert!(!state.objects.contains_key("/photos/library/catalog/head.json"));
+        assert_eq!(state.signature_errors, 0);
     }
 }
 

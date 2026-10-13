@@ -110,6 +110,7 @@ pub struct State {
     pub hold_head: bool,
     pub hold_abort: bool,
     pub defer_abort: usize,
+    pub unsupported_conditional: bool,
 }
 
 pub struct Fixture {
@@ -258,6 +259,9 @@ impl Drop for Fixture {
 }
 
 fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<String, String>, body: Vec<u8>) -> (u16, Vec<u8>, Option<String>, bool) {
+    if state.unsupported_conditional && (headers.contains_key("if-none-match") || headers.contains_key("if-match")) {
+        return (501, b"<Error><Code>NotImplemented</Code><Message>Conditional writes unavailable</Message></Error>".to_vec(), None, false);
+    }
     let (key, query) = target.split_once('?').unwrap_or((target, ""));
     assert!(key.starts_with("/photos/library/"));
     let query = query

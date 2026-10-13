@@ -118,7 +118,7 @@ fn a_duplicate_waiter_can_cancel_without_waiting_for_the_shared_transfer() {
 fn a_cached_preview_does_not_wait_for_an_original_being_downloaded() {
     let scratch = Scratch::new();
     let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
-    let asset = Asset { original: blob(b"original"), smart_preview: Some(blob(b"preview")), thumbnail: None };
+    let asset = Asset { associated: Default::default(), original: blob(b"original"), smart_preview: Some(blob(b"preview")), thumbnail: None };
     std::fs::write(scratch.0.join(&asset.smart_preview.as_ref().unwrap().id.0), b"preview").unwrap();
     let entry = resolver.entry(&asset.original.id).unwrap();
     let gate = entry.gate.lock().unwrap();
@@ -138,7 +138,7 @@ fn a_cached_preview_does_not_wait_for_an_original_being_downloaded() {
 fn a_known_cached_original_is_not_replaced_by_a_proxy_during_verification() {
     let scratch = Scratch::new();
     let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
-    let asset = Asset { original: blob(b"original"), smart_preview: Some(blob(b"preview")), thumbnail: None };
+    let asset = Asset { associated: Default::default(), original: blob(b"original"), smart_preview: Some(blob(b"preview")), thumbnail: None };
     std::fs::write(scratch.0.join(&asset.original.id.0), b"original").unwrap();
     std::fs::write(scratch.0.join(&asset.smart_preview.as_ref().unwrap().id.0), b"preview").unwrap();
     drop(resolver.acquire_cached(&asset.original, &AtomicBool::new(false)).unwrap().unwrap());
@@ -168,7 +168,7 @@ fn a_direct_render_replaces_cached_proxy_pixels_after_original_arrival() {
     let pixels = lightcraft_raster::Rgba8::from_fn(32, 24, |_, _| [20, 40, 60, 255]);
     let original = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&pixels), &lightcraft_codecs::EncodeMeta::default()).unwrap();
     let preview = crate::smart::encode(&lightcraft_raster::Rgb32f::from_fn(16, 12, |_, _| [0.6, 0.2, 0.1]), None).unwrap();
-    let asset = Asset { original: blob(&original), smart_preview: Some(blob(&preview)), thumbnail: None };
+    let asset = Asset { associated: Default::default(), original: blob(&original), smart_preview: Some(blob(&preview)), thumbnail: None };
     let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
     resolver.connect("memory".into(), store(&preview)).unwrap();
     let mut session = crate::Session::new().with_fs();
@@ -351,7 +351,7 @@ fn headless_wait_fetch_reports_errors_and_finishes_before_returning() {
     let mut session = crate::Session::new().with_fs();
     session.open_library(&scratch.0, false).unwrap();
     let bytes = b"a downloaded source";
-    let asset = Asset { original: blob(bytes), smart_preview: None, thumbnail: None };
+    let asset = Asset { associated: Default::default(), original: blob(bytes), smart_preview: None, thumbnail: None };
     let attached = session
         .execute("cloud.attach", &serde_json::json!({"assetId": "waited", "asset": asset, "fileName": "waited.jpg", "width": 4, "height": 3}))
         .unwrap();
@@ -493,7 +493,7 @@ fn user_outputs_cannot_replace_managed_cache_or_create_future_blob_files() {
     let mut session = crate::Session::new().with_fs();
     session.open_library(&scratch.0, false).unwrap();
     let bytes = b"original bytes";
-    let asset = Asset { original: blob(bytes), smart_preview: None, thumbnail: None };
+    let asset = Asset { associated: Default::default(), original: blob(bytes), smart_preview: None, thumbnail: None };
     session
         .execute(
             "cloud.attach",
@@ -544,7 +544,7 @@ fn catalog_storage_and_local_caches_are_independent() {
 fn cloud_photo_opens_develops_exports_and_reopens() {
     let scratch = Scratch::new();
     let bytes = crate::tests_xmp::synthetic_dng_with(None, lightcraft_meta::Metadata::default());
-    let asset = Asset { original: blob(&bytes), smart_preview: None, thumbnail: None };
+    let asset = Asset { associated: Default::default(), original: blob(&bytes), smart_preview: None, thumbnail: None };
     let provider = store(&bytes);
     let mut session = crate::Session::new().with_fs();
     session.open_library(&scratch.0, false).unwrap();
@@ -574,7 +574,8 @@ fn export_requires_original_even_if_a_preview_is_cached() {
     let scratch = Scratch::new();
     let img = lightcraft_raster::Rgb32f::from_fn(16, 12, |_, _| [0.2, 0.3, 0.4]);
     let preview = crate::smart::encode(&img, None).unwrap();
-    let asset = Asset { original: blob(b"unavailable original"), smart_preview: Some(blob(&preview)), thumbnail: None };
+    let asset =
+        Asset { associated: Default::default(), original: blob(b"unavailable original"), smart_preview: Some(blob(&preview)), thumbnail: None };
     let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
     resolver.connect("memory".into(), store(&preview)).unwrap();
     let mut session = crate::Session::new().with_fs();
@@ -634,7 +635,7 @@ fn budget_keeps_active_leases_and_independent_persistent_pin_owners() {
 fn decoded_source_clones_keep_the_managed_original_leased() {
     let scratch = Scratch::new();
     let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
-    let asset = Asset { original: blob(b"original"), smart_preview: None, thumbnail: None };
+    let asset = Asset { associated: Default::default(), original: blob(b"original"), smart_preview: None, thumbnail: None };
     resolver.connect("memory".into(), store(b"original")).unwrap();
     let source = crate::media::SourceRef::Managed {
         asset: Some(Box::new(asset.clone())),
@@ -688,7 +689,7 @@ fn a_failed_pin_save_does_not_change_retention_and_remove_local_does_not_refetch
     assert!(resolver.offline_pin("photo:1").is_none());
     drop(fault);
     resolver.evict(&b).unwrap();
-    let asset = Asset { original: b.clone(), smart_preview: None, thumbnail: None };
+    let asset = Asset { associated: Default::default(), original: b.clone(), smart_preview: None, thumbnail: None };
     assert!(matches!(resolver.acquire_asset(&asset, SourceRequirement::PreviewAllowed, &AtomicBool::new(false)), Err(AssetError::Pending)));
     assert_eq!(provider.reads.load(Ordering::Relaxed), 1);
     drop(resolver.acquire_asset(&asset, SourceRequirement::OriginalRequired, &AtomicBool::new(false)).unwrap());
@@ -701,7 +702,7 @@ fn pinned_preview_restarts_offline_edits_and_explicit_proxy_export_preserves_mem
     let scratch = Scratch::new();
     let image = lightcraft_raster::Rgb32f::from_fn(16, 12, |_, _| [0.2, 0.3, 0.4]);
     let preview = crate::smart::encode(&image, None).unwrap();
-    let asset = Asset { original: blob(b"remote original"), smart_preview: Some(blob(&preview)), thumbnail: None };
+    let asset = Asset { associated: Default::default(), original: blob(b"remote original"), smart_preview: Some(blob(&preview)), thumbnail: None };
     let mut session = crate::Session::new().with_fs();
     session.open_library(&scratch.0, false).unwrap();
     session.media.asset_resolver.as_ref().unwrap().connect("memory".into(), store(&preview)).unwrap();
@@ -763,7 +764,7 @@ fn managed_thumbnail_browses_without_original_and_is_not_reused_after_an_edit() 
     session.open_library(&scratch.0, false).unwrap();
     let resolver = session.media.asset_resolver.as_ref().unwrap().clone();
     resolver.connect("memory".into(), provider.clone()).unwrap();
-    let mut asset = Asset { original: blob(&original), smart_preview: None, thumbnail: None };
+    let mut asset = Asset { associated: Default::default(), original: blob(&original), smart_preview: None, thumbnail: None };
     let attached = session
         .execute(
             "cloud.attach",
@@ -830,7 +831,8 @@ fn adding_a_rendition_invalidates_queued_sources_and_quick_render_keys() {
     session.open_library(&scratch.0, false).unwrap();
     let image = lightcraft_raster::Rgb32f::from_fn(16, 12, |_, _| [0.2, 0.3, 0.4]);
     let preview = crate::smart::encode(&image, None).unwrap();
-    let mut asset = Asset { original: blob(b"unavailable original"), smart_preview: Some(blob(&preview)), thumbnail: None };
+    let mut asset =
+        Asset { associated: Default::default(), original: blob(b"unavailable original"), smart_preview: Some(blob(&preview)), thumbnail: None };
     let resolver = session.media.asset_resolver.as_ref().unwrap().clone();
     resolver.connect("memory".into(), store(&preview)).unwrap();
     let attached = session

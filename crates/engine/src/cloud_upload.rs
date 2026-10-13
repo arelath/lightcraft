@@ -65,8 +65,8 @@ impl Receipt {
             || (self.version == 2 && self.storage.is_none())
             || !identifier(&self.id)
             || self.id != self.imported.mutation_id
-            || self.id != self.imported.photo_id
-            || self.multipart.len() > 3
+            || (self.imported.base_asset.is_none() && self.id != self.imported.photo_id)
+            || self.multipart.len() > 19
             || self.error.as_ref().is_some_and(|message| message.len() > 4096 || message.contains('\0'))
         {
             return Err(error("invalid upload receipt; staged data preserved"));
@@ -127,7 +127,7 @@ impl Receipt {
 }
 
 fn blobs(asset: &Asset) -> impl Iterator<Item = &Blob> {
-    std::iter::once(&asset.original).chain(asset.smart_preview.iter()).chain(asset.thumbnail.iter())
+    asset.blobs()
 }
 
 fn read_receipt(path: &Path) -> Result<Option<Receipt>> {
@@ -285,6 +285,8 @@ impl Item {
             "original"
         } else if self.imported.asset.smart_preview.as_ref().is_some_and(|preview| preview.remote.key == blob.remote.key) {
             "editable preview"
+        } else if self.imported.asset.associated.values().any(|document| document.remote.key == blob.remote.key) {
+            "XMP document"
         } else {
             "thumbnail"
         }
@@ -591,9 +593,19 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
         }
         let asset = s.catalog.asset(&intent.asset_id).ok_or_else(|| error("upload intent has no asset; original preserved"))?;
         let photo = s.catalog.photo(intent.photo_id).ok_or_else(|| error("upload intent's photo was removed; staged original preserved"))?;
-        if photo.deleted || photo.source != (Source::Managed { asset_id: intent.asset_id.clone() }) {
+        if photo.deleted || !matches!(photo.source, Source::Managed { .. }) {
             continue;
         }
+        // An external or DNG revision can supersede this photo while the earlier import is
+        // still pending. Its immutable staged description remains publishable under the same
+        // global identity; never relabel the new photo's bytes as the old asset.
+        let staged;
+        let photo = if photo.source == (Source::Managed { asset_id: intent.asset_id.clone() }) {
+            photo.as_ref()
+        } else {
+            staged = crate::cloud_import::read_manifest(&root, id)?.photo.ok_or_else(|| error("staged photo description is missing"))?;
+            staged.as_ref()
+        };
         let connection = connections
             .iter()
             .find(|connection| connection.id == asset.original.remote.connection)
@@ -610,10 +622,15 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
         }
         let imported = Imported {
             mutation_id: id.clone(),
-            photo_id: id.clone(),
+            photo_id: s.catalog.cloud_identity(&format!("photo:{}", intent.photo_id.0)).unwrap_or(id).to_owned(),
             asset_id: intent.asset_id.clone(),
-            photo: Box::new((**photo).clone()),
+            photo: Box::new({
+                let mut snapshot = photo.clone();
+                snapshot.id = intent.photo_id;
+                snapshot
+            }),
             asset: Box::new(asset.clone()),
+            base_asset: crate::cloud_import::revision_target(&root, id)?.map(|target| target.base_asset),
         };
         imported.validate().map_err(|e| error(e.to_string()))?;
         result.push(Item { id: id.clone(), imported, connection, root: root.clone(), resolver: resolver.clone() });
@@ -867,7 +884,7 @@ impl Session {
                                 return Err(error("import's asset changed; staged data preserved"));
                             }
                             let photo = self.catalog.photo(intent.photo_id).ok_or_else(|| error("photo was removed; upload publication stopped"))?;
-                            if photo.deleted || photo.source != (Source::Managed { asset_id: intent.asset_id.clone() }) {
+                            if photo.deleted || !matches!(photo.source, Source::Managed { .. }) {
                                 return Err(error("photo was deleted or changed; upload stopped and original preserved"));
                             }
                             intent.state = state;
@@ -956,6 +973,7 @@ mod tests {
             .unwrap();
         let asset_id = AssetId("upload-ack-test".into());
         let asset = Asset {
+            associated: Default::default(),
             original: Blob {
                 id: sha256(b"original"),
                 size: 8,

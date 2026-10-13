@@ -731,6 +731,9 @@ pub struct UiState {
     /// Desktop cache-removal requests awaiting their actual completion result.
     #[serde(skip)]
     pub cloud_removals: std::collections::BTreeSet<u64>,
+    /// Managed preparation completions; an editor name requests a launch after durable save.
+    #[serde(skip)]
+    pub cloud_preparations: std::collections::BTreeMap<u64, Option<String>>,
     /// The result of the last Find Missing Photos (it searches in the background).
     #[serde(skip)]
     pub last_find_missing: Option<serde_json::Value>,
@@ -1146,6 +1149,7 @@ impl Default for UiState {
             reference: None,
             toast: None,
             cloud_removals: Default::default(),
+            cloud_preparations: Default::default(),
             last_find_missing: None,
             status: String::new(),
             dialog: None,
