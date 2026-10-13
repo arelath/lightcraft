@@ -24,6 +24,7 @@ pub struct Jobs {
     pub reports: Vec<Value>,
     next_poll: Option<web_time::Instant>,
     paused: bool,
+    last_audit: Option<web_time::Instant>,
 }
 impl Jobs {
     pub fn running(&self) -> bool {
@@ -34,6 +35,7 @@ fn error(message: impl Into<String>) -> EngineError {
     EngineError::Other(message.into())
 }
 pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
+    s.claim_cloud_owner()?;
     if s.cloud_replication_jobs.running() {
         return Err(error("cloud synchronization is already running"));
     }
@@ -48,6 +50,12 @@ pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
         Some(value) => value.as_bool().ok_or_else(|| error("checkpoint must be true or false"))?,
         None => false,
     };
+    let requested_audit = p.get("audit").map(|v| v.as_bool().ok_or_else(|| error("audit must be true or false"))).transpose()?.unwrap_or(true);
+    let now = web_time::Instant::now();
+    let audit = requested_audit || s.cloud_replication_jobs.last_audit.is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(300));
+    if audit {
+        s.cloud_replication_jobs.last_audit = Some(now);
+    }
     s.persist()?;
     let state = s.catalog.sync_state().cloned().ok_or_else(|| error("enable synchronization first using cloud.syncEnable"))?;
     let lib = s.library.as_mut().ok_or_else(|| error("open a persistent library first"))?;
@@ -66,10 +74,16 @@ pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
     std::thread::Builder::new()
         .name("cloud-catalog-sync".into())
         .spawn(move || {
-            handle.detail("Reading catalog head, reconciling and publishing durable mutations");
-            let result = crate::guard::catch("cloud synchronization worker", || synchronize(&connection, &state, checkpoint, &worker_cancel))
-                .map_err(error)
-                .and_then(|result| result.map_err(|error| EngineError::Other(error.to_string())));
+            handle.detail("Reconciling and publishing saved library changes");
+            let result = crate::guard::catch("cloud synchronization worker", || {
+                if !state.protocol.is_head() {
+                    crate::cloud_append::native::synchronize_with_audit(&connection, &state, checkpoint, audit, &worker_cancel)
+                } else {
+                    synchronize(&connection, &state, checkpoint, &worker_cancel)
+                }
+            })
+            .map_err(error)
+            .and_then(|result| result.map_err(|error| EngineError::Other(error.to_string())));
             let _ = sender.send(result);
         })
         .map_err(|e| error(format!("could not start cloud synchronization: {e}")))?;
@@ -114,7 +128,7 @@ impl Session {
             return;
         }
         *deadline = now + std::time::Duration::from_secs(5);
-        if let Err(error) = start(self, &json!({"wait":false})) {
+        if let Err(error) = start(self, &json!({"wait":false,"audit":false})) {
             self.cloud_replication_jobs.paused = true;
             self.cloud_replication_jobs.reports.push(json!({"ok":false,"error":error.to_string()}));
         }
@@ -145,22 +159,23 @@ impl Session {
             if !Arc::ptr_eq(&pending.library, &self.library_token()) || pending.connection_revision != pending.resolver.connection_revision() {
                 return Err(error("library or storage connection changed; remote result ignored and local pending work retained"));
             }
-            let op = crate::cloud_sync::incoming_checkpoint(
+            let op = if let Some(progress)=outcome.append.clone() {crate::cloud_sync::incoming_append(&self.catalog,progress,&outcome.acknowledged)?}else{crate::cloud_sync::incoming_checkpoint(
                 &self.catalog,
                 &outcome.state,
                 &outcome.acknowledged,
                 outcome.cursor.clone(),
                 outcome.generation,
-            )?;
+            )?};
             let inverse = self.apply_catalog_mode(op, false)?;
             if let Err(error) = self.persist() {
                 self.apply_received(inverse)?;
                 return Err(error);
             }
-            Ok(json!({"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len(),
+            Ok(json!({"protocol":self.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len(),
                 "pending":self.catalog.sync_state().map_or(0,|state|state.pending.len())}))
         });
         self.cloud_replication_jobs.paused = result.is_err();
+        self.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
         let report = match result {
             Ok(result) => json!({"task":id,"ok":true,"result":result}),
             Err(error) => json!({"task":id,"ok":false,"error":error.to_string()}),
@@ -231,8 +246,13 @@ mod tests {
                 value: json!("Remote green"),
             }])
             .unwrap();
-        let outcome =
-            Outcome { state: remote.portable(), acknowledged: local.pending.keys().cloned().collect(), cursor: "a".repeat(64), generation: 1 };
+        let outcome = Outcome {
+            append: None,
+            state: remote.portable(),
+            acknowledged: local.pending.keys().cloned().collect(),
+            cursor: "a".repeat(64),
+            generation: 1,
+        };
         let resolver = Arc::new(AssetResolver::new(std::env::temp_dir().join("lightcraft-sync-owner-unused")));
         let guard = s.activity.start("cloudSync", "test sync", crate::activity::Cancel::Yes);
         let cancel = guard.cancel_flag().unwrap();
@@ -285,5 +305,57 @@ mod tests {
         s.poll_cloud_replication();
         assert_eq!(s.catalog.to_snapshot(), before);
         assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["ok"], false);
+    }
+    #[test]
+    fn slow_sync_completion_leaves_a_window_for_explicit_retry_before_auto_polling() {
+        let (mut s, _) = session();
+        ready(&mut s);
+        s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() - std::time::Duration::from_secs(1));
+        s.poll_cloud_replication();
+        assert!(!s.cloud_replication_jobs.running());
+        let reports = s.cloud_replication_jobs.reports.len();
+        s.resume_cloud_replication();
+        assert!(!s.cloud_replication_jobs.running());
+        assert!(!s.cloud_replication_jobs.paused);
+        assert_eq!(s.cloud_replication_jobs.reports.len(), reports);
+        assert!(s.cloud_replication_jobs.next_poll.unwrap() > web_time::Instant::now());
+    }
+    #[test]
+    fn append_publication_proof_incoming_fields_and_outbox_rollback_together_on_full_disk() {
+        let (mut s, files) = session();
+        let mut state = s.catalog.sync_state().unwrap().clone();
+        state.protocol = lightcraft_catalog::replication::SyncProtocol::AppendLog;
+        s.apply_system(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+        s.persist().unwrap();
+        let before = s.catalog.sync_state().unwrap().clone();
+        let prepare = |s: &mut Session| {
+            ready(s);
+            let outcome = s.cloud_replication_jobs.pending.as_mut().unwrap().ready.as_mut().unwrap().as_mut().unwrap();
+            let p = lightcraft_catalog::replication::AppendProgress {
+                version: 1,
+                manifest: crate::assets::sha256(&crate::cloud_append::manifest("library").unwrap()).0,
+                frontiers: lightcraft_catalog::replication::publication_prefixes(&outcome.state).unwrap(),
+                remote: outcome.state.clone(),
+                gaps: Default::default(),
+            };
+            outcome.append = Some(p);
+            outcome.cursor.clear();
+            outcome.generation = 0;
+        };
+        prepare(&mut s);
+        files.fail.store(true, Ordering::Relaxed);
+        s.poll_cloud_replication();
+        assert_eq!(s.catalog.sync_state(), Some(&before));
+        assert_eq!(s.catalog.custom_label_name(lightcraft_catalog::ColorLabel::Green), None);
+        let (_, loaded, _) = Journal::open(Box::new(files.files.clone())).unwrap();
+        assert_eq!(loaded.sync_state(), Some(&before));
+        files.fail.store(false, Ordering::Relaxed);
+        s.persist().unwrap();
+        prepare(&mut s);
+        s.poll_cloud_replication();
+        assert!(s.catalog.sync_state().unwrap().pending.is_empty());
+        assert!(s.catalog.sync_state().unwrap().append.is_some());
+        let (_, loaded, _) = Journal::open(Box::new(files.files)).unwrap();
+        assert_eq!(loaded.sync_state(), s.catalog.sync_state());
     }
 }

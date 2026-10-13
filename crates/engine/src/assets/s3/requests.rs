@@ -95,10 +95,19 @@ fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result
 impl S3Connection {
     fn request_url(&self, key: &str, query: &[(&str, &str)]) -> Result<Url> {
         // Reuse the download boundary's connection/key/prefix validation.
-        let blob = Blob { id: sha256(b""), size: 1, remote: RemoteLocation { connection: self.id.clone(), key: key.into(), version: None } };
-        let mut url = self.url(&blob)?;
+        let mut url = if key.is_empty() {
+            self.validate()?;
+            let base = match &self.endpoint {
+                Some(e) => format!("{}/{}/", e.trim_end_matches('/'), self.bucket),
+                None => format!("https://{}.s3.{}.amazonaws.com/", self.bucket, self.region),
+            };
+            Url::parse(&base).map_err(|_| AssetError::Invalid("invalid bucket root".into()))?
+        } else {
+            let blob = Blob { id: sha256(b""), size: 1, remote: RemoteLocation { connection: self.id.clone(), key: key.into(), version: None } };
+            self.url(&blob)?
+        };
         if query.len() > 8
-            || query.iter().any(|(key, value)| key.len() > 128 || value.len() > 1024 || key.chars().chain(value.chars()).any(char::is_control))
+            || query.iter().any(|(key, value)| key.len() > 128 || value.len() > 8192 || key.chars().chain(value.chars()).any(char::is_control))
         {
             return Err(AssetError::Invalid("invalid S3 operation query".into()));
         }
@@ -112,6 +121,7 @@ impl S3Connection {
     }
 
     fn request(&self, request: Request<'_>, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<Response> {
+        log::debug!(target:"lightcraft_cloud_requests","S3 {:?} key={} query={} if_match={} if_none_match={}",request.method,request.key,request.query.iter().map(|(k,_)|*k).collect::<Vec<_>>().join(","),request.headers.iter().any(|(k,_)|*k=="if-match"),request.headers.iter().any(|(k,_)|*k=="if-none-match"));
         let url = self.request_url(request.key, request.query)?;
         let credentials = Credentials::load(self.profile.as_deref())?;
         let now = time::OffsetDateTime::now_utc();
@@ -125,7 +135,16 @@ impl S3Connection {
             Signing { method: request.method, payload: request.payload, extra: request.headers },
         )?;
         let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
-        http::request(request.method, &url, &headers, request.body, &limits, progress).map_err(http_error)
+        let length = request.body.as_ref().map_or(0, |b| b.length);
+        let mut previous = 0;
+        http::request(request.method, &url, &headers, request.body, &limits, &mut |done| {
+            progress(done);
+            if length >= 1 << 20 && (done >= previous + 1_048_576 || done == length) {
+                previous = done;
+                log::debug!(target:"lightcraft_cloud_requests","S3 sent bytes={done}/{length}");
+            }
+        })
+        .map_err(http_error)
     }
 
     /// Read only small protocol objects. Missing objects are distinct from access failures.
@@ -162,12 +181,79 @@ impl S3Connection {
         reply.etag.ok_or_else(|| AssetError::Network("storage did not return an ETag; conditional publication is unavailable".into()))
     }
 
+    /// Only content-addressed append records may be written without preconditions.
+    /// Success always includes a full readback; response loss retries the same bytes/key.
+    pub fn put_immutable_verified(&self, key: &str, bytes: &[u8], cancel: &AtomicBool) -> Result<()> {
+        crate::cloud_append::immutable_metadata(key, bytes)?;
+        if let Some(existing) = self.get_small(key, MAX_CHECKPOINT, cancel)? {
+            return if existing.bytes == bytes { Ok(()) } else { Err(AssetError::Integrity) };
+        }
+        for attempt in 0..2 {
+            let result = self
+                .request(
+                    Request {
+                        method: Method::Put,
+                        key,
+                        query: &[],
+                        headers: &[],
+                        payload: &sha256(bytes).0,
+                        body: Some(RequestBody { reader: &mut Cursor::new(bytes), length: bytes.len() as u64 }),
+                    },
+                    cancel,
+                    &mut |_| {},
+                )
+                .and_then(|response| read_reply(response, MAX_REPLY, cancel));
+            match self.get_small(key, MAX_CHECKPOINT, cancel) {
+                Ok(Some(reply)) => return if reply.bytes == bytes { Ok(()) } else { Err(AssetError::Integrity) },
+                Ok(None) if attempt == 0 && matches!(result, Ok(_) | Err(AssetError::Network(_))) => continue,
+                Err(e) => return Err(e),
+                _ => {
+                    return result
+                        .map(|_| ())
+                        .and_then(|_| Err(AssetError::Network("immutable publication is not yet visible; pending work retained".into())));
+                }
+            }
+        }
+        Err(AssetError::Network("immutable publication could not be verified".into()))
+    }
+    pub fn list_objects_v2(
+        &self,
+        list: &crate::cloud_append::listing::ListRequest,
+        cancel: &AtomicBool,
+    ) -> Result<crate::cloud_append::listing::Page> {
+        list.validate(&self.prefix)?;
+        let mut query = vec![("list-type", "2"), ("max-keys", "1000"), ("prefix", list.prefix.as_str())];
+        if list.delimiter {
+            query.push(("delimiter", "/"));
+        }
+        if let Some(token) = &list.continuation {
+            query.push(("continuation-token", token));
+        }
+        if let Some(after) = &list.start_after {
+            query.push(("start-after", after));
+        }
+        let response = self.request(
+            Request { method: Method::Get, key: "", query: &query, headers: &[], payload: &sha256(b"").0, body: None },
+            cancel,
+            &mut |_| {},
+        )?;
+        let reply = read_reply(response, 4 << 20, cancel)?;
+        crate::cloud_append::listing::parse(&reply.bytes, list)
+    }
+
     pub fn put_blob(&self, blob: &Blob, reader: &mut dyn Read, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
+        self.put_blob_mode(blob, reader, cancel, progress, false)
+    }
+    pub fn put_blob_immutable(&self, blob: &Blob, reader: &mut dyn Read, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
+        crate::cloud_append::immutable_blob(blob)?;
+        self.put_blob_mode(blob, reader, cancel, progress, true)
+    }
+    fn put_blob_mode(&self, blob: &Blob, reader: &mut dyn Read, cancel: &AtomicBool, progress: &mut dyn FnMut(u64), immutable: bool) -> Result<()> {
         blob.validate().map_err(AssetError::Invalid)?;
         if blob.remote.version.is_some() {
             return Err(AssetError::Invalid("uploads cannot target a historical object version".into()));
         }
-        let headers = condition_headers(PutCondition::Absent)?;
+        let headers = if immutable { Vec::new() } else { condition_headers(PutCondition::Absent)? };
         let response = self.request(
             Request {
                 method: Method::Put,
@@ -243,6 +329,13 @@ impl S3Connection {
     }
 
     pub fn complete_multipart(&self, blob: &Blob, upload_id: &str, parts: &[(u16, String)], cancel: &AtomicBool) -> Result<()> {
+        self.complete_multipart_mode(blob, upload_id, parts, cancel, false)
+    }
+    pub fn complete_multipart_immutable(&self, blob: &Blob, upload_id: &str, parts: &[(u16, String)], cancel: &AtomicBool) -> Result<()> {
+        crate::cloud_append::immutable_blob(blob)?;
+        self.complete_multipart_mode(blob, upload_id, parts, cancel, true)
+    }
+    fn complete_multipart_mode(&self, blob: &Blob, upload_id: &str, parts: &[(u16, String)], cancel: &AtomicBool, immutable: bool) -> Result<()> {
         blob.validate().map_err(AssetError::Invalid)?;
         if blob.remote.version.is_some() {
             return Err(AssetError::Invalid("multipart uploads cannot target a historical version".into()));
@@ -257,7 +350,7 @@ impl S3Connection {
             xml.push_str(&format!("<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>", quick_xml::escape::escape(&token)));
         }
         xml.push_str("</CompleteMultipartUpload>");
-        let mut headers = condition_headers(PutCondition::Absent)?;
+        let mut headers = if immutable { Vec::new() } else { condition_headers(PutCondition::Absent)? };
         headers.push(("content-type", "application/xml".into()));
         let response = self.request(
             Request {

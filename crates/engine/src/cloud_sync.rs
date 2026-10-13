@@ -380,11 +380,23 @@ pub(crate) fn guard_undo(catalog: &Catalog, op: &Op, expected: Option<&UndoBase>
 }
 
 pub fn enable(catalog: &Catalog, library: String, device: String, connection: String) -> Result<Op> {
+    enable_mode(catalog, library, device, connection, lightcraft_catalog::replication::SyncProtocol::ConditionalHead, String::new())
+}
+pub fn enable_mode(
+    catalog: &Catalog,
+    library: String,
+    device: String,
+    connection: String,
+    protocol: lightcraft_catalog::replication::SyncProtocol,
+    owner: String,
+) -> Result<Op> {
     if catalog.sync_state().is_some() {
         return Err(error("synchronization is already enabled; keep its durable device identity"));
     }
     let mut next = catalog.clone();
     let mut state = SyncState::new(library.clone(), device, connection)?;
+    state.protocol = protocol;
+    state.local_owner = owner;
     let mut ops = ensure_ids(&mut next, &state, None)?;
     let identity = Op::SetCloudIdentity { entity: "library".into(), id: Some(library) };
     next.apply(identity.clone())?;
@@ -428,6 +440,7 @@ mod materialize;
 #[cfg(test)]
 mod tests;
 pub use materialize::incoming;
+pub use materialize::incoming_append;
 pub use materialize::incoming_checkpoint;
 pub use materialize::resolve;
 pub use materialize::restore_deleted;

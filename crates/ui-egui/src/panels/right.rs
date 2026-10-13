@@ -750,6 +750,10 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     ui.label(
                         egui::RichText::new(if running {
                             "Synchronizing library…".to_owned()
+                        } else if status["protocol"].as_str() == Some("append-log-v1") {
+                            let gaps = status["gaps"].as_array().map_or(0, Vec::len);
+                            let authors = status["frontiers"].as_object().map_or(0, serde_json::Map::len);
+                            format!("Append synchronization · {authors} authors · {pending} pending changes · {gaps} gaps")
                         } else {
                             format!("Library generation {generation} · {pending} pending changes")
                         })

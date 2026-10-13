@@ -98,6 +98,17 @@ impl Provider {
         if origin.origin() != connection.storage_origin {
             return Err("storageOrigin must be an origin without a path".into());
         }
+        if let Some(root) = &connection.bucket_root {
+            let parsed = url(root)?;
+            if root.len() > 4096
+                || parsed.origin() != connection.storage_origin
+                || !parsed.search().is_empty()
+                || !parsed.pathname().ends_with('/')
+                || parsed.href() != *root
+            {
+                return Err("bucketRoot must be a canonical bucket URL ending in / on storageOrigin".into());
+            }
+        }
         if token.as_ref().is_some_and(|v| v.len() > 16384 || v.chars().any(char::is_control)) {
             return Err("invalid reauthorization token".into());
         }
@@ -113,13 +124,26 @@ impl Provider {
         version: Option<&str>,
         condition: Option<&str>,
         data: Option<&[u8]>,
+        list: Option<&lightcraft_engine::cloud_append::listing::ListRequest>,
+        immutable: bool,
     ) -> Result<Authorized, String> {
-        self.connection.validate_key(key)?;
-        let params = serde_json::json!({"connection":self.connection.id,"method":method,"key":key,"version":version,
+        if let Some(list) = list {
+            list.validate(&self.connection.prefix).map_err(|e| e.to_string())?;
+        } else {
+            self.connection.validate_key(key)?;
+        }
+        let mut params = serde_json::json!({"connection":self.connection.id,"method":method,"key":key,"version":version,
             "condition":condition,"size":data.map(|d|d.len()),"contentSha256":data.map(|d|lightcraft_engine::assets::sha256(d).0)});
+        if let Some(list) = list {
+            params["operation"] = serde_json::json!("list");
+            params["list"] = serde_json::json!(list);
+        } else if immutable {
+            params["operation"] = serde_json::json!("putImmutable");
+        }
         let options = RequestInit::new();
         options.set_method("POST");
         options.set_credentials(web_sys::RequestCredentials::Omit);
+        options.set_cache(web_sys::RequestCache::NoStore);
         options.set_redirect(web_sys::RequestRedirect::Error);
         options.set_body(&JsValue::from_str(&params.to_string()));
         let _deadline = TransferDeadline::new(&options, self.cancel.clone())?;
@@ -139,17 +163,48 @@ impl Provider {
             return Err("signer returned another storage origin".into());
         }
         let path = js_sys::decode_uri_component(&signed.pathname()).map_err(js_error)?;
-        if !String::from(path).ends_with(&format!("/{key}")) {
+        if let Some(list) = list {
+            self.validate_list_url(&signed, list)?;
+        } else if let Some(root) = &self.connection.bucket_root {
+            let root = url(root)?;
+            let root_path = String::from(js_sys::decode_uri_component(&root.pathname()).map_err(js_error)?);
+            if String::from(path) != format!("{root_path}{key}") {
+                return Err("signer returned another bucket or object key".into());
+            }
+        } else if !String::from(path).ends_with(&format!("/{key}")) {
             return Err("signer returned another object key".into());
         }
         let now = js_sys::Date::now().max(0.) as u64;
         if authorized.expires_at <= now || authorized.expires_at > now.saturating_add(24 * 60 * 60 * 1000) {
             return Err("signer returned an expired or excessive URL lifetime; reauthorize".into());
         }
+        if (immutable || list.is_some()) && authorized.headers.keys().any(|k| matches!(k.to_ascii_lowercase().as_str(), "if-match" | "if-none-match"))
+        {
+            return Err("append requests must not carry write preconditions".into());
+        }
         if let Some(condition) = condition {
             let name = if condition == "*" { "if-none-match" } else { "if-match" };
             if authorized.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str()) != Some(condition) {
                 return Err("signer did not authorize the required conditional write; pending work retained".into());
+            }
+        }
+        if list.is_none()
+            && (signed.search_params().get("versionId").as_deref() != version || signed.search_params().get_all("versionId").length() > 1)
+        {
+            return Err("signer changed the requested object version".into());
+        }
+        if immutable {
+            let data = data.ok_or("immutable write has no bytes")?;
+            let digest = lightcraft_engine::assets::sha256(data).0;
+            let header = |name: &str| authorized.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+            let mut latin = String::new();
+            for pair in digest.as_bytes().chunks_exact(2) {
+                let part = std::str::from_utf8(pair).map_err(|_| "invalid digest")?;
+                latin.push(char::from(u8::from_str_radix(part, 16).map_err(|_| "invalid digest")?));
+            }
+            let checksum = web_sys::window().ok_or("browser window unavailable")?.btoa(&latin).map_err(js_error)?;
+            if header("x-amz-content-sha256") != Some(digest.as_str()) && header("x-amz-checksum-sha256") != Some(checksum.as_str()) {
+                return Err("immutable authorization must bind the exact body SHA-256/checksum".into());
             }
         }
         Ok(authorized)
@@ -166,14 +221,28 @@ impl Provider {
         if !matches!(method, "GET" | "PUT" | "HEAD") || (method == "PUT" && condition.is_none()) {
             return Err("invalid or unconditional browser cloud request".into());
         }
+        self.request_typed(method, key, version, condition, data, limit, None, false).await
+    }
+    async fn request_typed(
+        &self,
+        method: &str,
+        key: &str,
+        version: Option<&str>,
+        condition: Option<&str>,
+        data: Option<&[u8]>,
+        limit: usize,
+        list: Option<&lightcraft_engine::cloud_append::listing::ListRequest>,
+        immutable: bool,
+    ) -> Result<Reply, String> {
         for attempt in 0..2 {
             if self.cancel.load(Ordering::Relaxed) {
                 return Err("cloud transfer cancelled; pending work retained".into());
             }
-            let authorized = self.authorize(method, key, version, condition, data).await?;
+            let authorized = self.authorize(method, key, version, condition, data, list, immutable).await?;
             let options = RequestInit::new();
             options.set_method(method);
             options.set_credentials(web_sys::RequestCredentials::Omit);
+            options.set_cache(web_sys::RequestCache::NoStore);
             options.set_redirect(web_sys::RequestRedirect::Error);
             if let Some(data) = data {
                 options.set_body(&Uint8Array::from(data));
@@ -198,6 +267,84 @@ impl Provider {
             return Ok(Reply { status, bytes, etag });
         }
         Err("cloud URL refresh exhausted; pending work retained".into())
+    }
+    fn validate_list_url(&self, signed: &web_sys::Url, list: &lightcraft_engine::cloud_append::listing::ListRequest) -> Result<(), String> {
+        let root = url(self.connection.bucket_root.as_ref().ok_or("append mode requires bucketRoot")?)?;
+        if root.origin() != self.connection.storage_origin || !root.search().is_empty() || root.pathname() != signed.pathname() {
+            return Err("signer returned another bucket root".into());
+        }
+        let params = signed.search_params();
+        for (name, expected) in [
+            ("list-type", Some("2")),
+            ("max-keys", Some("1000")),
+            ("prefix", Some(list.prefix.as_str())),
+            ("delimiter", list.delimiter.then_some("/")),
+            ("continuation-token", list.continuation.as_deref()),
+            ("start-after", list.start_after.as_deref()),
+        ] {
+            if params.get(name).as_deref() != expected || params.get_all(name).length() > 1 {
+                return Err("signer changed a scoped listing parameter".into());
+            }
+        }
+        let allowed = [
+            "list-type",
+            "max-keys",
+            "prefix",
+            "delimiter",
+            "continuation-token",
+            "start-after",
+            "X-Amz-Algorithm",
+            "X-Amz-Credential",
+            "X-Amz-Date",
+            "X-Amz-Expires",
+            "X-Amz-SignedHeaders",
+            "X-Amz-Signature",
+            "X-Amz-Security-Token",
+        ];
+        for pair in js_sys::try_iter(&params).map_err(js_error)?.ok_or("invalid listing query")? {
+            let pair = js_sys::Array::from(&pair.map_err(js_error)?);
+            if pair.get(0).as_string().is_none_or(|s| !allowed.contains(&s.as_str())) {
+                return Err("signer added an unsupported listing parameter".into());
+            }
+        }
+        Ok(())
+    }
+    pub async fn list(
+        &self,
+        list: &lightcraft_engine::cloud_append::listing::ListRequest,
+    ) -> Result<lightcraft_engine::cloud_append::listing::Page, String> {
+        let reply = self.request_typed("GET", "", None, None, None, 4 << 20, Some(list), false).await?;
+        if reply.status != 200 {
+            return Err(format!("object listing returned HTTP {}", reply.status));
+        }
+        lightcraft_engine::cloud_append::listing::parse(&reply.bytes, list).map_err(|e| e.to_string())
+    }
+    pub async fn put_immutable(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
+        lightcraft_engine::cloud_append::immutable_metadata(key, bytes).map_err(|e| e.to_string())?;
+        let existing = self.request("GET", key, None, None, None, 64 << 20).await?;
+        if existing.status == 200 {
+            return if existing.bytes == bytes { Ok(()) } else { Err("immutable object identity collision".into()) };
+        }
+        if existing.status != 404 {
+            return Err(format!("immutable lookup returned HTTP {}", existing.status));
+        }
+        for attempt in 0..2 {
+            let result = self.request_typed("PUT", key, None, None, Some(bytes), 2 << 20, None, true).await;
+            let verified = self.request("GET", key, None, None, None, 64 << 20).await?;
+            if verified.status == 200 {
+                return if verified.bytes == bytes { Ok(()) } else { Err("immutable readback failed SHA-256/length verification".into()) };
+            }
+            if attempt == 0 && verified.status == 404 && (result.is_err() || result.as_ref().is_ok_and(|r| matches!(r.status, 200 | 201 | 204))) {
+                continue;
+            }
+            return Err(match result {
+                Ok(reply) => {
+                    format!("immutable publication returned HTTP {} and readback HTTP {}; pending work retained", reply.status, verified.status)
+                }
+                Err(error) => format!("{error}; immutable readback HTTP {}; pending work retained", verified.status),
+            });
+        }
+        Err("immutable publication retry exhausted".into())
     }
     pub async fn blob(&self, backend: &Backend, blob: &Blob) -> Result<Vec<u8>, String> {
         blob.validate()?;

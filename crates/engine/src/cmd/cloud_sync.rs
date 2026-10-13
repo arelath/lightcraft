@@ -22,6 +22,7 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
     #[cfg(target_arch = "wasm32")]
     let (running, reports) = (false, Vec::<Value>::new());
     Ok(json!({"enabled":true,"library":state.library,"device":state.device,"connection":state.connection,
+        "protocol":state.protocol,"frontiers":state.append.as_ref().map(|p|&p.frontiers),"gaps":state.append.as_ref().map(|p|&p.gaps),
         "pending":state.pending.len(),"generation":state.generation,"cursor":state.cursor,"conflicts":conflicts,
         "running":running,"reports":reports,
         "transportAvailable":cfg!(not(target_arch="wasm32"))}))
@@ -29,9 +30,13 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
 #[cfg(not(target_arch = "wasm32"))]
 fn enable(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "cloud.syncEnable";
+    let protocol: lightcraft_catalog::replication::SyncProtocol =
+        serde_json::from_value(p.get("protocol").cloned().unwrap_or(json!("conditional-head-v1")))
+            .map_err(|_| bad(C, "invalid synchronization protocol"))?;
     if let Some(state) = s.catalog.sync_state() {
         if super::str_param(p, "connection").is_some_and(|id| id != state.connection)
             || super::str_param(p, "library").is_some_and(|id| id != state.library)
+            || p.get("protocol").is_some_and(|_| protocol != state.protocol)
         {
             return Err(bad(C, "this library already has a durable synchronization identity; open a separate library to join another one"));
         }
@@ -51,14 +56,19 @@ fn enable(s: &mut Session, p: &Value) -> Result<Value> {
         .map(str::to_owned)
         .or_else(|| s.catalog.cloud_identity("library").map(str::to_owned))
         .map_or_else(identity, Ok)?;
-    let op = crate::cloud_sync::enable(&s.catalog, library, identity()?, connection.into())?;
+    let owner = if protocol == lightcraft_catalog::replication::SyncProtocol::AppendLog && lib.on_disk {
+        crate::cloud_append::owner::identity(&lib.dir)?
+    } else {
+        String::new()
+    };
+    let op = crate::cloud_sync::enable_mode(&s.catalog, library, identity()?, connection.into(), protocol, owner)?;
     s.apply_system(op)?;
     status(s, p)
 }
 pub fn specs() -> Vec<CommandSpec> {
     #[allow(unused_mut)]
     let mut specs = vec![
-        cmd!(query "cloud.syncStatus","Cloud synchronization status",[],None,"{} → durable pending count, cursor and conflict revisions",always,status),
+        cmd!(query "cloud.syncStatus","Cloud synchronization status",[],None,"{} → protocol, pending count, cursor/frontiers, gaps and conflict revisions",always,status),
     ];
     specs.push(cmd!(
         "cloud.restoreDeleted",
@@ -80,11 +90,21 @@ pub fn specs() -> Vec<CommandSpec> {
     ));
     #[cfg(not(target_arch = "wasm32"))]
     specs.push(cmd!(
+        "cloud.migrateAppend",
+        "Migrate cloud library to append synchronization",
+        [],
+        None,
+        "{writersStopped:true}; explicitly seed verified remote state; pause all old clients first",
+        always,
+        crate::cloud_append::migration::migrate
+    ));
+    #[cfg(not(target_arch = "wasm32"))]
+    specs.push(cmd!(
         "cloud.syncEnable",
         "Enable cloud mutation journal",
         [],
         None,
-        "{connection, library?}; records durable offline metadata intent; transport comes separately",
+        "{connection, library?, protocol?}; records durable offline metadata intent; protocol defaults to conditional-head-v1",
         always,
         enable
     ));
@@ -94,15 +114,16 @@ pub fn specs() -> Vec<CommandSpec> {
         "Synchronize cloud library",
         [],
         None,
-        "{wait?, checkpoint?}; reconcile and publish durable mutations with conditional writes",
+        "{wait?, checkpoint?}; reconcile and publish durable mutations using the library's selected protocol",
         always,
         crate::cloud_replication::start
     ));
     specs.push(cmd!(query "cloud.configureBrowser","Configure browser cloud storage",[],None,"{id, prefix, authorizeEndpoint, storageOrigin, token?}; device-local settings and ephemeral login",always, browser_host));
     #[cfg(target_arch = "wasm32")]
     specs.extend([
+        cmd!(query "cloud.migrateAppend","Migrate cloud library to append synchronization",[],None,"{writersStopped:true}; seed verified remote history; pause every old writer",always,browser_host),
         cmd!(query "cloud.connections","Cloud storage connections",[],None,"{}",always,browser_host),
-        cmd!(query "cloud.syncEnable","Enable cloud synchronization",[],None,"{connection,library?}",always,browser_host),
+        cmd!(query "cloud.syncEnable","Enable cloud synchronization",[],None,"{connection,library?,protocol?}",always,browser_host),
         cmd!(query "cloud.sync","Synchronize cloud library",[],None,"{checkpoint?}; durable async synchronization",always,browser_host),
         cmd!(query "cloud.fetch","Download cloud originals",[],None,"{ids?}; verified asynchronous acquisition",always,browser_host),
         cmd!(query "cloud.reconnect","Retry cloud transfers",[],None,"{}",always,browser_host),

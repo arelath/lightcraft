@@ -96,12 +96,18 @@ fn signature(method: &str, target: &str, headers: &BTreeMap<String, String>, bod
 
 #[derive(Default)]
 pub struct State {
+    pub append_mode: bool,
+    pub list_page_size: usize,
+    pub list_calls: usize,
+    pub fail_list_after: Option<usize>,
+    pub late_object: Option<(String, Vec<u8>)>,
     pub objects: BTreeMap<String, Vec<u8>>,
     multipart: BTreeMap<String, (String, BTreeMap<u16, Vec<u8>>)>,
     pub requests: Vec<(String, String)>,
     pub created: usize,
     pub lost_part: bool,
     pub lost_put: bool,
+    pub lost_complete: bool,
     pub lost_head: bool,
     pub embedded_error: bool,
     pub unauthorized: bool,
@@ -264,7 +270,6 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
         return (501, b"<Error><Code>NotImplemented</Code><Message>Conditional writes unavailable</Message></Error>".to_vec(), None, false);
     }
     let (key, query) = target.split_once('?').unwrap_or((target, ""));
-    assert!(key.starts_with("/photos/library/"));
     let query = query
         .split('&')
         .filter(|pair| !pair.is_empty())
@@ -273,6 +278,49 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
             (decode(key), decode(value))
         })
         .collect::<BTreeMap<_, _>>();
+    if method == "GET" && query.get("list-type").map(String::as_str) == Some("2") {
+        assert_eq!(key, "/photos/");
+        state.list_calls += 1;
+        if state.fail_list_after == Some(state.list_calls) {
+            return (503, Vec::new(), None, false);
+        }
+        let prefix = query.get("prefix").unwrap();
+        assert!(prefix.starts_with("library/"));
+        let delimiter = query.get("delimiter").map(String::as_str) == Some("/");
+        if delimiter
+            && query.contains_key("continuation-token")
+            && let Some((key, body)) = state.late_object.take()
+        {
+            state.objects.insert(key, body);
+        }
+        let after = query.get("continuation-token").or_else(|| query.get("start-after"));
+        let mut entries = std::collections::BTreeSet::new();
+        for key in state.objects.keys().filter_map(|k| k.strip_prefix("/photos/")) {
+            let Some(tail) = key.strip_prefix(prefix) else { continue };
+            let item = if delimiter { tail.find('/').map_or_else(|| key.to_owned(), |n| format!("{prefix}{}/", &tail[..n])) } else { key.to_owned() };
+            if after.is_none_or(|after| item > *after) {
+                entries.insert(item);
+            }
+        }
+        let max = query["max-keys"].parse::<usize>().unwrap().min(if state.list_page_size == 0 { 1000 } else { state.list_page_size });
+        let truncated = entries.len() > max;
+        let page: Vec<_> = entries.into_iter().take(max).collect();
+        let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let mut xml = format!("<ListBucketResult><Prefix>{}</Prefix><IsTruncated>{truncated}</IsTruncated>", escape(prefix));
+        for item in &page {
+            xml.push_str(&if delimiter && item.ends_with('/') {
+                format!("<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>", escape(item))
+            } else {
+                format!("<Contents><Key>{}</Key><Size>1</Size></Contents>", escape(item))
+            });
+        }
+        if truncated {
+            xml.push_str(&format!("<NextContinuationToken>{}</NextContinuationToken>", escape(page.last().unwrap())));
+        }
+        xml.push_str("</ListBucketResult>");
+        return (200, xml.into_bytes(), None, false);
+    }
+    assert!(key.starts_with("/photos/library/"));
     let mut status = 200;
     let mut response = Vec::new();
     let mut etag = None;
@@ -318,7 +366,11 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
                 parts.insert(number, body);
                 lose = std::mem::take(&mut state.lost_part);
             } else if method == "POST" {
-                assert_eq!(headers.get("if-none-match").map(String::as_str), Some("*"));
+                if !state.append_mode {
+                    assert_eq!(headers.get("if-none-match").map(String::as_str), Some("*"));
+                } else {
+                    assert!(!headers.contains_key("if-none-match") && !headers.contains_key("if-match"));
+                }
                 if std::mem::take(&mut state.embedded_error) {
                     response = b"<Error><Code>InternalError</Code></Error>".to_vec();
                 } else if state.objects.contains_key(key) {
@@ -336,6 +388,7 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
                             .into_bytes();
                     state.objects.insert(key.to_owned(), bytes);
                     state.multipart.remove(id);
+                    lose = std::mem::take(&mut state.lost_complete);
                 }
             } else {
                 status = 400;
@@ -351,7 +404,7 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
         }
         let absent = headers.get("if-none-match").map(String::as_str) == Some("*");
         let matches = headers.get("if-match");
-        assert!(absent || matches.is_some(), "every write must be conditional");
+        assert!(absent || matches.is_some() || (state.append_mode && !key.ends_with("/catalog/head.json")), "mutable writes must be conditional");
         if (absent && state.objects.contains_key(key)) || matches.is_some_and(|token| state.objects.get(key).is_none_or(|bytes| &tag(bytes) != token))
         {
             status = 412;

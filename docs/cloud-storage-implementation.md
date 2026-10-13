@@ -1,10 +1,10 @@
 # Cloud storage implementation
 
-Last updated: 2026-10-13. Completion and acceptance checks are tracked in [../tasks.md](../tasks.md). The proposal is [cloud-storage.md](cloud-storage.md).
+Last updated: 2026-10-14. Completion and acceptance checks are tracked in [../tasks.md](../tasks.md). The proposal is [cloud-storage.md](cloud-storage.md).
 
 ## Current architecture
 
-The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–10 still load and upgrade; older builds refuse format 11. Format 10 adds associated XMP, stable identity mappings and device-local working-copy bindings. Format 11 adds durable mutation synchronization; shared checkpoints exclude upload intents and all device-local paths and settings.
+The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–11 still load and upgrade; older builds refuse format 12. Format 10 adds associated XMP, stable identity mappings and device-local working-copy bindings. Format 11 adds durable mutation synchronization; format 12 adds explicit append/CAS protocol selection, verified append progress and restored-author ownership. Shared checkpoints exclude upload intents and all device-local paths and settings.
 
 `crates/catalog/src/assets.rs` describes originals and optional smart-preview/thumbnail blobs, with connection IDs, object keys and optional object versions. Device cache paths, transfer state and connection settings are excluded from the catalog. Existing SipHash duplicate-detection and cache hashes retain their semantics.
 
@@ -221,7 +221,7 @@ develop, full-quality export, explicit preview export, local-original removal an
 reacquisition passed with the generated RAW. Credentials were supplied only through process
 environment variables and were not stored in the library, app settings or test evidence.
 The endpoint returned HTTP 501 `NotImplemented` for both `If-None-Match: *` and `If-Match`.
-Safe catalog publication therefore remains unavailable on this B2 endpoint. LightCraft
+Conditional-head catalog publication therefore remains unavailable on this B2 endpoint. LightCraft
 reports unsupported conditional writes and retains staged bytes and multipart receipts;
 it never falls back to an unconditional catalog overwrite. Live AWS remains unverified.
 Sanitized results are `target/cloud-acceptance/live-b2-results.json` and
@@ -229,6 +229,13 @@ Sanitized results are `target/cloud-acceptance/live-b2-results.json` and
 existing objects and bucket policies were left untouched. Provider setup follows the
 [Backblaze S3 API documentation](https://www.backblaze.com/apidocs/introduction-to-the-s3-compatible-api);
 the conditional-write limitation above was observed directly in the live test.
+
+Explicit append-only B2 synchronization passed live native and browser acceptance on
+2026-10-14. Immutable operations, checkpoints and verified small/multipart media use ordinary
+requests and no shared head. Existing CAS libraries require coordinated migration; mode never
+changes automatically after a 501. See [cloud-sync-protocol.md](cloud-sync-protocol.md) and
+[browser-cloud.md](browser-cloud.md) for setup, migration, durable recovery and evidence.
+The temporary browser acceptance CORS rule was restored to the original absent configuration.
 
 Catalog tests cover malformed references, shared originals/virtual copies, journal replay and compaction, format-7 upgrade and legacy file sources. A synthetic regression rejects `PhotoId(u64::MAX)` as an error instead of overflowing.
 

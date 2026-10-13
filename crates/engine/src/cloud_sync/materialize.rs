@@ -491,3 +491,13 @@ pub fn incoming_checkpoint(
     ops.push(Op::SetSyncState { state: Some(Box::new(state)) });
     Ok(Op::Batch { ops })
 }
+
+/// Incoming effects and exact publication receipts commit in the same journal record.
+pub fn incoming_append(catalog: &Catalog, progress: lightcraft_catalog::replication::AppendProgress, ids: &BTreeSet<String>) -> Result<Op> {
+    let mut state = catalog.sync_state().cloned().ok_or_else(|| error("enable synchronization first"))?;
+    state.merge(&progress.remote)?;
+    state.acknowledge_append(ids, progress)?;
+    let mut ops = install(catalog, &state)?;
+    ops.push(Op::SetSyncState { state: Some(Box::new(state)) });
+    Ok(Op::Batch { ops })
+}

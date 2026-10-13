@@ -214,7 +214,7 @@ fn op_variants_are_versioned() {
             Op::SetAsset { .. } => 8,
             Op::SetUploadIntent { .. } => 9,
             Op::SetCloudIdentity { .. } | Op::SetWorkingCopy { .. } => 10,
-            Op::SetSyncState { .. } => 11,
+            Op::SetSyncState { .. } => 12,
         }
     }
     let newest = since(&Op::SetSyncState { state: None });

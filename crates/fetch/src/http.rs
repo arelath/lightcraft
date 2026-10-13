@@ -254,10 +254,17 @@ impl Stream {
                 Ok(())
             }
             Stream::Tls(conn, sock) => {
-                // buffered by rustls, then sent as TLS records
-                conn.writer().write_all(data).map_err(|e| HttpError::Tls(e.to_string()))?;
-                while conn.wants_write() {
-                    Self::retry(limits, || conn.write_tls(sock))?;
+                // Drain at each TLS plaintext fragment. Buffering four records from a
+                // 64 KiB HTTP body chunk before socket writes reproducibly resets large
+                // B2 uploads on Windows; one 16 KiB fragment succeeds with identical
+                // bytes, signature and Content-Length. HTTP framing stays unchanged.
+                for fragment in data.chunks(16 * 1024) {
+                    conn.writer().write_all(fragment).map_err(|e| HttpError::Tls(e.to_string()))?;
+                    while conn.wants_write() {
+                        if Self::retry(limits, || conn.write_tls(sock))? == 0 {
+                            return Err(HttpError::Io("connection closed while sending TLS records".into()));
+                        }
+                    }
                 }
                 Ok(())
             }

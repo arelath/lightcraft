@@ -210,7 +210,7 @@ impl Write for Verify {
         Ok(())
     }
 }
-fn dependencies(connection: &S3Connection, mutations: &[Mutation], cancel: &AtomicBool) -> Result<()> {
+pub(crate) fn dependencies(connection: &S3Connection, mutations: &[Mutation], cancel: &AtomicBool) -> Result<()> {
     let mut verified = BTreeSet::new();
     for change in mutations.iter().flat_map(|mutation| &mutation.changes).filter(|change| change.field == "content") {
         let mut asset: Asset = serde_json::from_value(change.value.get("asset").cloned().ok_or_else(|| invalid("mutation content has no asset"))?)
@@ -241,6 +241,7 @@ fn dependencies(connection: &S3Connection, mutations: &[Mutation], cancel: &Atom
     Ok(())
 }
 pub struct Outcome {
+    pub append: Option<lightcraft_catalog::replication::AppendProgress>,
     pub state: Portable,
     pub acknowledged: BTreeSet<String>,
     pub cursor: String,
@@ -249,6 +250,12 @@ pub struct Outcome {
 /// Reconcile each failed conditional head update by reading the competing history. Mutation
 /// IDs and payloads never change across attempts, including uncertain publication responses.
 pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requested: bool, cancel: &AtomicBool) -> Result<Outcome> {
+    if local.protocol == lightcraft_catalog::replication::SyncProtocol::AppendLog {
+        return crate::cloud_append::native::synchronize(connection, local, checkpoint_requested, cancel);
+    }
+    if connection.get_small(&crate::cloud_append::manifest_key(&connection.prefix, &local.library)?, 16 << 10, cancel)?.is_some() {
+        return Err(invalid("this library has an append manifest; stop conditional-head writers and explicitly migrate before continuing"));
+    }
     local.validate().map_err(catalog_error)?;
     if local.pending.is_empty() && !checkpoint_requested {
         let current = publication::read_head(connection, cancel)?;
@@ -258,7 +265,13 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
             if head.library.as_deref() != Some(local.library.as_str()) || head.generation != local.generation {
                 return Err(invalid("remote library/cursor generation changed inconsistently"));
             }
-            return Ok(Outcome { state: local.portable(), acknowledged: BTreeSet::new(), cursor: head.tip.hash.0, generation: head.generation });
+            return Ok(Outcome {
+                append: None,
+                state: local.portable(),
+                acknowledged: BTreeSet::new(),
+                cursor: head.tip.hash.0,
+                generation: head.generation,
+            });
         }
     }
     let mut dependency_proof = BTreeSet::new();
@@ -286,6 +299,7 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
                 return Err(invalid("remote catalog is empty; initial library metadata must be queued first"));
             };
             return Ok(Outcome {
+                append: None,
                 state: remote.state.portable(),
                 acknowledged: local.pending.keys().cloned().collect(),
                 cursor: head.tip.hash.0,

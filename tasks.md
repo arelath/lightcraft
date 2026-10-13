@@ -9,6 +9,8 @@ Milestone 6 is deferred. Live Backblaze B2 read/edit/export and original reacqui
 B2 rejected `If-None-Match` and `If-Match` with HTTP 501, so conditional catalog publication remains
 unavailable there; the failed upload retained its staged original. Loopback fixtures cover publication
 and synchronization failure scenarios. Evidence: `target/cloud-acceptance/live-b2*-results.json`.
+Explicit append-only B2 publication and synchronization passed native and browser live acceptance
+on 2026-10-14; this protocol avoids the unavailable conditional writes (see the B2 tasks below).
 
 Verified on 2026-10-12: Milestone 1, including managed originals and proxies, catalog migration, integrity and failure recovery, real CLI/MCP acceptance, and native desktop control-channel acceptance with a generated RAW. Deferred metadata/render requests kept the UI responsive during a deliberately slow download, and attempts to overwrite managed cache data were rejected. The local S3-compatible test server verified request signing; live AWS interoperability remains unverified. `cargo +1.95.0 xtask ci` passed all eight stages. Long-lived keys cannot be entered into LightCraft; authentication uses externally managed AWS profiles or environment credentials.
 
@@ -190,6 +192,50 @@ Native synchronization acceptance (2026-10-13) passed through control port 18877
 - [x] **CS5.7** Run WASM and applicable web checks, including `cargo xtask ci`, and visually inspect browser cloud workflows.
 
 Browser acceptance (2026-10-13) passed in Chromium with two render workers on both OPFS and IndexedDB. A native CLI peer and browser converged after independent develop/rating/flag edits. Browser checks covered verified smart-preview browsing, full-quality refusal without originals, explicit preview export, genuine offline editing/export, reload with a durable pending outbox and cached preview, reauthorization after reload, a 403 URL refresh, lost conditional-head responses, checkpoints, quota failures that retain pending work, retry, and original reacquisition/full-quality export. All 205 fixture requests passed independent SigV4 checks; every write was conditional. Results and inspected screenshots are under `target/cloud-acceptance/browser-acceptance-results.json` and `browser-*.png`. These procedural, development-build tests establish neither live bucket interoperability nor large-library performance. Final UI updates were 2 ms, with startup/update maxima of 6.8–7.2 seconds and thumbnail work still in flight. All eight CI stages passed in `target/browser-cloud-ci.log`; the WASM bundle and native release binaries built successfully. Setup, masked credentials, preview/original renders, reload, failed acknowledgement saving and Info authorization/retry screenshots were inspected. The browser Info Sync now button completed retry; the rebuilt native app also synchronized to the browser's generation through its Info button. Additional IndexedDB acceptance rejected saving an acknowledgement after remote publication, retained pending work, then completed the saved proof after storage recovered and the page reloaded (`browser-durability-results.json`). Backup verification confirmed cloud hashes and excluded login tokens/signed URLs (`browser-backup-results.json`).
+
+## B2 append-only synchronization — follow-up implementation
+
+**Authorized:** 2026-10-13. Implement the append-only design in [docs/cloud-sync-protocol.md](docs/cloud-sync-protocol.md), retaining the existing conditional-head protocol. Test against the supplied B2 bucket using isolated acceptance prefixes; credentials stay outside repository/settings files. The optional managed backend remains deferred.
+
+### Protocol, storage and local durability
+
+- [x] **B2.1** Add explicit, persistent append/CAS protocol selection and backward-compatible local synchronization progress; reject silent mode changes or a fallback after HTTP 501.
+- [x] **B2.2** Add bounded, prefix-scoped ListObjectsV2 adapters with delimiter discovery, continuation pagination, start-after handling and malformed/out-of-scope response rejection.
+- [x] **B2.3** Add narrowly scoped, verified immutable uploads and ordinary multipart completion for append mode; never expose unconditional shared-head replacement.
+- [x] **B2.4** Add canonical hash-addressed manifests and per-author sequence/mutation records, preserving exact mutation IDs and bytes across retries.
+- [x] **B2.5** Persist exact publication proofs, incoming changes and contiguous discovery progress before removing pending work; retain staging/receipts after uncertain outcomes or failed saves.
+- [x] **B2.6** Rotate author identity on backup restore/ownership changes while retaining historical pending mutation IDs and causal context; detect cloned-author content collisions without overwriting either record.
+
+### Native reconciliation and recovery
+
+- [x] **B2.7** Implement gap-aware, paginated author discovery and causal dependency staging; never advance a frontier past a missing earlier operation.
+- [x] **B2.8** Route managed imports and binary revisions through append mutation publication after verifying all asset dependencies; preserve upload recovery and cache promotion protections.
+- [x] **B2.9** Publish/merge immutable checkpoints from remotely verified state only; support incomparable snapshots and pending-preserving bootstrap without remote garbage collection.
+- [x] **B2.10** Add explicit coordinated CAS-to-append migration with verified seed state, preserved pending identities/mappings and retained legacy history; block unsafe mixed-mode continuation.
+- [x] **B2.11** Expose append setup/status/progress/retry through registered commands and shared desktop/CLI/MCP control paths; preserve existing conflicts, tombstones and revision-aware undo.
+
+### Browser integration
+
+- [x] **B2.12** Extend browser connection/signing contracts with validated bucket roots and typed scoped listing/immutable-write requests, including URL expiry and cancellation.
+- [x] **B2.13** Implement browser append publication/discovery/checkpoints with durable OPFS/IndexedDB progress and exact-ID acknowledgement proofs.
+- [x] **B2.14** Wire browser protocol selection, setup/status/retry and restored-owner handling; preserve verified cache, smart-preview/export and quota/no-eviction behavior.
+
+### Verification and documentation
+
+- [x] **B2.A1** Test simultaneous writers, same-object races, lost upload/multipart/acknowledgement responses, restart with pending work and mutation identity collisions.
+- [x] **B2.A2** Test late authors during pagination, missing earlier sequences, cross-author causal dependencies, malformed/listing scope/token bounds and failed-page recovery.
+- [x] **B2.A3** Test historical-author restore, migration, incomparable checkpoints, pending exclusion from snapshots, delete-versus-offline-edit recovery and CAS regressions.
+- [x] **B2.A4** Test browser OPFS/IndexedDB offline/reload/quota/expired-URL flows and native/browser append convergence; inspect real browser workflows.
+- [x] **B2.A5** Verify small and multipart immutable uploads against live B2, then two native devices with independent/concurrent edits, checkpoints and reconnect/rebootstrap; ensure no shared-head or conditional-write request is emitted.
+- [x] **B2.A6** Verify browser synchronization against live B2 through a scoped stateless signer, including original/proxy browse/export and native-peer convergence.
+- [x] **B2.A7** Update protocol/authentication/migration/retention docs and applicable progress rows with verified evidence; keep unimplemented/unsupported work explicit.
+- [x] **B2.A8** Run required full CI, WASM/web builds and desktop control-channel acceptance before committing implementation; check off only verified tasks.
+
+Protocol verification (2026-10-14) passed all nine real CLI append scenarios, including a committed multipart completion response being lost, external binary revisions, deletion versus an offline edit with explicit recovery, historical-author restore, migration, pagination/gaps/forks and bootstrap. Shared engine tests cover causal dependency staging, remote-only/incomparable checkpoints and exact acknowledgements; owner tests cover full-disk rollback and the explicit-sync window after a slow scan. Browser receipt tests retain later and historical pending IDs across durable progress/acknowledgement recovery. All eight stages of `cargo +1.95.0 xtask ci` passed on the final source (`target/b2-ci-verified.log`); CAS regressions remain enabled. Native and web builds and desktop/browser screenshots are recorded in `target/b2-native-final.log`, `target/b2-web-final.log` and the acceptance folder.
+
+Live B2 acceptance (2026-10-14) used isolated `lightcraft-acceptance/append/` and `lightcraft-acceptance/browser-append/` prefixes. Native small/9 MiB multipart imports, independent and concurrent metadata/develop edits, checkpoints, reconnect/rebootstrap and DNG/XMP revisions converged without shared-head publication or conditional-write headers (`target/cloud-acceptance/b2-append-live-results.json`, `b2-revision-live-results.json`; 132 requests in the native append run). Chromium passed OPFS and IndexedDB preview browsing/export, genuine offline edits, durable pending work across reload, URL expiry, a lost committed PUT response, quota failure/no eviction/retry, original reacquisition/export and native-peer convergence. IndexedDB also migrated a historical pending outbox from CAS mode. The two browser flows recorded 195 B2 responses (`b2-browser-live-results.json`, `b2-browser-wire-*.json`). Both finished with no pending work or gaps and two real render workers. These development/procedural checks do not establish live AWS compatibility or large-library performance. Browser final update times were 1–2 ms, with startup/update maxima of 12.1–13.9 seconds. Desktop control-channel acceptance rendered the managed DNG and inspected append setup/status; the desktop and browser Info Sync now buttons completed live B2 synchronization (`b2-browser-visual-results.json`) (`b2-native-visual-results.json`); final update time was 1.4 ms and maximum 37.8 ms with empty render queues. Temporary CORS was removed and the original absent configuration verified (`b2-cors-restored.json`); credentials and signed URLs were excluded from saved evidence.
+
+After the complete live acceptance runs, an additional post-build B2 recheck reached the account's download bandwidth/Class B cap. Scoped listing still returned 200, while object GET returned 403 `AccessDenied` with the explicit cap-exceeded message (`target/cloud-acceptance/b2-final-access-probe.json`). This blocks further live download rechecks until the cap resets or the owner changes Caps & Alerts. It does not invalidate the earlier completed native/browser runs. The current native 403 error labels this as rejected credentials; the isolated diagnostic established the cap as the actual cause. Account caps were not changed.
 
 ## Milestone 6 — Optional managed metadata backend
 

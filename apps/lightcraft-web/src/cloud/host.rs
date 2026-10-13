@@ -23,12 +23,13 @@ use std::{
 
 pub const CONFIG_FILE: &str = "browser-cloud.json";
 enum Stage {
-    SaveThenSync { checkpoint: bool },
+    SaveThenSync { checkpoint: bool, audit: bool },
     Network(Rc<RefCell<Option<Result<Outcome, String>>>>),
     Ack { receipt: AckReceipt, result: Value },
     Acquire { command: String, params: Value, sources: Vec<(PhotoId, Source)>, ready: Rc<RefCell<Option<Result<(), String>>>> },
 }
 struct Job {
+    migrating: bool,
     guard: TaskGuard,
     owner: Arc<()>,
     stage: Stage,
@@ -48,6 +49,7 @@ struct Data {
     sync_running: bool,
     paused: bool,
     next_poll: f64,
+    last_audit: f64,
 }
 #[derive(Clone)]
 pub struct Host {
@@ -56,11 +58,12 @@ pub struct Host {
     files: Files,
     backend: Option<Backend>,
     frozen: Rc<Cell<bool>>,
+    owner: Option<String>,
 }
 fn parameter<'a>(params: &'a Value, key: &str) -> Result<&'a str, String> {
     params.get(key).and_then(Value::as_str).ok_or_else(|| format!("missing {key}"))
 }
-fn random_identity() -> Result<String, String> {
+pub(crate) fn random_identity() -> Result<String, String> {
     let mut bytes = [0u8; 32];
     web_sys::window()
         .ok_or("browser window unavailable")?
@@ -71,13 +74,14 @@ fn random_identity() -> Result<String, String> {
     Ok(lightcraft_engine::assets::sha256(&bytes).0)
 }
 impl Host {
-    pub fn new(backend: Option<Backend>, files: Files, frozen: Rc<Cell<bool>>) -> Self {
+    pub fn new(backend: Option<Backend>, files: Files, frozen: Rc<Cell<bool>>, owner: Option<String>) -> Self {
         let host = Self {
             data: Rc::new(RefCell::new(Data { next_poll: js_sys::Date::now() + 5000., ..Data::default() })),
             memory: ManagedBytes::default(),
             files,
             backend,
             frozen,
+            owner,
         };
         if let Some(bytes) = host.files.get(CONFIG_FILE) {
             match serde_json::from_slice::<Vec<Connection>>(&bytes) {
@@ -116,6 +120,21 @@ impl Host {
                 crate::safety::notice(error);
             }
         }
+        if let Err(error) = self.claim_owner(session) {
+            self.data.borrow_mut().paused = true;
+            crate::safety::notice(error);
+        }
+    }
+    fn claim_owner(&self, session: &mut Session) -> Result<(), String> {
+        let Some(mut state) = session.catalog.sync_state().filter(|s| !s.protocol.is_head()).cloned() else { return Ok(()) };
+        if state
+            .claim_owner(self.owner.clone().ok_or("persistent browser installation identity unavailable")?, random_identity()?)
+            .map_err(|e| e.to_string())?
+        {
+            session.apply_received(Op::SetSyncState { state: Some(Box::new(state)) }).map_err(|e| e.to_string())?;
+            session.persist().map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
     pub fn action(&self) -> CloudAction {
         let host = self.clone();
@@ -126,9 +145,10 @@ impl Host {
             "cloud.configureBrowser" => Some(self.configure(s, p)),
             "cloud.connections" => Some(Ok(json!({"connections":self.data.borrow().providers.values().map(|v|json!({
                 "id":v.connection.id,"bucket":v.connection.storage_origin,"region":v.connection.authorize_endpoint,"prefix":v.connection.prefix,
-                "endpoint":"","profile":""})).collect::<Vec<_>>()}))),
+                "endpoint":v.connection.bucket_root.as_deref().unwrap_or(""),"profile":"","storageOrigin":v.connection.storage_origin,"authorizeEndpoint":v.connection.authorize_endpoint,"bucketRoot":v.connection.bucket_root})).collect::<Vec<_>>()}))),
             "cloud.syncEnable" => Some(self.enable(s, p)),
             "cloud.sync" => Some(self.start(s, p)),
+            "cloud.migrateAppend" => Some(self.migrate(s, p)),
             "cloud.syncStatus" => Some(self.status(s)),
             "cloud.reconnect" => Some({
                 self.memory.retry();
@@ -151,14 +171,18 @@ impl Host {
             prefix: parameter(p, "prefix")?.into(),
             authorize_endpoint: parameter(p, "authorizeEndpoint")?.into(),
             storage_origin: parameter(p, "storageOrigin")?.into(),
+            bucket_root: p.get("bucketRoot").and_then(Value::as_str).map(str::to_owned),
         };
         let token = p.get("token").and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_owned);
         let mut data = self.data.borrow_mut();
         if data.providers.len() >= 64 && !data.providers.contains_key(&config.id) {
             return Err("browser connection limit reached".into());
         }
-        if data.providers.get(&config.id).is_some_and(|old| old.connection != config)
-            && s.catalog.sync_state().is_some_and(|state| state.connection == config.id)
+        if data.providers.get(&config.id).is_some_and(|old| {
+            old.connection.prefix != config.prefix
+                || old.connection.storage_origin != config.storage_origin
+                || (old.connection.bucket_root.is_some() && old.connection.bucket_root != config.bucket_root)
+        }) && s.catalog.sync_state().is_some_and(|state| state.connection == config.id)
         {
             return Err("an enabled library cannot be retargeted; use a separate local library to change its bucket/prefix".into());
         }
@@ -177,17 +201,29 @@ impl Host {
         if self.backend.is_none() {
             return Err("open persistent browser storage first".into());
         }
+        let protocol: lightcraft_engine::catalog::replication::SyncProtocol =
+            serde_json::from_value(p.get("protocol").cloned().unwrap_or(json!("conditional-head-v1")))
+                .map_err(|_| "invalid synchronization protocol")?;
         let connection = parameter(p, "connection")?;
         if !self.data.borrow().providers.contains_key(connection) {
             return Err("configure browser cloud storage first".into());
         }
         if let Some(state) = s.catalog.sync_state() {
-            if state.connection != connection || p.get("library").and_then(Value::as_str).is_some_and(|id| id != state.library) {
+            if state.connection != connection
+                || p.get("library").and_then(Value::as_str).is_some_and(|id| id != state.library)
+                || p.get("protocol").is_some_and(|_| state.protocol != protocol)
+            {
                 return Err("this catalog already has a durable library identity".into());
             }
         } else {
             let library = p.get("library").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned).map_or_else(random_identity, Ok)?;
-            let op = lightcraft_engine::cloud_sync::enable(&s.catalog, library, random_identity()?, connection.into()).map_err(|e| e.to_string())?;
+            if !protocol.is_head() && self.data.borrow().providers.get(connection).is_none_or(|p| p.connection.bucket_root.is_none()) {
+                return Err("append mode requires bucketRoot".into());
+            }
+            let owner =
+                if protocol.is_head() { String::new() } else { self.owner.clone().ok_or("persistent browser installation identity unavailable")? };
+            let op = lightcraft_engine::cloud_sync::enable_mode(&s.catalog, library, random_identity()?, connection.into(), protocol, owner)
+                .map_err(|e| e.to_string())?;
             s.apply_received(op).map_err(|e| e.to_string())?;
             s.persist().map_err(|e| e.to_string())?;
         }
@@ -205,6 +241,11 @@ impl Host {
         Ok(status)
     }
     fn start(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
+        self.claim_owner(s)?;
+        let migrating = p.get("migrate").map(|v| v.as_bool().ok_or("migrate must be true or false")).transpose()?.unwrap_or(false);
+        if migrating && p.get("writersStopped").and_then(Value::as_bool) != Some(true) {
+            return Err("migration requires writersStopped:true after stopping every old writer".into());
+        }
         if self.backend.is_none() || self.frozen.get() {
             return Err("persistent browser storage is unavailable".into());
         }
@@ -226,12 +267,26 @@ impl Host {
         s.persist().map_err(|e| e.to_string())?;
         let guard = s.activity.start("cloudSync", "Synchronize cloud library", Cancel::Yes);
         let task = guard.id();
-        data.jobs.push(Job { guard, owner: s.library_token(), stage: Stage::SaveThenSync { checkpoint } });
+        let audit = p.get("audit").map(|v| v.as_bool().ok_or("audit must be true or false")).transpose()?.unwrap_or(true)
+            || data.last_audit == 0.
+            || js_sys::Date::now() - data.last_audit >= 300_000.;
+        if audit {
+            data.last_audit = js_sys::Date::now();
+        }
+        data.jobs.push(Job { migrating, guard, owner: s.library_token(), stage: Stage::SaveThenSync { checkpoint, audit } });
         data.sync_running = true;
         data.paused = false;
         data.next_poll = js_sys::Date::now() + 5000.;
         self.memory.retry();
         Ok(json!({"task":task,"background":true}))
+    }
+    fn migrate(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
+        if s.catalog.sync_state().is_some_and(|s| !s.protocol.is_head()) {
+            return self.status(s);
+        }
+        let mut params = p.as_object().cloned().ok_or("migration parameters must be an object")?;
+        params.insert("migrate".into(), json!(true));
+        self.start(s, &Value::Object(params))
     }
     fn acquire(&self, s: &mut Session, command: &str, p: &Value) -> Result<Value, String> {
         let backend = self.backend.clone().ok_or("persistent browser storage is unavailable")?;
@@ -294,6 +349,7 @@ impl Host {
             object.insert("ids".into(), json!(ids));
         }
         self.data.borrow_mut().jobs.push(Job {
+            migrating: false,
             guard,
             owner: s.library_token(),
             stage: Stage::Acquire { command: command.into(), params, sources, ready },
@@ -317,6 +373,9 @@ impl Host {
                     if sync {
                         data.sync_running = false;
                         data.paused = result.is_err();
+                        // Leave a retry/explicit-sync window even when a remote scan takes
+                        // longer than the polling interval.
+                        data.next_poll = js_sys::Date::now() + 5000.;
                     }
                     let report = match result {
                         Ok(value) => json!({"task":job.guard.id(),"ok":true,"result":value}),
@@ -341,7 +400,7 @@ impl Host {
                 && app.session.catalog.sync_state().is_some_and(|s| data.providers.contains_key(&s.connection))
         };
         if poll && !self.frozen.get() {
-            if let Err(error) = self.start(&mut app.session, &json!({"wait":false})) {
+            if let Err(error) = self.start(&mut app.session, &json!({"wait":false,"audit":false})) {
                 self.data.borrow_mut().paused = true;
                 crate::safety::notice(error);
             }
@@ -353,7 +412,7 @@ impl Host {
     fn advance(&self, job: &mut Job, app: &mut LightcraftApp, flushing: bool) -> Option<Result<Value, String>> {
         let result = (|| -> Result<Option<Value>, String> {
             match &mut job.stage {
-                Stage::SaveThenSync { checkpoint } => {
+                Stage::SaveThenSync { checkpoint, audit } => {
                     if job.guard.is_cancelled() {
                         return Err("synchronization cancelled; pending work retained".into());
                     }
@@ -369,11 +428,17 @@ impl Host {
                     let provider = provider.with_cancel(job.guard.cancel_flag().ok_or("cancellation is unavailable")?);
                     let backend = self.backend.clone().ok_or("browser storage is unavailable")?;
                     let checkpoint = *checkpoint;
+                    let audit = *audit;
+                    let migrating = job.migrating;
                     let ready = Rc::new(RefCell::new(None));
                     let result = ready.clone();
-                    job.guard.handle().detail("Reading the head and reconciling durable mutations");
+                    job.guard.handle().detail("Reconciling and publishing saved library changes");
                     wasm_bindgen_futures::spawn_local(async move {
-                        *result.borrow_mut() = Some(protocol::synchronize(&provider, &backend, &local, checkpoint).await);
+                        *result.borrow_mut() = Some(if migrating {
+                            super::append::migrate(&provider, &local).await
+                        } else {
+                            protocol::synchronize(&provider, &backend, &local, checkpoint, audit).await
+                        });
                         crate::web::request_repaint();
                     });
                     job.stage = Stage::Network(ready);
@@ -389,24 +454,48 @@ impl Host {
                         *ready.borrow_mut() = Some(Ok(outcome));
                         return Ok(None);
                     }
-                    let receipt = AckReceipt::new(
-                        app.session.catalog.sync_state().ok_or("synchronization identity is unavailable")?,
-                        &outcome.acknowledged,
-                        outcome.cursor.clone(),
-                        outcome.generation,
-                    )?;
-                    let op = lightcraft_engine::cloud_sync::incoming_checkpoint(
-                        &app.session.catalog,
-                        &outcome.state,
-                        &BTreeSet::new(),
-                        outcome.cursor.clone(),
-                        outcome.generation,
-                    )
-                    .map_err(|e| e.to_string())?;
+                    let mut binding = None;
+                    let mut next = app.session.catalog.clone();
+                    if job.migrating {
+                        let mut state = next.sync_state().cloned().ok_or("synchronization identity unavailable")?;
+                        state.protocol = lightcraft_engine::catalog::replication::SyncProtocol::AppendLog;
+                        state.migrated_from_head = true;
+                        state.cursor = None;
+                        state.generation = 0;
+                        state
+                            .claim_owner(self.owner.clone().ok_or("persistent installation identity unavailable")?, random_identity()?)
+                            .map_err(|e| e.to_string())?;
+                        let op = Op::SetSyncState { state: Some(Box::new(state)) };
+                        next.apply(op.clone()).map_err(|e| e.to_string())?;
+                        binding = Some(op);
+                    }
+                    let receipt = if let Some(progress) = &outcome.append {
+                        AckReceipt::new_append(next.sync_state().ok_or("synchronization identity unavailable")?, &outcome.acknowledged, progress)?
+                    } else {
+                        AckReceipt::new(
+                            app.session.catalog.sync_state().ok_or("synchronization identity is unavailable")?,
+                            &outcome.acknowledged,
+                            outcome.cursor.clone(),
+                            outcome.generation,
+                        )?
+                    };
+                    let op = if let Some(progress) = outcome.append.clone() {
+                        lightcraft_engine::cloud_sync::incoming_append(&next, progress, &BTreeSet::new()).map_err(|e| e.to_string())?
+                    } else {
+                        lightcraft_engine::cloud_sync::incoming_checkpoint(
+                            &app.session.catalog,
+                            &outcome.state,
+                            &BTreeSet::new(),
+                            outcome.cursor.clone(),
+                            outcome.generation,
+                        )
+                        .map_err(|e| e.to_string())?
+                    };
+                    let op = if let Some(binding) = binding { Op::Batch { ops: vec![binding, op] } } else { op };
                     app.session.apply_received(op).map_err(|e| e.to_string())?;
                     app.session.persist().map_err(|e| e.to_string())?;
                     self.files.write(ACK_FILE, &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?);
-                    let value = json!({"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len()});
+                    let value = json!({"protocol":app.session.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len()});
                     job.guard.handle().detail("Saving received changes and remote acknowledgement in browser storage");
                     job.stage = Stage::Ack { receipt, result: value };
                     Ok(None)

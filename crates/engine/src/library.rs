@@ -522,6 +522,8 @@ impl Session {
             lock: lock.take(),
         });
         // forget untouched Local records of folders not browsed for a while (journaled at once)
+        #[cfg(not(target_arch = "wasm32"))]
+        self.claim_cloud_owner()?;
         if self.forget_local_days > 0 {
             let plan = self.forget_local(false, None);
             if !plan.evict.is_empty() {

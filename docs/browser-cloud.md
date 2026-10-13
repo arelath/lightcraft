@@ -1,13 +1,13 @@
 # Browser cloud adapter
 
-Last updated: 2026-10-13
+Last updated: 2026-10-14
 
 The browser uses Fetch and authorized object URLs. Native AWS profiles and long-lived keys
 are not available to this adapter. A user-controlled, stateless authorization endpoint signs
 requests for one bucket/prefix; it does not store library metadata. Metadata remains in the
 direct bucket protocol described in [cloud-sync-protocol.md](cloud-sync-protocol.md).
 
-Connection configuration contains `id`, `prefix`, `authorizeEndpoint`, and `storageOrigin`.
+Connection configuration contains `id`, `prefix`, `authorizeEndpoint`, `storageOrigin`, and optional `bucketRoot`.
 It is device-local. Login tokens and returned signed URLs stay in memory. The authorization
 endpoint and storage origin require HTTPS; loopback HTTP is supported for development.
 Do not put an application key or secret key in browser configuration or catalog data.
@@ -150,8 +150,77 @@ tokens/signed URLs. Info's Sync now button recovered from a rejected login. All 
 source replacement, corrupt bytes, acknowledgement recovery and backup path/hash validation.
 
 These are procedural tests of a development bundle. They do not establish live AWS/provider
-interoperability or large-library performance. The provided B2 bucket previously returned
-HTTP 501 for the conditional writes required by this protocol; see
+interoperability or large-library performance. The provided B2 bucket returns
+HTTP 501 for conditional writes; use explicit append mode below. See
 [the native compatibility evidence](cloud-storage-implementation.md). No unconditional fallback
 is enabled. Bucket CORS and a user-controlled signer must be configured for a live deployment.
 The optional managed metadata backend remains deferred.
+
+## Append mode and signer extension
+
+Configure `bucketRoot` as a canonical URL ending in `/`, on `storageOrigin`. For path-style B2,
+for example, it is `https://s3.<region>.backblazeb2.com/<bucket>/`. The adapter pins this root and
+prefix, rejects retargeting an enabled catalog, and verifies exact object paths and version IDs.
+Library backups exclude the root-level installation identity; restored library directories
+claim a new current author while keeping historical pending IDs. Browser Web Locks serialize
+writers in the same browser storage.
+
+Select Append-only (Backblaze B2) in Cloud Synchronization, or pass `protocol:"append-log-v1"`
+to `cloud.syncEnable`. The default remains conditional S3. For migration, stop every old writer,
+configure an append-capable signer/root, and dispatch `cloud.migrateAppend {writersStopped:true}`.
+Observe its background report before retrying `cloud.sync`. Migration saves the remotely
+verified seed and local mode atomically without acknowledging unsent pending work.
+
+Existing requests retain the original JSON contract. Append requests add:
+
+```json
+{
+  "connection":"personal", "method":"GET", "key":"", "operation":"list",
+  "list":{
+    "prefix":"library/sync-v2/<library-id>/ops/",
+    "delimiter":true, "continuation":null, "startAfter":null
+  }
+}
+```
+
+The signer authorizes only this exact scoped `ListObjectsV2` request. `list-type=2` and
+`max-keys=1000` are fixed. Optional delimiter, continuation and start-after parameters must
+match exactly; bucket root, query names and duplicate parameters are checked. Root discovery
+uses `/`; tails and checkpoints use ordinary listings. Each page is bounded to 4 MiB/1,000
+entries. Keys outside its prefix, repeated tokens, unsupported namespaces and XML DTDs fail.
+
+An immutable PUT includes `operation:"putImmutable"`, exact key, `size` and `contentSha256`.
+The signer must reject mutable heads and arbitrary keys. Bind the exact SHA-256 using a signed
+content hash or checksum header; the adapter verifies that binding. B2 presigning uses
+`UNSIGNED-PAYLOAD` in the canonical request with a signed `x-amz-checksum-sha256` header
+containing the Base64 SHA-256. Do not use the ordinary header-auth payload hash as the canonical
+query-auth payload hash. The bucket CORS rule must allow the checksum header, including on PUT
+preflight. [Backblaze CORS](https://www.backblaze.com/docs/cloud-storage-cross-origin-resource-sharing-rules)
+explains the supported bucket APIs. The adapter never adds conditional-write headers in append
+mode. It resolves lost responses by fresh GET/readback of the exact bytes and hash key.
+
+Authorization and object requests disable the browser HTTP cache, so a reused signed GET URL
+cannot retain a cached 404 after publication or a stale listing/head. Verified media still uses
+the explicit OPFS/IndexedDB cache. Existing expiry refresh, cancellation and quotas apply.
+Received changes/progress and an exact-ID acknowledgement receipt must actually finish saving
+before pending IDs drop. Reload can finish a saved acknowledgement, including historical authors.
+
+Live append acceptance (2026-10-14) passed on OPFS and IndexedDB through a scoped stateless
+signer and the actual B2 endpoint. It covered offline preview editing/export, pending work
+across reload, expired URLs, a lost committed PUT response, quota failure/no eviction/retry,
+original reacquisition/export and native-peer convergence. IndexedDB migrated its historical
+pending CAS outbox. Both finished with no pending work or gaps and two real render workers;
+195 B2 responses were recorded. Results and screenshots live in
+`target/cloud-acceptance/b2-browser-live-results.json` and `b2-browser-*.png`. Final UI updates
+were 1–2 ms, with startup/update maxima of 12.1–13.9 seconds. This is procedural acceptance of
+a development bundle, not a large-library performance measurement. Test origins receive
+temporary CORS rules; the original absent configuration was restored and verified after testing.
+Desktop and browser Info Sync now completed live B2 reconciliation, with append setup/status
+screenshots inspected. All eight final CI stages passed (`target/b2-ci-verified.log`). The optional metadata backend remains
+out of scope; a live browser deployment still needs its own signer, login and bucket CORS.
+
+After acceptance completed, an extra B2 object GET returned 403 because the account download
+bandwidth/Class B cap had been reached; scoped listing still worked. The native adapter
+currently labels a 403 as rejected credentials, so check B2 Caps & Alerts as well as key
+permissions. Further live download rechecks await a cap reset or an owner-approved cap change.
+The complete earlier acceptance results remain recorded; account caps were not changed.

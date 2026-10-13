@@ -1310,10 +1310,13 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             let value = |key: &str, fallback: &str| connection.and_then(|connection| connection[key].as_str()).unwrap_or(fallback).to_owned();
             app.ui.dialog = Some(Dialog::CloudStorage {
                 id: value("id", "personal"),
-                bucket: value("bucket", ""),
-                region: value("region", if cfg!(target_arch = "wasm32") { "" } else { "us-east-1" }),
+                bucket: value(if cfg!(target_arch = "wasm32") { "storageOrigin" } else { "bucket" }, ""),
+                region: value(
+                    if cfg!(target_arch = "wasm32") { "authorizeEndpoint" } else { "region" },
+                    if cfg!(target_arch = "wasm32") { "" } else { "us-east-1" },
+                ),
                 prefix: value("prefix", "lightcraft"),
-                endpoint: value("endpoint", ""),
+                endpoint: value(if cfg!(target_arch = "wasm32") { "bucketRoot" } else { "endpoint" }, ""),
                 profile: value("profile", ""),
             });
             Ok(Value::Null)
@@ -1330,7 +1333,16 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 .or_else(|| saved.and_then(|c| c.get("id")).and_then(Value::as_str))
                 .unwrap_or("")
                 .to_owned();
-            app.ui.dialog = Some(Dialog::CloudSync { connection, library: p.get("library").and_then(Value::as_str).unwrap_or("").to_owned() });
+            app.ui.dialog = Some(Dialog::CloudSync {
+                protocol: app.session.catalog.sync_state().map_or(Default::default(), |s| s.protocol),
+                connection,
+                library: p
+                    .get("library")
+                    .and_then(Value::as_str)
+                    .or_else(|| app.session.catalog.sync_state().map(|s| s.library.as_str()))
+                    .unwrap_or("")
+                    .to_owned(),
+            });
             Ok(Value::Null)
         }
         "file.importCloud" => {

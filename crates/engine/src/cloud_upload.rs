@@ -47,6 +47,14 @@ struct Multipart {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Receipt {
     version: u32,
+    #[serde(default, skip_serializing_if = "lightcraft_catalog::replication::SyncProtocol::is_head")]
+    protocol: lightcraft_catalog::replication::SyncProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    library: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    append_proof: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    publication_intent: BTreeMap<String, String>,
     id: String,
     imported: Imported,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,9 +68,19 @@ struct Receipt {
 
 impl Receipt {
     fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1 | 2)
+        if !matches!(self.version, 1..=3)
             || (self.version == 1 && self.storage.is_some())
             || (self.version == 2 && self.storage.is_none())
+            || (self.version == 3
+                && (self.storage.is_none()
+                    || self.protocol != lightcraft_catalog::replication::SyncProtocol::AppendLog
+                    || self.library.as_ref().is_none_or(|s| !identifier(s))))
+            || (self.version < 3
+                && (!self.protocol.is_head() || self.library.is_some() || !self.append_proof.is_empty() || !self.publication_intent.is_empty()))
+            || self.append_proof.len() > 100_000
+            || self.append_proof.iter().any(|(id, hash)| !identifier(id) || hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            || self.publication_intent.len() > 100_000
+            || self.publication_intent.iter().any(|(id, hash)| !identifier(id) || hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
             || !identifier(&self.id)
             || self.id != self.imported.mutation_id
             || (self.imported.base_asset.is_none() && self.id != self.imported.photo_id)
@@ -176,7 +194,7 @@ pub(crate) fn staging_proofs(root: &Path, policy: &crate::assets::managed::Polic
         }
         let approved = policy.imports.get(&receipt.id).is_some_and(|intent| {
             intent.acknowledged && intent.asset_id == receipt.imported.asset_id && intent.asset.as_ref() == receipt.imported.asset.as_ref()
-        }) && receipt.generation.is_some()
+        }) && (receipt.generation.is_some() || (receipt.version == 3 && !receipt.append_proof.is_empty()))
             && receipt.multipart.is_empty()
             && blobs(&receipt.imported.asset).all(|blob| receipt.verified.contains(&blob.remote.key))
             && receipt
@@ -193,11 +211,13 @@ pub(crate) fn staging_proofs(root: &Path, policy: &crate::assets::managed::Polic
 }
 
 enum Event {
+    Publication { outcome: Box<crate::cloud_replication::Outcome>, reply: mpsc::SyncSender<Result<()>> },
     Phase { id: String, state: UploadState, verified: BTreeSet<String>, error: Option<String>, reply: mpsc::SyncSender<Result<()>> },
     Finished(Result<Value>),
 }
 
 struct Item {
+    sync: Option<lightcraft_catalog::replication::SyncState>,
     id: String,
     imported: Imported,
     connection: S3Connection,
@@ -302,7 +322,11 @@ impl Item {
             task.detail(&format!("{} · uploading {}", self.imported.photo.file_name, self.rendition(blob)));
             let mut observed = 0;
             let result = self.resolver.background_transfer(blob, cancel, || {
-                self.connection.put_blob(blob, &mut file, cancel, &mut |done| task.observe(&mut observed, done, 0, blob.size))
+                if self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()) {
+                    self.connection.put_blob_immutable(blob, &mut file, cancel, &mut |done| task.observe(&mut observed, done, 0, blob.size))
+                } else {
+                    self.connection.put_blob(blob, &mut file, cancel, &mut |done| task.observe(&mut observed, done, 0, blob.size))
+                }
             });
             match result {
                 Ok(()) => return Ok(()),
@@ -385,8 +409,13 @@ impl Item {
                     .map(|(number, part)| (*number, part.etag.clone()))
                     .collect::<Vec<_>>();
                 task.detail(&format!("{} · completing {}", self.imported.photo.file_name, self.rendition(blob)));
-                let completed =
-                    self.resolver.background_transfer(blob, cancel, || self.connection.complete_multipart(blob, &upload_id, &parts, cancel));
+                let completed = self.resolver.background_transfer(blob, cancel, || {
+                    if self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()) {
+                        self.connection.complete_multipart_immutable(blob, &upload_id, &parts, cancel)
+                    } else {
+                        self.connection.complete_multipart(blob, &upload_id, &parts, cancel)
+                    }
+                });
                 match completed {
                     Ok(()) => return Ok(()),
                     Err(e @ (AssetError::Missing | AssetError::Conflict | AssetError::Network(_))) => {
@@ -413,10 +442,35 @@ impl Item {
         Err(error("multipart upload repeatedly expired or conflicted; staged bytes and receipts retained"))
     }
 
-    fn run(&self, abort: bool, events: &mpsc::SyncSender<Event>, cancel: &AtomicBool, task: &UploadProgress) -> Result<Value> {
+    fn run(
+        &self,
+        abort: bool,
+        events: &mpsc::SyncSender<Event>,
+        cancel: &AtomicBool,
+        task: &UploadProgress,
+        defer_publication: bool,
+    ) -> Result<Value> {
         let path = self.root.join("uploads").join(format!("{}.json", self.id));
+        let frozen = self
+            .sync
+            .as_ref()
+            .into_iter()
+            .flat_map(|s| s.pending.values())
+            .filter(|m| {
+                m.changes.iter().any(|c| {
+                    c.entity == format!("photo:{}", self.imported.photo_id)
+                        && c.field == "content"
+                        && c.value.get("assetId").and_then(Value::as_str) == Some(self.imported.asset_id.0.as_str())
+                })
+            })
+            .map(|m| m.digest().map(|digest| (m.revision.id(), digest)).map_err(|e| error(e.to_string())))
+            .collect::<Result<BTreeMap<_, _>>>()?;
         let mut receipt = read_receipt(&path)?.unwrap_or_else(|| Receipt {
-            version: 2,
+            version: if self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()) { 3 } else { 2 },
+            protocol: self.sync.as_ref().map_or(Default::default(), |s| s.protocol),
+            library: self.sync.as_ref().filter(|s| !s.protocol.is_head()).map(|s| s.library.clone()),
+            append_proof: Default::default(),
+            publication_intent: if self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()) { frozen.clone() } else { Default::default() },
             id: self.id.clone(),
             imported: self.imported.clone(),
             storage: Some(self.connection.storage_snapshot()),
@@ -428,6 +482,27 @@ impl Item {
         });
         if receipt.id != self.id || receipt.imported.asset_id != self.imported.asset_id || receipt.imported.asset != self.imported.asset {
             return Err(error("upload receipt describes another asset or rendition; preserved"));
+        }
+        if receipt.protocol.is_head()
+            && let Some(local) = self.sync.as_ref().filter(|s| s.migrated_from_head && !s.protocol.is_head())
+        {
+            if receipt.storage.as_ref().is_some_and(|storage| !storage.same_destination(&self.connection)) {
+                return Err(error("migration upload destination mismatch; receipt retained"));
+            }
+            receipt.protocol = local.protocol;
+            receipt.library = Some(local.library.clone());
+            receipt.version = 3;
+            receipt.generation = None;
+            receipt.storage = Some(self.connection.storage_snapshot());
+            self.write_receipt(&receipt, cancel)?;
+        }
+        if !receipt.protocol.is_head() && receipt.publication_intent.is_empty() {
+            receipt.publication_intent = frozen;
+        }
+        if receipt.protocol != self.sync.as_ref().map_or(Default::default(), |s| s.protocol)
+            || (receipt.library.is_some() && receipt.library.as_ref() != self.sync.as_ref().map(|s| &s.library))
+        {
+            return Err(error("upload receipt protocol/library differs; explicit migration or original settings required"));
         }
         if receipt.storage.as_ref().is_some_and(|storage| !storage.same_destination(&self.connection)) {
             return Err(error(
@@ -478,7 +553,8 @@ impl Item {
                 self.phase(&receipt, events, cancel)?;
             }
             if abort {
-                receipt.state = if receipt.generation.is_some() { UploadState::Published } else { UploadState::SavedLocally };
+                receipt.state =
+                    if receipt.generation.is_some() || !receipt.append_proof.is_empty() { UploadState::Published } else { UploadState::SavedLocally };
                 self.write_receipt(&receipt, cancel)?;
                 self.phase(&receipt, events, cancel)?;
                 return Ok(json!({"import": self.id, "aborted": true, "originalPreserved": true}));
@@ -487,8 +563,49 @@ impl Item {
             self.write_receipt(&receipt, cancel)?;
             self.phase(&receipt, events, cancel)?;
             task.detail(&format!("{} · publishing", self.imported.photo.file_name));
-            receipt.generation =
-                Some(cloud_publication::publish_import(&self.connection, &receipt.imported, cancel).map_err(|e| error(e.to_string()))?);
+            if defer_publication && self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()) {
+                return Ok(json!({"import":self.id,"objectsVerified":true,"publicationPending":true}));
+            }
+            if let Some(local) = self.sync.as_ref().filter(|s| !s.protocol.is_head()) {
+                let outcome = crate::cloud_append::native::synchronize(&self.connection, local, false, cancel).map_err(|e| error(e.to_string()))?;
+                let proof = outcome.append.as_ref().ok_or_else(|| error("missing append publication proof"))?;
+                let target = proof.remote.documents.get(&format!("photo:{}", self.imported.photo_id)).and_then(|fields| fields.get("content"));
+                let expected = if !receipt.publication_intent.is_empty() {
+                    receipt.publication_intent.clone()
+                } else if !receipt.append_proof.is_empty() {
+                    receipt.append_proof.clone()
+                } else {
+                    target
+                        .into_iter()
+                        .flat_map(|r| r.0.iter())
+                        .filter(|(_, v)| v.get("assetId").and_then(Value::as_str) == Some(self.imported.asset_id.0.as_str()))
+                        .filter_map(|(id, _)| proof.remote.received.get(id).map(|r| (id.clone(), r.digest.clone())))
+                        .collect()
+                };
+                if expected.is_empty() || expected.iter().any(|(id, digest)| proof.remote.received.get(id).is_none_or(|r| &r.digest != digest)) {
+                    return Err(error("earlier causal imports are not uploaded; exact content publication proof missing; staged bytes retained"));
+                }
+                receipt.append_proof = expected;
+                self.write_receipt(&receipt, cancel)?;
+                let (reply, response) = mpsc::sync_channel(1);
+                events
+                    .send(Event::Publication { outcome: Box::new(outcome), reply })
+                    .map_err(|_| error("upload owner closed; exact publication retained"))?;
+                loop {
+                    match response.recv_timeout(Duration::from_millis(20)) {
+                        Ok(r) => {
+                            r?;
+                            break;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Err(error("upload owner closed")),
+                        Err(_) if cancel.load(Ordering::Relaxed) => return Err(error("upload cancelled; publication retained")),
+                        Err(_) => {}
+                    }
+                }
+            } else {
+                receipt.generation =
+                    Some(cloud_publication::publish_import(&self.connection, &receipt.imported, cancel).map_err(|e| error(e.to_string()))?);
+            }
             receipt.state = UploadState::Published;
             self.write_receipt(&receipt, cancel)?;
             self.phase(&receipt, events, cancel)?;
@@ -633,13 +750,33 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
             base_asset: crate::cloud_import::revision_target(&root, id)?.map(|target| target.base_asset),
         };
         imported.validate().map_err(|e| error(e.to_string()))?;
-        result.push(Item { id: id.clone(), imported, connection, root: root.clone(), resolver: resolver.clone() });
+        result.push(Item {
+            sync: s.catalog.sync_state().filter(|state| state.connection == connection.id).cloned(),
+            id: id.clone(),
+            imported,
+            connection,
+            root: root.clone(),
+            resolver: resolver.clone(),
+        });
     }
     if let Some(selected) = selected
         && selected.iter().any(|id| !s.catalog.upload_intents().contains_key(id))
     {
         return Err(error("unknown import identity"));
     }
+    result.sort_by_key(|item| {
+        item.sync.as_ref().and_then(|s| {
+            s.pending
+                .values()
+                .filter(|m| {
+                    m.changes
+                        .iter()
+                        .any(|c| c.field == "content" && c.value.get("assetId").and_then(Value::as_str) == Some(item.imported.asset_id.0.as_str()))
+                })
+                .map(|m| m.revision.clone())
+                .min()
+        })
+    });
     Ok(result)
 }
 
@@ -725,6 +862,7 @@ pub fn observed(s: &mut Session, p: &Value, abort: bool, observer: &mut dyn FnMu
 }
 
 fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
+    s.claim_cloud_owner()?;
     let wait = p
         .get("wait")
         .map(|value| value.as_bool().ok_or_else(|| error("wait must be true or false")))
@@ -763,13 +901,29 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
             let result = crate::guard::catch("cloud upload worker", || {
                 let mut results = Vec::new();
                 let mut failures = Vec::new();
-                for item in items {
+                // A single causal import mutation can contain several photos. Verify every
+                // selected asset before publishing any of those photos' metadata.
+                for item in &items {
                     if worker_cancel.load(Ordering::Relaxed) {
                         return Err(error("upload cancelled; originals and multipart receipts retained"));
                     }
-                    match item.run(abort, &sender, &worker_cancel, &progress) {
+                    let append = !abort && item.sync.as_ref().is_some_and(|s| !s.protocol.is_head());
+                    let uploaded = item.run(abort, &sender, &worker_cancel, &progress, append);
+                    if append {
+                        if uploaded.is_err() {
+                            let _ = item.run(abort, &sender, &worker_cancel, &progress, true);
+                        }
+                        continue;
+                    }
+                    match uploaded {
                         Ok(result) => results.push(result),
                         Err(error) => failures.push(error.to_string()),
+                    }
+                }
+                for item in items.iter().filter(|item| !abort && item.sync.as_ref().is_some_and(|s| !s.protocol.is_head())) {
+                    match item.run(false, &sender, &worker_cancel, &progress, false) {
+                        Ok(value) => results.push(value),
+                        Err(e) => failures.push(e.to_string()),
                     }
                 }
                 if let Some(first) = failures.first() {
@@ -869,6 +1023,24 @@ impl Session {
         uploads.pending.retain(|pending| {
             for _ in 0..8 {
                 match pending.receiver.try_recv() {
+                    Ok(Event::Publication { outcome, reply }) => {
+                        let result = (|| {
+                            if !Arc::ptr_eq(&pending.library, &self.library_token())
+                                || pending.connection_revision != pending.resolver.connection_revision()
+                            {
+                                return Err(error("library or connection changed; append publication retained"));
+                            }
+                            let progress = outcome.append.ok_or_else(|| error("missing append proof"))?;
+                            let op = crate::cloud_sync::incoming_append(&self.catalog, progress, &outcome.acknowledged)?;
+                            let inverse = self.apply_catalog_mode(op, false)?;
+                            if let Err(e) = self.persist() {
+                                self.apply_received(inverse)?;
+                                return Err(e);
+                            }
+                            Ok(())
+                        })();
+                        let _ = reply.send(result);
+                    }
                     Ok(Event::Phase { id, state, verified, error: message, reply }) => {
                         let result = (|| {
                             if !Arc::ptr_eq(&pending.library, &self.library_token()) {

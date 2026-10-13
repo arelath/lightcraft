@@ -261,6 +261,10 @@ mod tests {
             };
             let asset_id = AssetId("asset-1".into());
             let receipt = Receipt {
+                protocol: Default::default(),
+                library: None,
+                append_proof: Default::default(),
+                publication_intent: Default::default(),
                 version: 2,
                 id: "import-1".into(),
                 imported: Imported {

@@ -278,6 +278,7 @@ struct Boot {
     index: ThumbIndex,
     /// The library folder in storage (`library`, or a restored backup's).
     lib_dir: String,
+    owner: Option<String>,
 }
 
 async fn boot(opts: Options) -> Boot {
@@ -296,6 +297,7 @@ async fn boot(opts: Options) -> Boot {
     let files = Files::default();
     let mut index = ThumbIndex::default();
     let mut lib_dir = DEFAULT_LIBRARY_DIR.to_string();
+    let mut installation = None;
     if let Some(b) = &backend {
         if opts.reset {
             // everything this site keeps in the browser, photos included: never without asking
@@ -311,6 +313,25 @@ async fn boot(opts: Options) -> Boot {
             } else {
                 log::info!("lightcraft: ?reset declined; storage kept");
             }
+        }
+        let identity = async {
+            let id = match b.read("cloud-installation-id").await? {
+                Some(bytes) => String::from_utf8(bytes).map_err(|_| "invalid browser installation identity")?,
+                None => {
+                    let id = crate::cloud::host::random_identity()?;
+                    b.write("cloud-installation-id", id.as_bytes()).await?;
+                    id
+                }
+            };
+            if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("invalid browser installation identity; local catalog retained".to_owned());
+            }
+            Ok(id)
+        }
+        .await;
+        match identity {
+            Ok(id) => installation = Some(id),
+            Err(error) => notice(error),
         }
         // a restored backup lives in its own folder (see `backup`)
         if let Ok(Some(d)) = b.read(ACTIVE_LIBRARY).await {
@@ -364,7 +385,14 @@ async fn boot(opts: Options) -> Boot {
         index.len(),
         index.total() as f64 / 1e6
     );
-    Boot { opts, backend, files, index, lib_dir }
+    Boot {
+        owner: installation.map(|id| lightcraft_engine::assets::sha256(format!("{id}/{lib_dir}").as_bytes()).0),
+        opts,
+        backend,
+        files,
+        index,
+        lib_dir,
+    }
 }
 
 struct WebApp {
@@ -389,7 +417,7 @@ struct WebApp {
 
 impl WebApp {
     fn new(cc: &eframe::CreationContext<'_>, boot: Boot, chinese_font: Vec<u8>) -> Self {
-        let Boot { opts, backend, files, index, lib_dir } = boot;
+        let Boot { opts, backend, files, index, lib_dir, owner } = boot;
         let originals = Originals::default();
         let t = perf_now();
         let mut session = Session::new();
@@ -433,7 +461,7 @@ impl WebApp {
         // previews are large (≤ 2560 px, f32): keep few in a 32-bit address space
         session.media.preview_capacity = 3;
         let frozen = Rc::new(Cell::new(false));
-        let cloud = crate::cloud::host::Host::new(backend.clone(), files.clone(), frozen.clone());
+        let cloud = crate::cloud::host::Host::new(backend.clone(), files.clone(), frozen.clone(), owner);
         cloud.install(&mut session, &cc.egui_ctx);
         let mut platform = services(originals.clone(), backend.clone(), files.clone(), frozen.clone(), cc.egui_ctx.clone());
         platform.cloud_action = Some(cloud.action());

@@ -10,6 +10,7 @@ use lightcraft_engine::cloud_records::{Batch, Checkpoint, CheckpointRef, Head, I
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Outcome {
+    pub append: Option<lightcraft_engine::catalog::replication::AppendProgress>,
     pub state: Portable,
     pub acknowledged: BTreeSet<String>,
     pub cursor: String,
@@ -148,7 +149,7 @@ async fn immutable(provider: &Provider, key: &str, bytes: &[u8]) -> Result<(), S
         }
     }
 }
-async fn dependencies(provider: &Provider, mutations: &[Mutation]) -> Result<(), String> {
+pub(super) async fn dependencies(provider: &Provider, mutations: &[Mutation]) -> Result<(), String> {
     let mut seen = BTreeSet::new();
     for change in mutations.iter().flat_map(|m| &m.changes).filter(|c| c.field == "content") {
         let mut asset: Asset = serde_json::from_value(change.value.get("asset").cloned().ok_or("missing immutable asset description")?)
@@ -171,7 +172,24 @@ async fn dependencies(provider: &Provider, mutations: &[Mutation]) -> Result<(),
     }
     Ok(())
 }
-pub async fn synchronize(provider: &Provider, _backend: &Backend, local: &SyncState, checkpoint_requested: bool) -> Result<Outcome, String> {
+pub async fn synchronize(
+    provider: &Provider,
+    _backend: &Backend,
+    local: &SyncState,
+    checkpoint_requested: bool,
+    audit: bool,
+) -> Result<Outcome, String> {
+    if !local.protocol.is_head() {
+        return super::append::synchronize(provider, local, checkpoint_requested, audit).await;
+    }
+    let marker = lightcraft_engine::cloud_append::manifest_key(&provider.connection.prefix, &local.library).map_err(|e| e.to_string())?;
+    let existing = provider.request("GET", &marker, None, None, None, 16 << 10).await?;
+    if existing.status == 200 {
+        return Err("this library uses append mode; coordinate migration before continuing".into());
+    }
+    if existing.status != 404 {
+        return Err("could not verify protocol compatibility; pending work retained".into());
+    }
     local.validate().map_err(|e| e.to_string())?;
     let mut verified = BTreeSet::new();
     for _ in 0..64 {
@@ -192,6 +210,7 @@ pub async fn synchronize(provider: &Provider, _backend: &Backend, local: &SyncSt
         {
             let (head, _) = remote.head.ok_or("empty remote library; initial metadata must be queued")?;
             return Ok(Outcome {
+                append: None,
                 state: remote.state.portable(),
                 acknowledged: local.pending.keys().cloned().collect(),
                 cursor: head.tip.hash.0,
@@ -261,4 +280,8 @@ pub async fn synchronize(provider: &Provider, _backend: &Backend, local: &SyncSt
         }
     }
     Err("catalog busy or unreachable; pending work retained for retry".into())
+}
+
+pub(super) async fn migration_seed(provider: &Provider, library: &str) -> Result<Portable, String> {
+    Ok(read(provider, library).await?.state.portable())
 }

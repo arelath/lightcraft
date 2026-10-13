@@ -988,11 +988,10 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                     #[cfg(target_arch="wasm32")]
                     {
-                        let _=endpoint;
                         ui.label("Connect to your shared library using a storage origin and authorization service.");
                         for (widget,label,text) in [
                             ("cloudConnectionId","Connection name",id),("cloudBucket","Storage origin",bucket),
-                            ("cloudRegion","Authorization endpoint",region),("cloudPrefix","Library prefix",prefix),
+                            ("cloudRegion","Authorization endpoint",region),("cloudPrefix","Library prefix",prefix),("cloudEndpoint","Bucket root (append mode)",endpoint),
                         ] {field(ui,label,|ui|{crate::text_field::TextField::singleline(widget,text).width(f32::INFINITY).show(ui);});}
                         field(ui,"Login token (this session only)",|ui|{crate::text_field::TextField::singleline("cloudProfile",profile).password(true).width(f32::INFINITY).show(ui);});
                         ui.label(egui::RichText::new("Login tokens stay in memory. Reauthorize after reloading when your service requires a login.").color(t.text_dim));
@@ -1004,9 +1003,15 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         for saved in connections { ui.selectable_value(connection, saved.clone(), saved.as_str()); }
                     });
                 }
-                Dialog::CloudSync { connection, library } => {
+                Dialog::CloudSync { connection, library,protocol } => {
                     ui.label(crate::i18n::tr("Use the same storage prefix and library ID on each device. Leave Library ID empty only when creating a shared library."));
                     field(ui, "Connection name", |ui| { crate::text_field::TextField::singleline("cloudSyncConnection", connection).width(f32::INFINITY).show(ui); });
+                    ui.add_enabled_ui(app.session.catalog.sync_state().is_none(),|ui|{
+                        egui::ComboBox::from_id_salt("cloudSyncProtocol").selected_text(if protocol.is_head(){"S3 conditional writes"}else{"Append-only (Backblaze B2)"}).show_ui(ui,|ui|{
+                            ui.selectable_value(protocol,lightcraft_catalog::replication::SyncProtocol::ConditionalHead,"S3 conditional writes");
+                            ui.selectable_value(protocol,lightcraft_catalog::replication::SyncProtocol::AppendLog,"Append-only (Backblaze B2)");
+                        });
+                    });
                     field(ui, "Library ID", |ui| { crate::text_field::TextField::singleline("cloudSyncLibrary", library).width(f32::INFINITY).show(ui); });
                     ui.label(crate::i18n::tr("After a failed synchronization, retry from Info. Originals and pending edits stay on this device."));
                     let deleted: Vec<_> = app.session.catalog.sync_state().into_iter().flat_map(|state| {
@@ -1759,16 +1764,15 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
             }
             #[cfg(target_arch = "wasm32")]
             {
-                let _ = endpoint;
                 app.run(
                     "cloud.configureBrowser",
-                    json!({"id":id.trim(),"storageOrigin":bucket.trim(),"authorizeEndpoint":region.trim(),"prefix":prefix.trim(),"token":profile}),
+                    json!({"id":id.trim(),"storageOrigin":bucket.trim(),"authorizeEndpoint":region.trim(),"prefix":prefix.trim(),"bucketRoot":if endpoint.trim().is_empty(){None}else{Some(endpoint.trim())},"token":profile}),
                 )
             }
         }
         Dialog::CloudImport { connection, .. } => app.run("file.importCloud", json!({"connection":connection})),
-        Dialog::CloudSync { connection, library } => {
-            let mut params = json!({"connection":connection.trim()});
+        Dialog::CloudSync { connection, library, protocol } => {
+            let mut params = json!({"connection":connection.trim(),"protocol":protocol});
             if !library.trim().is_empty()
                 && let Some(object) = params.as_object_mut()
             {

@@ -11,6 +11,8 @@ pub const MAX_MUTATION_BYTES: usize = 2 << 20;
 const MAX_STATE_BYTES: usize = 64 << 20;
 const MAX_DEVICES: usize = 4096;
 const MAX_RECORDS: usize = 100_000;
+mod append;
+pub use append::{AppendProgress, SyncProtocol, prefixes as publication_prefixes};
 pub type Clock = BTreeMap<String, u64>;
 
 fn invalid(message: &str) -> CatalogError {
@@ -118,6 +120,16 @@ pub struct SyncState {
     pub device: String,
     /// Device-local connection binding, never part of a remote mutation/checkpoint.
     pub connection: String,
+    #[serde(default, skip_serializing_if = "SyncProtocol::is_head")]
+    pub protocol: SyncProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub append: Option<Box<AppendProgress>>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub local_owner: String,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub previous_authors: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub migrated_from_head: bool,
     pub clock: Clock,
     pub cursor: Option<String>,
     pub generation: u64,
@@ -144,6 +156,11 @@ impl Portable {
             library: self.library.clone(),
             device: "checkpoint".into(),
             connection: "remote".into(),
+            protocol: SyncProtocol::default(),
+            append: None,
+            local_owner: String::new(),
+            previous_authors: BTreeSet::new(),
+            migrated_from_head: false,
             clock: self.clock.clone(),
             cursor: None,
             generation: 0,
@@ -222,6 +239,11 @@ impl SyncState {
             library,
             device,
             connection,
+            protocol: SyncProtocol::default(),
+            append: None,
+            local_owner: String::new(),
+            previous_authors: BTreeSet::new(),
+            migrated_from_head: false,
             clock: Clock::new(),
             cursor: None,
             generation: 0,
@@ -246,6 +268,23 @@ impl SyncState {
         {
             return Err(invalid("invalid or oversized synchronization state; preserved"));
         }
+        if (!self.local_owner.is_empty() && !identifier(&self.local_owner))
+            || self.previous_authors.len() > MAX_DEVICES
+            || self.previous_authors.iter().any(|id| !identifier(id) || id.len() > 96 || id == &self.device)
+        {
+            return Err(invalid("invalid local synchronization ownership"));
+        }
+        if let Some(progress) = &self.append {
+            if self.protocol != SyncProtocol::AppendLog || self.cursor.is_some() || self.generation != 0 {
+                return Err(invalid("append progress cannot use a head cursor"));
+            }
+            progress.validate(&self.library)?;
+        }
+        if (self.migrated_from_head && self.protocol.is_head())
+            || (self.protocol == SyncProtocol::AppendLog && (self.cursor.is_some() || self.generation != 0))
+        {
+            return Err(invalid("append mode cannot use a mutable-head cursor"));
+        }
         for (id, receipt) in &self.received {
             let stamp = Self::stamp(id).ok_or_else(|| invalid("invalid synchronization receipt identity"))?;
             stamp.validate()?;
@@ -262,7 +301,7 @@ impl SyncState {
         for (id, mutation) in &self.pending {
             mutation.validate()?;
             if mutation.library != self.library
-                || mutation.revision.device != self.device
+                || (mutation.revision.device != self.device && !self.previous_authors.contains(&mutation.revision.device))
                 || mutation.revision.id() != *id
                 || self.received.get(id).is_none_or(|r| mutation.digest().ok().as_ref() != Some(&r.digest))
             {
@@ -380,7 +419,54 @@ impl SyncState {
     }
     /// Call only in the same journal record as incoming catalog changes. A failed durable
     /// append leaves this state and its original pending mutation identities queued for retry.
+    /// Rotate a restored/copied catalog's current author without rewriting old pending IDs.
+    pub fn claim_owner(&mut self, owner: String, new_author: String) -> Result<bool> {
+        if !identifier(&owner) || !identifier(&new_author) || new_author.len() > 96 {
+            return Err(invalid("invalid synchronization owner identity"));
+        }
+        if self.local_owner == owner {
+            return Ok(false);
+        }
+        let mut next = self.clone();
+        if new_author != self.device && (self.clock.contains_key(&new_author) || self.previous_authors.contains(&new_author)) {
+            return Err(invalid("new owner author already exists in history"));
+        }
+        if !next.local_owner.is_empty() || !next.pending.is_empty() || !next.received.is_empty() {
+            next.previous_authors.insert(next.device.clone());
+            next.device = new_author;
+        }
+        next.previous_authors.remove(&next.device);
+        next.local_owner = owner;
+        next.validate()?;
+        *self = next;
+        Ok(true)
+    }
+    pub fn acknowledge_append(&mut self, ids: &BTreeSet<String>, progress: AppendProgress) -> Result<()> {
+        if self.protocol != SyncProtocol::AppendLog {
+            return Err(invalid("append acknowledgement requires explicit append mode"));
+        }
+        progress.validate(&self.library)?;
+        let mut next = self.clone();
+        for id in ids {
+            let local = next.received.get(id).ok_or_else(|| invalid("acknowledgement names an unknown mutation"))?;
+            if progress.remote.received.get(id).is_none_or(|remote| remote.digest != local.digest) {
+                return Err(invalid("append acknowledgement lacks exact remote publication proof"));
+            }
+        }
+        for id in ids {
+            next.pending.remove(id);
+        }
+        next.cursor = None;
+        next.generation = 0;
+        next.append = Some(Box::new(progress));
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
     pub fn acknowledge(&mut self, ids: &BTreeSet<String>, cursor: String, generation: u64) -> Result<()> {
+        if self.protocol != SyncProtocol::ConditionalHead {
+            return Err(invalid("head acknowledgement cannot acknowledge append-log work"));
+        }
         if generation == 0
             || generation < self.generation
             || (generation == self.generation && self.cursor.as_ref().is_some_and(|old| old != &cursor))

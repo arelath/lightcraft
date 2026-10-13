@@ -770,6 +770,8 @@ pub struct NameEdit {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Dialog {
     CloudSync {
+        #[serde(default)]
+        protocol: lightcraft_catalog::replication::SyncProtocol,
         connection: String,
         library: String,
     },

@@ -21,6 +21,7 @@ pub mod assets;
 pub mod availability;
 pub(crate) mod camera_preview;
 pub mod camera_profiles;
+pub mod cloud_append;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_import;
 #[cfg(target_arch = "wasm32")]

@@ -12,6 +12,8 @@ pub struct Connection {
     pub prefix: String,
     pub authorize_endpoint: String,
     pub storage_origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_root: Option<String>,
 }
 impl Connection {
     pub fn validate(&self) -> Result<(), String> {
@@ -87,6 +89,8 @@ pub fn verify_blob(blob: &Blob, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_arch = "wasm32")]
+mod append;
 pub mod durability;
 #[cfg(target_arch = "wasm32")]
 pub mod host;
@@ -108,6 +112,7 @@ mod tests {
             prefix: "library".into(),
             authorize_endpoint: "https://signer.example/authorize".into(),
             storage_origin: "https://bucket.example".into(),
+            bucket_root: None,
         };
         c.validate_key("library/catalog/head.json").unwrap();
         for key in ["library-other/key", "library/../other", "library//key", "library/", "library/x\n"] {
