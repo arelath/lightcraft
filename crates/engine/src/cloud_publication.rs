@@ -26,6 +26,18 @@ pub struct Head {
     pub version: u32,
     pub generation: u64,
     pub tip: RecordRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<CheckpointRef>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CheckpointRef {
+    pub object: RecordRef,
+    pub covers: RecordRef,
+    pub generation: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -46,6 +58,10 @@ pub struct Batch {
     pub version: u32,
     pub parent: Option<RecordRef>,
     pub imports: Vec<Imported>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutations: Vec<lightcraft_catalog::replication::Mutation>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checkpoint_marker: bool,
 }
 
 fn invalid(message: &str) -> AssetError {
@@ -79,7 +95,7 @@ impl Imported {
 }
 
 impl RecordRef {
-    fn validate(&self, connection: &S3Connection) -> Result<()> {
+    pub(crate) fn validate(&self, connection: &S3Connection) -> Result<()> {
         if self.size == 0
             || self.size > MAX_BYTES as u64
             || self.hash.0.len() != 64
@@ -92,7 +108,7 @@ impl RecordRef {
     }
 }
 
-fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     let bytes = serde_json::to_vec(value).map_err(|_| invalid("could not encode remote catalog metadata"))?;
     if bytes.len() > MAX_BYTES {
         return Err(invalid("remote catalog record exceeds 2 MiB; reduce metadata before publishing"));
@@ -105,10 +121,27 @@ pub fn read_head(connection: &S3Connection, cancel: &AtomicBool) -> Result<Optio
     let Some(reply) = connection.get_small(&key, 16 << 10, cancel)? else { return Ok(None) };
     let head: Head =
         serde_json::from_slice(&reply.bytes).map_err(|_| invalid("remote catalog head is malformed or from an unsupported version; preserved"))?;
-    if head.version != 1 || head.generation == 0 {
+    if !matches!(head.version, 1 | 2)
+        || head.generation == 0
+        || (head.version == 1 && (head.library.is_some() || head.checkpoint.is_some()))
+        || (head.version == 2 && head.library.as_ref().is_none_or(|id| !identifier(id)))
+    {
         return Err(invalid("unsupported remote catalog head; preserved"));
     }
     head.tip.validate(connection)?;
+    if let Some(checkpoint) = &head.checkpoint {
+        checkpoint.covers.validate(connection)?;
+        if checkpoint.generation == 0
+            || checkpoint.generation >= head.generation
+            || checkpoint.object.size == 0
+            || checkpoint.object.size > 64 << 20
+            || checkpoint.object.hash.0.len() != 64
+            || !checkpoint.object.hash.0.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+            || checkpoint.object.key != keys::in_library(&connection.prefix, &format!("catalog/checkpoints/{}.json", checkpoint.object.hash.0))?
+        {
+            return Err(invalid("invalid remote checkpoint reference"));
+        }
+    }
     let etag = reply.etag.ok_or_else(|| invalid("remote head has no ETag; conditional synchronization is unavailable"))?;
     Ok(Some((head, etag)))
 }
@@ -120,9 +153,12 @@ pub fn read_batch(connection: &S3Connection, reference: &RecordRef, cancel: &Ato
         return Err(AssetError::Integrity);
     }
     let batch: Batch = serde_json::from_slice(&reply.bytes).map_err(|_| invalid("remote catalog batch is malformed; preserved"))?;
-    if !matches!(batch.version, 1 | 2)
-        || batch.imports.is_empty()
+    if !matches!(batch.version, 1..=3)
+        || (batch.imports.is_empty() && batch.mutations.is_empty() && !batch.checkpoint_marker)
         || batch.imports.len() > 1000
+        || batch.mutations.len() > 1000
+        || (batch.version < 3 && !batch.mutations.is_empty())
+        || (batch.version < 3 && batch.checkpoint_marker)
         || (batch.version == 1 && batch.imports.iter().any(|imported| imported.base_asset.is_some() || !imported.asset.associated.is_empty()))
     {
         return Err(invalid("unsupported remote catalog batch"));
@@ -137,11 +173,27 @@ pub fn read_batch(connection: &S3Connection, reference: &RecordRef, cancel: &Ato
             return Err(invalid("remote batch repeats a mutation identity"));
         }
     }
+    let mut mutation_ids = BTreeSet::new();
+    for mutation in &batch.mutations {
+        mutation.validate().map_err(|error| invalid(&error.to_string()))?;
+        if !mutation_ids.insert(mutation.revision.id()) || batch.mutations.first().is_some_and(|first| first.library != mutation.library) {
+            return Err(invalid("remote batch repeats a mutation or mixes libraries"));
+        }
+    }
     Ok(batch)
 }
 
 /// Return the generation already containing this exact import, including a lost head response.
 fn contains(connection: &S3Connection, head: &Head, imported: &Imported, cancel: &AtomicBool) -> Result<bool> {
+    if let Some(reference) = &head.checkpoint {
+        let checkpoint = crate::cloud_replication::read_checkpoint(connection, reference, cancel)?;
+        if let Some(digest) = checkpoint.imports.get(&imported.mutation_id) {
+            if digest != &sha256(&encode(imported)?).0 {
+                return Err(invalid("checkpoint import identity describes different data"));
+            }
+            return Ok(true);
+        }
+    }
     let mut next = Some(head.tip.clone());
     let mut seen = BTreeSet::new();
     for _ in 0..MAX_CHAIN {
@@ -182,7 +234,13 @@ pub fn publish_import(connection: &S3Connection, imported: &Imported, cancel: &A
             return Ok(head.generation);
         }
         let version = if imported.base_asset.is_some() || !imported.asset.associated.is_empty() { 2 } else { 1 };
-        let batch = Batch { version, parent: current.as_ref().map(|(head, _)| head.tip.clone()), imports: vec![imported.clone()] };
+        let batch = Batch {
+            version,
+            parent: current.as_ref().map(|(head, _)| head.tip.clone()),
+            imports: vec![imported.clone()],
+            mutations: Vec::new(),
+            checkpoint_marker: false,
+        };
         let bytes = encode(&batch)?;
         let hash = sha256(&bytes);
         let reference =
@@ -201,7 +259,13 @@ pub fn publish_import(connection: &S3Connection, imported: &Imported, cancel: &A
         let generation = current
             .as_ref()
             .map_or(Ok(1), |(head, _)| head.generation.checked_add(1).ok_or_else(|| invalid("remote catalog generation exhausted")))?;
-        let new_head = Head { version: 1, generation, tip: reference };
+        let new_head = Head {
+            version: current.as_ref().map_or(1, |(head, _)| head.version),
+            generation,
+            tip: reference,
+            library: current.as_ref().and_then(|(head, _)| head.library.clone()),
+            checkpoint: current.as_ref().and_then(|(head, _)| head.checkpoint.clone()),
+        };
         let condition = current.as_ref().map_or(PutCondition::Absent, |(_, etag)| PutCondition::Matches(etag));
         match connection.put_small(&head_key, &encode(&new_head)?, condition, cancel) {
             Ok(_) => return Ok(generation),

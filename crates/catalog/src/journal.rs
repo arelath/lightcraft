@@ -77,7 +77,7 @@ pub const LOG: &str = "catalog.log";
 const FORMAT: &str = "lightcraft-catalog";
 /// The catalog format this build writes (and the newest it reads). See the module docs →
 /// *Format versions*; bump it whenever an [`Op`] variant or a serialized field is added.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 
 /// When [`Journal::wants_snapshot`] says it's time to compact the log.
 #[derive(Clone, Copy, Debug)]
@@ -330,6 +330,9 @@ impl Journal {
                     return Err(newer(format!("{SNAPSHOT} is catalog format v{}", h.version)));
                 }
                 let s: SnapFile = serde_json::from_slice(&bytes).map_err(|e| CatalogError::Corrupt(format!("{SNAPSHOT}: {e}")))?;
+                if let Some(state) = s.catalog.sync_state() {
+                    state.validate().map_err(|e| CatalogError::Corrupt(format!("{SNAPSHOT}: {e}")))?;
+                }
                 (s.catalog, s.seq, Some(h.version))
             }
             None => (Catalog::new(), 0, None),

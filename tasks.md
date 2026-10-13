@@ -135,41 +135,45 @@ Managed revision acceptance (2026-10-13): all eight CI stages passed in `target/
 
 **Dependencies:** Milestones 1–3.
 
+Synchronization core verified (2026-10-13): catalog format 11 atomically retains global identities, field mutations, pending work and incoming cursors. Eleven shared-engine scenarios, two owner/persistence regressions, five reconciliation-core checks and four real CLI protocol scenarios cover offline imports, independent fields and album additions, competing recipes, delete-versus-edit recovery, revision-aware undo, grouped sliders, compaction, failed saves, conditional races/response loss, incremental tails and expired-history rebootstrap. The protocol and retention policy are in [docs/cloud-sync-protocol.md](docs/cloud-sync-protocol.md). Desktop acceptance also passed, as recorded below.
+
 ### Identities and local synchronization durability
 
-- [ ] **CS4.1** Add stable library and device IDs, globally unique synchronized entity IDs, mutation IDs, base revisions, and a durable remote cursor; migrate existing compact IDs or persist a global-ID mapping.
-- [ ] **CS4.2** Define versioned mutation records for all persistent changes, preserving mutation IDs across retries to prevent duplicated imports, history, or album operations.
-- [ ] **CS4.3** Persist catalog changes and unacknowledged synchronization intent atomically; retain unsent records through checkpoints, compaction, and local save completion.
-- [ ] **CS4.4** Persist remote acknowledgements before discarding pending work, and persist incoming changes together with their received cursor.
-- [ ] **CS4.5** Capture command changes, system bookkeeping, undo, and redo; preserve completed slider-edit grouping and avoid echoing remote changes as new local mutations.
-- [ ] **CS4.6** Synchronize library state while excluding device-local cache, transfer, pinning, selection, and hardware state.
+- [x] **CS4.1** Add stable library and device IDs, globally unique synchronized entity IDs, mutation IDs, base revisions, and a durable remote cursor; migrate existing compact IDs or persist a global-ID mapping.
+- [x] **CS4.2** Define versioned mutation records for all persistent changes, preserving mutation IDs across retries to prevent duplicated imports, history, or album operations.
+- [x] **CS4.3** Persist catalog changes and unacknowledged synchronization intent atomically; retain unsent records through checkpoints, compaction, and local save completion.
+- [x] **CS4.4** Persist remote acknowledgements before discarding pending work, and persist incoming changes together with their received cursor.
+- [x] **CS4.5** Capture command changes, system bookkeeping, undo, and redo; preserve completed slider-edit grouping and avoid echoing remote changes as new local mutations.
+- [x] **CS4.6** Synchronize library state while excluding device-local cache, transfer, pinning, selection, and hardware state.
 
 ### Direct-S3 publication protocol
 
-- [ ] **CS4.7** Define and document versioned bucket layouts for originals, previews, thumbnails, immutable change batches, checkpoints, and `catalog/head.json`.
-- [ ] **CS4.8** Implement publication by reading the catalog head and ETag, uploading dependencies and a change batch, then updating the head with `If-Match`; create absent immutable objects with `If-None-Match: *` where appropriate.
-- [ ] **CS4.9** Handle failed preconditions by fetching concurrent changes, reconciling, and retrying; never resolve a conflict with an unconditional head overwrite.
-- [ ] **CS4.10** Poll the small catalog head for changes, download incremental batches, and bootstrap from checkpoints while normal browsing continues to use the local catalog.
-- [ ] **CS4.11** Implement mutation deduplication, checkpoint creation, history retention, and recovery when publication or acknowledgement outcomes are uncertain.
+- [x] **CS4.7** Define and document versioned bucket layouts for originals, previews, thumbnails, immutable change batches, checkpoints, and `catalog/head.json`.
+- [x] **CS4.8** Implement publication by reading the catalog head and ETag, uploading dependencies and a change batch, then updating the head with `If-Match`; create absent immutable objects with `If-None-Match: *` where appropriate.
+- [x] **CS4.9** Handle failed preconditions by fetching concurrent changes, reconciling, and retrying; never resolve a conflict with an unconditional head overwrite.
+- [x] **CS4.10** Poll the small catalog head for changes, download incremental batches, and bootstrap from checkpoints while normal browsing continues to use the local catalog.
+- [x] **CS4.11** Implement mutation deduplication, checkpoint creation, history retention, and recovery when publication or acknowledgement outcomes are uncertain.
 
 ### Conflicts, deletion, and undo
 
-- [ ] **CS4.12** Accept concurrent changes to different photos and merge independent metadata fields against their shared base revision.
-- [ ] **CS4.13** Represent album membership changes as explicit operations so concurrent additions are preserved rather than overwritten by whole-list replacements.
-- [ ] **CS4.14** Preserve conflicting develop recipes as separate versions and provide a user-visible way to inspect and resolve them.
-- [ ] **CS4.15** Retain deletion tombstones and recoverable offline edits when deletion conflicts with editing; prevent a returning device from silently recreating deleted photos.
-- [ ] **CS4.16** Make undo and redo produce revision-aware changes that respect received remote edits.
-- [ ] **CS4.17** Define retention and rebootstrap behavior for devices older than the retained synchronization history, preserving their pending local changes.
+- [x] **CS4.12** Accept concurrent changes to different photos and merge independent metadata fields against their shared base revision.
+- [x] **CS4.13** Represent album membership changes as explicit operations so concurrent additions are preserved rather than overwritten by whole-list replacements.
+- [x] **CS4.14** Preserve conflicting develop recipes as separate versions and provide a user-visible way to inspect and resolve them.
+- [x] **CS4.15** Retain deletion tombstones and recoverable offline edits when deletion conflicts with editing; prevent a returning device from silently recreating deleted photos.
+- [x] **CS4.16** Make undo and redo produce revision-aware changes that respect received remote edits.
+- [x] **CS4.17** Define retention and rebootstrap behavior for devices older than the retained synchronization history, preserving their pending local changes.
 
 ### Acceptance checks
 
-- [ ] **CS4.A1** Run two-device scenarios with independent offline imports and edits; verify globally unique identities, eventual convergence, and no duplicate mutations.
-- [ ] **CS4.A2** Test concurrent album additions, independent metadata edits, competing develop settings, and delete-versus-edit conflicts; verify the documented preservation policies.
-- [ ] **CS4.A3** Test simultaneous head publication, failed conditional writes, lost responses, replayed batches, and restart before acknowledgement persistence.
-- [ ] **CS4.A4** Test compaction with unsent changes, atomic incoming-change/cursor persistence, remote-change echo suppression, and revision-aware undo after remote edits.
-- [ ] **CS4.A5** Test deletion followed by offline reconnection and rebootstrap after history expiry, including pending local edits.
-- [ ] **CS4.A6** Verify existing local libraries migrate safely and remain usable without a configured cloud connection.
-- [ ] **CS4.A7** Run `cargo xtask ci` and inspect synchronization, conflict-version, and recovery flows in the desktop app.
+- [x] **CS4.A1** Run two-device scenarios with independent offline imports and edits; verify globally unique identities, eventual convergence, and no duplicate mutations.
+- [x] **CS4.A2** Test concurrent album additions, independent metadata edits, competing develop settings, and delete-versus-edit conflicts; verify the documented preservation policies.
+- [x] **CS4.A3** Test simultaneous head publication, failed conditional writes, lost responses, replayed batches, and restart before acknowledgement persistence.
+- [x] **CS4.A4** Test compaction with unsent changes, atomic incoming-change/cursor persistence, remote-change echo suppression, and revision-aware undo after remote edits.
+- [x] **CS4.A5** Test deletion followed by offline reconnection and rebootstrap after history expiry, including pending local edits.
+- [x] **CS4.A6** Verify existing local libraries migrate safely and remain usable without a configured cloud connection.
+- [x] **CS4.A7** Run `cargo xtask ci` and inspect synchronization, conflict-version, and recovery flows in the desktop app.
+
+Native synchronization acceptance (2026-10-13) passed through control port 18877 with a signed loopback S3 fixture. Two catalogs converged after independent metadata/develop edits; the Info conflict controls opened Versions and explicitly resolved a recipe while preserving its alternative. Permanent deletion followed by an offline peer edit did not recreate the photo; clicking Recover restored the retained five-star edit, then both catalogs synchronized. Cancellation retained pending work, rejected credentials produced actionable Info text, and clicking Sync now completed retry. Setup, progress, failure, conflict, versions and recovery screenshots were inspected. All 140 scenario requests passed independent signing checks; every write was conditional. Results are in `target/cloud-acceptance/native-sync-results.json`. The isolated delayed-head check recorded 61 inspection samples with a maximum of 52 ms; the complete feedback flow recorded a 493 ms outlier around screenshot/control interaction. Final UI update time was 8.87 ms with empty render queues. These tiny procedural checks do not establish large-library performance or live AWS compatibility. All eight CI stages passed in `target/cloud-sync-ci-final.log`.
 
 ## Milestone 5 — Add browser cloud support
 

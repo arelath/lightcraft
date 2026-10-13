@@ -769,6 +769,10 @@ pub struct NameEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Dialog {
+    CloudSync {
+        connection: String,
+        library: String,
+    },
     CloudStorage {
         id: String,
         bucket: String,

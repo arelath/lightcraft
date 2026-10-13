@@ -655,6 +655,7 @@ impl Session {
         {
             self.cloud_imports = Default::default();
             self.cloud_uploads = Default::default();
+            self.cloud_replication_jobs = Default::default();
         }
         if self.library.is_none() {
             return Ok(());

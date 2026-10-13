@@ -720,6 +720,60 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 _ => "Original in cloud storage",
             };
             ui.add_space(6.0);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let sync = app.session.catalog.sync_state().map(|state| (state.library.clone(), state.pending.len(), state.generation));
+                if let Some((library, pending, generation)) = sync {
+                    let running = app.session.cloud_replication_jobs.running();
+                    ui.label(
+                        egui::RichText::new(if running {
+                            "Synchronizing library…".to_owned()
+                        } else {
+                            format!("Library generation {generation} · {pending} pending changes")
+                        })
+                        .color(t.text_dim),
+                    );
+                    ui.label(egui::RichText::new(format!("Library ID: {library}")).small().color(t.text_dim));
+                    if let Some(report) = app.session.cloud_replication_jobs.reports.last()
+                        && let Some(error) = report.get("error").and_then(serde_json::Value::as_str)
+                    {
+                        ui.label(egui::RichText::new(error).color(t.text_dim));
+                    }
+                    if !running
+                        && text_button(ui, "cloudSyncNow", crate::i18n::tr("Sync now"), false).clicked()
+                        && let Err(error) = app.run("cloud.sync", json!({"wait":false}))
+                    {
+                        app.toast(ui.ctx(), error);
+                    }
+                    let conflict = app.session.catalog.sync_state().and_then(|state| {
+                        let id = app.session.catalog.cloud_identity(&format!("photo:{}", p.id.0))?;
+                        let entity = format!("photo:{id}");
+                        let register = state.documents.get(&entity)?.get("develop")?;
+                        let (_, winner) = state.winning(&entity, "develop")?;
+                        register
+                            .0
+                            .values()
+                            .any(|value| value != winner)
+                            .then(|| (entity.clone(), state.winning(&entity, "develop").map(|(stamp, _)| stamp.id())))
+                    });
+                    if let Some((entity, Some(revision))) = conflict {
+                        ui.label(crate::i18n::tr("Competing edits are preserved in Versions."));
+                        if text_button(ui, "cloudConflictVersions", crate::i18n::tr("Open Versions"), false).clicked() {
+                            let _ = app.run("panel.versions", json!({}));
+                        }
+                        if text_button(ui, "cloudKeepCurrent", crate::i18n::tr("Keep current edit"), false).clicked()
+                            && let Err(error) = app.run("cloud.resolveConflict", json!({"entity":entity,"field":"develop","revision":revision}))
+                        {
+                            app.toast(ui.ctx(), error);
+                        }
+                    }
+                } else if text_button(ui, "cloudSyncSetup", crate::i18n::tr("Enable synchronization…"), false).clicked() {
+                    let connection = app.session.catalog.asset(asset_id).map(|asset| asset.original.remote.connection.clone());
+                    if let Err(error) = app.run("dialog.cloudSync", json!({"connection":connection})) {
+                        app.toast(ui.ctx(), error);
+                    }
+                }
+            }
             if let Some((import_id, upload)) = upload {
                 use lightcraft_catalog::uploads::UploadState;
                 let label = match upload.state {

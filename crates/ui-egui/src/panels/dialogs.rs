@@ -227,6 +227,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::Rename { .. } => "Rename Photos",
         Dialog::Import { .. } => "Import Photos",
         Dialog::CloudStorage { .. } => "Cloud Storage",
+        Dialog::CloudSync { .. } => "Cloud Synchronization",
         Dialog::CloudImport { .. } => "Import to Cloud Storage",
         Dialog::LabelNames { .. } => "Edit Color Label Names",
         Dialog::CaptureTime { .. } => "Edit Capture Time",
@@ -289,7 +290,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .default_width(match dlg {
             Dialog::Import { .. } => crate::import::DIALOG_SIZE[0],
-            Dialog::CloudStorage { .. } | Dialog::CloudImport { .. } => 480.0,
+            Dialog::CloudStorage { .. } | Dialog::CloudImport { .. } | Dialog::CloudSync { .. } => 480.0,
             Dialog::SmartRules { .. } => 680.0,
             Dialog::AllMetadata { .. } => 620.0,
             Dialog::FaceModel { .. } => 460.0,
@@ -989,6 +990,28 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         for saved in connections { ui.selectable_value(connection, saved.clone(), saved.as_str()); }
                     });
                 }
+                Dialog::CloudSync { connection, library } => {
+                    ui.label(crate::i18n::tr("Use the same storage prefix and library ID on each device. Leave Library ID empty only when creating a shared library."));
+                    field(ui, "Connection name", |ui| { crate::text_field::TextField::singleline("cloudSyncConnection", connection).width(f32::INFINITY).show(ui); });
+                    field(ui, "Library ID", |ui| { crate::text_field::TextField::singleline("cloudSyncLibrary", library).width(f32::INFINITY).show(ui); });
+                    ui.label(crate::i18n::tr("After a failed synchronization, retry from Info. Originals and pending edits stay on this device."));
+                    let deleted: Vec<_> = app.session.catalog.sync_state().into_iter().flat_map(|state| {
+                        state.documents.keys().filter(|entity| entity.starts_with("photo:") && state.winning(entity,"deleted").is_some_and(|(_,v)| v.as_bool()==Some(true)))
+                            .map(|entity| (entity.clone(),state.winning(entity,"file_name").and_then(|(_,v)| v.as_str()).unwrap_or("Deleted cloud photo").to_owned()))
+                    }).collect();
+                    if !deleted.is_empty() {
+                        ui.separator();
+                        ui.label(crate::i18n::tr("Recover deleted cloud photos and their retained edits:"));
+                        for (entity,name) in deleted {
+                            ui.horizontal(|ui| {
+                                ui.label(name);
+                                let response = ui.button(crate::i18n::tr("Recover"));
+                                crate::widgets::register(ui.ctx(),format!("button:cloudRecover:{entity}"),response.rect);
+                                if response.clicked() && let Err(error) = app.run("cloud.restoreDeleted",json!({"entity":entity})) { app.toast(ui.ctx(),error); }
+                            });
+                        }
+                    }
+                }
                 Dialog::Settings { tab } => crate::panels::settings::body(app, ui, tab),
                 Dialog::SamModel { error, .. } => sam_model_body(app, ui, error.as_deref()),
                 Dialog::KeywordTag {
@@ -1231,6 +1254,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                     Dialog::ContactSheet { .. } => "Choose PDF…",
                     Dialog::CloudStorage { .. } => "Save Connection",
+                    Dialog::CloudSync { .. } => "Enable & Synchronize",
                     Dialog::CloudImport { .. } => "Choose Photos…",
                     Dialog::Merge { .. } => "Merge",
                     Dialog::DenoiseModel { info, .. } if info["download"].is_string() => "Accept & Download",
@@ -1304,6 +1328,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     dlg,
                     Dialog::Import { .. }
                         | Dialog::CloudStorage { .. }
+                        | Dialog::CloudSync { .. }
                         | Dialog::CloudImport { .. }
                         | Dialog::Export { .. }
                         | Dialog::ContactSheet { .. }
@@ -1717,6 +1742,16 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
             app.run("cloud.configure", params)
         }
         Dialog::CloudImport { connection, .. } => app.run("file.importCloud", json!({"connection":connection})),
+        Dialog::CloudSync { connection, library } => {
+            let mut params = json!({"connection":connection.trim()});
+            if !library.trim().is_empty()
+                && let Some(object) = params.as_object_mut()
+            {
+                object.insert("library".into(), json!(library.trim()));
+            }
+            app.run("cloud.syncEnable", params)?;
+            app.run("cloud.sync", json!({"wait":false}))
+        }
         Dialog::ConfirmDelete { .. } => app.run("photo.delete", json!({})),
         // the catalog found: no file dialog; none: File ▸ Import Lightroom Catalog… asks for it
         Dialog::LightroomCatalog { catalog, .. } => {

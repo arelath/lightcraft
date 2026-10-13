@@ -9,6 +9,7 @@ mod before;
 pub(crate) mod browse;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod cloud;
+mod cloud_sync;
 mod color;
 pub(crate) mod convert;
 mod cull;
@@ -137,6 +138,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
     SPECS.get_or_init(|| {
         let mut v = Vec::new();
         v.extend(edit::specs());
+        v.extend(cloud_sync::specs());
         v.extend(library::specs());
         v.extend(develop::specs());
         v.extend(color::specs());

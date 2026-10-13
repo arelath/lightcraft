@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 const MAX_REPLY: usize = 2 << 20;
+const MAX_CHECKPOINT: usize = 64 << 20;
 pub(super) const PART_BYTES: usize = 8 << 20;
 
 #[derive(Debug)]
@@ -70,7 +71,7 @@ fn status(response: &Response) -> Result<()> {
 
 fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result<ObjectReply> {
     status(&response)?;
-    if max > MAX_REPLY || response.content_length().is_some_and(|size| size > max as u64) {
+    if max > MAX_CHECKPOINT || response.content_length().is_some_and(|size| size > max as u64) {
         return Err(AssetError::Network("S3 response exceeds its safety limit".into()));
     }
     let etag = response.header("etag").map(etag).transpose()?;
@@ -129,8 +130,8 @@ impl S3Connection {
 
     /// Read only small protocol objects. Missing objects are distinct from access failures.
     pub fn get_small(&self, key: &str, max: usize, cancel: &AtomicBool) -> Result<Option<ObjectReply>> {
-        if max > MAX_REPLY {
-            return Err(AssetError::Invalid("metadata limit exceeds 2 MiB".into()));
+        if max > MAX_CHECKPOINT {
+            return Err(AssetError::Invalid("metadata limit exceeds 64 MiB".into()));
         }
         let response =
             self.request(Request { method: Method::Get, key, query: &[], headers: &[], payload: &sha256(b"").0, body: None }, cancel, &mut |_| {})?;
@@ -141,8 +142,8 @@ impl S3Connection {
     }
 
     pub fn put_small(&self, key: &str, bytes: &[u8], condition: PutCondition<'_>, cancel: &AtomicBool) -> Result<String> {
-        if bytes.len() > MAX_REPLY {
-            return Err(AssetError::Invalid("metadata object exceeds 2 MiB".into()));
+        if bytes.len() > MAX_CHECKPOINT {
+            return Err(AssetError::Invalid("metadata object exceeds 64 MiB".into()));
         }
         let headers = condition_headers(condition)?;
         let response = self.request(

@@ -23,6 +23,7 @@ pub mod lock;
 pub mod managed;
 pub mod model;
 pub mod query;
+pub mod replication;
 pub mod rules;
 pub mod safe_file;
 pub mod stacks;
@@ -77,6 +78,9 @@ pub const HISTORY_LIMIT: usize = 200;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum Op {
+    SetSyncState {
+        state: Option<Box<replication::SyncState>>,
+    },
     SetCloudIdentity {
         entity: String,
         id: Option<String>,
@@ -271,6 +275,8 @@ pub enum Op {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sync_state: Option<Box<replication::SyncState>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     cloud_identities: BTreeMap<String, String>,
     /// Device-local paths and return-detection baselines, excluded from cloud metadata.
@@ -307,6 +313,9 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn sync_state(&self) -> Option<&replication::SyncState> {
+        self.sync_state.as_deref()
+    }
     pub fn cloud_identity(&self, entity: &str) -> Option<&str> {
         self.cloud_identities.get(entity).map(String::as_str)
     }
@@ -537,6 +546,13 @@ impl Catalog {
 
     fn apply_inner(&mut self, op: Op) -> Result<Op> {
         Ok(match op {
+            Op::SetSyncState { state } => {
+                if let Some(state) = &state {
+                    state.validate()?;
+                }
+                let old = std::mem::replace(&mut self.sync_state, state);
+                Op::SetSyncState { state: old }
+            }
             Op::SetCloudIdentity { entity, id } => {
                 if !managed::entity_key(&entity) {
                     return Err(CatalogError::Invalid("invalid cloud entity identity key".into()));

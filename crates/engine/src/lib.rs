@@ -29,6 +29,9 @@ pub(crate) mod cloud_import;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_publication;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod cloud_replication;
+pub mod cloud_sync;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_upload;
 pub mod cmd;
 pub mod config;
@@ -119,6 +122,7 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 pub struct UndoEntry {
     pub label: String,
     pub op: Op,
+    pub(crate) cloud_base: Option<cloud_sync::UndoBase>,
     /// A folder to rename on disk (`from` → `to`) before `op` is applied: Rename / Move Folder
     /// (whose `op` relinks the photos inside). Never overwrites; refused when `to` exists. An
     /// empty `to` removes the (empty) folder `from`, an empty `from` creates `to` (Create Folder).
@@ -299,6 +303,8 @@ pub struct Session {
     #[cfg(not(target_arch = "wasm32"))]
     pub cloud_uploads: cloud_upload::Uploads,
     #[cfg(not(target_arch = "wasm32"))]
+    pub cloud_replication_jobs: cloud_replication::Jobs,
+    #[cfg(not(target_arch = "wasm32"))]
     staging_dirty: std::collections::BTreeSet<String>,
     /// The last (or running) Build Previews.
     pub preview_build: Option<std::sync::Arc<cmd::previews::PreviewBuild>>,
@@ -406,6 +412,8 @@ impl Session {
             #[cfg(not(target_arch = "wasm32"))]
             cloud_uploads: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
+            cloud_replication_jobs: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
             staging_dirty: Default::default(),
             preview_build: None,
             import_defaults: import::ImportDefaults::default(),
@@ -452,6 +460,7 @@ impl Session {
         if self.depth == 0 {
             self.poll_cloud_imports();
             self.poll_cloud_uploads();
+            self.poll_cloud_replication();
         }
         let log_start = self.pending_log.len();
         let was_active = self.active();
@@ -505,10 +514,16 @@ impl Session {
 
     /// Apply an op as one undoable step.
     pub fn commit(&mut self, label: &str, op: Op) -> Result<()> {
-        let fwd = op.clone();
         let inv = self.apply_catalog(op)?;
-        self.pending_log.push(fwd);
-        self.undo.push(UndoEntry { label: label.to_string(), op: inv, folder: None, retry_inverse: Vec::new(), retry_sidecars: Vec::new() });
+        let cloud_base = cloud_sync::undo_base(&self.catalog, &inv);
+        self.undo.push(UndoEntry {
+            label: label.to_string(),
+            op: inv,
+            cloud_base,
+            folder: None,
+            retry_inverse: Vec::new(),
+            retry_sidecars: Vec::new(),
+        });
         self.commits = self.commits.wrapping_add(1);
         if self.undo.len() > 1000 {
             let mut dropped = self.undo.remove(0);
@@ -521,7 +536,23 @@ impl Session {
     }
 
     fn apply_catalog(&mut self, op: Op) -> Result<Op> {
-        let inv = self.catalog.apply(op.clone())?;
+        self.apply_catalog_mode(op, true)
+    }
+
+    pub(crate) fn apply_received(&mut self, op: Op) -> Result<()> {
+        self.apply_catalog_mode(op, false)?;
+        Ok(())
+    }
+
+    fn apply_catalog_mode(&mut self, op: Op, capture: bool) -> Result<Op> {
+        let (op, inv) = if capture && self.catalog.sync_state().is_some() {
+            let prepared = cloud_sync::prepare(&self.catalog, op)?;
+            self.catalog.apply(prepared.0.clone())?;
+            prepared
+        } else {
+            let inv = self.catalog.apply(op.clone())?;
+            (op, inv)
+        };
         let mut pending = vec![&op];
         let mut assets_changed = false;
         while let Some(op) = pending.pop() {
@@ -548,6 +579,7 @@ impl Session {
         }
         #[cfg(not(target_arch = "wasm32"))]
         self.notice_staging(&op);
+        self.pending_log.push(op);
         Ok(inv)
     }
 
@@ -611,11 +643,7 @@ impl Session {
     /// scan, a raw's as-shot white read by a decode): journaled like any op, but not an undo step, and it leaves the
     /// redo stack alone.
     pub(crate) fn apply_system(&mut self, op: Op) -> Result<()> {
-        let fwd = op.clone();
-        self.catalog.apply(op)?;
-        #[cfg(not(target_arch = "wasm32"))]
-        self.notice_staging(&fwd);
-        self.pending_log.push(fwd);
+        self.apply_catalog(op)?;
         Ok(())
     }
 
@@ -638,9 +666,7 @@ impl Session {
             versions.remove(i);
         }
         let op = Op::SetVersions { id, versions };
-        if self.catalog.apply(op.clone()).is_ok() {
-            self.pending_log.push(op);
-        }
+        let _ = self.apply_system(op);
     }
 
     /// Fold the last `n` undo steps into one (commands that commit step by step because each op
@@ -662,13 +688,9 @@ impl Session {
         }
         let tail = self.undo.split_off(self.undo.len() - n);
         let ops = tail.into_iter().rev().map(|e| e.op).collect();
-        self.undo.push(UndoEntry {
-            label: label.to_string(),
-            op: Op::Batch { ops },
-            folder: None,
-            retry_inverse: Vec::new(),
-            retry_sidecars: Vec::new(),
-        });
+        let op = Op::Batch { ops };
+        let cloud_base = cloud_sync::undo_base(&self.catalog, &op);
+        self.undo.push(UndoEntry { label: label.to_string(), op, cloud_base, folder: None, retry_inverse: Vec::new(), retry_sidecars: Vec::new() });
     }
 
     /// Apply without recording undo (interactive previews).
@@ -691,10 +713,10 @@ impl Session {
             }
         };
         self.show_undone(&e.op);
-        self.pending_log.push(e.op);
         self.redo.push(UndoEntry {
             label: e.label.clone(),
             op: redo,
+            cloud_base: cloud_sync::undo_base(&self.catalog, &e.op),
             folder: e.folder.as_ref().map(FolderMove::reversed),
             retry_inverse: Vec::new(),
             retry_sidecars: Vec::new(),
@@ -716,10 +738,10 @@ impl Session {
             }
         };
         self.show_undone(&e.op);
-        self.pending_log.push(e.op);
         self.undo.push(UndoEntry {
             label: e.label.clone(),
             op: undo,
+            cloud_base: cloud_sync::undo_base(&self.catalog, &e.op),
             folder: e.folder.as_ref().map(FolderMove::reversed),
             retry_inverse: Vec::new(),
             retry_sidecars: Vec::new(),
@@ -750,6 +772,7 @@ impl Session {
     /// library follows them (a logged change outside the undo history), so none goes missing; the
     /// folder is only moved back when no file was left behind at its new path.
     fn apply_with_files(&mut self, entry: &mut UndoEntry, fs: &dyn rename::MoveFs) -> Result<Op> {
+        cloud_sync::guard_undo(&self.catalog, &entry.op, entry.cloud_base.as_ref())?;
         // The entry is detached from self.undo/self.redo: include it before any global
         // repair can retire, then retry revalidates it before moving its own packets.
         rename::validate_sidecars(fs, &entry.retry_sidecars).map_err(|e| EngineError::Other(format!("can't move the files back: {e}")))?;

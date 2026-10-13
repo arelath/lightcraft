@@ -175,6 +175,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("file.addPhotos", "Import Photos…", Some("Cmd+Shift+I"), "File"),
     ("file.importCloud", "Import to Cloud Storage…", None, "File"),
     ("dialog.cloudStorage", "Cloud Storage…", None, "File"),
+    ("dialog.cloudSync", "Cloud Synchronization…", None, "File"),
     ("file.addFolder", "Import from Folder…", None, "File"),
     ("file.importLightroom", "Import Lightroom Catalog…", None, "File"),
     ("file.addFromDevice", "Import from Device", None, ""),
@@ -1317,6 +1318,21 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             });
             Ok(Value::Null)
         }
+        "dialog.cloudSync" => {
+            let configured = match app.run("cloud.connections", json!({})) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            };
+            let saved = configured.get("connections").and_then(Value::as_array).and_then(|connections| connections.first());
+            let connection = p
+                .get("connection")
+                .and_then(Value::as_str)
+                .or_else(|| saved.and_then(|c| c.get("id")).and_then(Value::as_str))
+                .unwrap_or("")
+                .to_owned();
+            app.ui.dialog = Some(Dialog::CloudSync { connection, library: p.get("library").and_then(Value::as_str).unwrap_or("").to_owned() });
+            Ok(Value::Null)
+        }
         "file.importCloud" => {
             let configured = match app.run("cloud.connections", json!({})) {
                 Ok(value) => value,
@@ -1882,7 +1898,7 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
                     .and_then(|id| app.session.catalog.photo(id))
                     .is_some_and(|p| matches!(p.source, lightcraft_engine::catalog::Source::File { .. }))
         }
-        "file.importCloud" | "dialog.cloudStorage" => cfg!(not(target_arch = "wasm32")) && app.session.library.is_some(),
+        "file.importCloud" | "dialog.cloudStorage" | "dialog.cloudSync" => cfg!(not(target_arch = "wasm32")) && app.session.library.is_some(),
         "file.exportPresets" => app.session.presets.iter().any(|p| !p.builtin),
         "file.exportCurvePresets" => !app.session.curve_presets.is_empty(),
         "view.compare" => app.session.catalog.len() > 1,

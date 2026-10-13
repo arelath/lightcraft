@@ -1,0 +1,497 @@
+//! Portable, bounded mutation reconciliation. No paths, credentials, I/O or UI dependencies.
+//! Concurrent field values survive until a causally later edit resolves them. Memberships are
+//! individual boolean fields, so additions of different photos never replace one another.
+use crate::{CatalogError, Result, assets::identifier};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+
+pub const MAX_MUTATION_BYTES: usize = 2 << 20;
+const MAX_STATE_BYTES: usize = 64 << 20;
+const MAX_DEVICES: usize = 4096;
+const MAX_RECORDS: usize = 100_000;
+pub type Clock = BTreeMap<String, u64>;
+
+fn invalid(message: &str) -> CatalogError {
+    CatalogError::Invalid(message.into())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Stamp {
+    pub sequence: u64,
+    pub device: String,
+}
+impl Stamp {
+    pub fn id(&self) -> String {
+        format!("{}-{}", self.device, self.sequence)
+    }
+    fn validate(&self) -> Result<()> {
+        if !identifier(&self.device) || self.device.len() > 96 || self.sequence == 0 {
+            return Err(invalid("invalid synchronization revision"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Change {
+    pub entity: String,
+    pub field: String,
+    pub base: Option<Stamp>,
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Mutation {
+    pub version: u32,
+    pub library: String,
+    pub revision: Stamp,
+    pub context: Clock,
+    pub changes: Vec<Change>,
+}
+fn valid_clock(clock: &Clock) -> bool {
+    clock.len() <= MAX_DEVICES && clock.iter().all(|(id, sequence)| identifier(id) && id.len() <= 96 && *sequence > 0)
+}
+pub fn entity(value: &str) -> bool {
+    value.split_once(':').is_some_and(|(kind, id)| matches!(kind, "photo" | "album" | "stack" | "keyword" | "library") && identifier(id))
+}
+impl Mutation {
+    pub fn validate(&self) -> Result<()> {
+        self.revision.validate()?;
+        if self.version != 1
+            || !identifier(&self.library)
+            || !valid_clock(&self.context)
+            || self.context.get(&self.revision.device).copied().unwrap_or(0) != self.revision.sequence - 1
+            || self.changes.is_empty()
+            || self.changes.len() > 10_000
+        {
+            return Err(invalid("invalid or unsupported synchronization mutation"));
+        }
+        let mut fields = BTreeSet::new();
+        for change in &self.changes {
+            if !entity(&change.entity)
+                || change.field.is_empty()
+                || change.field.len() > 1024
+                || change.field.chars().any(char::is_control)
+                || !fields.insert((&change.entity, &change.field))
+            {
+                return Err(invalid("invalid or duplicate synchronized field"));
+            }
+            if let Some(base) = &change.base {
+                base.validate()?;
+                if self.context.get(&base.device).copied().unwrap_or(0) < base.sequence {
+                    return Err(invalid("mutation base revision is outside its causal context"));
+                }
+            }
+        }
+        if serde_json::to_vec(self).map_err(|e| invalid(&e.to_string()))?.len() > MAX_MUTATION_BYTES {
+            return Err(invalid("synchronization mutation exceeds 2 MiB; local data retained"));
+        }
+        Ok(())
+    }
+    pub fn digest(&self) -> Result<String> {
+        let bytes = serde_json::to_vec(self).map_err(|e| invalid(&e.to_string()))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Receipt {
+    pub context: Clock,
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Register(pub BTreeMap<String, Value>);
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SyncState {
+    pub version: u32,
+    pub library: String,
+    pub device: String,
+    /// Device-local connection binding, never part of a remote mutation/checkpoint.
+    pub connection: String,
+    pub clock: Clock,
+    pub cursor: Option<String>,
+    pub generation: u64,
+    pub documents: BTreeMap<String, BTreeMap<String, Register>>,
+    pub received: BTreeMap<String, Receipt>,
+    pub pending: BTreeMap<String, Mutation>,
+}
+
+/// Provider-independent checkpoint payload. All device-local state and unacknowledged work
+/// are excluded; a returning device merges this with its own durable pending mutations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Portable {
+    pub version: u32,
+    pub library: String,
+    pub clock: Clock,
+    pub documents: BTreeMap<String, BTreeMap<String, Register>>,
+    pub received: BTreeMap<String, Receipt>,
+}
+impl Portable {
+    pub fn validate(&self) -> Result<()> {
+        let state = SyncState {
+            version: self.version,
+            library: self.library.clone(),
+            device: "checkpoint".into(),
+            connection: "remote".into(),
+            clock: self.clock.clone(),
+            cursor: None,
+            generation: 0,
+            documents: self.documents.clone(),
+            received: self.received.clone(),
+            pending: BTreeMap::new(),
+        };
+        state.validate()
+    }
+}
+impl SyncState {
+    pub fn portable(&self) -> Portable {
+        Portable {
+            version: self.version,
+            library: self.library.clone(),
+            clock: self.clock.clone(),
+            documents: self.documents.clone(),
+            received: self.received.clone(),
+        }
+    }
+    /// Merge a verified checkpoint without replacing local identities, pending work or cursor.
+    pub fn merge(&mut self, remote: &Portable) -> Result<()> {
+        remote.validate()?;
+        if remote.library != self.library {
+            return Err(invalid("checkpoint belongs to another library"));
+        }
+        let mut next = self.clone();
+        for (id, receipt) in &remote.received {
+            if next.received.get(id).is_some_and(|old| old != receipt) {
+                return Err(invalid("checkpoint mutation receipt collision; local work retained"));
+            }
+            next.received.insert(id.clone(), receipt.clone());
+        }
+        for (device, sequence) in &remote.clock {
+            next.clock.entry(device.clone()).and_modify(|v| *v = (*v).max(*sequence)).or_insert(*sequence);
+        }
+        for (entity, fields) in &remote.documents {
+            for (field, register) in fields {
+                let target = next.documents.entry(entity.clone()).or_default().entry(field.clone()).or_default();
+                for (id, value) in &register.0 {
+                    if target.0.get(id).is_some_and(|old| old != value) {
+                        return Err(invalid("checkpoint mutation content collision; local work retained"));
+                    }
+                    target.0.insert(id.clone(), value.clone());
+                }
+            }
+        }
+        for fields in next.documents.values_mut() {
+            for register in fields.values_mut() {
+                let ids: Vec<_> = register.0.keys().cloned().collect();
+                register.0.retain(|id, _| {
+                    let Some(stamp) = Self::stamp(id) else { return true };
+                    !ids.iter().any(|other| {
+                        if stamp.device.starts_with("baseline_") && Self::stamp(other).is_some_and(|other| !other.device.starts_with("baseline_")) {
+                            return true;
+                        }
+                        other != id
+                            && next
+                                .received
+                                .get(other)
+                                .is_some_and(|receipt| receipt.context.get(&stamp.device).copied().unwrap_or(0) >= stamp.sequence)
+                    })
+                });
+                if !ids.is_empty() && register.0.is_empty() {
+                    return Err(invalid("checkpoint causal revisions contain a cycle"));
+                }
+            }
+        }
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
+    pub fn new(library: String, device: String, connection: String) -> Result<Self> {
+        let state = Self {
+            version: 1,
+            library,
+            device,
+            connection,
+            clock: Clock::new(),
+            cursor: None,
+            generation: 0,
+            documents: BTreeMap::new(),
+            received: BTreeMap::new(),
+            pending: BTreeMap::new(),
+        };
+        state.validate()?;
+        Ok(state)
+    }
+    pub fn validate(&self) -> Result<()> {
+        if self.version != 1
+            || !identifier(&self.library)
+            || !identifier(&self.device)
+            || self.device.len() > 96
+            || !identifier(&self.connection)
+            || !valid_clock(&self.clock)
+            || self.documents.len() > MAX_RECORDS
+            || self.received.len() > MAX_RECORDS
+            || self.pending.len() > 10_000
+            || self.cursor.as_ref().is_some_and(|id| id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(invalid("invalid or oversized synchronization state; preserved"));
+        }
+        for (id, receipt) in &self.received {
+            let stamp = Self::stamp(id).ok_or_else(|| invalid("invalid synchronization receipt identity"))?;
+            stamp.validate()?;
+            if !identifier(id)
+                || !valid_clock(&receipt.context)
+                || receipt.context.get(&stamp.device).copied().unwrap_or(0) != stamp.sequence - 1
+                || self.clock.get(&stamp.device).copied().unwrap_or(0) < stamp.sequence
+                || receipt.digest.len() != 64
+                || !receipt.digest.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(invalid("invalid synchronization receipt"));
+            }
+        }
+        for (id, mutation) in &self.pending {
+            mutation.validate()?;
+            if mutation.library != self.library
+                || mutation.revision.device != self.device
+                || mutation.revision.id() != *id
+                || self.received.get(id).is_none_or(|r| mutation.digest().ok().as_ref() != Some(&r.digest))
+            {
+                return Err(invalid("pending mutation identity or receipt mismatch"));
+            }
+        }
+        for (id, fields) in &self.documents {
+            if !entity(id) || fields.len() > 10_000 {
+                return Err(invalid("invalid synchronized document"));
+            }
+            for (field, register) in fields {
+                if field.is_empty()
+                    || field.len() > 1024
+                    || field.chars().any(char::is_control)
+                    || register.0.len() > 128
+                    || register.0.keys().any(|id| !self.received.contains_key(id))
+                {
+                    return Err(invalid("invalid synchronized field register"));
+                }
+            }
+        }
+        if serde_json::to_vec(self).map_err(|e| invalid(&e.to_string()))?.len() > MAX_STATE_BYTES {
+            return Err(invalid("synchronization state exceeds 64 MiB; checkpoint required, local data retained"));
+        }
+        Ok(())
+    }
+    fn stamp(id: &str) -> Option<Stamp> {
+        let (device, sequence) = id.rsplit_once('-')?;
+        Some(Stamp { device: device.into(), sequence: sequence.parse().ok()? })
+    }
+    pub fn winning(&self, entity: &str, field: &str) -> Option<(Stamp, &Value)> {
+        let register = self.documents.get(entity)?.get(field)?;
+        register
+            .0
+            .iter()
+            .filter_map(|(id, value)| Self::stamp(id).map(|stamp| (stamp, value)))
+            .max_by_key(|(stamp, value)| (field == "deleted" && value.as_bool() == Some(true), stamp.clone()))
+    }
+    /// Atomic even for invalid replay, bounds failures or conflicting identities.
+    pub fn receive(&mut self, mutation: &Mutation) -> Result<bool> {
+        let mut next = self.clone();
+        let changed = next.receive_inner(mutation)?;
+        if changed {
+            next.validate()?;
+            *self = next;
+        }
+        Ok(changed)
+    }
+    fn receive_inner(&mut self, mutation: &Mutation) -> Result<bool> {
+        mutation.validate()?;
+        if mutation.library != self.library {
+            return Err(invalid("mutation belongs to a different library"));
+        }
+        let id = mutation.revision.id();
+        let digest = mutation.digest()?;
+        if let Some(previous) = self.received.get(&id) {
+            if previous.digest != digest {
+                return Err(invalid("replayed mutation identity describes different data"));
+            }
+            return Ok(false);
+        }
+        for change in &mutation.changes {
+            let register = self.documents.entry(change.entity.clone()).or_default().entry(change.field.clone()).or_default();
+            let mut dominated = false;
+            register.0.retain(|current, _| {
+                let Some(stamp) = Self::stamp(current) else { return true };
+                if mutation.revision.device.starts_with("baseline_") && !stamp.device.starts_with("baseline_") {
+                    dominated = true;
+                    return true;
+                }
+                if stamp.device.starts_with("baseline_") && !mutation.revision.device.starts_with("baseline_") {
+                    return false;
+                }
+                if self
+                    .received
+                    .get(current)
+                    .is_some_and(|r| r.context.get(&mutation.revision.device).copied().unwrap_or(0) >= mutation.revision.sequence)
+                {
+                    dominated = true;
+                }
+                mutation.context.get(&stamp.device).copied().unwrap_or(0) < stamp.sequence
+            });
+            if !dominated {
+                register.0.insert(id.clone(), change.value.clone());
+            }
+        }
+        self.received.insert(id, Receipt { context: mutation.context.clone(), digest });
+        self.clock
+            .entry(mutation.revision.device.clone())
+            .and_modify(|v| *v = (*v).max(mutation.revision.sequence))
+            .or_insert(mutation.revision.sequence);
+        for (device, sequence) in &mutation.context {
+            self.clock.entry(device.clone()).and_modify(|v| *v = (*v).max(*sequence)).or_insert(*sequence);
+        }
+        Ok(true)
+    }
+    pub fn enqueue(&mut self, changes: Vec<Change>) -> Result<Option<Mutation>> {
+        if changes.is_empty() {
+            return Ok(None);
+        }
+        let sequence = self.clock.get(&self.device).copied().unwrap_or(0).checked_add(1).ok_or_else(|| invalid("device revision exhausted"))?;
+        let mutation = Mutation {
+            version: 1,
+            library: self.library.clone(),
+            revision: Stamp { sequence, device: self.device.clone() },
+            context: self.clock.clone(),
+            changes,
+        };
+        let mut next = self.clone();
+        next.receive_inner(&mutation)?;
+        next.pending.insert(mutation.revision.id(), mutation.clone());
+        next.validate()?;
+        *self = next;
+        Ok(Some(mutation))
+    }
+    /// Call only in the same journal record as incoming catalog changes. A failed durable
+    /// append leaves this state and its original pending mutation identities queued for retry.
+    pub fn acknowledge(&mut self, ids: &BTreeSet<String>, cursor: String, generation: u64) -> Result<()> {
+        if generation == 0
+            || generation < self.generation
+            || (generation == self.generation && self.cursor.as_ref().is_some_and(|old| old != &cursor))
+        {
+            return Err(invalid("stale or inconsistent remote catalog cursor; pending work retained"));
+        }
+        let mut next = self.clone();
+        next.pending.retain(|id, _| !ids.contains(id));
+        next.cursor = Some(cursor);
+        next.generation = generation;
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    fn state(device: &str) -> SyncState {
+        SyncState::new("library".into(), device.into(), "personal".into()).unwrap()
+    }
+    fn set(s: &mut SyncState, entity: &str, field: &str, value: Value) -> Mutation {
+        let base = s.winning(entity, field).map(|(stamp, _)| stamp);
+        s.enqueue(vec![Change { entity: entity.into(), field: field.into(), base, value }]).unwrap().unwrap()
+    }
+    #[test]
+    fn independent_fields_and_album_additions_converge_and_replay_is_idempotent() {
+        let mut a = state("a");
+        let mut b = state("b");
+        let rating = set(&mut a, "photo:one", "rating", json!(4));
+        let title = set(&mut b, "photo:one", "meta.title", json!("Paris"));
+        a.receive(&title).unwrap();
+        b.receive(&rating).unwrap();
+        let first = set(&mut a, "album:trip", "member:one", json!(true));
+        let second = set(&mut b, "album:trip", "member:two", json!(true));
+        a.receive(&second).unwrap();
+        b.receive(&first).unwrap();
+        assert_eq!(a.documents, b.documents);
+        assert!(!a.receive(&rating).unwrap());
+        let before = a.clone();
+        let mut bad = rating;
+        bad.changes[0].value = json!(2);
+        assert!(a.receive(&bad).is_err());
+        assert_eq!(a, before);
+    }
+    #[test]
+    fn competing_recipes_survive_and_a_causal_resolution_retires_both() {
+        let mut a = state("a");
+        let mut b = state("b");
+        let first = set(&mut a, "photo:one", "develop", json!({"exposure":1}));
+        let second = set(&mut b, "photo:one", "develop", json!({"exposure":2}));
+        a.receive(&second).unwrap();
+        b.receive(&first).unwrap();
+        assert_eq!(a.documents, b.documents);
+        assert_eq!(a.documents["photo:one"]["develop"].0.len(), 2);
+        let resolved = set(&mut a, "photo:one", "develop", json!({"exposure":3}));
+        b.receive(&resolved).unwrap();
+        assert_eq!(a.documents, b.documents);
+        assert_eq!(a.documents["photo:one"]["develop"].0.len(), 1);
+    }
+    #[test]
+    fn tombstone_wins_concurrent_restore_but_offline_edits_remain_recoverable() {
+        let mut a = state("a");
+        let mut b = state("b");
+        let removed = set(&mut a, "photo:one", "deleted", json!(true));
+        let restored = set(&mut b, "photo:one", "deleted", json!(false));
+        let edited = set(&mut b, "photo:one", "develop", json!({"exposure":2}));
+        a.receive(&restored).unwrap();
+        a.receive(&edited).unwrap();
+        b.receive(&removed).unwrap();
+        assert_eq!(a.documents, b.documents);
+        assert_eq!(a.winning("photo:one", "deleted").unwrap().1, &json!(true));
+        assert!(a.winning("photo:one", "develop").is_some());
+        let explicit = set(&mut a, "photo:one", "deleted", json!(false));
+        b.receive(&explicit).unwrap();
+        assert_eq!(b.winning("photo:one", "deleted").unwrap().1, &json!(false));
+    }
+    #[test]
+    fn older_replay_cannot_overwrite_a_causal_descendant_or_lose_unrelated_fields() {
+        let mut a = state("a");
+        let first = set(&mut a, "photo:one", "rating", json!(1));
+        let second = set(&mut a, "photo:one", "rating", json!(5));
+        let mut b = state("b");
+        b.receive(&second).unwrap();
+        b.receive(&first).unwrap();
+        assert_eq!(b.winning("photo:one", "rating").unwrap().1, &json!(5));
+    }
+
+    #[test]
+    fn legacy_baselines_never_replace_offline_edits_and_checkpoint_merge_keeps_pending_work() {
+        let mut a = state("a");
+        let authored = set(&mut a, "photo:one", "rating", json!(4));
+        let baseline = Mutation {
+            version: 1,
+            library: "library".into(),
+            revision: Stamp { sequence: 1, device: "baseline_fixture".into() },
+            context: Clock::new(),
+            changes: vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(0) }],
+        };
+        let mut remote = state("b");
+        remote.receive(&baseline).unwrap();
+        remote.receive(&authored).unwrap();
+        a.receive(&baseline).unwrap();
+        assert_eq!(a.documents, remote.documents);
+        assert_eq!(a.winning("photo:one", "rating").unwrap().1, &json!(4));
+        let pending = a.pending.clone();
+        a.merge(&remote.portable()).unwrap();
+        assert_eq!(a.pending, pending);
+        assert!(a.acknowledge(&BTreeSet::new(), "a".repeat(64), 0).is_err());
+        assert_eq!(a.pending, pending);
+    }
+}

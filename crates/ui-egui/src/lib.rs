@@ -1088,9 +1088,13 @@ impl LightcraftApp {
         #[cfg(not(target_arch = "wasm32"))]
         self.session.poll_cloud_uploads();
         #[cfg(not(target_arch = "wasm32"))]
+        self.session.poll_cloud_replication();
+        #[cfg(not(target_arch = "wasm32"))]
         self.cloud_removal_outcome(ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.session.resume_cloud_uploads();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.session.resume_cloud_replication();
         merge::poll(self, ctx);
         import::poll_scan(self, ctx);
         sync::poll(self, ctx);

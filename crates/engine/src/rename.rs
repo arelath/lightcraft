@@ -1118,7 +1118,6 @@ impl Session {
                         Op::Batch { ops } => ops,
                         op => vec![op],
                     };
-                    self.pending_log.push(fix);
                     Ok(())
                 }
                 Err(e) => Err(e),

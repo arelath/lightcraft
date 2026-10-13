@@ -111,6 +111,7 @@ pub struct State {
     pub hold_abort: bool,
     pub defer_abort: usize,
     pub unsupported_conditional: bool,
+    pub next_head: Option<Vec<u8>>,
 }
 
 pub struct Fixture {
@@ -343,6 +344,11 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
             status = 404;
         }
     } else if method == "PUT" {
+        if key.ends_with("/catalog/head.json")
+            && let Some(competing) = state.next_head.take()
+        {
+            state.objects.insert(key.to_owned(), competing);
+        }
         let absent = headers.get("if-none-match").map(String::as_str) == Some("*");
         let matches = headers.get("if-match");
         assert!(absent || matches.is_some(), "every write must be conditional");
@@ -364,6 +370,27 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
                             "no catalog head may reference absent or wrong bytes"
                         );
                     }
+                }
+                for mutation in batch.get("mutations").and_then(Value::as_array).into_iter().flatten() {
+                    for change in mutation["changes"].as_array().unwrap().iter().filter(|change| change["field"] == "content") {
+                        let asset = &change["value"]["asset"];
+                        let mut blobs = vec![&asset["original"]];
+                        blobs.extend([asset.get("smartPreview"), asset.get("thumbnail")].into_iter().flatten().filter(|blob| !blob.is_null()));
+                        blobs.extend(asset.get("associated").and_then(Value::as_object).into_iter().flat_map(|map| map.values()));
+                        for blob in blobs {
+                            let object = format!("/photos/{}", blob["remote"]["key"].as_str().unwrap());
+                            assert_eq!(
+                                hash(&state.objects[&object]),
+                                blob["id"].as_str().unwrap(),
+                                "mutation references only verified uploaded bytes"
+                            );
+                            assert_eq!(state.objects[&object].len() as u64, blob["size"].as_u64().unwrap());
+                        }
+                    }
+                }
+                if let Some(checkpoint) = head.get("checkpoint") {
+                    let object = format!("/photos/{}", checkpoint["object"]["key"].as_str().unwrap());
+                    assert_eq!(hash(&state.objects[&object]), checkpoint["object"]["hash"].as_str().unwrap());
                 }
                 lose = std::mem::take(&mut state.lost_head);
             } else {
