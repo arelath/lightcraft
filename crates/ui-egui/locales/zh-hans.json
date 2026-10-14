@@ -1990,5 +1990,12 @@
   "not added to Apple Photos (cancelled)": "未添加到 Apple 照片（已取消）",
   "The first time, macOS asks whether LightCraft may control Photos.": "首次使用时，macOS 会询问是否允许 LightCraft 控制“照片”。",
   "Adding to Apple Photos": "正在添加到 Apple 照片",
-  "Smart albums with local folders or local photo selections stay on this device.": "包含本地文件夹或本地照片选择的智能相册会保留在此设备上。"
+  "Smart albums with local folders or local photo selections stay on this device.": "包含本地文件夹或本地照片选择的智能相册会保留在此设备上。",
+  "Checking cloud library": "正在检查云端图库",
+  "Automatic checking stopped after an error.": "自动检查因错误而停止。",
+  "No successful remote check in this session.": "本次会话尚未成功完成远程检查。",
+  "Local upload records waiting": "等待处理的本地上传记录",
+  "Album or stack choices need attention": "相册或堆叠的冲突需要处理",
+  "Cloud library — synchronization needs attention": "云端图库 — 同步需要关注",
+  "Cloud library — checking synchronization": "云端图库 — 正在检查同步"
 }

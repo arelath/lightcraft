@@ -418,6 +418,8 @@ impl Session {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.cloud_replication_jobs = Default::default();
+            self.cloud_uploads = Default::default();
+            self.cloud_imports = Default::default();
         }
         self.library_generation = crate::LIBRARY_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for entry in self.undo.iter_mut().chain(self.redo.iter_mut()) {

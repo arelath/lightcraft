@@ -41,7 +41,7 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 - [x] CR.26 — Resolve shared stack ownership and validity independently of local-only members, then apply local overlays. Test identical shared proposals S1=(P,Q), S2=(Q,R), S3=(R,S) with and without a local-only member of S2, comparing projected cloud relationships.
 - [x] CR.27 — Durably finalize every upload receipt covered by shared acknowledgement with exact publication evidence. Retry local proof writes after restart independently of media transfer; test delayed bulk siblings and subsequent local-copy removal without manual verification. Keep staging protection intact.
 - [x] CR.28 — Make per-import preflight failures explicit queue outcomes with retained blocked reasons and defined retry eligibility. Test one unreadable manifest alongside a healthy import: healthy work completes and the blocked item exposes its specific recovery action.
-- [ ] CR.29 — Model subsystem health explicitly: user pause, polling halted by error, publication waiting, structural conflicts, and last successful remote scan. A success clears only the recovered subsystem's failure. Test failed automatic sync followed by upload success, and structural-only conflicts; never infer healthy synchronization solely from no pending local work.
+- [x] CR.29 — Model subsystem health explicitly: user pause, polling halted by error, publication waiting, structural conflicts, and last successful remote scan. A success clears only the recovered subsystem's failure. Test failed automatic sync followed by upload success, and structural-only conflicts; never infer healthy synchronization solely from no pending local work.
 - [ ] CR.30 — Record logical fields changed by actions and construct undo/redo inverses against current state. Guard those fields' revisions while preserving independent remote metadata and membership changes. Test local title undo after remote caption editing, plus concurrent changes to the same title.
 - [ ] CR.31 — Separate verified media readiness, metadata publication, and covered-receipt finalization under one authoritative per-library coordinator (with CR.13/CR.22/CR.27). The per-library publication gate landed in CR.22 and durable local receipt finalization in CR.27; media stage extraction and bulk-import request-count/transferred-byte assertions remain open.
 - [ ] CR.32 — Replace contradictory protocol outcome combinations and sentinel cursors/generations with explicit unchanged, conditional-head, and append outcome variants. Test evidence merging, monotonic cursors, and no-op writes.
@@ -446,3 +446,38 @@ Evidence: ignored `target/cloud-reliability/cr28-native-results-*.json` and requ
 C: scratch `lightcraft-cr28-native/native-d461fb22/` and `native-76cf7cf8/`. CR.28 is complete.
 Shared status/UI/schema behavior is tested and WASM-compiled; native staged-upload preparation
 has no browser equivalent. No live-provider acceptance is claimed. Scheduler health remains CR.29.
+
+
+2026-10-15 — CR.29 implementation: native/browser polling health now retains its own
+error and last verified remote scan independently of upload activity. Resume permits
+retry but does not erase the error before a successful check. Verified upload
+publication records scan evidence without restarting halted polling. Media/cleanup
+failures recover per resource; bounded details retain total failure counts. Direct
+library replacement cancels uploads and resets per-library health/attempt state;
+superseded results cannot halt the new scheduler. Cached status includes durable
+blocked/failed intents and receipt work, even for removed imports. The popup/icon
+include structural-only conflicts, pending receipts and append gaps, and show scan
+age. Up to date requires verified healthy polling and no recovery work/conflicts.
+All nine locale catalogs include the new status labels.
+
+The focused rendered popup test passed for stopped polling and structural-only
+conflicts, then recovery to Up to date. The focused owner-worker regression passed
+for failed polling followed by a higher-ID upload success and verified scan recovery.
+All eight full CI stages passed (`cr29-ci.log`), including native/browser compilation and all workspace tests. Native binaries rebuilt (`cr29-native-build.log`).
+
+
+Rebuilt desktop acceptance passed on both protocols. Automatic polling failed on
+rejected fixture credentials; a later successful upload/publication retained the
+polling error and attention badge despite zero pending work. Another peer edited a
+photo; the stopped device received it only after clicking the actual Retry Syncing
+control, which cleared that subsystem's error. Concurrent folder moves produced
+one structural conflict with zero photo issues/local changes; both protocol
+popups and badges correctly required attention. Both stopped-polling and structural
+popups were visually inspected, as was the recovered grid; `ui.inspect` was captured.
+All 307 signed loopback requests verified (128 head / 179 append). The first native
+script assumed a synchronous desktop import and was corrected to await its background
+report before checking upload completion. Evidence: ignored
+`target/cloud-reliability/cr29-native-results-*.json` and request logs; C: scratch
+`lightcraft-cr29-native/native-2f2db31d/` and `native-191dfc40/`. CR.29 is complete.
+Shared health/UI behavior and browser host are tested/WASM-compiled; fresh browser
+and live-provider acceptance are not claimed.

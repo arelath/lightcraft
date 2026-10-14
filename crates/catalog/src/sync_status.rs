@@ -43,6 +43,10 @@ pub struct Overview {
     pub queued_bytes: u64,
     pub pending_changes: u64,
     pub blocked_import_count: u64,
+    pub failed_uploads: u64,
+    pub pending_receipts: u64,
+    pub failed_receipts: u64,
+    pub first_upload_error: Option<String>,
     pub blocked_imports: Vec<BlockedImport>,
     #[serde(skip)]
     pub statuses: BTreeMap<PhotoId, SyncStatus>,
@@ -110,6 +114,22 @@ fn build(cat: &Catalog) -> Overview {
     let mut failed_files = BTreeSet::new();
     let mut queue_blobs = BTreeSet::new();
     for (id, intent) in cat.upload_intents() {
+        if out.first_upload_error.is_none() {
+            out.first_upload_error = intent
+                .blocked
+                .as_ref()
+                .map(|block| block.reason.clone())
+                .or_else(|| intent.error.clone().filter(|_| intent.state == UploadState::Failed || intent.finalization.is_some()));
+        }
+        if intent.state == UploadState::Failed || intent.blocked.is_some() {
+            out.failed_uploads = out.failed_uploads.saturating_add(1);
+        }
+        if intent.finalization.is_some() {
+            out.pending_receipts = out.pending_receipts.saturating_add(1);
+            if intent.error.is_some() {
+                out.failed_receipts = out.failed_receipts.saturating_add(1);
+            }
+        }
         if let Some(block) = &intent.blocked {
             out.blocked_import_count = out.blocked_import_count.saturating_add(1);
             if out.blocked_imports.len() < 32 {

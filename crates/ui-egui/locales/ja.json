@@ -1954,5 +1954,12 @@
   "not added to Apple Photos (cancelled)": "Appleの写真には追加されませんでした（キャンセル）",
   "The first time, macOS asks whether LightCraft may control Photos.": "初回は、LightCraftに写真の操作を許可するかmacOSが確認します。",
   "Adding to Apple Photos": "Appleの写真に追加中",
-  "Smart albums with local folders or local photo selections stay on this device.": "ローカルフォルダーやローカル写真の選択を使うスマートアルバムは、このデバイスに保持されます。"
+  "Smart albums with local folders or local photo selections stay on this device.": "ローカルフォルダーやローカル写真の選択を使うスマートアルバムは、このデバイスに保持されます。",
+  "Checking cloud library": "クラウドライブラリを確認中",
+  "Automatic checking stopped after an error.": "エラーのため自動確認が停止しました。",
+  "No successful remote check in this session.": "このセッションではリモート確認がまだ成功していません。",
+  "Local upload records waiting": "ローカルのアップロード記録が待機中",
+  "Album or stack choices need attention": "アルバムまたはスタックの競合を確認してください",
+  "Cloud library — synchronization needs attention": "クラウドライブラリ — 同期の確認が必要です",
+  "Cloud library — checking synchronization": "クラウドライブラリ — 同期を確認中"
 }

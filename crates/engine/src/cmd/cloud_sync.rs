@@ -30,10 +30,15 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
     let conflicts = s.cloud_conflicts_cache.as_ref().map(|(_, _, value)| value);
     #[cfg(not(target_arch = "wasm32"))]
     let (running, reports) = (s.cloud_replication_jobs.running(), s.cloud_replication_jobs.reports.clone());
+    #[cfg(not(target_arch = "wasm32"))]
+    let health = s.cloud_replication_jobs.health(true, s.cloud_paused);
     #[cfg(target_arch = "wasm32")]
     let (running, reports) = (false, Vec::<Value>::new());
+    #[cfg(target_arch = "wasm32")]
+    let health = crate::cloud_status::PollHealth::default().view(true, false, s.cloud_paused, false, false);
     Ok(json!({"enabled":true,"library":state.library,"device":state.device,"connection":state.connection,
         "paused":s.cloud_paused,
+        "health":health,
         "preparingMigration":preparing_migration(s),
         "migrating":migrating(s),
         "protocol":state.protocol,"frontiers":state.append.as_ref().map(|p|&p.frontiers),"gaps":state.append.as_ref().map(|p|&p.gaps),

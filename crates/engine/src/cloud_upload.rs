@@ -719,6 +719,7 @@ struct Pending {
     resolver: Arc<AssetResolver>,
     connection_revision: u64,
     ids: BTreeMap<String, lightcraft_catalog::assets::AssetId>,
+    verification_ids: BTreeSet<String>,
     connections: BTreeSet<String>,
     maintenance: Option<String>,
     guard: TaskGuard,
@@ -740,8 +741,12 @@ pub struct Uploads {
     finalization_retry: BTreeMap<String, web_time::Instant>,
     finalization_revision: Option<u64>,
     finalization_candidates: BTreeSet<String>,
+    health: crate::cloud_status::ResourceHealth,
 }
 impl Uploads {
+    pub fn health(&self) -> Value {
+        self.health.view()
+    }
     pub fn active_files(&self, catalog: &lightcraft_catalog::Catalog) -> usize {
         self.pending
             .iter()
@@ -767,6 +772,51 @@ impl Uploads {
         if include_failed {
             self.attempted.clear();
             self.finalization_retry.clear();
+        }
+    }
+}
+
+fn task_health(health: &mut crate::cloud_status::ResourceHealth, s: &Session, pending: &Pending, result: &Result<Value>) {
+    if !Arc::ptr_eq(&pending.library, &s.library_token())
+        || pending.connection_revision != pending.resolver.connection_revision()
+        || pending.guard.is_cancelled()
+    {
+        return;
+    }
+    if pending.maintenance.as_deref() == Some("receipt") {
+        if result.is_ok() {
+            for id in pending.ids.keys() {
+                health.success(&format!("upload:{id}"));
+            }
+        }
+        return;
+    } // Durable receipt errors live in the intent; verification failures require verification.
+    for id in pending.ids.keys() {
+        let Some(intent) = s.catalog.upload_intents().get(id) else { continue };
+        let verification = pending.verification_ids.contains(id);
+        let resource = format!("{}:{id}", if verification { "verify" } else { "upload" });
+        match result {
+            Ok(_) => {
+                health.success(&resource);
+                if matches!(intent.state, UploadState::ObjectsVerified | UploadState::Published | UploadState::Synchronized) {
+                    health.success(&format!("upload:{id}"));
+                    health.success(&format!("verify:{id}"));
+                }
+            }
+            Err(_) if intent.state == UploadState::Failed || intent.blocked.is_some() => health.success(&resource),
+            Err(reason) if intent.state != UploadState::Synchronized || verification => {
+                health.fail(resource, &reason.to_string(), Some(pending.guard.id()))
+            }
+            _ => {} // An obsolete ordinary failure cannot revoke a newer verified ACK.
+        }
+    }
+    if pending.ids.is_empty()
+        && let Some(connection) = &pending.maintenance
+    {
+        let key = format!("cleanup:{connection}");
+        match result {
+            Ok(_) => health.success(&key),
+            Err(reason) => health.fail(key, &reason.to_string(), Some(pending.guard.id())),
         }
     }
 }
@@ -1011,6 +1061,7 @@ pub(crate) fn remove_local(s: &mut Session, p: &Value, blobs: Vec<Blob>, observe
         connection_revision: resolver.connection_revision(),
         resolver,
         ids,
+        verification_ids: BTreeSet::new(),
         connections: BTreeSet::new(),
         maintenance: None,
         guard: task,
@@ -1102,6 +1153,7 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
     let worker_bytes = bytes.clone();
     let cancel = task.cancel_flag().ok_or_else(|| error("upload cancellation flag unavailable"))?;
     let ids = items.iter().map(|item| (item.id.clone(), item.imported.asset_id.clone())).collect();
+    let verification_ids = items.iter().filter(|item| item.reverification).map(|item| item.id.clone()).collect();
     let connections = items.iter().map(|item| item.connection.id.clone()).collect();
     let (sender, receiver) = mpsc::sync_channel(2);
     let worker_cancel = cancel.clone();
@@ -1156,6 +1208,7 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
         resolver: owner_resolver,
         connection_revision,
         ids,
+        verification_ids,
         connections,
         maintenance: None,
         guard: task,
@@ -1304,6 +1357,7 @@ impl Session {
                                 self.apply_received(inverse)?;
                                 return Err(e);
                             }
+                            self.cloud_replication_jobs.publication_scan(pending.guard.id());
                             Ok(())
                         })();
                         let _ = reply.send(result);
@@ -1355,6 +1409,7 @@ impl Session {
                         let _ = reply.send(result);
                     }
                     Ok(Event::Finished(result)) => {
+                        task_health(&mut uploads.health,self,pending,&result);
                         if Arc::ptr_eq(&pending.library, &self.library_token()) && pending.connection_revision == pending.resolver.connection_revision()
                             && let Err(reason) = &result {
                             for id in pending.ids.keys() { finalize::record_error(self, id, &reason.to_string()); }
@@ -1367,6 +1422,8 @@ impl Session {
                     }
                     Err(mpsc::TryRecvError::Empty) => return true,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        let result = Err(error("upload worker closed; durable receipts retained"));
+                        task_health(&mut uploads.health,self,pending,&result);
                         uploads
                             .reports
                             .push(json!({"task": pending.guard.id(), "ok": false, "error": "upload worker closed; durable receipts retained"}));
@@ -1494,6 +1551,7 @@ mod tests {
             resolver,
             connection_revision,
             ids: BTreeMap::from([("upload-ack-test".into(), intent.asset_id)]),
+            verification_ids: BTreeSet::new(),
             connections: BTreeSet::from(["test".into()]),
             maintenance: None,
             guard,
@@ -1540,6 +1598,7 @@ mod tests {
                 connection_revision: resolver.connection_revision(),
                 resolver,
                 ids: BTreeMap::from([("upload-ack-test".into(), intent.asset_id)]),
+                verification_ids: BTreeSet::new(),
                 connections: BTreeSet::from(["test".into()]),
                 maintenance: None,
                 guard,
@@ -1558,6 +1617,53 @@ mod tests {
             drop(sender);
             s.poll_cloud_uploads();
         }
+    }
+    #[test]
+    fn replacing_a_library_cancels_uploads_and_resets_resource_health_and_attempts() {
+        let root = std::env::temp_dir().join(format!(
+            "lightcraft-upload-health-switch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut s, _) = session(&root);
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let guard = s.activity.start("upload", "Old library upload", crate::activity::Cancel::Yes);
+        let cancel = guard.cancel_flag().unwrap();
+        let resolver = s.media.asset_resolver.clone().unwrap();
+        s.cloud_uploads.pending.push(Pending {
+            receiver,
+            library: s.library_token(),
+            connection_revision: resolver.connection_revision(),
+            resolver,
+            ids: BTreeMap::new(),
+            verification_ids: BTreeSet::new(),
+            connections: BTreeSet::new(),
+            maintenance: None,
+            guard,
+            cancel: cancel.clone(),
+        });
+        s.cloud_uploads.health.fail("upload:old".into(), "old failure", None);
+        s.cloud_uploads.attempted.insert("old".into());
+        s.cloud_imports.reports.push(json!({"ok":false,"error":"old import"}));
+        s.open_library_in(
+            crate::library::LibraryStores {
+                dir: root.join("other"),
+                catalog: Box::new(lightcraft_catalog::MemStore::new()),
+                files: Box::new(lightcraft_catalog::MemStore::new()),
+                on_disk: false,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(sender.send(Event::Finished(Err(error("old result")))).is_err());
+        assert_eq!(s.cloud_uploads.running(), 0);
+        assert_eq!(s.cloud_uploads.health()["failedResources"], 0);
+        assert!(s.cloud_uploads.attempted.is_empty() && s.cloud_imports.reports.is_empty());
+        s.close_library().unwrap();
+        drop(s);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn automatic_preflight_failure_is_durable_and_retryable_without_revoking_verified_state() {

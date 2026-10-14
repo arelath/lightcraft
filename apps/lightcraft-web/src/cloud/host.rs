@@ -22,6 +22,10 @@ use std::{
 };
 
 pub const CONFIG_FILE: &str = "browser-cloud.json";
+fn timestamp_ms() -> Option<u64> {
+    let now = js_sys::Date::now();
+    if now.is_finite() && (0. ..=8_640_000_000_000_000.).contains(&now) { Some(now as u64) } else { None }
+}
 enum Stage {
     SaveThenSync { checkpoint: bool, audit: bool },
     Network(Rc<RefCell<Option<Result<Outcome, String>>>>),
@@ -51,6 +55,8 @@ struct Data {
     paused: bool,
     next_poll: f64,
     last_audit: f64,
+    health: lightcraft_engine::cloud_status::PollHealth,
+    media_health: lightcraft_engine::cloud_status::ResourceHealth,
 }
 #[derive(Clone)]
 pub struct Host {
@@ -270,6 +276,14 @@ impl Host {
         status["preparingMigration"] = json!(data.preparing_migration);
         status["migrating"] = json!(data.jobs.iter().any(|job| job.migrating));
         status["reports"] = json!(data.reports);
+        status["health"] = data.health.view(
+            s.catalog.sync_state().is_some(),
+            data.sync_running,
+            s.cloud_paused,
+            data.preparing_migration || data.jobs.iter().any(|job| job.migrating),
+            data.paused,
+        );
+        status["health"]["secondsSinceLastRemoteScan"] = json!(data.health.age_seconds(timestamp_ms()));
         status["cache"] = self.memory.status();
         status["savePending"] = json!(self.files.is_dirty());
         status["saveError"] = json!(self.files.error());
@@ -282,8 +296,21 @@ impl Host {
         out["preparingMigration"] = json!(data.preparing_migration);
         out["migrating"] = json!(data.jobs.iter().any(|j| j.migrating));
         out["canResume"] = json!(!data.sync_running);
-        if let Some(report) = data.reports.iter().rev().find(|r| r["paused"] != true).filter(|r| r["ok"] == false) {
-            out["error"] = report["error"].clone();
+        out["health"]["sync"] = data.health.view(
+            s.catalog.sync_state().is_some(),
+            data.sync_running,
+            s.cloud_paused,
+            data.preparing_migration || data.jobs.iter().any(|job| job.migrating),
+            data.paused,
+        );
+        out["health"]["sync"]["secondsSinceLastRemoteScan"] = json!(data.health.age_seconds(timestamp_ms()));
+        out["health"]["media"] = data.media_health.view();
+        if let Some(message) = out["health"]["sync"]["lastError"]["message"].as_str() {
+            out["error"] = json!(message);
+        } else if let Some(failures) = out["health"]["media"]["failures"].as_object()
+            && let Some(message) = failures.values().find_map(|failure| failure["message"].as_str())
+        {
+            out["error"] = json!(message);
         }
         Ok(out)
     }
@@ -430,7 +457,8 @@ impl Host {
         let jobs = std::mem::take(&mut self.data.borrow_mut().jobs);
         let mut remaining = Vec::new();
         for mut job in jobs {
-            let result = if self.frozen.get() || !Arc::ptr_eq(&job.owner, &app.session.library_token()) {
+            let current_owner = !self.frozen.get() && Arc::ptr_eq(&job.owner, &app.session.library_token());
+            let result = if !current_owner {
                 Some(Err("library changed; cloud result ignored and pending work retained".into()))
             } else {
                 self.advance(&mut job, app, flushing)
@@ -442,10 +470,33 @@ impl Host {
                     let mut data = self.data.borrow_mut();
                     if sync {
                         data.sync_running = false;
-                        data.paused = result.is_err() || data.preparing_migration;
+                        if current_owner {
+                            data.paused = result.is_err() || data.preparing_migration;
+                            match &result {
+                                Ok(value) if value["refreshRequired"] != true => {
+                                    data.health.success(timestamp_ms(), Some(job.guard.id()));
+                                }
+                                Err(message) if !(app.session.cloud_paused && job.guard.is_cancelled()) => {
+                                    data.health.fail(message, Some(job.guard.id()))
+                                }
+                                _ => {}
+                            }
+                        }
                         // Leave a retry/explicit-sync window even when a remote scan takes
                         // longer than the polling interval.
                         data.next_poll = js_sys::Date::now() + 5000.;
+                    }
+                    if current_owner
+                        && !job.guard.is_cancelled()
+                        && let Stage::Acquire { sources, .. } = &job.stage
+                    {
+                        for (photo, _) in sources {
+                            let resource = format!("download:{}", photo.0);
+                            match &result {
+                                Ok(_) => data.media_health.success(&resource),
+                                Err(message) => data.media_health.fail(resource, message, Some(job.guard.id())),
+                            }
+                        }
                     }
                     let report = match result {
                         Ok(value) => json!({"task":job.guard.id(),"ok":true,"result":value}),
@@ -472,7 +523,9 @@ impl Host {
         };
         if poll && !self.frozen.get() {
             if let Err(error) = self.start(&mut app.session, &json!({"wait":false,"audit":false})) {
-                self.data.borrow_mut().paused = true;
+                let mut data = self.data.borrow_mut();
+                data.paused = true;
+                data.health.fail(&error, None);
                 crate::safety::notice(error);
             }
         }

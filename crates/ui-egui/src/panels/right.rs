@@ -750,6 +750,8 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     ui.label(
                         egui::RichText::new(if status["migrating"].as_bool() == Some(true) {
                             "Migrating cloud library…".to_owned()
+                        } else if status["health"]["pollingHalted"] == true {
+                            crate::i18n::tr("Automatic checking stopped after an error.").to_owned()
                         } else if running {
                             "Synchronizing library…".to_owned()
                         } else if status["protocol"].as_str() == Some("append-log-v1") {
@@ -765,9 +767,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     );
                     ui.label(egui::RichText::new(format!("Library ID: {library}")).small().color(t.text_dim));
                     super::cloud::capacity(app, ui, &status, false);
-                    if let Some(report) = status["reports"].as_array().and_then(|reports| reports.last())
-                        && let Some(error) = report.get("error").and_then(serde_json::Value::as_str)
-                    {
+                    if let Some(error) = status["health"]["lastError"]["message"].as_str() {
                         ui.label(egui::RichText::new(error).color(t.text_dim));
                     }
                     if !running

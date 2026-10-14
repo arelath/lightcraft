@@ -1952,5 +1952,12 @@
   "not added to Apple Photos (cancelled)": "no se añadieron a Fotos de Apple (cancelado)",
   "The first time, macOS asks whether LightCraft may control Photos.": "La primera vez, macOS pregunta si LightCraft puede controlar Fotos.",
   "Adding to Apple Photos": "Añadiendo a Fotos de Apple",
-  "Smart albums with local folders or local photo selections stay on this device.": "Los álbumes inteligentes con carpetas locales o selecciones de fotos locales permanecen en este dispositivo."
+  "Smart albums with local folders or local photo selections stay on this device.": "Los álbumes inteligentes con carpetas locales o selecciones de fotos locales permanecen en este dispositivo.",
+  "Checking cloud library": "Comprobando la biblioteca en la nube",
+  "Automatic checking stopped after an error.": "La comprobación automática se detuvo tras un error.",
+  "No successful remote check in this session.": "No hubo una comprobación remota correcta en esta sesión.",
+  "Local upload records waiting": "Registros locales de subida pendientes",
+  "Album or stack choices need attention": "Las opciones de álbumes o pilas requieren atención",
+  "Cloud library — synchronization needs attention": "Biblioteca en la nube — la sincronización requiere atención",
+  "Cloud library — checking synchronization": "Biblioteca en la nube — comprobando la sincronización"
 }

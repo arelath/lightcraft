@@ -274,6 +274,12 @@ fn folder_rearrangement_detaches_before_attaching_and_concurrent_cycles_converge
     assert_eq!(a.sync_state().unwrap().winning("album:zzz-A", "parent").unwrap().1, &json!("aaa-B"), "conflicting proposed edge remains retained");
     let conflict = structural_conflicts(&a);
     assert_eq!(conflict.len(), 1);
+    let mut status_session = Session::new();
+    status_session.catalog = a.clone();
+    let overview = crate::cloud_status::overview(&mut status_session, &Value::Null).unwrap();
+    assert_eq!(overview["summary"]["issues"], 0, "the conflict has no photo fields");
+    assert_eq!(overview["health"]["conflicts"]["structural"], 1);
+    assert_eq!(overview["structuralConflicts"], serde_json::to_value(&conflict).unwrap());
     a.apply(accept_structure(&a, conflict[0]["entity"].as_str().unwrap()).unwrap()).unwrap();
     assert!(structural_conflicts(&a).is_empty());
     b.apply(incoming_checkpoint(&b, &a.sync_state().unwrap().portable(), &BTreeSet::new(), "c".repeat(64), 3).unwrap()).unwrap();

@@ -52,8 +52,15 @@ pub struct Jobs {
     next_poll: Option<web_time::Instant>,
     paused: bool,
     last_audit: Option<web_time::Instant>,
+    health: crate::cloud_status::PollHealth,
 }
 impl Jobs {
+    pub(crate) fn publication_scan(&mut self, task: u64) {
+        self.health.publication_scan(crate::cloud_status::now_ms(), Some(task));
+    }
+    pub fn health(&self, enabled: bool, user_paused: bool) -> Value {
+        self.health.view(enabled, self.running(), user_paused, self.preparing_migration || self.migrating(), self.paused)
+    }
     pub fn preparing_migration(&self) -> bool {
         self.preparing_migration
     }
@@ -240,6 +247,7 @@ impl Session {
         *deadline = now + std::time::Duration::from_secs(5);
         if let Err(error) = start(self, &json!({"wait":false,"audit":false})) {
             self.cloud_replication_jobs.paused = true;
+            self.cloud_replication_jobs.health.fail(&error.to_string(), None);
             self.cloud_replication_jobs.reports.push(json!({"ok":false,"error":error.to_string()}));
         }
     }
@@ -265,6 +273,8 @@ impl Session {
             return;
         }
         let id = pending.guard.id();
+        let current_owner =
+            Arc::ptr_eq(&pending.library, &self.library_token()) && pending.connection_revision == pending.resolver.connection_revision();
         let result = result.and_then(|outcome| {
             if pending.guard.is_cancelled() { return Err(error("synchronization cancelled; pending work and prior protocol retained")); }
             if !Arc::ptr_eq(&pending.library, &self.library_token()) || pending.connection_revision != pending.resolver.connection_revision() {
@@ -316,7 +326,16 @@ impl Session {
             Ok(json!({"unchanged":false,"migrated":pending.migration_owner.is_some(),"legacyHistoryRetained":true,"protocol":self.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len(),
                 "pending":self.catalog.sync_state().map_or(0,|state|state.pending.len())}))
         });
-        self.cloud_replication_jobs.paused = result.is_err() || self.cloud_replication_jobs.preparing_migration;
+        if current_owner {
+            self.cloud_replication_jobs.paused = result.is_err() || self.cloud_replication_jobs.preparing_migration;
+            match &result {
+                Ok(value) if value["refreshRequired"] != true => self.cloud_replication_jobs.health.success(crate::cloud_status::now_ms(), Some(id)),
+                Err(reason) if !(self.cloud_paused && pending.cancel.load(Ordering::Relaxed)) => {
+                    self.cloud_replication_jobs.health.fail(&reason.to_string(), Some(id))
+                }
+                _ => {}
+            }
+        }
         self.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
         if result.as_ref().is_ok_and(|value| value.get("refreshRequired").and_then(Value::as_bool) == Some(true)) {
             request_poll(self);
@@ -439,6 +458,31 @@ mod tests {
         assert_eq!(loaded.sync_state(), s.catalog.sync_state());
     }
     #[test]
+    fn polling_failure_survives_unrelated_upload_success_until_a_verified_scan_recovers() {
+        let (mut s, _) = session();
+        ready(&mut s);
+        s.poll_cloud_replication();
+        assert!(s.catalog.sync_state().unwrap().pending.is_empty());
+        let last = s.cloud_replication_jobs.health(true, false)["lastSuccessfulRemoteScan"].clone();
+        ready_same_head(&mut s, 1);
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Err(error("remote authorization rejected")));
+        s.poll_cloud_replication();
+        s.cloud_uploads.reports.push(json!({"task":99999,"ok":true,"result":{"uploaded":true}}));
+        let overview = crate::cloud_status::overview(&mut s, &Value::Null).unwrap();
+        assert_eq!(overview["summary"]["pendingChanges"], 0);
+        assert_eq!(overview["health"]["sync"]["pollingHalted"], true);
+        assert_eq!(overview["health"]["sync"]["lastSuccessfulRemoteScan"], last);
+        assert!(overview["error"].as_str().unwrap().contains("authorization"));
+        assert_eq!(s.execute("cloud.syncStatus", &json!({})).unwrap()["health"]["state"], "halted");
+        resume_publication(&mut s);
+        assert_eq!(s.cloud_replication_jobs.health(true, false)["state"], "retrying");
+        ready_same_head(&mut s, 1);
+        s.poll_cloud_replication();
+        let recovered = crate::cloud_status::overview(&mut s, &Value::Null).unwrap();
+        assert_eq!(recovered["health"]["sync"]["state"], "healthy");
+        assert!(!recovered["error"].is_string());
+    }
+    #[test]
     fn incoming_result_waits_for_slider_group_and_rejects_stale_library_owner() {
         let (mut s, _) = session();
         ready(&mut s);
@@ -455,6 +499,8 @@ mod tests {
         s.poll_cloud_replication();
         assert_eq!(s.catalog.to_snapshot(), before);
         assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["ok"], false);
+        assert!(!s.cloud_replication_jobs.paused, "obsolete work must not halt the current owner");
+        assert!(s.cloud_replication_jobs.health(true, false)["lastError"].is_null());
     }
     fn ready_migration(s: &mut Session) {
         ready(s);

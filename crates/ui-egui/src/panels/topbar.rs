@@ -163,8 +163,13 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 .unwrap_or(0)
                 .saturating_add(cloud["summary"]["syncing"].as_u64().unwrap_or(0))
                 .saturating_add(cloud["summary"]["issues"].as_u64().unwrap_or(0));
+            let attention = super::cloud::needs_attention(&cloud);
             let cloud_text = if cloud["paused"] == true {
                 "Cloud library — syncing paused".to_owned()
+            } else if attention {
+                crate::i18n::tr("Cloud library — synchronization needs attention").to_owned()
+            } else if cloud["syncEnabled"] == true && !cloud["health"]["sync"]["lastSuccessfulRemoteScan"].is_object() {
+                crate::i18n::tr("Cloud library — checking synchronization").to_owned()
             } else {
                 format!("Cloud library — {pending} photos waiting to sync")
             };
@@ -180,7 +185,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 let resp = ui.interact(r, egui::Id::new(("top", id)), Sense::click()).on_hover_text(tip);
                 register(ui.ctx(), format!("icon:{id}"), r);
                 let warn = id == "cloud" && unsaved.is_some();
-                let colour = if warn || (id == "cloud" && (cloud["summary"]["issues"].as_u64().unwrap_or(0) > 0 || cloud["error"].is_string())) {
+                let colour = if warn || (id == "cloud" && attention) {
                     t.caution
                 } else if resp.hovered() {
                     t.text
@@ -195,9 +200,15 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                     register(ui.ctx(), "indicator:unsaved", r);
                 }
                 if id == "cloud" {
-                    if !warn && (pending > 0 || cloud["paused"] == true) {
+                    if !warn
+                        && (pending > 0
+                            || cloud["paused"] == true
+                            || attention
+                            || cloud["health"]["publicationWaiting"] == true
+                            || cloud["health"]["receipts"]["pending"].as_u64().unwrap_or(0) > 0)
+                    {
                         let c = r.right_top() + vec2(-4., 6.);
-                        ui.painter().circle_filled(c, 7., if cloud["paused"] == true { t.caution } else { t.accent });
+                        ui.painter().circle_filled(c, 7., if cloud["paused"] == true || attention { t.caution } else { t.accent });
                         if cloud["paused"] == true {
                             for dx in [-2.5, 1.] {
                                 ui.painter().rect_filled(Rect::from_min_size(c + vec2(dx, -3.), vec2(1.5, 6.)), 0., t.canvas);
@@ -206,7 +217,15 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                             ui.painter().text(
                                 c,
                                 Align2::CENTER_CENTER,
-                                if pending > 99 { "99+".into() } else { pending.to_string() },
+                                if attention {
+                                    "!".into()
+                                } else if pending > 99 {
+                                    "99+".into()
+                                } else if pending == 0 {
+                                    "•".into()
+                                } else {
+                                    pending.to_string()
+                                },
                                 t.semibold(9.),
                                 t.canvas,
                             );

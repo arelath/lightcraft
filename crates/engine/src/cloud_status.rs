@@ -1,6 +1,10 @@
 //! Shared cloud popup data and device-local publication controls.
 use crate::{EngineError, Result, Session};
 use serde_json::{Value, json};
+mod health;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use health::now_ms;
+pub use health::{PollHealth, ResourceHealth};
 
 pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
     let summary = s.catalog.sync_overview();
@@ -17,18 +21,28 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
         out["migrating"] = json!(s.cloud_replication_jobs.migrating());
         out["paused"] = json!(s.cloud_paused || s.cloud_replication_jobs.preparing_migration());
         out["canResume"] = json!(s.cloud_uploads.running() == 0 && !s.cloud_replication_jobs.running());
-        let last = s
-            .cloud_uploads
-            .reports
-            .iter()
-            .chain(s.cloud_replication_jobs.reports.iter())
-            .filter(|r| r["paused"] != true)
-            .max_by_key(|r| r["task"].as_u64().unwrap_or(0));
-        if let Some(report) = last.filter(|r| r["ok"] == false) {
-            out["error"] = report["error"].clone();
-        }
+        out["health"]["uploads"]["activity"] = s.cloud_uploads.health();
     }
     let sync = crate::cmd::cloud_sync_status(s, &Value::Null)?;
+    out["health"]["sync"] = sync["health"].clone();
+    out["health"]["uploads"]["failedImports"] = json!(summary.failed_uploads);
+    out["health"]["uploads"]["blockedImports"] = json!(summary.blocked_import_count);
+    out["health"]["receipts"] = json!({"pending":summary.pending_receipts,"failed":summary.failed_receipts});
+    out["health"]["publicationWaiting"] = json!(summary.pending_changes > 0);
+    out["health"]["remoteHistoryWaiting"] = json!(sync["gaps"].as_array().is_some_and(|gaps| !gaps.is_empty()));
+    out["conflicts"] = sync["conflicts"].clone();
+    out["structuralConflicts"] = sync["structuralConflicts"].clone();
+    out["health"]["conflicts"] =
+        json!({"fields":sync["conflicts"].as_array().map_or(0,Vec::len),"structural":sync["structuralConflicts"].as_array().map_or(0,Vec::len)});
+    if let Some(message) = sync["health"]["lastError"]["message"].as_str() {
+        out["error"] = json!(message);
+    } else if let Some(reason) = &summary.first_upload_error {
+        out["error"] = json!(reason);
+    } else if let Some(failures) = out["health"]["uploads"]["activity"]["failures"].as_object()
+        && let Some(message) = failures.values().find_map(|failure| failure["message"].as_str())
+    {
+        out["error"] = json!(message);
+    }
     out["utilization"] = sync["utilization"].clone();
     out["capacityWarnings"] = sync["capacityWarnings"].clone();
     Ok(out)

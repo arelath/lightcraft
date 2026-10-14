@@ -2146,5 +2146,12 @@
   "not added to Apple Photos (cancelled)": "не додано до Apple Фото (скасовано)",
   "The first time, macOS asks whether LightCraft may control Photos.": "Першого разу macOS запитає, чи може LightCraft керувати програмою «Фото».",
   "Adding to Apple Photos": "Додавання до Apple Фото",
-  "Smart albums with local folders or local photo selections stay on this device.": "Смарт-альбоми з локальними папками або добірками локальних фотографій залишаються на цьому пристрої."
+  "Smart albums with local folders or local photo selections stay on this device.": "Смарт-альбоми з локальними папками або добірками локальних фотографій залишаються на цьому пристрої.",
+  "Checking cloud library": "Перевірка хмарної бібліотеки",
+  "Automatic checking stopped after an error.": "Автоматичну перевірку зупинено після помилки.",
+  "No successful remote check in this session.": "У цьому сеансі ще не було успішної перевірки хмари.",
+  "Local upload records waiting": "Локальні записи завантаження очікують",
+  "Album or stack choices need attention": "Потрібно вибрати рішення для альбомів або стосів",
+  "Cloud library — synchronization needs attention": "Хмарна бібліотека — синхронізація потребує уваги",
+  "Cloud library — checking synchronization": "Хмарна бібліотека — перевірка синхронізації"
 }

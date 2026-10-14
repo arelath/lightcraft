@@ -621,3 +621,26 @@ Missing retained causal history produces a recovery error with the outbox retain
 Append discovery/publication continues to enforce contiguous author prefixes and
 causal readiness. Retired author clocks remain retained; author-slot retirement
 is still unsupported.
+
+
+### Cloud subsystem health (2026-10-15)
+
+`cloud.syncStatus.health` and `cloud.overview.health.sync` report the actual polling
+scheduler: disabled, unverified, checking, healthy, userPaused, migrationPaused,
+halted or retrying. They include the subsystem's retained error and last successful
+remote scan (time, task and polling/publication source). Resume allows a new check;
+it clears the error only after that check succeeds. Upload publication can record
+a verified scan but cannot restart halted polling or clear its failure. An unrelated
+media/cleanup success clears only the same resource's error. Health resets when
+opening a different catalog; obsolete workers cannot poison the new library.
+
+The overview reports publication waiting, retained append gaps, structural and field
+conflicts, blocked/failed imports and pending/failed local receipt jobs separately.
+Bounded diagnostic details do not hide additional failed resources. Activity reports
+remain history; the newest activity is not the source of cloud health. The popup and
+icon show attention for structural-only conflicts and stopped polling. Up to date
+requires a successful remote scan, no retained error, no pending publication/receipt
+work and no unresolved conflicts. The displayed scan age explains the freshness of
+that claim; after reopen the UI checks again before displaying it. Browser media
+download failures are resource-specific and its host reports the same scheduler
+health model.

@@ -245,5 +245,6 @@
   "{n} added to Apple Photos album “{album}”": "{n} añadidas al álbum “{album}” de Fotos de Apple",
   "{n} added to Apple Photos": "{n} añadidas a Fotos de Apple",
   "{n} photos opened for editing; each is stacked with its original": "{n} fotos abiertas para editar; cada una está apilada con su original",
-  "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "Activar la sincronización de fotos y álbumes existentes o editar una entidad requiere como máximo {limit} campos modificados y 1 MiB por entidad. Los metadatos del álbum y sus miembros gestionados comparten este límite; divida los álbumes grandes antes de configurar."
+  "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "Activar la sincronización de fotos y álbumes existentes o editar una entidad requiere como máximo {limit} campos modificados y 1 MiB por entidad. Los metadatos del álbum y sus miembros gestionados comparten este límite; divida los álbumes grandes antes de configurar.",
+  "Last remote check: {n} s ago": "Última comprobación remota: hace {n} s"
 }

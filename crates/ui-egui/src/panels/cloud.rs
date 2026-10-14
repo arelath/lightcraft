@@ -2,6 +2,29 @@
 use crate::{LightcraftApp, theme::Tokens, widgets::register};
 use serde_json::{Value, json};
 
+pub(crate) fn needs_attention(data: &Value) -> bool {
+    let summary = &data["summary"];
+    let health = &data["health"];
+    summary["issues"].as_u64().unwrap_or(0) > 0
+        || summary["failedFiles"].as_u64().unwrap_or(0) > 0
+        || summary["blockedImportCount"].as_u64().unwrap_or(0) > 0
+        || data["error"].is_string()
+        || health["sync"]["pollingHalted"] == true
+        || health["sync"]["lastError"].is_object()
+        || health["uploads"]["failedImports"].as_u64().unwrap_or(0) > 0
+        || health["uploads"]["activity"]["failedResources"].as_u64().unwrap_or(0) > 0
+        || health["media"]["failedResources"].as_u64().unwrap_or(0) > 0
+        || health["receipts"]["failed"].as_u64().unwrap_or(0) > 0
+        || health["conflicts"]["fields"].as_u64().unwrap_or(0) > 0
+        || health["conflicts"]["structural"].as_u64().unwrap_or(0) > 0
+        || data["conflicts"].as_array().is_some_and(|items| !items.is_empty())
+        || data["structuralConflicts"].as_array().is_some_and(|items| !items.is_empty())
+        || data["capacityWarnings"].as_array().is_some_and(|items| !items.is_empty())
+}
+fn verified_scan(data: &Value) -> bool {
+    data["health"]["sync"]["lastSuccessfulRemoteScan"].is_object() && matches!(data["health"]["sync"]["state"].as_str(), Some("healthy" | "checking"))
+}
+
 pub fn bytes(n: u64) -> String {
     if n >= 1_000_000_000_000 {
         format!("{:.1} TB", n as f64 / 1_000_000_000_000.)
@@ -91,29 +114,49 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let active = data["uploadingFiles"].as_u64().unwrap_or(0);
     let failed = summary["failedFiles"].as_u64().unwrap_or(0);
     let blocked = summary["blockedImports"].as_array();
+    let halted = data["health"]["sync"]["pollingHalted"] == true;
+    let receipts = data["health"]["receipts"]["pending"].as_u64().unwrap_or(0);
+    let structural = data["structuralConflicts"].as_array().map_or(0, Vec::len);
     ui.separator();
     ui.label(
         egui::RichText::new(crate::i18n::tr(if migrating {
             "Migrating cloud library…"
         } else if paused {
             "Syncing paused"
-        } else if summary["issues"].as_u64().unwrap_or(0) > 0
-            || failed > 0
-            || blocked.is_some_and(|items| !items.is_empty())
-            || data["error"].is_string()
-            || data["capacityWarnings"].as_array().is_some_and(|w| !w.is_empty())
-        {
+        } else if needs_attention(data) {
             "Sync needs attention"
-        } else if waiting > 0 || active > 0 || summary["pendingChanges"].as_u64().unwrap_or(0) > 0 {
+        } else if waiting > 0
+            || active > 0
+            || receipts > 0
+            || data["health"]["remoteHistoryWaiting"] == true
+            || summary["pendingChanges"].as_u64().unwrap_or(0) > 0
+        {
             "Syncing library"
-        } else if data["syncEnabled"] == true {
+        } else if data["syncEnabled"] == true && verified_scan(data) {
             "Up to date"
+        } else if data["syncEnabled"] == true {
+            "Checking cloud library"
         } else {
             "Local library"
         }))
         .font(t.semibold(14.)),
     );
     ui.label(format!("{waiting} files waiting · {active} uploading"));
+    if halted {
+        ui.label(egui::RichText::new(crate::i18n::tr("Automatic checking stopped after an error.")).color(t.caution));
+    }
+    if data["syncEnabled"] == true && !data["health"]["sync"]["lastSuccessfulRemoteScan"].is_object() {
+        ui.label(egui::RichText::new(crate::i18n::tr("No successful remote check in this session.")).size(11.).color(t.text_dim));
+    }
+    if let Some(n) = data["health"]["sync"]["secondsSinceLastRemoteScan"].as_u64() {
+        ui.label(egui::RichText::new(crate::i18n::tr_format!("Last remote check: {n} s ago", n = n)).size(11.).color(t.text_dim));
+    }
+    if receipts > 0 {
+        ui.label(format!("{}: {receipts}", crate::i18n::tr("Local upload records waiting")));
+    }
+    if structural > 0 {
+        ui.label(egui::RichText::new(format!("{}: {structural}", crate::i18n::tr("Album or stack choices need attention"))).color(t.caution));
+    }
     if failed > 0 {
         ui.label(egui::RichText::new(format!("{failed} files need upload retry")).color(t.caution));
     }
@@ -138,6 +181,23 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             ui.label(format!("{} more blocked imports; select a photo for details", count.saturating_sub(3)));
         }
     }
+    if let Some(resource) = data["health"]["uploads"]["activity"]["firstFailedResource"].as_str()
+        && let Some((kind, id)) = resource.split_once(':')
+        && matches!(kind, "upload" | "verify")
+    {
+        if let Some(message) = data["health"]["uploads"]["activity"]["failures"][resource]["message"].as_str() {
+            ui.label(egui::RichText::new(message).size(11.).color(t.caution));
+        }
+        action(
+            app,
+            ui,
+            &format!("button:cloudRetryWork:{resource}"),
+            "Retry upload",
+            !paused && data["canResume"] == true,
+            "cloud.upload",
+            json!({"imports":[id],"verify":kind=="verify","wait":false}),
+        );
+    }
     if summary["issues"].as_u64().unwrap_or(0) > 0 {
         ui.label(format!("{} photos with sync issues", summary["issues"].as_u64().unwrap_or(0)));
     }
@@ -156,7 +216,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         if paused { "cloud.resume" } else { "cloud.pause" },
         json!({}),
     );
-    if !paused && (failed > 0 || data["error"].is_string()) {
+    if !paused && needs_attention(data) {
         action(app, ui, "button:cloudRetry", "Retry Syncing", data["canResume"] == true, "cloud.resume", json!({}));
     }
     if paused && data["canResume"] != true {
@@ -190,7 +250,15 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             }
         }
     }
-    if let Some(error) = data["error"].as_str().filter(|_| !paused) {
+    if let Some(error) = data["error"]
+        .as_str()
+        .filter(|error| !paused && !blocked.is_some_and(|items| items.iter().any(|item| item["reason"].as_str() == Some(error))))
+    {
+        ui.label(egui::RichText::new(error).size(11.).color(t.caution));
+    }
+    if let Some(error) = summary["firstUploadError"].as_str().filter(|error| {
+        data["error"].as_str() != Some(error) && !blocked.is_some_and(|items| items.iter().any(|item| item["reason"].as_str() == Some(error)))
+    }) {
         ui.label(egui::RichText::new(error).size(11.).color(t.caution));
     }
     if app.session.unsaved().is_some() {

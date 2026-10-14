@@ -245,5 +245,6 @@
   "{n} added to Apple Photos album “{album}”": "已將 {n} 個加入 Apple 照片相簿「{album}」",
   "{n} added to Apple Photos": "已將 {n} 個加入 Apple 照片",
   "{n} photos opened for editing; each is stacked with its original": "已開啟 {n} 張相片進行編輯；每張都與其原始相片堆疊在一起",
-  "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "為現有相片和相簿啟用同步，或編輯單一實體時，每個實體最多允許變更 {limit} 個欄位，序列化大小上限為 1 MiB。相簿中繼資料與受管理相片的成員關係共用此額度；請在設定前分拆大型相簿。"
+  "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "為現有相片和相簿啟用同步，或編輯單一實體時，每個實體最多允許變更 {limit} 個欄位，序列化大小上限為 1 MiB。相簿中繼資料與受管理相片的成員關係共用此額度；請在設定前分拆大型相簿。",
+  "Last remote check: {n} s ago": "最近一次遠端檢查：{n} 秒前"
 }

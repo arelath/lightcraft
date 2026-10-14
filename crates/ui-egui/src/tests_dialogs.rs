@@ -2,10 +2,60 @@
 
 use crate::headless::Headless;
 use crate::{LightcraftApp, Services};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::time::Duration;
 
 const T: Duration = Duration::from_secs(20);
+
+#[test]
+fn cloud_health_headline_covers_halted_polling_and_structural_only_conflicts() {
+    for structural in [false, true] {
+        let overview = std::sync::Arc::new(std::sync::Mutex::new(json!({
+            "summary":{"cloudPhotos":0,"albums":2,"pendingChanges":0,"issues":0,"failedFiles":0},
+            "paused":false,"syncEnabled":true,"canResume":true,"tasks":[],
+            "health":{"sync":{"state":if structural {"healthy"}else{"halted"},"pollingHalted":!structural,
+                "lastSuccessfulRemoteScan":{"atUnixMs":1000},"secondsSinceLastRemoteScan":20,
+                "lastError":if structural {Value::Null}else{json!({"message":"Remote access failed; polling stopped"})}},
+                "conflicts":{"structural":u64::from(structural)}},
+            "structuralConflicts":if structural {json!([{"entity":"album:one","field":"parent"}])}else{json!([])},
+            "error":if structural {Value::Null}else{json!("Remote access failed; polling stopped")}
+        })));
+        let data = overview.clone();
+        let services = Services {
+            cloud_action: Some(Box::new(move |_, id, _| (id == "cloud.overview").then(|| Ok(data.lock().unwrap().clone())))),
+            ..Default::default()
+        };
+        let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::with_demo(), services), [1400., 1000.], 1.);
+        for _ in 0..4 {
+            h.step();
+        }
+        assert_eq!(h.request("ui.clickWidget", json!({"id":"icon:cloud"}), T)["ok"], true);
+        for _ in 0..4 {
+            h.step();
+        }
+        let text = h.view.painted_text();
+        assert!(text.iter().any(|value| value.contains("Sync needs attention")), "{text:?}");
+        assert!(!text.iter().any(|value| value == "Up to date"));
+        let cause = if structural { "Album or stack choices need attention" } else { "Automatic checking stopped after an error." };
+        assert!(text.iter().any(|value| value.contains(cause)), "{text:?}");
+        assert!(text.iter().any(|value| value.contains("Last remote check: 20 s ago")), "{text:?}");
+        let widgets = h.request("ui.widgets", json!({"filter":"indicator:cloudQueue"}), T);
+        assert!(!widgets["result"].as_array().unwrap().is_empty());
+        {
+            let mut value = overview.lock().unwrap();
+            value["health"]["sync"]["state"] = json!("healthy");
+            value["health"]["sync"]["pollingHalted"] = json!(false);
+            value["health"]["sync"]["lastError"] = Value::Null;
+            value["health"]["conflicts"]["structural"] = json!(0);
+            value["structuralConflicts"] = json!([]);
+            value["error"] = Value::Null;
+        }
+        for _ in 0..4 {
+            h.step();
+        }
+        assert!(h.view.painted_text().iter().any(|value| value == "Up to date"));
+    }
+}
 
 #[test]
 fn cloud_popup_exposes_preflight_reason_and_dispatches_exact_import_retry() {
