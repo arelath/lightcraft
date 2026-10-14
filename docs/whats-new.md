@@ -1,5 +1,18 @@
 # What's new in LightCraft
 
+## 2026-10-14
+
+### Settings → Cache
+- Settings opens on a new **Cache** page, with the pages listed down the left like Lightroom's Preferences. It
+  shows the drive the cloud cache is on, how full it is, and what LightCraft keeps there: app & user data, the
+  photo cache, photos stored offline and free space.
+- **Cache size limit** (5 GB to 1 TB) and **Clear cache**, which frees the downloaded photos at once; photos
+  stored offline and ones not uploaded yet stay.
+- **Store a copy of all Smart previews** / **all originals** keeps every cloud photo available offline, including
+  ones added later.
+- **Storage location for originals → Browse…** moves the cloud cache to another folder or drive; every file is
+  checked after the copy, and the old copies are deleted only once the library uses the new folder.
+
 ## 2026-10-11
 
 ### JPEG XL export
