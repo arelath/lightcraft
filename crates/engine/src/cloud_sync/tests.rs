@@ -74,6 +74,48 @@ fn session() -> (Session, MemStore) {
     (session, store)
 }
 #[test]
+fn unavailable_writer_blocks_new_local_mutations_but_allows_verified_remote_receive() {
+    let (mut s, _) = session();
+    s.cloud_writer_error = Some("persistent installation identity unavailable".into());
+    let before = s.catalog.to_snapshot();
+    assert!(s.execute("photo.rate", &json!({"ids":[1],"rating":4})).unwrap_err().to_string().contains("claiming"));
+    assert_eq!(s.catalog.to_snapshot(), before);
+    let mut authored = s.catalog.sync_state().unwrap().clone();
+    authored.enqueue(vec![Change { entity: "library:library".into(), field: "label.Green".into(), base: None, value: json!("local") }]).unwrap();
+    assert!(s.apply_received(Op::SetSyncState { state: Some(Box::new(authored)) }).is_err());
+    assert_eq!(s.catalog.to_snapshot(), before);
+    let mut peer = SyncState::new("library".into(), "peer".into(), "personal".into()).unwrap();
+    let change = peer
+        .enqueue(vec![Change { entity: "library:library".into(), field: "label.Green".into(), base: None, value: json!("remote") }])
+        .unwrap()
+        .unwrap();
+    let mut received = s.catalog.sync_state().unwrap().clone();
+    let pending = received.pending.clone();
+    received.receive(&change).unwrap();
+    s.apply_received(Op::SetSyncState { state: Some(Box::new(received)) }).unwrap();
+    assert_eq!(s.catalog.sync_state().unwrap().pending, pending);
+}
+#[test]
+fn publication_schedules_historical_authors_before_dependent_new_epochs() {
+    let mut state = SyncState::new("library".into(), "old".into(), "personal".into()).unwrap();
+    for value in 1..=3 {
+        state.enqueue(vec![Change { entity: "library:library".into(), field: "label.Green".into(), base: None, value: json!(value) }]).unwrap();
+    }
+    let mut observed = state.clock.clone();
+    observed.insert("old".into(), 2);
+    let old = state.pending["old-3"].clone();
+    state.local_owner = "owner".into();
+    state.begin_writing_epoch("owner".into(), "new".into()).unwrap();
+    let new = state
+        .enqueue(vec![Change { entity: "library:library".into(), field: "label.Red".into(), base: None, value: json!("new") }])
+        .unwrap()
+        .unwrap();
+    let ordered = publication_order(vec![new.clone(), old.clone()], &observed).unwrap();
+    assert_eq!(ordered, vec![old.clone(), new.clone()]);
+    assert_eq!(publication_order(vec![old, new.clone()], &observed).unwrap(), ordered);
+    assert!(publication_order(vec![new], &observed).unwrap_err().to_string().contains("missing retained causal history"));
+}
+#[test]
 fn commands_undo_redo_system_changes_and_final_slider_values_have_durable_fresh_identities() {
     let (mut s, store) = session();
     let first = s.catalog.sync_state().unwrap().pending.len();

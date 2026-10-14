@@ -35,7 +35,7 @@ work below. The following tasks now take priority, in this order; remaining scal
 work (CR.9/CR.10) and other original unchecked tasks remain open.
 
 - [x] CR.22 — Apply verified synchronization results monotonically across upload and ordinary workers. Distinguish stale valid completions from inconsistent remote history, retain newer head cursors, merge append publication progress, and qualify phase events by attempt so obsolete failures cannot overwrite success. Test held generation 10 after generation 11 and append frontier preservation; retain deliberate integrity-verification failures.
-- [ ] CR.23 — Claim installation/catalog writer ownership in both protocols before editing, preserving pending IDs. Provide a safe writing epoch for explicit same-directory backup restore and causally schedule retained historical-author mutations. Test copied conditional-head catalogs making distinct offline edits and restoring an older backup.
+- [x] CR.23 — Claim installation/catalog writer ownership in both protocols before editing, preserving pending IDs. Provide a safe writing epoch for explicit same-directory backup restore and causally schedule retained historical-author mutations. Test copied conditional-head catalogs making distinct offline edits and restoring an older backup.
 - [ ] CR.24 — Materialize smart-album references to deleted or unresolved albums deterministically without broadening their criteria or blocking fresh-device bootstrap. Test a retained smart album referencing a deleted regular album.
 - [ ] CR.25 — Define a nonportable smart-album policy that preserves originating-device semantics. Preserve folder criteria and local-only selections, and distinguish absent selection restrictions from explicitly empty sets. Test self-sync with folder-restricted and exclusively local-photo rules.
 - [ ] CR.26 — Resolve shared stack ownership and validity independently of local-only members, then apply local overlays. Test identical shared proposals S1=(P,Q), S2=(Q,R), S3=(R,S) with and without a local-only member of S2, comparing projected cloud relationships.
@@ -263,3 +263,28 @@ Browser transport/host changes are WASM-compiled and ACK/shared-model tested; no
 fresh browser deployment or live-provider acceptance is claimed. Shared receipt
 finalization and request-cost/stage refactoring remain CR.27/CR.31; scale remains
 CR.9/CR.10. Only CR.22 of the follow-up review is complete at this checkpoint.
+
+
+2026-10-14 — CR.23: native installation/catalog ownership now covers both protocols.
+Writer reservations outside catalog backups are durably advanced before local journal
+application. A catalog-only rollback at the same path starts a fresh writing epoch;
+historical pending IDs and clocks are preserved. Restoring the whole installation
+configuration as well requires fresh persistent installation storage. Browser restore
+already targets a fresh directory; ownership failures now block local mutation capture.
+Conditional-head publication schedules causal dependencies across retained authors
+rather than sorting global sequence numbers. Unknown reservation formats fail closed.
+
+Final source passed all eight CI stages: C: build `cr23-ci.log`. Regressions cover
+copied head catalogs with divergent offline edits, retained historical pending IDs
+before new-author changes, same-path older-backup restoration on both protocols,
+reservation-ahead recovery, durable reservation write failure and malformed/oversized
+records. Focused engine synchronization/ownership tests passed (71); real CLI head,
+append and upload suites passed (41). Rebuilt native acceptance restored older catalog snapshot/journal files at the same
+path on both protocols. Both changed writer, preserved the later remote flag and
+synchronized the new rating with zero pending mutations. All 93 signed loopback
+requests verified (38 head / 55 append); both rendered dialogs were inspected.
+Evidence: ignored `target/cloud-reliability/cr23-native-results-*.json` and request
+logs; C: scratch `lightcraft-cr23-native/native-634f6b4c/` and `native-aa73c898/`.
+The first native script correctly hit the persisted pause and was amended to resume.
+Browser ownership/causal ordering is WASM-compiled and shared-model tested; fresh
+browser deployment and live-provider acceptance are not claimed.

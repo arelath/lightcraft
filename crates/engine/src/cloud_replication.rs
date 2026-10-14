@@ -274,7 +274,7 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
             return Ok(Outcome { append: None, state, acknowledged, cursor: head.tip.hash.0, generation: head.generation });
         }
         let pending_count = pending.len();
-        pending.sort_by_key(|mutation| mutation.revision.clone());
+        pending = crate::cloud_sync::publication_order(pending, &remote.state.clock).map_err(|e| invalid(e.to_string()))?;
         let mut chunk = Vec::new();
         let mut waiting_for_media = false;
         for mutation in pending.into_iter().take(256) {

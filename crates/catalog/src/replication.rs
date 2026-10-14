@@ -493,17 +493,27 @@ impl SyncState {
     /// append leaves this state and its original pending mutation identities queued for retry.
     /// Rotate a restored/copied catalog's current author without rewriting old pending IDs.
     pub fn claim_owner(&mut self, owner: String, new_author: String) -> Result<bool> {
+        self.claim_epoch(owner, new_author, false)
+    }
+    /// Explicitly rotate even when a backup returns to the same installation/path.
+    pub fn begin_writing_epoch(&mut self, owner: String, new_author: String) -> Result<()> {
+        self.claim_epoch(owner, new_author, true).map(|_| ())
+    }
+    fn claim_epoch(&mut self, owner: String, new_author: String, force: bool) -> Result<bool> {
         if !identifier(&owner) || !identifier(&new_author) || new_author.len() > 96 {
             return Err(invalid("invalid synchronization owner identity"));
         }
-        if self.local_owner == owner {
+        if self.local_owner == owner && !force {
             return Ok(false);
         }
         let mut next = self.clone();
+        if force && new_author == self.device {
+            return Err(invalid("a new writing epoch requires a distinct author"));
+        }
         if new_author != self.device && (self.clock.contains_key(&new_author) || self.previous_authors.contains(&new_author)) {
             return Err(invalid("new owner author already exists in history"));
         }
-        if !next.local_owner.is_empty() || !next.pending.is_empty() || !next.received.is_empty() {
+        if force || !next.local_owner.is_empty() || !next.pending.is_empty() || !next.received.is_empty() {
             next.previous_authors.insert(next.device.clone());
             next.device = new_author;
         }
@@ -569,6 +579,26 @@ mod tests {
     fn set(s: &mut SyncState, entity: &str, field: &str, value: Value) -> Mutation {
         let base = s.winning(entity, field).map(|(stamp, _)| stamp);
         s.enqueue(vec![Change { entity: entity.into(), field: field.into(), base, value }]).unwrap().unwrap()
+    }
+    #[test]
+    fn same_owner_epoch_rotation_keeps_pending_ids_and_rotates_even_without_history() {
+        let mut s = state("original");
+        s.local_owner = "owner".into();
+        s.begin_writing_epoch("owner".into(), "fresh".into()).unwrap();
+        assert_eq!(s.device, "fresh");
+        let original = set(&mut s, "photo:one", "rating", json!(4));
+        let pending = s.pending.clone();
+        let clock = s.clock.clone();
+        s.begin_writing_epoch("owner".into(), "restored".into()).unwrap();
+        assert_eq!(s.pending, pending);
+        assert_eq!(s.clock, clock);
+        assert!(s.previous_authors.contains("fresh"));
+        let newer = set(&mut s, "photo:one", "flag", json!(1));
+        assert_eq!(newer.revision.sequence, 1);
+        assert_eq!(newer.context.get("fresh"), Some(&original.revision.sequence));
+        let before = s.clone();
+        assert!(s.begin_writing_epoch("owner".into(), "restored".into()).is_err());
+        assert_eq!(s, before);
     }
     #[test]
     fn independent_fields_and_album_additions_converge_and_replay_is_idempotent() {

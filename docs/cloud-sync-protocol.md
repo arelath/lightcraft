@@ -5,8 +5,8 @@ Last updated: 2026-10-14
 Configure the same bucket and library prefix on each computer. In File → Cloud Synchronization,
 the first computer leaves Library ID blank; subsequent computers enter the first computer's
 Library ID (also shown in Info). Connection names and credentials belong to each computer.
-Use separate local catalog directories. A catalog's saved device identity must not be cloned
-to another independently editing device. Existing local photos remain local until imported
+Use separate local catalog directories. Each persistent installation/catalog claims its own current author in both protocols;
+copied catalogs keep historical pending IDs and rotate the current writer before editing. Existing local photos remain local until imported
 into managed storage. Existing catalogs open without a cloud connection.
 
 `cloud.syncEnable {connection, library?, protocol?}` enables a durable offline mutation journal.
@@ -522,3 +522,38 @@ import can invalidate it when it confirms missing or corrupt remote bytes and
 cannot repair them; connectivity or old publication failures do not revoke proof.
 Receipt finalization after another worker acknowledges publication remains CR.27;
 transfer/publication stage extraction and request-cost assertions remain CR.31.
+
+
+### Writer identity and catalog restores (2026-10-14)
+
+Writer ownership belongs to shared synchronization rather than the append protocol.
+Native setup/open and the local mutation boundary protect both modes. Browser setup
+and host installation claim both modes before editing; a failed claim blocks new
+local mutations while allowing verified incoming reconciliation.
+
+Native installation storage keeps `cloud-installation-id` and small per-catalog
+`cloud-writer-sequences/<owner>.json` records outside catalog backups. A reservation
+is durably saved before a newly authored mutation enters the live catalog/journal,
+including explicit conflict resolutions and tombstone recovery. If an older backup
+returns to the same path, or a crash leaves a reservation ahead of the catalog, a
+new author starts before editing. Existing pending IDs, original payloads and
+historical author clocks remain intact. Ordinary reopen keeps the current author;
+there is no author-per-launch or author-per-import churn. Missing installation
+records trigger a safe new epoch; malformed/future records fail closed and remain
+available for recovery. Reservation write failure leaves the proposed catalog and
+outbox changes unapplied. Installation identity creation publishes complete bytes
+atomically, including concurrent process initialization.
+
+Preserve installation storage when restoring catalog folders. Restoring an entire
+installation image including those records requires new installation storage
+(`LIGHTCRAFT_CONFIG_DIR`) so that the new current author cannot reuse the image's
+writing epoch. The browser's supported Restore operation creates a fresh library
+directory and reloads before accepting edits; it has no in-place overwrite route.
+
+Conditional-head publication orders retained pending mutations by causal readiness,
+including previous authors, before batching or media dependency checks. It cannot
+publish sequence 1 of a new author before historical revisions in its context.
+Missing retained causal history produces a recovery error with the outbox retained.
+Append discovery/publication continues to enforce contiguous author prefixes and
+causal readiness. Retired author clocks remain retained; author-slot retirement
+is still unsupported.

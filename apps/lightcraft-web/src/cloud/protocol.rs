@@ -196,6 +196,7 @@ pub async fn synchronize(
             });
         }
         let count = pending.len();
+        let pending = lightcraft_engine::cloud_sync::publication_order(pending, &remote.state.clock).map_err(|e| e.to_string())?;
         let mut chunk = Vec::new();
         for mutation in pending.into_iter().take(256) {
             chunk.push(mutation);

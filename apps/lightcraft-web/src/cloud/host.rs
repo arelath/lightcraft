@@ -127,7 +127,12 @@ impl Host {
         }
     }
     fn claim_owner(&self, session: &mut Session) -> Result<(), String> {
-        let Some(mut state) = session.catalog.sync_state().filter(|s| !s.protocol.is_head()).cloned() else { return Ok(()) };
+        let result = self.claim_owner_inner(session);
+        session.cloud_writer_error = result.as_ref().err().cloned();
+        result
+    }
+    fn claim_owner_inner(&self, session: &mut Session) -> Result<(), String> {
+        let Some(mut state) = session.catalog.sync_state().cloned() else { return Ok(()) };
         if state
             .claim_owner(self.owner.clone().ok_or("persistent browser installation identity unavailable")?, random_identity()?)
             .map_err(|e| e.to_string())?
@@ -248,8 +253,7 @@ impl Host {
             if !protocol.is_head() && self.data.borrow().providers.get(connection).is_none_or(|p| p.connection.bucket_root.is_none()) {
                 return Err("append mode requires bucketRoot".into());
             }
-            let owner =
-                if protocol.is_head() { String::new() } else { self.owner.clone().ok_or("persistent browser installation identity unavailable")? };
+            let owner = self.owner.clone().ok_or("persistent browser installation identity unavailable")?;
             let op = lightcraft_engine::cloud_sync::enable_mode(&s.catalog, library, random_identity()?, connection.into(), protocol, owner)
                 .map_err(|e| e.to_string())?;
             s.apply_received(op).map_err(|e| e.to_string())?;

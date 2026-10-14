@@ -320,6 +320,69 @@ pub(crate) fn prepare(catalog: &Catalog, op: Op) -> Result<(Op, Op)> {
     Ok((Op::Batch { ops }, inverse))
 }
 
+/// The final local state carrying newly authored IDs, including explicit conflict
+/// resolutions that already contain their mutations and therefore bypass capture.
+pub(crate) fn authored_state<'a>(catalog: &Catalog, op: &'a Op) -> Option<&'a SyncState> {
+    let mut pending = vec![op];
+    let mut last = None;
+    while let Some(op) = pending.pop() {
+        match op {
+            Op::Batch { ops } => pending.extend(ops.iter().rev()),
+            Op::SetSyncState { state: Some(state) } => last = Some(state.as_ref()),
+            _ => {}
+        }
+    }
+    last.filter(|state| {
+        state
+            .pending
+            .iter()
+            .any(|(id, mutation)| mutation.revision.device == state.device && catalog.sync_state().is_none_or(|old| !old.pending.contains_key(id)))
+    })
+}
+
+/// Publish historical authors before revisions whose contexts depend on them.
+/// A copied/restored catalog retains its original pending IDs across author rotation.
+pub fn publication_order(
+    mut pending: Vec<lightcraft_catalog::replication::Mutation>,
+    observed: &lightcraft_catalog::replication::Clock,
+) -> Result<Vec<lightcraft_catalog::replication::Mutation>> {
+    if pending.len() > lightcraft_catalog::replication::MAX_PENDING {
+        return Err(error("pending publication exceeds the bounded outbox"));
+    }
+    if observed.len() > lightcraft_catalog::replication::MAX_DEVICES
+        || observed.iter().any(|(author, sequence)| !lightcraft_catalog::assets::identifier(author) || author.len() > 96 || *sequence == 0)
+    {
+        return Err(error("invalid publication frontier; local work retained"));
+    }
+    for mutation in &pending {
+        mutation.validate()?;
+    }
+    pending.sort_by_key(|mutation| mutation.revision.clone());
+    let mut clock = observed.clone();
+    let mut ordered = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let pass_start = ordered.len();
+        let mut waiting = Vec::new();
+        for mutation in pending {
+            if mutation.context.iter().all(|(author, sequence)| clock.get(author).copied().unwrap_or(0) >= *sequence)
+                && clock.get(&mutation.revision.device).copied().unwrap_or(0).checked_add(1) == Some(mutation.revision.sequence)
+            {
+                clock.insert(mutation.revision.device.clone(), mutation.revision.sequence);
+                ordered.push(mutation);
+            } else {
+                waiting.push(mutation);
+            }
+        }
+        if ordered.len() == pass_start {
+            return Err(error(
+                "pending publication depends on missing retained causal history; synchronize or restore the complete catalog/outbox; local work retained",
+            ));
+        }
+        pending = waiting;
+    }
+    Ok(ordered)
+}
+
 fn user_inverse(op: Op) -> Op {
     match op {
         Op::SetCloudIdentity { .. } | Op::SetSyncState { .. } => Op::Batch { ops: Vec::new() },

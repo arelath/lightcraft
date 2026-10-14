@@ -13,6 +13,104 @@ fn success(fixture: &Fixture, library: &Path, commands: &[(&str, Value)]) -> Vec
 fn configure(fixture: &Fixture) -> Value {
     json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":fixture.endpoint,"profile":"acceptance"})
 }
+fn copy_catalog_files(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for name in ["catalog.snap", "catalog.log"] {
+        std::fs::copy(source.join(name), destination.join(name)).unwrap();
+    }
+}
+fn saved_catalog(path: &Path) -> lightcraft_catalog::Catalog {
+    lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(path).unwrap())).unwrap().1
+}
+#[test]
+fn copied_conditional_catalog_uses_distinct_writers_for_independent_offline_edits() {
+    let f = Fixture::new();
+    let (a, _, _) = initialize(&f);
+    let b = f.dir.join("copied-head");
+    copy_catalog_files(&a, &b);
+    let original = saved_catalog(&a).sync_state().unwrap().device.clone();
+    success(&f, &a, &[("photo.rate", json!({"ids":[1],"rating":5}))]);
+    success(&f, &b, &[("cloud.configure", configure(&f)), ("photo.flag", json!({"ids":[1],"flag":"pick"}))]);
+    assert_ne!(saved_catalog(&b).sync_state().unwrap().device, original);
+    success(&f, &a, &[("cloud.sync", json!({}))]);
+    success(&f, &b, &[("cloud.sync", json!({}))]);
+    success(&f, &a, &[("cloud.sync", json!({}))]);
+    for path in [&a, &b] {
+        let catalog = saved_catalog(path);
+        assert_eq!(catalog.photo(lightcraft_catalog::PhotoId(1)).unwrap().rating, 5);
+        assert_eq!(catalog.photo(lightcraft_catalog::PhotoId(1)).unwrap().flag, lightcraft_catalog::Flag::Pick);
+        assert!(catalog.sync_state().unwrap().pending.is_empty());
+    }
+}
+#[test]
+fn copied_head_preserves_historical_pending_ids_and_publishes_causal_order() {
+    let f = Fixture::new();
+    let (a, _, _) = initialize(&f);
+    success(&f, &a, &[("photo.rate", json!({"ids":[1],"rating":2}))]);
+    let before = saved_catalog(&a).sync_state().unwrap().clone();
+    let b = f.dir.join("copied-pending-head");
+    copy_catalog_files(&a, &b);
+    success(&f, &b, &[("cloud.configure", configure(&f)), ("photo.flag", json!({"ids":[1],"flag":"pick"}))]);
+    let copied = saved_catalog(&b).sync_state().unwrap().clone();
+    assert_ne!(copied.device, before.device);
+    for (id, mutation) in &before.pending {
+        assert_eq!(copied.pending.get(id), Some(mutation));
+    }
+    let new = copied.pending.values().find(|m| m.revision.device == copied.device).unwrap();
+    assert_eq!(new.revision.sequence, 1);
+    assert!(new.context.get(&before.device).copied().unwrap() > 1);
+    success(&f, &b, &[("cloud.sync", json!({}))]);
+    success(&f, &a, &[("cloud.sync", json!({}))]);
+    let catalog = saved_catalog(&a);
+    assert_eq!(catalog.photo(lightcraft_catalog::PhotoId(1)).unwrap().rating, 2);
+    assert_eq!(catalog.photo(lightcraft_catalog::PhotoId(1)).unwrap().flag, lightcraft_catalog::Flag::Pick);
+    let state = f.state.lock().unwrap();
+    let batch = state
+        .objects
+        .iter()
+        .filter(|(key, _)| key.contains("/catalog/changes/"))
+        .map(|(_, bytes)| serde_json::from_slice::<Value>(bytes).unwrap())
+        .find(|batch| batch["mutations"].as_array().is_some_and(|list| list.iter().any(|m| m["revision"]["device"] == copied.device)))
+        .unwrap();
+    let devices: Vec<_> = batch["mutations"].as_array().unwrap().iter().map(|m| m["revision"]["device"].as_str().unwrap()).collect();
+    assert_eq!(devices, vec![before.device.as_str(), copied.device.as_str()]);
+}
+#[test]
+fn older_same_path_backup_starts_a_new_writer_epoch_in_both_protocols() {
+    for append in [false, true] {
+        let f = Fixture::new();
+        f.state.lock().unwrap().append_mode = append;
+        let a = f.dir.join("same-path-backup");
+        success(
+            &f,
+            &a,
+            &[
+                ("cloud.configure", configure(&f)),
+                ("cloud.syncEnable", json!({"connection":"personal","protocol":if append {"append-log-v1"} else {"conditional-head-v1"}})),
+            ],
+        );
+        f.import(&a, false);
+        success(&f, &a, &[("cloud.upload", json!({})), ("photo.rate", json!({"ids":[1],"rating":2}))]);
+        let old = saved_catalog(&a).sync_state().unwrap().clone();
+        let saved = ["catalog.snap", "catalog.log"].map(|name| (name, std::fs::read(a.join(name)).unwrap()));
+        success(&f, &a, &[("photo.flag", json!({"ids":[1],"flag":"pick"})), ("cloud.sync", json!({}))]);
+        for (name, bytes) in saved {
+            std::fs::write(a.join(name), bytes).unwrap();
+        }
+        success(&f, &a, &[("photo.rate", json!({"ids":[1],"rating":4}))]);
+        let restored = saved_catalog(&a).sync_state().unwrap().clone();
+        assert_ne!(restored.device, old.device);
+        for (id, mutation) in &old.pending {
+            assert_eq!(restored.pending.get(id), Some(mutation));
+        }
+        assert_eq!(restored.clock.get(&restored.device), Some(&1));
+        success(&f, &a, &[("cloud.sync", json!({}))]);
+        let catalog = saved_catalog(&a);
+        assert_eq!(catalog.photo(lightcraft_catalog::PhotoId(1)).unwrap().rating, 4);
+        assert_eq!(catalog.photo(lightcraft_catalog::PhotoId(1)).unwrap().flag, lightcraft_catalog::Flag::Pick);
+        assert!(catalog.sync_state().unwrap().pending.is_empty());
+    }
+}
 #[test]
 fn actual_remote_rollback_with_pending_work_or_checkpoint_request_retains_local_state() {
     let f = Fixture::new();

@@ -29,6 +29,8 @@ pub mod cloud_import;
 #[path = "cloud_import_web.rs"]
 pub(crate) mod cloud_import;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod cloud_owner;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_publication;
 pub mod cloud_records;
 #[cfg(not(target_arch = "wasm32"))]
@@ -317,6 +319,8 @@ pub struct Session {
     /// Disk budget of the library's thumbnail cache in MB (0 = default; persisted in prefs.json).
     /// Device-local pause, persisted in library preferences.
     pub cloud_paused: bool,
+    /// A persistent host that cannot claim its writer must refuse local cloud edits.
+    pub cloud_writer_error: Option<String>,
     /// Derived conflict views are local and reused by UI/CLI queries until this catalog changes.
     pub(crate) cloud_conflicts_cache: Option<(std::sync::Arc<()>, u64, Value)>,
     pub cache_mb: u32,
@@ -426,6 +430,7 @@ impl Session {
             preview_build: None,
             import_defaults: import::ImportDefaults::default(),
             cloud_paused: false,
+            cloud_writer_error: None,
             cloud_conflicts_cache: None,
             cache_mb: 0,
             smart_previews_dir: None,
@@ -557,11 +562,32 @@ impl Session {
     }
 
     fn apply_catalog_mode(&mut self, op: Op, capture: bool) -> Result<Op> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut op = op;
+        if let Some(reason) = &self.cloud_writer_error
+            && ((capture && self.catalog.sync_state().is_some()) || cloud_sync::authored_state(&self.catalog, &op).is_some())
+        {
+            return Err(EngineError::Other(format!(
+                "cannot edit cloud library before claiming this installation's writer: {reason}; saved data retained"
+            )));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.catalog.sync_state().is_none() {
+            cloud_owner::bind_initial(self, &mut op)?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if capture {
+            self.claim_cloud_owner()?;
+        }
         let (op, inv) = if capture && self.catalog.sync_state().is_some() {
             let prepared = cloud_sync::prepare(&self.catalog, op)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            cloud_owner::reserve(self, &prepared.0)?;
             self.catalog.apply(prepared.0.clone())?;
             prepared
         } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            cloud_owner::reserve(self, &op)?;
             let inv = self.catalog.apply(op.clone())?;
             (op, inv)
         };

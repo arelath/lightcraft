@@ -219,7 +219,7 @@ pub mod migration;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod owner;
+pub use crate::cloud_owner as owner;
 
 #[cfg(test)]
 mod tests {

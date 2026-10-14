@@ -94,11 +94,7 @@ fn enable(s: &mut Session, p: &Value) -> Result<Value> {
         .map(str::to_owned)
         .or_else(|| s.catalog.cloud_identity("library").map(str::to_owned))
         .map_or_else(identity, Ok)?;
-    let owner = if protocol == lightcraft_catalog::replication::SyncProtocol::AppendLog && lib.on_disk {
-        crate::cloud_append::owner::identity(&lib.dir)?
-    } else {
-        String::new()
-    };
+    let owner = if lib.on_disk { crate::cloud_append::owner::identity(&lib.dir)? } else { String::new() };
     let op = crate::cloud_sync::enable_mode(&s.catalog, library, identity()?, connection.into(), protocol, owner)?;
     s.apply_system(op)?;
     s.cloud_uploads.request_resume(true);
@@ -138,6 +134,8 @@ pub fn specs() -> Vec<CommandSpec> {
         "{entity}; explicitly resolve a structural conflict using the valid displayed parent/membership; preserve immutable history",
         always,
         |s, p| {
+            #[cfg(not(target_arch = "wasm32"))]
+            s.claim_cloud_owner()?;
             let entity = super::str_param(p, "entity").ok_or_else(|| bad("cloud.acceptStructure", "missing entity"))?;
             let op = crate::cloud_sync::accept_structure(&s.catalog, entity)?;
             s.apply_received(op)?;
@@ -202,6 +200,8 @@ fn browser_host(_: &mut Session, _: &Value) -> Result<Value> {
 }
 
 fn resolve(s: &mut Session, p: &Value) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    s.claim_cloud_owner()?;
     const C: &str = "cloud.resolveConflict";
     let string = |key| super::str_param(p, key).ok_or_else(|| bad(C, format!("missing {key}")));
     let op = crate::cloud_sync::resolve(&s.catalog, string("entity")?, string("field")?, string("revision")?)?;
@@ -209,6 +209,8 @@ fn resolve(s: &mut Session, p: &Value) -> Result<Value> {
     status(s, p)
 }
 fn restore(s: &mut Session, p: &Value) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    s.claim_cloud_owner()?;
     let entity = super::str_param(p, "entity").ok_or_else(|| bad("cloud.restoreDeleted", "missing entity"))?;
     let op = crate::cloud_sync::restore_deleted(&s.catalog, entity)?;
     s.apply_received(op)?;
