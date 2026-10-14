@@ -530,7 +530,7 @@ impl SyncState {
         }
         next.cursor = None;
         next.generation = 0;
-        let mut progress = progress;
+        let mut progress = if let Some(previous) = &next.append { previous.merge(&progress)? } else { progress };
         progress.remote.proofs.clear();
         next.append = Some(Box::new(progress));
         next.prune_archived_receipts();

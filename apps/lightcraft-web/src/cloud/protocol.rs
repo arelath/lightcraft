@@ -168,6 +168,9 @@ pub async fn synchronize(
     let mut archive_proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
     for _ in 0..64 {
         let mut remote = read(provider, &local.library).await?;
+        if remote.head.as_ref().map_or(0, |(head, _)| head.generation) < local.generation {
+            return Err("remote catalog rolled back below the acknowledged generation; local work retained".into());
+        }
         super::history::hydrate(provider, &mut remote.state, local, &mut archive_proofs).await?;
         let mut pending = Vec::new();
         for mutation in local.pending.values() {

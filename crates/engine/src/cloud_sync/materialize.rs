@@ -662,6 +662,30 @@ pub fn incoming_checkpoint(
     Ok(Op::Batch { ops })
 }
 
+/// A verified worker result may finish after a newer result. The worker's captured
+/// generation distinguishes this from a remote scan rolling back its own baseline.
+pub fn completed_checkpoint(
+    catalog: &Catalog,
+    remote: &lightcraft_catalog::replication::Portable,
+    acknowledged: &BTreeSet<String>,
+    cursor: String,
+    generation: u64,
+    started_generation: u64,
+) -> Result<Op> {
+    let current = catalog.sync_state().ok_or_else(|| error("enable synchronization first"))?;
+    if generation < started_generation {
+        return Err(error("remote catalog rolled back below the worker's acknowledged generation; pending work retained"));
+    }
+    if generation < current.generation {
+        // Both completions were certified against their captured baselines. Preserve
+        // the newer durable cursor while still reconciling this result's exact ACKs.
+        let newer = current.cursor.clone().ok_or_else(|| error("acknowledged cloud head has no cursor"))?;
+        incoming_checkpoint(catalog, remote, acknowledged, newer, current.generation)
+    } else {
+        incoming_checkpoint(catalog, remote, acknowledged, cursor, generation)
+    }
+}
+
 /// Incoming effects and exact publication receipts commit in the same journal record.
 pub fn incoming_append(catalog: &Catalog, progress: lightcraft_catalog::replication::AppendProgress, ids: &BTreeSet<String>) -> Result<Op> {
     let mut state = catalog.sync_state().cloned().ok_or_else(|| error("enable synchronization first"))?;

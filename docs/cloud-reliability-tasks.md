@@ -27,6 +27,26 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [ ] CR.20 — Provide supported browser signer deployment instructions and a desktop/browser capability matrix; verify the deployment workflow and stated scope.
 - [ ] CR.21 — Classify sync failures and retry transient connectivity with bounded backoff; pause authentication, integrity, schema, and identity failures with actionable status. Test native/browser recovery.
 
+## Follow-up review: completion ordering and shared semantics
+
+Source: supplied static review of `64ac4d0` against `208edb8`, received 2026-10-14.
+Current starting commit: `1118cf59`. This review predates the verified CR.5–CR.8
+work below. The following tasks now take priority, in this order; remaining scale
+work (CR.9/CR.10) and other original unchecked tasks remain open.
+
+- [x] CR.22 — Apply verified synchronization results monotonically across upload and ordinary workers. Distinguish stale valid completions from inconsistent remote history, retain newer head cursors, merge append publication progress, and qualify phase events by attempt so obsolete failures cannot overwrite success. Test held generation 10 after generation 11 and append frontier preservation; retain deliberate integrity-verification failures.
+- [ ] CR.23 — Claim installation/catalog writer ownership in both protocols before editing, preserving pending IDs. Provide a safe writing epoch for explicit same-directory backup restore and causally schedule retained historical-author mutations. Test copied conditional-head catalogs making distinct offline edits and restoring an older backup.
+- [ ] CR.24 — Materialize smart-album references to deleted or unresolved albums deterministically without broadening their criteria or blocking fresh-device bootstrap. Test a retained smart album referencing a deleted regular album.
+- [ ] CR.25 — Define a nonportable smart-album policy that preserves originating-device semantics. Preserve folder criteria and local-only selections, and distinguish absent selection restrictions from explicitly empty sets. Test self-sync with folder-restricted and exclusively local-photo rules.
+- [ ] CR.26 — Resolve shared stack ownership and validity independently of local-only members, then apply local overlays. Test identical shared proposals S1=(P,Q), S2=(Q,R), S3=(R,S) with and without a local-only member of S2, comparing projected cloud relationships.
+- [ ] CR.27 — Durably finalize every upload receipt covered by shared acknowledgement with exact publication evidence. Retry local proof writes after restart independently of media transfer; test delayed bulk siblings and subsequent local-copy removal without manual verification. Keep staging protection intact.
+- [ ] CR.28 — Make per-import preflight failures explicit queue outcomes with retained blocked reasons and defined retry eligibility. Test one unreadable manifest alongside a healthy import: healthy work completes and the blocked item exposes its specific recovery action.
+- [ ] CR.29 — Model subsystem health explicitly: user pause, polling halted by error, publication waiting, structural conflicts, and last successful remote scan. A success clears only the recovered subsystem's failure. Test failed automatic sync followed by upload success, and structural-only conflicts; never infer healthy synchronization solely from no pending local work.
+- [ ] CR.30 — Record logical fields changed by actions and construct undo/redo inverses against current state. Guard those fields' revisions while preserving independent remote metadata and membership changes. Test local title undo after remote caption editing, plus concurrent changes to the same title.
+- [ ] CR.31 — Separate verified media readiness, metadata publication, and covered-receipt finalization under one authoritative per-library coordinator (with CR.13/CR.22/CR.27). The per-library publication gate landed in CR.22; stage extraction, receipt finalization, and bulk-import request-count/transferred-byte assertions remain open.
+- [ ] CR.32 — Replace contradictory protocol outcome combinations and sentinel cursors/generations with explicit unchanged, conditional-head, and append outcome variants. Test evidence merging, monotonic cursors, and no-op writes.
+- [ ] CR.33 — Extract independently testable shared structural reconciliation. Add property tests: identical shared synchronization state yields identical shared relationships regardless of local IDs, local-only content, iteration order, or delivery order. Test local-only preservation separately.
+
 ## Verification log
 
 2026-10-14 — CR.1/CR.2: 11 append and 5 conditional-head real-CLI tests passed
@@ -206,3 +226,40 @@ and corresponding request log; C: scratch `lightcraft-cr8-native/native-4f301fe2
 Browser host is WASM-compiled and uses the tested shared guard. Its host module has no
 native runtime test runner; fresh browser ACK-file/storage-count acceptance is not claimed.
 Large-library indexing/delta persistence and append audits remain CR.9/CR.10.
+
+
+2026-10-14 — CR.22: native metadata publication is serialized per open library
+through durable owner acknowledgement; media transfer and staging writes retain
+separate locks. Both blocking owner loops pump each other's queues. Certified
+late head completions retain newer cursors, while scans below their own captured
+generation and equal-generation cursor collisions fail. Append progress merges
+remote effects/frontiers and removes covered gaps; receipt/manifest collisions
+remain errors. Old completions lacking witnesses for newer archives retain state
+and outbox and request a fresh scan without pausing automatic polling.
+
+Upload phases carry attempt identity. Obsolete failures cannot downgrade shared
+acknowledgement or cause a redundant journal write. Explicit verification begun
+on an acknowledged import can still report confirmed remote media damage.
+Append merging retains incoming archived ACK witnesses until delayed acknowledgement;
+the browser ACK records the merged progress digest. Shared transport certification
+includes prior publication progress as well as main catalog state. The initial CI
+found two missing-proof append checkpoint regressions; this certification correction
+passed all 12 append CLI cases before final verification.
+
+Final source passed all eight CI stages: C: build `cr22-ci-verified.log`, including
+three append model tests, held generation 10 after 11, genuine rollback/fork errors,
+archival-witness refresh, permit retention through interaction/owner save, obsolete
+versus integrity phase failures, and the existing browser ACK/reload tests. Real-CLI
+rollback with pending changes and checkpoint maintenance preserves local state.
+
+Rebuilt native acceptance passed automatic three-photo bulk upload alongside normal
+synchronization and checkpoint maintenance on both protocols. All four imports
+finished synchronized, zero pending mutations remained, and the current rating was
+retained after compaction. All 526 signed loopback requests verified (351 append /
+175 head); both final rendered dialogs were inspected. Evidence: ignored
+`target/cloud-reliability/cr22-native-results-*.json`, `cr22-native-requests-*.json`;
+C: scratch `lightcraft-cr22-native/native-1773ad8b/` and `native-df5a5821/`.
+Browser transport/host changes are WASM-compiled and ACK/shared-model tested; no
+fresh browser deployment or live-provider acceptance is claimed. Shared receipt
+finalization and request-cost/stage refactoring remain CR.27/CR.31; scale remains
+CR.9/CR.10. Only CR.22 of the follow-up review is complete at this checkpoint.

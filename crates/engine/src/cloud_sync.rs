@@ -420,12 +420,31 @@ mod materialize;
 #[cfg(test)]
 mod tests;
 pub use materialize::accept_structure;
+pub use materialize::completed_checkpoint;
 pub use materialize::incoming;
 pub use materialize::incoming_append;
 pub use materialize::incoming_checkpoint;
 pub use materialize::resolve;
 pub use materialize::restore_deleted;
 pub use materialize::structural_conflicts;
+
+/// Old verified results can lack witnesses for archives installed since they
+/// started. Retain newer state and refresh rather than pausing on missing proofs.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn obsolete_completion_needs_proof(catalog: &Catalog, outcome: &crate::cloud_replication::Outcome, failure: &EngineError) -> bool {
+    if !matches!(failure, EngineError::Catalog(lightcraft_catalog::CatalogError::ArchiveRequired(_))) {
+        return false;
+    }
+    let Some(current) = catalog.sync_state() else { return false };
+    if let Some(incoming) = &outcome.append {
+        current.append.as_ref().is_some_and(|previous| {
+            previous.manifest == incoming.manifest
+                && incoming.frontiers.iter().all(|(author, sequence)| previous.frontiers.get(author).copied().unwrap_or(0) >= *sequence)
+        })
+    } else {
+        current.protocol.is_head() && outcome.generation < current.generation
+    }
+}
 
 /// Fast owner-thread guard for an already certified conditional-head outcome.
 /// Compare every durable portable component without cloning/materializing it.

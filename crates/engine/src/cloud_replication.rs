@@ -244,6 +244,9 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
     for _ in 0..64 {
         canceled(cancel)?;
         let mut remote = if checkpoint_requested { read(connection, &local.library, cancel)? } else { read_incremental(connection, local, cancel)? };
+        if remote.head.as_ref().map_or(0, |(head, _)| head.generation) < local.generation {
+            return Err(invalid("remote catalog rolled back below the acknowledged generation; local work retained"));
+        }
         crate::cloud_history::native::hydrate(connection, &mut remote.state, local, &mut archive_proofs, cancel)?;
         let mut pending = Vec::new();
         let mut acknowledged = BTreeSet::new();
@@ -363,4 +366,6 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
 }
 
 mod worker;
+pub(crate) use worker::Coordinator;
+pub(crate) use worker::request_poll;
 pub use worker::{Jobs, pause_publication, prepare_migration, resume_publication, start, start_migration};

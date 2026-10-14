@@ -555,7 +555,7 @@ impl Host {
                         next.apply(op.clone()).map_err(|e| e.to_string())?;
                         binding = Some(op);
                     }
-                    let receipt = if let Some(progress) = &outcome.append {
+                    let mut receipt = if let Some(progress) = &outcome.append {
                         AckReceipt::new_append(next.sync_state().ok_or("synchronization identity unavailable")?, &outcome.acknowledged, progress)?
                     } else {
                         AckReceipt::new(
@@ -579,6 +579,11 @@ impl Host {
                     };
                     let op = if let Some(binding) = binding { Op::Batch { ops: vec![binding, op] } } else { op };
                     app.session.apply_received(op).map_err(|e| e.to_string())?;
+                    if outcome.append.is_some() {
+                        let received = app.session.catalog.sync_state().ok_or("synchronization identity unavailable")?;
+                        let progress = received.append.as_ref().ok_or("append publication progress unavailable")?;
+                        receipt = AckReceipt::new_append(received, &outcome.acknowledged, progress)?;
+                    }
                     app.session.persist().map_err(|e| e.to_string())?;
                     self.files.write(ACK_FILE, &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?);
                     let value = json!({"unchanged":false,"protocol":app.session.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len()});

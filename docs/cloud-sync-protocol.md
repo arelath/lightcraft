@@ -496,3 +496,29 @@ remains pending. No account caps or billing settings were changed.
 All eight final CI stages passed (`target/migration-ci-final.log`), including the owner-worker
 rollback/cancellation/library-switch regressions and the shared modal confirmation test. Native
 release and web builds passed; fixture/static helpers were stopped after acceptance.
+
+
+### Publication completion ordering (2026-10-14)
+
+Native uploads and ordinary synchronization share one metadata publication gate per
+open library. A worker holds it from remote reconciliation through durable owner
+application (or rejection); byte transfers and staging receipt writes use separate
+locks. Blocking CLI commands pump both owner queues while waiting. Cancellation
+and library replacement release waiting work without applying results to another
+catalog. The browser already permits one metadata synchronization job.
+
+A certified head completion retains its worker's starting acknowledged generation.
+Finishing an older valid scan after a newer completion preserves the newer cursor;
+a scan below its own starting generation is rollback and fails, including scans
+with pending mutations or checkpoint maintenance. Equal-generation cursor changes
+remain errors. Append acknowledgement merges verified remote effects and contiguous
+frontiers, pruning gaps covered by either result. Receipt/manifest collisions fail.
+An obsolete completion missing witnesses for newer archived history retains the
+newer state and outbox and schedules a fresh certified scan without halting polling.
+
+Upload phase events identify their attempt. Ordinary older failures cannot undo
+shared acknowledgement. Explicit verification started on an already synchronized
+import can invalidate it when it confirms missing or corrupt remote bytes and
+cannot repair them; connectivity or old publication failures do not revoke proof.
+Receipt finalization after another worker acknowledges publication remains CR.27;
+transfer/publication stage extraction and request-cost assertions remain CR.31.

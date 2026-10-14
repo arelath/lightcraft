@@ -2,9 +2,30 @@ use super::*;
 use crate::assets::AssetResolver;
 use crate::{EngineError, Session, activity::TaskGuard};
 use serde_json::{Value, json};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
+
+/// One metadata publisher per library, held through durable owner acknowledgement.
+/// Media transfer and receipt I/O use separate locks and continue independently.
+#[derive(Default)]
+pub(crate) struct Coordinator(Mutex<()>);
+impl Coordinator {
+    pub(crate) fn acquire(&self, cancel: &AtomicBool) -> crate::Result<MutexGuard<'_, ()>> {
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(error("metadata publication cancelled; pending work retained"));
+            }
+            match self.0.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(TryLockError::Poisoned(e)) => return Ok(e.into_inner()),
+                Err(TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
+}
 
 struct Pending {
+    owner_done: Option<mpsc::SyncSender<()>>,
+    started_generation: u64,
     migration_owner: Option<String>,
     receiver: mpsc::Receiver<crate::Result<Outcome>>,
     library: Arc<()>,
@@ -16,11 +37,15 @@ struct Pending {
 }
 impl Drop for Pending {
     fn drop(&mut self) {
+        if let Some(done) = self.owner_done.take() {
+            let _ = done.send(());
+        }
         self.cancel.store(true, Ordering::Relaxed);
     }
 }
 #[derive(Default)]
 pub struct Jobs {
+    pub(crate) coordinator: Arc<Coordinator>,
     preparing_migration: bool,
     pending: Option<Pending>,
     pub reports: Vec<Value>,
@@ -51,6 +76,9 @@ pub fn pause_publication(s: &mut Session) {
 pub fn resume_publication(s: &mut Session) {
     s.cloud_replication_jobs.preparing_migration = false;
     s.cloud_replication_jobs.paused = false;
+    s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now());
+}
+pub(crate) fn request_poll(s: &mut Session) {
     s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now());
 }
 pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
@@ -123,10 +151,20 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
     let handle = guard.handle();
     let cancel = guard.cancel_flag().ok_or_else(|| error("synchronization cancellation flag unavailable"))?;
     let worker_cancel = cancel.clone();
+    let started_generation = state.generation;
     let (sender, receiver) = mpsc::sync_channel(1);
+    let (owner_done, applied) = mpsc::sync_channel(1);
+    let coordinator = s.cloud_replication_jobs.coordinator.clone();
     std::thread::Builder::new()
         .name("cloud-catalog-sync".into())
         .spawn(move || {
+            let _permit = match coordinator.acquire(&worker_cancel) {
+                Ok(permit) => permit,
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    return;
+                }
+            };
             handle.detail(if migrating {
                 "Verifying committed history and publishing the migration seed"
             } else {
@@ -143,10 +181,20 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
             })
             .map_err(error)
             .and_then(|result| result.map_err(|error| EngineError::Other(error.to_string())));
-            let _ = sender.send(result);
+            if sender.send(result).is_ok() {
+                loop {
+                    match applied.recv_timeout(std::time::Duration::from_millis(20)) {
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(_) if worker_cancel.load(Ordering::Relaxed) => break,
+                        Err(_) => {}
+                    }
+                }
+            }
         })
         .map_err(|e| error(format!("could not start cloud synchronization: {e}")))?;
     s.cloud_replication_jobs.pending = Some(Pending {
+        owner_done: Some(owner_done),
+        started_generation,
         migration_owner,
         receiver,
         library: s.library_token(),
@@ -163,6 +211,7 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
         return Ok(json!({"task":id,"background":true}));
     }
     loop {
+        s.poll_cloud_uploads();
         s.poll_cloud_replication();
         if let Some(report) = s.cloud_replication_jobs.reports.iter().find(|report| report.get("task").and_then(Value::as_u64) == Some(id)) {
             if report.get("ok").and_then(Value::as_bool) == Some(true) {
@@ -244,13 +293,20 @@ impl Session {
                 migrated = Some(next);
                 Some(op)
             } else { None };
-            let op = if let Some(progress)=outcome.append.clone() {crate::cloud_sync::incoming_append(migrated.as_ref().unwrap_or(&self.catalog),progress,&outcome.acknowledged)?}else{crate::cloud_sync::incoming_checkpoint(
+            let reconciled = if let Some(progress)=outcome.append.clone() {crate::cloud_sync::incoming_append(migrated.as_ref().unwrap_or(&self.catalog),progress,&outcome.acknowledged)}else{crate::cloud_sync::completed_checkpoint(
                 &self.catalog,
                 &outcome.state,
                 &outcome.acknowledged,
                 outcome.cursor.clone(),
                 outcome.generation,
-            )?};
+                pending.started_generation,
+            )};
+            let op = match reconciled {
+                Err(error) if pending.migration_owner.is_none() && crate::cloud_sync::obsolete_completion_needs_proof(&self.catalog, &outcome, &error) => {
+                    return Ok(json!({"superseded":true,"refreshRequired":true,"pending":self.catalog.sync_state().map_or(0,|state|state.pending.len())}));
+                }
+                result => result?,
+            };
             let op = if let Some(binding) = binding { lightcraft_catalog::Op::Batch { ops: vec![binding, op] } } else { op };
             let inverse = self.apply_catalog_mode(op, false)?;
             if let Err(error) = self.persist() {
@@ -262,6 +318,9 @@ impl Session {
         });
         self.cloud_replication_jobs.paused = result.is_err() || self.cloud_replication_jobs.preparing_migration;
         self.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
+        if result.as_ref().is_ok_and(|value| value.get("refreshRequired").and_then(Value::as_bool) == Some(true)) {
+            request_poll(self);
+        }
         let report = match result {
             Ok(result) => json!({"task":id,"ok":true,"result":result}),
             Err(error) => {
@@ -346,6 +405,8 @@ mod tests {
         let cancel = guard.cancel_flag().unwrap();
         let (_, receiver) = mpsc::sync_channel(1);
         s.cloud_replication_jobs.pending = Some(Pending {
+            owner_done: None,
+            started_generation: local.generation,
             migration_owner: None,
             receiver,
             library: s.library_token(),
@@ -470,6 +531,97 @@ mod tests {
         assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["result"]["unchanged"], true);
         let (_, restored, _) = Journal::open(Box::new(files.files)).unwrap();
         assert_eq!(restored.photo(PhotoId(1)).unwrap().rating, 5);
+    }
+    #[test]
+    fn publication_permit_is_held_until_owner_save_even_during_interaction() {
+        let (mut s, _) = session();
+        ready(&mut s);
+        let coordinator = s.cloud_replication_jobs.coordinator.clone();
+        let outcome = s.cloud_replication_jobs.pending.as_mut().unwrap().ready.take().unwrap();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (owner_done, applied) = mpsc::sync_channel(1);
+        let (held, holding) = mpsc::sync_channel(1);
+        let worker_gate = coordinator.clone();
+        let worker = std::thread::spawn(move || {
+            let _permit = worker_gate.acquire(&AtomicBool::new(false)).unwrap();
+            sender.send(outcome).unwrap();
+            held.send(()).unwrap();
+            applied.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        });
+        let pending = s.cloud_replication_jobs.pending.as_mut().unwrap();
+        pending.receiver = receiver;
+        pending.owner_done = Some(owner_done);
+        holding.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        s.begin_interaction("slider").unwrap();
+        s.poll_cloud_replication();
+        assert!(coordinator.0.try_lock().is_err());
+        s.end_interaction().unwrap();
+        s.poll_cloud_replication();
+        worker.join().unwrap();
+        assert!(coordinator.0.try_lock().is_ok());
+        assert_eq!(s.catalog.sync_state().unwrap().generation, 1);
+        let _permit = coordinator.acquire(&AtomicBool::new(false)).unwrap();
+        assert!(coordinator.acquire(&AtomicBool::new(true)).is_err());
+    }
+    #[test]
+    fn older_completion_without_new_archive_witnesses_refreshes_without_pausing() {
+        let (mut s, _) = session();
+        ready(&mut s);
+        let old = s.cloud_replication_jobs.pending.as_mut().unwrap().ready.take().unwrap().unwrap();
+        let mut newer = SyncState::restore_durable(&old.state, "other".into(), "personal".into()).unwrap();
+        newer
+            .enqueue(vec![lightcraft_catalog::replication::Change {
+                entity: "library:library".into(),
+                field: "label.Green".into(),
+                base: None,
+                value: json!("Newer green"),
+            }])
+            .unwrap();
+        newer.pending.clear();
+        let plan = newer.archive_plan().unwrap();
+        newer.compact_receipts(&plan).unwrap();
+        let mut portable = newer.portable();
+        portable.proofs = plan.objects;
+        let op = crate::cloud_sync::incoming_checkpoint(&s.catalog, &portable, &old.acknowledged, "b".repeat(64), 11).unwrap();
+        s.apply_received(op).unwrap();
+        s.persist().unwrap();
+        let before = s.catalog.to_snapshot();
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Ok(Outcome { generation: 10, ..old }));
+        s.poll_cloud_replication();
+        assert!(!s.cloud_replication_jobs.paused);
+        assert_eq!(s.catalog.to_snapshot(), before);
+        assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["result"]["refreshRequired"], true);
+        assert!(s.cloud_replication_jobs.next_poll.unwrap() <= web_time::Instant::now());
+    }
+    #[test]
+    fn older_completion_retains_newer_head_without_pausing_but_rollback_and_forks_fail() {
+        let (mut s, _) = session();
+        ready(&mut s);
+        let old = s.cloud_replication_jobs.pending.as_mut().unwrap().ready.take().unwrap().unwrap();
+        let old_state = old.state.clone();
+        let old_ids = old.acknowledged.clone();
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Ok(Outcome { generation: 11, cursor: "b".repeat(64), ..old }));
+        s.poll_cloud_replication();
+        ready(&mut s);
+        s.cloud_replication_jobs.pending.as_mut().unwrap().started_generation = 0;
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready =
+            Some(Ok(Outcome { append: None, state: old_state, acknowledged: old_ids, cursor: "a".repeat(64), generation: 10 }));
+        s.poll_cloud_replication();
+        assert!(!s.cloud_replication_jobs.paused);
+        assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["ok"], true);
+        assert_eq!(s.catalog.sync_state().unwrap().generation, 11);
+        assert_eq!(s.catalog.sync_state().unwrap().cursor.as_deref(), Some("b".repeat(64).as_str()));
+        assert_eq!(s.catalog.custom_label_name(lightcraft_catalog::ColorLabel::Green), Some("Remote green"));
+        let before = s.catalog.to_snapshot();
+        ready_same_head(&mut s, 10); // Started after the owner acknowledged 11: actual rollback.
+        s.poll_cloud_replication();
+        assert!(s.cloud_replication_jobs.paused);
+        assert_eq!(s.catalog.to_snapshot(), before);
+        ready_same_head(&mut s, 11);
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready.as_mut().unwrap().as_mut().unwrap().cursor = "c".repeat(64);
+        s.poll_cloud_replication();
+        assert!(s.cloud_replication_jobs.paused);
+        assert_eq!(s.catalog.to_snapshot(), before);
     }
     #[test]
     fn migration_owner_retains_late_edits_and_rolls_back_mode_on_failed_save() {

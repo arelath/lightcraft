@@ -66,6 +66,28 @@ pub fn prefixes(remote: &Portable) -> Result<Clock> {
     Ok(result)
 }
 impl AppendProgress {
+    /// Combine independently verified publications; owner completion order is arbitrary.
+    pub fn merge(&self, incoming: &Self) -> Result<Self> {
+        self.validate(&self.remote.library)?;
+        incoming.validate(&self.remote.library)?;
+        if self.manifest != incoming.manifest {
+            return Err(invalid("append publication manifest changed; local progress retained"));
+        }
+        let mut remote = super::SyncState::restore_durable(&self.remote, "publication".into(), "remote".into())?;
+        remote.merge(&incoming.remote)?;
+        let mut remote = remote.portable();
+        // Incoming transport may promote archived receipts needed by a later
+        // browser ACK transaction. Merge authenticated them before pruning;
+        // keep these witnesses until the following remote scan replaces them.
+        remote.received.extend(incoming.remote.received.clone());
+        let frontiers = prefixes(&remote)?;
+        let mut gaps = self.gaps.clone();
+        gaps.extend(incoming.gaps.iter().cloned());
+        gaps.retain(|id| !stamp(id).is_ok_and(|s| frontiers.get(&s.device).copied().unwrap_or(0) >= s.sequence));
+        let merged = Self { version: 1, manifest: self.manifest.clone(), frontiers, remote, gaps: gaps.into_iter().take(1000).collect() };
+        merged.validate(&merged.remote.library)?;
+        Ok(merged)
+    }
     pub fn validate(&self, library: &str) -> Result<()> {
         if self.version != 1
             || !hash(&self.manifest)
@@ -87,5 +109,77 @@ impl AppendProgress {
         durable.remote.proofs.clear();
         let bytes = serde_json::to_vec(&durable).map_err(|e| invalid(&e.to_string()))?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::replication::{Change, SyncState};
+    use serde_json::json;
+
+    fn progress(state: &SyncState) -> AppendProgress {
+        let remote = state.portable();
+        AppendProgress { version: 1, manifest: "a".repeat(64), frontiers: prefixes(&remote).unwrap(), remote, gaps: BTreeSet::new() }
+    }
+    fn edit(state: &mut SyncState, field: &str, value: u8) {
+        state.enqueue(vec![Change { entity: "photo:one".into(), field: field.into(), base: None, value: json!(value) }]).unwrap();
+    }
+    #[test]
+    fn completion_order_cannot_regress_frontiers_remote_effects_or_resolved_gaps() {
+        let mut state = SyncState::new("library".into(), "a".into(), "storage".into()).unwrap();
+        state.protocol = SyncProtocol::AppendLog;
+        edit(&mut state, "rating", 1);
+        let mut old = progress(&state);
+        old.gaps.insert("a-2".into());
+        edit(&mut state, "rating", 5);
+        let new = progress(&state);
+        state.acknowledge_append(&state.pending.keys().cloned().collect(), new.clone()).unwrap();
+        state.acknowledge_append(&BTreeSet::new(), old.clone()).unwrap();
+        assert_eq!(state.append.as_deref(), Some(&new));
+        assert_eq!(old.merge(&new).unwrap(), new.merge(&old).unwrap());
+        assert!(state.pending.is_empty());
+    }
+    #[test]
+    fn merge_retains_incoming_archived_receipts_until_delayed_ack_finishes() {
+        let mut state = SyncState::new("library".into(), "a".into(), "storage".into()).unwrap();
+        state.protocol = SyncProtocol::AppendLog;
+        edit(&mut state, "rating", 1);
+        let first = state.received["a-1"].clone();
+        let old = progress(&state);
+        state.acknowledge_append(&BTreeSet::new(), old.clone()).unwrap();
+        edit(&mut state, "rating", 5);
+        let mut remote = SyncState::restore_durable(&state.portable(), "remote".into(), "storage".into()).unwrap();
+        let plan = remote.archive_plan().unwrap();
+        remote.compact_receipts(&plan).unwrap();
+        remote.prove_archived("a-1", first.clone(), &plan.objects).unwrap();
+        let mut incoming = progress(&remote);
+        incoming.remote.proofs = plan.objects;
+        state.merge(&incoming.remote).unwrap();
+        state.acknowledge_append(&BTreeSet::new(), incoming).unwrap();
+        assert_eq!(state.append.as_ref().unwrap().remote.received.get("a-1"), Some(&first));
+        // Mimic reloading between the receive and browser ACK transactions.
+        let mut loaded: SyncState = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        let saved = *loaded.append.clone().unwrap();
+        loaded.acknowledge_append(&BTreeSet::from(["a-1".into()]), saved).unwrap();
+        assert_eq!(loaded.pending.keys().cloned().collect::<Vec<_>>(), vec!["a-2".to_owned()]);
+    }
+    #[test]
+    fn independent_verified_progress_merges_and_collisions_remain_errors() {
+        let mut a = SyncState::new("library".into(), "a".into(), "storage".into()).unwrap();
+        let mut b = SyncState::new("library".into(), "b".into(), "storage".into()).unwrap();
+        edit(&mut a, "rating", 4);
+        edit(&mut b, "flag", 1);
+        let ap = progress(&a);
+        let bp = progress(&b);
+        let merged = ap.merge(&bp).unwrap();
+        assert_eq!(merged, bp.merge(&ap).unwrap());
+        assert_eq!(merged.frontiers, Clock::from([("a".into(), 1), ("b".into(), 1)]));
+        let mut fork = ap.clone();
+        fork.remote.received.get_mut("a-1").unwrap().digest = "f".repeat(64);
+        assert!(ap.merge(&fork).is_err());
+        let mut other_manifest = bp;
+        other_manifest.manifest = "b".repeat(64);
+        assert!(ap.merge(&other_manifest).is_err());
     }
 }

@@ -14,6 +14,23 @@ fn configure(fixture: &Fixture) -> Value {
     json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":fixture.endpoint,"profile":"acceptance"})
 }
 #[test]
+fn actual_remote_rollback_with_pending_work_or_checkpoint_request_retains_local_state() {
+    let f = Fixture::new();
+    let (a, _, _) = initialize(&f);
+    let old_head = f.state.lock().unwrap().objects["/photos/library/catalog/head.json"].clone();
+    success(&f, &a, &[("photo.rate", json!({"ids":[1],"rating":2})), ("cloud.sync", json!({})), ("photo.rate", json!({"ids":[1],"rating":4}))]);
+    let before = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap().1;
+    assert!(!before.sync_state().unwrap().pending.is_empty());
+    f.state.lock().unwrap().objects.insert("/photos/library/catalog/head.json".into(), old_head);
+    for params in [json!({}), json!({"checkpoint":true})] {
+        let (output, rows) = f.run(&a, &[("cloud.sync", params)]);
+        assert!(!output.status.success());
+        assert!(rows[0]["error"].as_str().unwrap().contains("rolled back"), "{rows:?}");
+        let after = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap().1;
+        assert_eq!(after.to_snapshot(), before.to_snapshot());
+    }
+}
+#[test]
 fn unchanged_head_cli_polls_preserve_exact_catalog_files_and_only_read_the_head() {
     let f = Fixture::new();
     let (a, _, _) = initialize(&f);

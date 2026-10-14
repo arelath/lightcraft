@@ -35,6 +35,13 @@ pub fn merge_request(local: &SyncState, remote: &Portable, witness: &Witness) ->
     remote.proofs.extend(witness.clone());
     let mut test = local.clone();
     test.merge(&remote)?;
+    if let Some(progress) = &local.append {
+        // Publication progress can retain promoted ACK receipts that the main
+        // catalog has already demoted. Certify their archive paths as well, so
+        // owner-side monotonic progress merging never needs to fetch proofs.
+        let mut published = SyncState::restore_durable(&progress.remote, "publication".into(), "remote".into())?;
+        published.merge(&remote)?;
+    }
     Ok(remote)
 }
 #[cfg(not(target_arch = "wasm32"))]
