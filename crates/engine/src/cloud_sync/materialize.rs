@@ -1,4 +1,5 @@
 //! Validate and install portable documents without echoing them into the local outbox.
+use super::shared_projection::{fields, stacks as shared_stacks};
 use super::*;
 use lightcraft_catalog::assets::{Asset, AssetId};
 use lightcraft_catalog::replication::Mutation;
@@ -13,15 +14,6 @@ fn local(catalog: &Catalog, kind: &str, global: &str) -> Option<u64> {
         let (prefix, local) = key.split_once(':')?;
         (prefix == kind && id == global).then(|| local.parse().ok()).flatten()
     })
-}
-fn fields(state: &SyncState, entity: &str) -> BTreeMap<String, Value> {
-    state
-        .documents
-        .get(entity)
-        .into_iter()
-        .flat_map(|fields| fields.keys())
-        .filter_map(|field| state.winning(entity, field).map(|(_, v)| (field.clone(), v.clone())))
-        .collect()
 }
 fn apply(catalog: &mut Catalog, ops: &mut Vec<Op>, op: Op) -> Result<()> {
     catalog.apply(op.clone())?;
@@ -109,54 +101,28 @@ fn merged_array(state: &SyncState, entity: &str, field: &str) -> Result<Value> {
 }
 
 fn album_parents(catalog: &Catalog, state: &SyncState, ids: &BTreeMap<String, AlbumId>) -> Result<BTreeMap<AlbumId, Option<AlbumId>>> {
+    let shared = super::shared_projection::album_parents(state)?;
     let mut parents: BTreeMap<_, _> = catalog.albums().map(|album| (album.id, album.parent)).collect();
-    let live: BTreeSet<_> = ids.values().copied().collect();
     for (entity, id) in ids {
-        let values = fields(state, entity);
-        let parent = values.get("parent").cloned().unwrap_or(Value::Null);
-        if !parent.is_null() && !parent.is_string() {
-            return Err(error("invalid cloud album parent"));
-        }
-        let parent = parent
-            .as_str()
-            .and_then(|global| local(catalog, "album", global))
-            .map(AlbumId)
-            .filter(|parent| live.contains(parent) || catalog.cloud_identity(&format!("album:{}", parent.0)).is_none());
-        if let Some(parent) = parent
-            && catalog.album(parent).is_none_or(|album| !album.folder)
-        {
-            return Err(error("cloud album parent is not a folder"));
-        }
+        let parent = shared.get(entity).and_then(|parent| parent.as_ref()).and_then(|parent| ids.get(parent)).copied();
         parents.insert(*id, parent);
     }
-    // Cross-entity concurrent moves can form a cycle even though each local edit was
-    // valid. Project the greatest stable global identity at the root; keep the causal
-    // registers unchanged so every proposed edge remains available for resolution.
+    // Shared cycle choices are already fixed globally. Validate the remaining local
+    // graph independently; a local node never chooses which shared edge is severed.
     let mut visited = BTreeSet::new();
     for start in parents.keys().copied().collect::<Vec<_>>() {
-        let mut path = Vec::new();
-        let mut seen = BTreeMap::new();
+        let mut path = BTreeSet::new();
         let mut current = Some(start);
         while let Some(id) = current {
             if visited.contains(&id) {
                 break;
             }
-            if let Some(index) = seen.get(&id).copied() {
-                let cycle = path.get(index..).ok_or_else(|| error("invalid album graph traversal"))?;
-                let chosen = ids
-                    .iter()
-                    .filter(|(_, id)| cycle.contains(*id))
-                    .max_by_key(|(entity, _)| *entity)
-                    .map(|(_, id)| *id)
-                    .ok_or_else(|| error("device-local album graph contains a cycle"))?;
-                parents.insert(chosen, None);
-                break;
+            if !path.insert(id) {
+                return Err(error("device-local album graph contains a cycle"));
             }
             if path.len() > parents.len() {
                 return Err(error("album graph traversal limit reached"));
             }
-            seen.insert(id, path.len());
-            path.push(id);
             current = parents.get(&id).copied().flatten();
         }
         visited.extend(path);
@@ -223,48 +189,6 @@ pub fn structural_conflicts(catalog: &Catalog) -> Vec<Value> {
     }
     conflicts
 }
-struct SharedStack {
-    photos: Vec<String>,
-    collapsed: bool,
-}
-
-/// Resolve shared ownership before consulting any device-local objects. A
-/// singleton cannot claim a photo merely because this device has a local overlay.
-fn shared_stacks(state: &SyncState) -> Result<BTreeMap<String, SharedStack>> {
-    let live: BTreeSet<_> = state
-        .documents
-        .iter()
-        .filter(|(entity, fields)| {
-            entity.starts_with("photo:")
-                && fields.contains_key("content")
-                && state.winning(entity, "deleted").is_none_or(|(_, value)| value.as_bool() != Some(true))
-        })
-        .filter_map(|(entity, _)| entity.strip_prefix("photo:"))
-        .collect();
-    let mut claimed = BTreeSet::new();
-    let mut result = BTreeMap::new();
-    for entity in state.documents.keys().filter(|entity| entity.starts_with("stack:")) {
-        let values = fields(state, entity);
-        let mut photos = Vec::new();
-        let mut unique = BTreeSet::new();
-        if let Some(value) = values.get("photos") {
-            for value in value.as_array().ok_or_else(|| error("cloud stack membership is not a list"))? {
-                let global = value.as_str().ok_or_else(|| error("invalid global stack photo reference"))?;
-                if live.contains(global) && !claimed.contains(global) && unique.insert(global) {
-                    photos.push(global.to_owned());
-                }
-            }
-        }
-        if values.get("deleted").and_then(Value::as_bool) == Some(true) || photos.len() < 2 {
-            photos.clear();
-        } else {
-            claimed.extend(photos.iter().cloned());
-        }
-        result.insert(entity.clone(), SharedStack { photos, collapsed: values.get("collapsed").and_then(Value::as_bool).unwrap_or(false) });
-    }
-    Ok(result)
-}
-
 fn device_local_photo(catalog: &Catalog, connection: &str, id: PhotoId) -> bool {
     catalog.photo(id).is_some_and(|photo| {
         let Source::Managed { asset_id } = &photo.source else { return true };

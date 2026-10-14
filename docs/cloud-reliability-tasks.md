@@ -45,7 +45,7 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 - [x] CR.30 — Record logical fields changed by actions and construct undo/redo inverses against current state. Guard those fields' revisions while preserving independent remote metadata and membership changes. Test local title undo after remote caption editing, plus concurrent changes to the same title.
 - [x] CR.31 — Separate verified media readiness, metadata publication, and covered-receipt finalization under one authoritative per-library coordinator (with CR.13/CR.22/CR.27). Share bounded fresh media evidence across active producers, journal exact late-worker proof, and assert bulk request/byte costs for batch and sibling workers.
 - [x] CR.32 — Replace contradictory protocol outcome combinations and sentinel cursors/generations with explicit unchanged, conditional-head, and append outcome variants. Test evidence merging, monotonic cursors, and no-op writes.
-- [ ] CR.33 — Extract independently testable shared structural reconciliation. Add property tests: identical shared synchronization state yields identical shared relationships regardless of local IDs, local-only content, iteration order, or delivery order. Test local-only preservation separately.
+- [x] CR.33 — Extract independently testable shared structural reconciliation. Add property tests: identical shared synchronization state yields identical shared relationships regardless of local IDs, local-only content, iteration order, or delivery order. Test local-only preservation separately.
 
 ## Verification log
 
@@ -629,3 +629,29 @@ with no queued work; `ui.inspect` was captured. Evidence: ignored
 `lightcraft-cr32-native/native-74966b4b/` and `native-c246e98c/`. CR.32 is complete.
 Browser receipt semantics are unit-tested and full WASM-compiled; this run does not
 claim fresh browser runtime or live-provider acceptance. CR.33 remains open.
+
+
+2026-10-15 - CR.33 implementation: global folder-cycle and shared-stack resolution
+now has a pure synchronization-state boundary. Catalog identity allocation and
+local overlay preservation remain adapters. Three 64-case generated properties
+plus a fixed cycle regression passed: shared projection ignores local IDs, private
+members, concurrent proposal delivery and insertion order; restart/reapplication
+is stable and private photos/rules/groups survive separately. Initial test macro
+formatting and clippy multiple-of diagnostics were corrected. Full CI and rebuilt
+native acceptance remain pending; CR.33 stays unchecked.
+
+CR.33 final source passed all eight CI stages (`cr33-ci.log`), including generated
+convergence/local-overlay tests in the full workspace run. Native rebuild and
+both-protocol control-channel acceptance remain pending before checking it off.
+
+Rebuilt native CR.33 acceptance passed under both protocols (`cr33-native-build.log`,
+`cr33-native-{head,append}.log`). Three existing catalogs with different local IDs
+and mixed private members, plus a fresh fourth join after checkpointing, produced
+the same shared stacks and reversed folder hierarchy. Private folder rules and
+local groups survived; retained structural choices remained visible. Grid and
+conflict-dialog screenshots were inspected, and `ui.inspect` captured empty render
+queues. All 675 signed loopback requests verified (290 head / 385 append).
+Evidence: ignored `target/cloud-reliability/cr33-native-*.json`, C: scratch
+`lightcraft-cr33-native/native-8c0bb306/` and `native-7227b648/`. CR.33 is complete;
+CR.22-CR.33 are checked. Original CR.9-CR.21 remain open. This run adds native
+fixture acceptance, not fresh live-provider/browser runtime or scale benchmarks.

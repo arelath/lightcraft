@@ -557,6 +557,7 @@ pub fn enable_mode(
 }
 
 mod materialize;
+mod shared_projection;
 #[cfg(test)]
 mod tests;
 pub use materialize::accept_structure;

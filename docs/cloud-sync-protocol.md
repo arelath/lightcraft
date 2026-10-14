@@ -723,3 +723,21 @@ or `append`). Only a published head includes `cursor` and `generation`; an empty
 head reports `head: "empty"`, and append reports `frontiers`/`gaps`. Poll status still
 exposes the saved catalog's protocol-specific state. Existing append checkpoint
 request-cost/large-library work stays open in CR.9/CR.10.
+
+
+### Shared structural projection (2026-10-15)
+
+Folder-parent resolution and shared stack ownership live in
+`cloud_sync::shared_projection`. They take only shared synchronization state,
+returning global identities without consulting a catalog, local IDs or overlays.
+Cycles sever the greatest global album identity's proposed edge while retaining
+all causal proposals. Missing/deleted parent targets become roots; malformed
+parent values and live nonfolder parents remain actionable errors.
+
+Stack validity and ownership are computed before adding local members. The
+catalog adapter allocates local identities, installs the resolved graph and then
+preserves private content separately. Generated tests compare the actual shared
+projection across different local IDs, mixed local groups, concurrent proposals,
+tombstones, reverse insertion/delivery order, restart and repeated application.
+Separate properties verify preservation of private photos, filters and groups.
+No wire-format change or large-library performance claim accompanies extraction.
