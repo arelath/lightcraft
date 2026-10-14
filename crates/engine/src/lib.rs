@@ -80,6 +80,9 @@ pub mod rename;
 pub mod segment;
 pub mod sidecar;
 pub mod smart;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod storage_usage;
+
 pub mod sync;
 mod view;
 pub mod walk;
@@ -614,7 +617,10 @@ impl Session {
             if let Some(resolver) = &self.media.asset_resolver {
                 resolver.assets_changed();
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            cmd::cloud::refresh_keep_all(self);
         }
+
         #[cfg(not(target_arch = "wasm32"))]
         self.notice_staging(&op);
         self.pending_log.push(op);

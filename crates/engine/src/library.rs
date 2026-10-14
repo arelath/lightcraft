@@ -577,6 +577,9 @@ impl Session {
         #[cfg(not(target_arch = "wasm32"))]
         crate::cmd::cloud::resume_offline_pins(self);
         #[cfg(not(target_arch = "wasm32"))]
+        crate::cmd::cloud::refresh_keep_all(self);
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.cloud_uploads.request_resume(true);
         Ok(())
     }

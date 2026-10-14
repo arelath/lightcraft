@@ -659,7 +659,7 @@ fn decoded_source_clones_keep_the_managed_original_leased() {
 
 #[test]
 fn damaged_or_future_retention_settings_disable_eviction_and_preserve_bytes() {
-    for bytes in [b"broken".as_slice(), br#"{"version":2,"budget_bytes":0,"pins":{},"removed":[]}"#] {
+    for bytes in [b"broken".as_slice(), br#"{"version":3,"budget_bytes":0,"pins":{},"removed":[]}"#] {
         let scratch = Scratch::new();
         let b = blob(b"protected");
         std::fs::write(scratch.0.join(&b.id.0), b"protected").unwrap();
@@ -861,4 +861,158 @@ fn adding_a_rendition_invalidates_queued_sources_and_quick_render_keys() {
         session.media.get(id, crate::media::SourceLevel::Thumb).is_none(),
         "a result captured before a rendition update cannot repopulate the decoded cache"
     );
+}
+
+/// A store holding several blobs, by identity.
+struct MapStore(BTreeMap<BlobId, Vec<u8>>, AtomicUsize);
+impl BlobStore for MapStore {
+    fn download(&self, blob: &Blob, out: &mut dyn Write, _: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
+        self.1.fetch_add(1, Ordering::Relaxed);
+        let bytes = self.0.get(&blob.id).ok_or(AssetError::Missing)?;
+        out.write_all(bytes).map_err(disk)?;
+        progress(bytes.len() as u64);
+        Ok(())
+    }
+}
+fn map_store(contents: &[&[u8]]) -> Arc<MapStore> {
+    Arc::new(MapStore(contents.iter().map(|b| (sha256(b), b.to_vec())).collect(), AtomicUsize::new(0)))
+}
+
+#[test]
+fn clear_cache_evicts_every_eligible_download_but_keeps_pinned_and_leased_bytes() {
+    use super::cache::{OfflinePin, OfflineQuality};
+    let scratch = Scratch::new();
+    let resolver = AssetResolver::new(scratch.0.clone());
+    let (plain, pinned, leased) = (blob(b"plain download"), blob(b"kept offline"), blob(b"being decoded"));
+    resolver.connect("memory".into(), map_store(&[b"plain download", b"kept offline", b"being decoded"])).unwrap();
+    for b in [&plain, &pinned] {
+        drop(resolver.acquire(b, &AtomicBool::new(false)).unwrap());
+    }
+    let lease = resolver.acquire(&leased, &AtomicBool::new(false)).unwrap();
+    resolver.set_offline_pins(&[("photo:1".into(), Some(OfflinePin { quality: OfflineQuality::Original, blobs: vec![pinned.id.clone()] }))]).unwrap();
+    let budget = resolver.cache_status().budget_bytes;
+    assert_eq!(resolver.clear_cache().unwrap(), plain.size);
+    assert!(!scratch.0.join(&plain.id.0).exists());
+    assert!(scratch.0.join(&pinned.id.0).exists() && scratch.0.join(&leased.id.0).exists());
+    assert_eq!(resolver.cache_status().budget_bytes, budget, "clearing does not change the size limit");
+    assert_eq!(resolver.availability(&plain.id), AssetAvailability::Remote);
+    drop(lease);
+    assert_eq!(resolver.clear_cache().unwrap(), leased.size);
+    assert_eq!(resolver.cache_status().used_bytes, pinned.size);
+}
+
+#[test]
+fn keep_all_protects_library_blobs_downloads_new_arrivals_and_survives_restart() {
+    use super::cache::KeepAll;
+    let scratch = Scratch::new();
+    let (a, b) = (blob(b"first original"), blob(b"second original"));
+    let provider = map_store(&[b"first original", b"second original"]);
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    resolver.connect("memory".into(), provider.clone()).unwrap();
+    resolver.set_cache_budget(0).unwrap();
+    let keep = KeepAll { originals: true, previews: false };
+    resolver.set_keep_all(keep, BTreeMap::from([(a.id.clone(), a.clone())])).unwrap();
+    let wait = |path: &Path| {
+        for _ in 0..500 {
+            if path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("{} was not downloaded", path.display());
+    };
+    wait(&scratch.0.join(&a.id.0));
+    // an import arrives: covered and fetched too
+    resolver.set_library_blobs(BTreeMap::from([(a.id.clone(), a.clone()), (b.id.clone(), b.clone())]));
+    wait(&scratch.0.join(&b.id.0));
+    for _ in 0..500 {
+        if !resolver.keep_all_running.load(Ordering::Acquire) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(resolver.clear_cache().unwrap(), 0, "a zero budget and Clear cache keep library-wide offline copies");
+    assert_eq!(resolver.cache_status().keep_all_blobs, 2);
+    drop(resolver);
+    let reopened = Arc::new(AssetResolver::new(scratch.0.clone()));
+    assert_eq!(reopened.keep_all(), keep);
+    reopened.set_library_blobs(BTreeMap::from([(a.id.clone(), a.clone()), (b.id.clone(), b.clone())]));
+    assert_eq!(reopened.clear_cache().unwrap(), 0);
+    // turning it off deletes nothing at once; the copies are ordinary cache entries again
+    reopened.set_cache_budget(1 << 30).unwrap();
+    reopened.set_keep_all(KeepAll::default(), BTreeMap::new()).unwrap();
+
+    assert!(scratch.0.join(&a.id.0).exists());
+    assert_eq!(reopened.clear_cache().unwrap(), a.size + b.size);
+}
+
+#[test]
+fn version_1_retention_settings_load_and_are_saved_as_version_2() {
+    let scratch = Scratch::new();
+    std::fs::write(scratch.0.join("retention.json"), br#"{"version":1,"budget_bytes":1048576,"pins":{},"removed":[]}"#).unwrap();
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    assert_eq!(resolver.cache_status().error, None);
+    assert_eq!(resolver.cache_status().budget_bytes, 1 << 20);
+    assert_eq!(resolver.keep_all(), super::cache::KeepAll::default());
+    resolver.set_keep_all(super::cache::KeepAll { originals: false, previews: true }, BTreeMap::new()).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(scratch.0.join("retention.json")).unwrap()).unwrap();
+    assert_eq!(saved["version"], 2);
+    assert_eq!(saved["budget_bytes"], 1 << 20);
+    assert_eq!(saved["keep_all"], serde_json::json!({"originals": false, "previews": true}));
+}
+
+#[test]
+fn cache_settings_commands_report_the_drive_keep_new_cloud_photos_offline_and_clear() {
+    let scratch = Scratch::new();
+    let wait_idle = |session: &crate::Session| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !session.activity.list().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(session.activity.list().is_empty(), "background work finished");
+    };
+    let attach = |session: &mut crate::Session, name: &str, bytes: &[u8]| {
+        let asset = Asset { associated: Default::default(), original: blob(bytes), smart_preview: None, thumbnail: None };
+        let r = session
+            .execute(
+                "cloud.attach",
+                &serde_json::json!({"assetId": name, "asset": asset, "fileName": format!("{name}.raw"), "width": 32, "height": 24, "kind": "raw"}),
+            )
+            .unwrap();
+        r["id"].as_u64().unwrap()
+    };
+    let mut session = crate::Session::new().with_fs();
+    session.open_library(&scratch.0, false).unwrap();
+    let provider = map_store(&[b"first cloud original", b"second cloud original"]);
+    session.media.asset_resolver.as_ref().unwrap().connect("memory".into(), provider.clone()).unwrap();
+    attach(&mut session, "first", b"first cloud original");
+
+    let storage = session.execute("cloud.storage", &serde_json::json!({"wait": true})).unwrap();
+    assert!(storage["volume"]["totalBytes"].as_u64().unwrap() > 0, "{storage}");
+    assert!(storage["volume"]["label"].as_str().is_some_and(|l| !l.is_empty()));
+    assert!(storage["appDataBytes"].as_u64().unwrap() > 0, "the catalog counts as app data");
+    assert_eq!(storage["keepAll"], serde_json::json!({"originals": false, "previews": false}));
+    assert!(session.execute("cloud.cache", &serde_json::json!({"keepAllOriginals": "yes"})).is_err());
+
+    let status = session.execute("cloud.cache", &serde_json::json!({"keepAllOriginals": true, "budgetMb": 0})).unwrap();
+    assert_eq!(status["keepAll"]["originals"], true);
+    assert_eq!(status["keepAllBlobs"], 1);
+    wait_idle(&session);
+    // a photo arriving later is kept offline too
+    attach(&mut session, "second", b"second cloud original");
+    wait_idle(&session);
+    let root = session.media.asset_resolver.as_ref().unwrap().root().to_path_buf();
+    assert!(root.join(blob(b"second cloud original").id.0).exists());
+    let cleared = session.execute("cloud.clearCache", &serde_json::json!({"wait": true})).unwrap();
+    assert_eq!(cleared["freedBytes"], 0, "offline copies survive Clear cache");
+    let storage = session.execute("cloud.storage", &serde_json::json!({"wait": true})).unwrap();
+    assert_eq!(storage["offlineBytes"].as_u64().unwrap(), (b"first cloud original".len() + b"second cloud original".len()) as u64);
+    assert_eq!(storage["photoCacheBytes"], 0);
+
+    session.execute("cloud.cache", &serde_json::json!({"keepAllOriginals": false, "budgetMb": 1024})).unwrap();
+    let cleared = session.execute("cloud.clearCache", &serde_json::json!({})).unwrap();
+    assert_eq!(cleared["background"], true);
+    wait_idle(&session);
+    assert_eq!(session.execute("cloud.cache", &serde_json::json!({})).unwrap()["usedBytes"], 0);
+    assert_eq!(provider.1.load(Ordering::Relaxed), 2, "each original was downloaded once");
 }

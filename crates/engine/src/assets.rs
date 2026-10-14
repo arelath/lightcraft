@@ -222,6 +222,10 @@ pub struct AssetResolver {
     transfers: transfers::Queue,
     activity: Mutex<Option<crate::activity::Activity>>,
     durable_root: Mutex<Option<PathBuf>>,
+    /// The blobs "Store a copy of all …" covers (from the catalog), and whether a worker is
+    /// downloading the missing ones.
+    keep_all_blobs: Mutex<BTreeMap<BlobId, Blob>>,
+    keep_all_running: AtomicBool,
 }
 
 impl AssetResolver {
@@ -245,6 +249,8 @@ impl AssetResolver {
             transfers: transfers::Queue::new(4),
             activity: Mutex::new(None),
             durable_root: Mutex::new(None),
+            keep_all_blobs: Mutex::new(BTreeMap::new()),
+            keep_all_running: AtomicBool::new(false),
         }
     }
     pub fn generation(&self) -> u64 {
@@ -645,6 +651,96 @@ impl AssetResolver {
     pub fn trim_cache(&self) -> Result<cache::CacheStatus> {
         self.cache.trim()?;
         Ok(self.cache.status())
+    }
+    /// Evict every eligible download now (Settings → Cache → Clear cache); the bytes freed.
+    /// Offline copies, files in use, staged and unsynchronized data are kept.
+    pub fn clear_cache(&self) -> Result<u64> {
+        let freed = self.cache.clear()?;
+        if freed > 0 {
+            self.changed();
+        }
+        Ok(freed)
+    }
+    pub fn keep_all(&self) -> cache::KeepAll {
+        self.cache.keep_all()
+    }
+    /// Save the library-wide offline choice; `blobs` are the ones it covers now (originals
+    /// and/or smart previews of every managed photo). Downloads the missing ones in the
+    /// background.
+    pub fn set_keep_all(self: &Arc<Self>, keep: cache::KeepAll, blobs: BTreeMap<BlobId, Blob>) -> Result<()> {
+        self.cache.set_keep_all(keep, blobs.keys().cloned().collect())?;
+        *self.keep_all_blobs.lock().unwrap_or_else(PoisonError::into_inner) = blobs;
+        self.download_keep_all();
+        Ok(())
+    }
+    /// The catalog's managed assets changed (library opened, import, sync): refresh what
+    /// "Store a copy of all …" covers and fetch new arrivals.
+    pub fn set_library_blobs(self: &Arc<Self>, blobs: BTreeMap<BlobId, Blob>) {
+        self.cache.set_library_ids(blobs.keys().cloned().collect());
+        *self.keep_all_blobs.lock().unwrap_or_else(PoisonError::into_inner) = blobs;
+        self.download_keep_all();
+    }
+    /// Start (at most) one background worker that acquires every covered blob not tried yet in
+    /// its run. A failure (offline, credentials) is logged and the blob is retried on the next
+    /// refresh, so an unreachable store does not spin.
+    fn download_keep_all(self: &Arc<Self>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.cache.keep_all() == cache::KeepAll::default() || self.keep_all_blobs.lock().unwrap_or_else(PoisonError::into_inner).is_empty() {
+                return;
+            }
+            if self.keep_all_running.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            let activity = self.activity.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let task = activity.map(|a| a.start("download", "Download Offline Copies", crate::activity::Cancel::Yes));
+            let cancel = task.as_ref().and_then(|t| t.cancel_flag()).unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+            let weak = Arc::downgrade(self);
+            let spawned = std::thread::Builder::new().name("cloud-keep-all".into()).spawn(move || {
+                let mut tried = std::collections::BTreeSet::new();
+                let run = |tried: &mut std::collections::BTreeSet<BlobId>| -> std::result::Result<(), String> {
+                    loop {
+                        let Some(resolver) = weak.upgrade() else { return Ok(()) };
+                        if resolver.cache.keep_all() == cache::KeepAll::default() {
+                            return Ok(());
+                        }
+                        let next =
+                            resolver.keep_all_blobs.lock().unwrap_or_else(PoisonError::into_inner).values().find(|b| !tried.contains(&b.id)).cloned();
+                        let Some(blob) = next else { return Ok(()) };
+                        tried.insert(blob.id.clone());
+                        match resolver.acquire(&blob, &cancel) {
+                            Ok(_) => {}
+                            Err(AssetError::Cancelled) => return Err(AssetError::Cancelled.to_string()),
+                            Err(error) => log::warn!("offline copy of {}: {error}", blob.id.0),
+                        }
+                    }
+                };
+                loop {
+                    let result = match &task {
+                        Some(task) => transfers::with_progress(task.handle(), || run(&mut tried)),
+                        None => run(&mut tried),
+                    };
+                    let Some(resolver) = weak.upgrade() else { break };
+                    resolver.keep_all_running.store(false, Ordering::Release);
+                    if let Err(error) = result {
+                        log::info!("offline copies: {error}");
+                        break;
+                    }
+                    // blobs that arrived after the last look, while this worker was still the one
+                    let more = resolver.cache.keep_all() != cache::KeepAll::default()
+                        && resolver.keep_all_blobs.lock().unwrap_or_else(PoisonError::into_inner).keys().any(|id| !tried.contains(id));
+                    if !more || resolver.keep_all_running.swap(true, Ordering::AcqRel) {
+                        break;
+                    }
+                }
+                drop(task);
+            });
+
+            if let Err(error) = spawned {
+                log::warn!("could not start offline copy worker: {error}");
+                self.keep_all_running.store(false, Ordering::Release);
+            }
+        }
     }
 }
 
