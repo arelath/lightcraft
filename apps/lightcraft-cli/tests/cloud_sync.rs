@@ -2,6 +2,7 @@
 mod support;
 use lightcraft_engine::catalog as lightcraft_catalog;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::Path;
 use support::Fixture;
 
@@ -22,6 +23,99 @@ fn copy_catalog_files(source: &Path, destination: &Path) {
 fn saved_catalog(path: &Path) -> lightcraft_catalog::Catalog {
     lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(path).unwrap())).unwrap().1
 }
+#[test]
+fn overlapping_shared_stacks_converge_with_a_device_local_member_in_both_protocols() {
+    use lightcraft_catalog::{FsStore, Journal, Op, PhotoId};
+    for append in [false, true] {
+        let f = Fixture::new();
+        f.state.lock().unwrap().append_mode = append;
+        let protocol = if append { "append-log-v1" } else { "conditional-head-v1" };
+        let a = f.dir.join("stack-a");
+        let b = f.dir.join("stack-b");
+        let c = f.dir.join("stack-c");
+        let rows = success(&f, &a, &[("cloud.configure", configure(&f)), ("cloud.syncEnable", json!({"connection":"personal","protocol":protocol}))]);
+        let library = rows[1]["result"]["library"].as_str().unwrap();
+        for _ in 0..4 {
+            f.import_unsynchronized(&a, false);
+        }
+        success(&f, &a, &[("cloud.upload", json!({})), ("cloud.sync", json!({}))]);
+        let origin = saved_catalog(&a);
+        let globals: Vec<_> = (1..=4).map(|id| origin.cloud_identity(&format!("photo:{id}")).unwrap().to_owned()).collect();
+        let pixels = lightcraft_raster::Rgba8::from_fn(32, 24, |x, y| [x as u8 * 5, y as u8 * 7, 200, 255]);
+        let local = f.dir.join("stack-local.png");
+        std::fs::write(&local, lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&pixels), &Default::default()).unwrap()).unwrap();
+        success(&f, &b, &[("library.import", json!({"paths":[local]}))]);
+        for path in [&b, &c] {
+            success(
+                &f,
+                path,
+                &[
+                    ("cloud.configure", configure(&f)),
+                    ("cloud.syncEnable", json!({"connection":"personal","library":library,"protocol":protocol})),
+                    ("cloud.sync", json!({})),
+                ],
+            );
+        }
+        for (path, global, members) in [(&a, "aaa", vec![0, 1]), (&b, "bbb", vec![1, 2]), (&c, "ccc", vec![2, 3])] {
+            // Freeze lexical identity order in the fixture, while creating and
+            // publishing the actual proposals through the real command path.
+            let (mut journal, mut catalog, _) = Journal::open(Box::new(FsStore::open(path).unwrap())).unwrap();
+            let mapping = Op::SetCloudIdentity { entity: "stack:1".into(), id: Some(global.into()) };
+            catalog.apply(mapping.clone()).unwrap();
+            journal.append(&[mapping]).unwrap();
+            journal.snapshot(&catalog).unwrap();
+            drop(journal);
+            let mut ids: Vec<_> = members
+                .into_iter()
+                .map(|index| {
+                    catalog
+                        .cloud_identities()
+                        .iter()
+                        .find(|(key, value)| key.starts_with("photo:") && *value == &globals[index])
+                        .unwrap()
+                        .0
+                        .strip_prefix("photo:")
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap()
+                })
+                .collect();
+            if path == &b {
+                ids.push(1);
+            }
+            success(
+                &f,
+                path,
+                &[("library.select", json!({"ids":ids,"active":ids[0]})), ("stack.group", json!({"ids":ids,"top":ids[0],"collapsed":false}))],
+            );
+        }
+        for path in [&a, &b, &c, &a, &b, &c] {
+            success(&f, path, &[("cloud.sync", json!({}))]);
+        }
+        let expected = BTreeMap::from([
+            ("aaa".to_owned(), vec![globals[0].clone(), globals[1].clone()]),
+            ("ccc".to_owned(), vec![globals[2].clone(), globals[3].clone()]),
+        ]);
+        for path in [&a, &b, &c] {
+            let catalog = saved_catalog(path);
+            let shared: BTreeMap<_, _> = catalog
+                .stacks()
+                .filter_map(|stack| {
+                    let photos: Vec<_> =
+                        stack.photos.iter().filter_map(|id| catalog.cloud_identity(&format!("photo:{}", id.0))).map(str::to_owned).collect();
+                    (photos.len() >= 2).then(|| (catalog.cloud_identity(&format!("stack:{}", stack.id.0)).unwrap().to_owned(), photos))
+                })
+                .collect();
+            assert_eq!(shared, expected);
+            assert!(catalog.sync_state().unwrap().pending.is_empty());
+            if path == &b {
+                assert!(catalog.photo(PhotoId(1)).is_some());
+                assert!(catalog.stack_of(PhotoId(1)).is_none(), "local singleton must not keep a shared singleton alive");
+            }
+        }
+    }
+}
+
 #[test]
 fn self_sync_preserves_nonportable_smart_rules_and_shares_explicit_empty_selection() {
     for append in [false, true] {

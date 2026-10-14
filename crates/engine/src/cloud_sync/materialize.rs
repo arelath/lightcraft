@@ -223,6 +223,55 @@ pub fn structural_conflicts(catalog: &Catalog) -> Vec<Value> {
     }
     conflicts
 }
+struct SharedStack {
+    photos: Vec<String>,
+    collapsed: bool,
+}
+
+/// Resolve shared ownership before consulting any device-local objects. A
+/// singleton cannot claim a photo merely because this device has a local overlay.
+fn shared_stacks(state: &SyncState) -> Result<BTreeMap<String, SharedStack>> {
+    let live: BTreeSet<_> = state
+        .documents
+        .iter()
+        .filter(|(entity, fields)| {
+            entity.starts_with("photo:")
+                && fields.contains_key("content")
+                && state.winning(entity, "deleted").is_none_or(|(_, value)| value.as_bool() != Some(true))
+        })
+        .filter_map(|(entity, _)| entity.strip_prefix("photo:"))
+        .collect();
+    let mut claimed = BTreeSet::new();
+    let mut result = BTreeMap::new();
+    for entity in state.documents.keys().filter(|entity| entity.starts_with("stack:")) {
+        let values = fields(state, entity);
+        let mut photos = Vec::new();
+        let mut unique = BTreeSet::new();
+        if let Some(value) = values.get("photos") {
+            for value in value.as_array().ok_or_else(|| error("cloud stack membership is not a list"))? {
+                let global = value.as_str().ok_or_else(|| error("invalid global stack photo reference"))?;
+                if live.contains(global) && !claimed.contains(global) && unique.insert(global) {
+                    photos.push(global.to_owned());
+                }
+            }
+        }
+        if values.get("deleted").and_then(Value::as_bool) == Some(true) || photos.len() < 2 {
+            photos.clear();
+        } else {
+            claimed.extend(photos.iter().cloned());
+        }
+        result.insert(entity.clone(), SharedStack { photos, collapsed: values.get("collapsed").and_then(Value::as_bool).unwrap_or(false) });
+    }
+    Ok(result)
+}
+
+fn device_local_photo(catalog: &Catalog, connection: &str, id: PhotoId) -> bool {
+    catalog.photo(id).is_some_and(|photo| {
+        let Source::Managed { asset_id } = &photo.source else { return true };
+        catalog.asset(asset_id).is_none_or(|asset| asset.original.remote.connection != connection)
+    })
+}
+
 fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
     let mut next = catalog.clone();
     let mut ops = Vec::new();
@@ -480,41 +529,30 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
             apply(&mut next, &mut ops, Op::SetAlbumRules { id: *id, rules })?;
         }
     }
+    let shared = shared_stacks(state)?;
+    let synchronized_stacks: BTreeSet<_> =
+        shared.keys().filter_map(|entity| entity.strip_prefix("stack:")).filter_map(|global| local(&next, "stack", global).map(StackId)).collect();
     let mut desired_stacks = Vec::new();
-    let synchronized_stacks: BTreeSet<_> = state
-        .documents
-        .keys()
-        .filter_map(|entity| entity.strip_prefix("stack:"))
-        .filter_map(|global| local(&next, "stack", global).map(StackId))
-        .collect();
-    let mut claimed: BTreeSet<_> =
-        next.stacks().filter(|stack| !synchronized_stacks.contains(&stack.id)).flat_map(|stack| stack.photos.iter().copied()).collect();
-    for entity in state.documents.keys().filter(|entity| entity.starts_with("stack:")) {
+    let mut claimed = BTreeSet::new();
+    for (entity, shared) in &shared {
         let global = entity.strip_prefix("stack:").ok_or_else(|| error("invalid stack identity"))?;
-        let values = fields(state, entity);
         let known = local(&next, "stack", global).map(StackId);
-        let mut photos: Vec<_> = values
-            .get("photos")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|v| photo_reference(&next, v))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .filter(|id| next.photo(*id).is_some())
-            .collect();
+        let mut photos: Vec<_> = shared
+            .photos
+            .iter()
+            .map(|global| {
+                local(&next, "photo", global)
+                    .map(PhotoId)
+                    .filter(|id| next.photo(*id).is_some())
+                    .ok_or_else(|| error("live shared stack photo did not materialize"))
+            })
+            .collect::<Result<Vec<_>>>()?;
         if let Some(stack) = known.and_then(|id| next.stack(id)) {
-            photos.extend(stack.photos.iter().copied().filter(|id| {
-                next.photo(*id).is_some_and(|photo| {
-                    let Source::Managed { asset_id } = &photo.source else { return true };
-                    next.asset(asset_id).is_none_or(|asset| asset.original.remote.connection != state.connection)
-                })
-            }));
+            photos.extend(stack.photos.iter().copied().filter(|id| device_local_photo(&next, &state.connection, *id)));
         }
         let mut unique = BTreeSet::new();
         photos.retain(|id| !claimed.contains(id) && unique.insert(*id));
-        if values.get("deleted").and_then(Value::as_bool) == Some(true) || photos.len() < 2 {
+        if photos.len() < 2 {
             continue;
         }
         claimed.extend(photos.iter().copied());
@@ -522,14 +560,22 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
         if known.is_none() {
             apply(&mut next, &mut ops, Op::SetCloudIdentity { entity: format!("stack:{}", id.0), id: Some(global.into()) })?;
         }
-        desired_stacks.push(Stack { id, photos, collapsed: values.get("collapsed").and_then(Value::as_bool).unwrap_or(false) });
+        let collapsed =
+            if shared.photos.is_empty() { known.and_then(|id| next.stack(id)).is_some_and(|stack| stack.collapsed) } else { shared.collapsed };
+        desired_stacks.push(Stack { id, photos, collapsed });
+    }
+    // Unsynchronized mixed stacks relinquish photos owned by a shared winner.
+    // Their remaining local relationships survive when at least two members remain.
+    for stack in next.stacks().filter(|stack| !synchronized_stacks.contains(&stack.id)) {
+        let photos: Vec<_> = stack.photos.iter().copied().filter(|id| !claimed.contains(id)).collect();
+        if photos.len() >= 2 {
+            claimed.extend(photos.iter().copied());
+            desired_stacks.push(Stack { photos, ..stack.clone() });
+        }
     }
     let desired_by_id: BTreeMap<_, _> = desired_stacks.iter().map(|stack| (stack.id, stack)).collect();
-    let removed: Vec<_> = next
-        .stacks()
-        .filter(|stack| synchronized_stacks.contains(&stack.id) && desired_by_id.get(&stack.id).is_none_or(|desired| **desired != **stack))
-        .map(|stack| stack.id)
-        .collect();
+    let removed: Vec<_> =
+        next.stacks().filter(|stack| desired_by_id.get(&stack.id).is_none_or(|desired| **desired != **stack)).map(|stack| stack.id).collect();
     for id in removed {
         apply(&mut next, &mut ops, Op::RemoveStack { id })?;
     }

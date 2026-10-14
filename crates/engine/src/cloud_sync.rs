@@ -281,7 +281,12 @@ fn project(catalog: &Catalog, ids: &Catalog, state: &SyncState, scope: Option<&S
     }
     let stacks: Vec<_> = scope.map_or_else(|| catalog.stacks().collect(), |s| s.stacks.iter().filter_map(|id| catalog.stack(*id)).collect());
     for stack in stacks {
-        let photos: Vec<_> = stack.photos.iter().filter_map(|id| mapped_photo(catalog, ids, &state.connection, id.0)).collect();
+        let photos: Vec<_> = stack
+            .photos
+            .iter()
+            .filter(|id| catalog.photo(**id).is_some_and(|photo| !photo.deleted))
+            .filter_map(|id| mapped_photo(catalog, ids, &state.connection, id.0))
+            .collect();
         if photos.len() < 2 {
             continue;
         }

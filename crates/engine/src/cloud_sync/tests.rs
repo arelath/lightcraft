@@ -330,6 +330,138 @@ fn stack_membership_swaps_and_cross_entity_overlap_materialize_without_uniquenes
 }
 
 #[test]
+fn shared_stack_ownership_is_independent_of_local_members_and_ids() {
+    use lightcraft_catalog::{Catalog, Stack, StackId};
+    let (mut seed, _) = session();
+    for id in 2..=4 {
+        seed.commit(
+            "photo",
+            Op::AddPhoto {
+                photo: Box::new(Photo::new(PhotoId(id), Source::Managed { asset_id: AssetId("asset".into()) }, "copy.dng", "DNG", 32, 24, "")),
+            },
+        )
+        .unwrap();
+    }
+    let mut remote = seed.catalog.sync_state().unwrap().clone();
+    let globals: Vec<_> = (1..=4).map(|id| seed.catalog.cloud_identity(&format!("photo:{id}")).unwrap().to_owned()).collect();
+    let before = remote.portable();
+    let proposals =
+        [vec![globals[0].clone(), globals[1].clone()], vec![globals[1].clone(), globals[2].clone()], vec![globals[2].clone(), globals[3].clone()]];
+    let changes = ["aaa", "bbb", "ccc"]
+        .into_iter()
+        .zip(proposals)
+        .flat_map(|(global, photos)| {
+            [
+                Change { entity: format!("stack:{global}"), field: "photos".into(), base: None, value: json!(photos) },
+                Change { entity: format!("stack:{global}"), field: "collapsed".into(), base: None, value: json!(true) },
+            ]
+        })
+        .collect();
+    remote.enqueue(changes).unwrap();
+    let shared = remote.portable();
+    let expected =
+        BTreeMap::from([("stack:aaa".to_owned(), json!([globals[0], globals[1]])), ("stack:ccc".to_owned(), json!([globals[2], globals[3]]))]);
+    for (local_count, known_stack) in [(0, Some("bbb")), (1, Some("bbb")), (2, Some("bbb")), (2, None), (2, Some("aaa"))] {
+        let mut catalog = Catalog::new();
+        let local_ids: Vec<_> = (0..local_count).map(|i| PhotoId(40 + local_count * 7 + i)).collect();
+        for id in &local_ids {
+            catalog
+                .apply(Op::AddPhoto {
+                    photo: Box::new(Photo::new(*id, Source::File { path: format!("private/{}.jpg", id.0) }, "local.jpg", "JPEG", 32, 24, "")),
+                })
+                .unwrap();
+        }
+        let state = SyncState::new("library".into(), "peer".into(), "personal".into()).unwrap();
+        catalog.apply(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+        catalog.apply(incoming_checkpoint(&catalog, &before, &BTreeSet::new(), "a".repeat(64), 1).unwrap()).unwrap();
+        let photo = |global: &str| {
+            PhotoId(
+                catalog
+                    .cloud_identities()
+                    .iter()
+                    .find(|(key, value)| key.starts_with("photo:") && value.as_str() == global)
+                    .unwrap()
+                    .0
+                    .strip_prefix("photo:")
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            )
+        };
+        if !local_ids.is_empty() {
+            let mut photos = vec![photo(&globals[2])];
+            photos.extend(&local_ids);
+            catalog.apply(Op::AddStack { stack: Stack { id: StackId(31), photos, collapsed: false } }).unwrap();
+            if let Some(global) = known_stack {
+                catalog.apply(Op::SetCloudIdentity { entity: "stack:31".into(), id: Some(global.into()) }).unwrap();
+            }
+        }
+        catalog.apply(incoming_checkpoint(&catalog, &shared, &BTreeSet::new(), "b".repeat(64), 2).unwrap()).unwrap();
+        let projection = project(&catalog, &catalog, catalog.sync_state().unwrap(), None).unwrap();
+        let stacks: BTreeMap<_, _> = projection
+            .into_iter()
+            .filter(|(entity, _)| entity.starts_with("stack:"))
+            .map(|(entity, fields)| (entity, fields["photos"].clone()))
+            .collect();
+        assert_eq!(stacks, expected, "local count {local_count}, synchronized overlay {known_stack:?}");
+        assert_eq!(catalog.sync_state().unwrap().portable(), shared, "materialization cannot echo local overlays");
+        if known_stack == Some("aaa") {
+            let local_stack = catalog.stack(StackId(31)).unwrap();
+            let shared_members: Vec<_> = local_stack.photos.iter().filter(|id| !local_ids.contains(id)).copied().collect();
+            assert_eq!(shared_members.len(), 2);
+            assert!(local_ids.iter().all(|id| local_stack.photos.contains(id)), "attach local overlay to a surviving shared stack");
+            assert!(local_stack.collapsed, "shared stack keeps its shared presentation");
+        } else if local_ids.len() >= 2 {
+            let local_stack = catalog.stack(StackId(31)).unwrap();
+            assert_eq!(local_stack.photos, local_ids, "preserve the local-only group after shared dissolution or reassignment");
+            assert!(!local_stack.collapsed, "local group keeps its own presentation");
+        } else {
+            assert!(catalog.stack(StackId(31)).is_none());
+        }
+        let reopened = Catalog::from_snapshot(&catalog.to_snapshot()).unwrap();
+        assert_eq!(structural_conflicts(&reopened), structural_conflicts(&catalog));
+        assert!(structural_conflicts(&catalog).iter().any(|conflict| conflict["entity"] == "stack:bbb" && conflict["projected"] == json!([])));
+        let before = catalog.to_snapshot();
+        catalog.apply(incoming_checkpoint(&catalog, &shared, &BTreeSet::new(), "b".repeat(64), 2).unwrap()).unwrap();
+        assert_eq!(catalog.to_snapshot(), before, "repeated materialization is stable");
+
+        // Existing devices retain deleted photo objects; a fresh bootstrap does
+        // not. Neither those objects nor unresolved references may affect winners.
+        let mut deleted = remote.clone();
+        let entity = format!("photo:{}", globals[0]);
+        deleted
+            .enqueue(vec![
+                Change {
+                    entity: entity.clone(),
+                    field: "deleted".into(),
+                    base: deleted.winning(&entity, "deleted").map(|(stamp, _)| stamp),
+                    value: json!(true),
+                },
+                Change {
+                    entity: "stack:bbb".into(),
+                    field: "photos".into(),
+                    base: deleted.winning("stack:bbb", "photos").map(|(stamp, _)| stamp),
+                    value: json!([globals[1], "unresolved", globals[2]]),
+                },
+            ])
+            .unwrap();
+        let deleted = deleted.portable();
+        let mut fresh = Catalog::new();
+        fresh
+            .apply(Op::SetSyncState { state: Some(Box::new(SyncState::new("library".into(), "fresh".into(), "personal".into()).unwrap())) })
+            .unwrap();
+        for device in [&mut catalog, &mut fresh] {
+            device.apply(incoming_checkpoint(device, &deleted, &BTreeSet::new(), "c".repeat(64), 3).unwrap()).unwrap();
+            let projected = project(device, device, device.sync_state().unwrap(), None).unwrap();
+            let stacks: Vec<_> = projected.iter().filter(|(entity, _)| entity.starts_with("stack:")).collect();
+            assert_eq!(stacks.len(), 1);
+            assert_eq!(stacks[0].0, "stack:bbb");
+            assert_eq!(stacks[0].1["photos"], json!([globals[1], globals[2]]));
+        }
+    }
+}
+
+#[test]
 fn local_sources_and_working_paths_are_excluded_and_membership_changes_are_individual() {
     let (mut s, _) = session();
     let first = s.catalog.sync_state().unwrap().pending.len();

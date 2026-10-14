@@ -38,7 +38,7 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 - [x] CR.23 — Claim installation/catalog writer ownership in both protocols before editing, preserving pending IDs. Provide a safe writing epoch for explicit same-directory backup restore and causally schedule retained historical-author mutations. Test copied conditional-head catalogs making distinct offline edits and restoring an older backup.
 - [x] CR.24 — Materialize smart-album references to deleted or unresolved albums deterministically without broadening their criteria or blocking fresh-device bootstrap. Test a retained smart album referencing a deleted regular album.
 - [x] CR.25 — Define a nonportable smart-album policy that preserves originating-device semantics. Preserve folder criteria and local-only selections, and distinguish absent selection restrictions from explicitly empty sets. Test self-sync with folder-restricted and exclusively local-photo rules.
-- [ ] CR.26 — Resolve shared stack ownership and validity independently of local-only members, then apply local overlays. Test identical shared proposals S1=(P,Q), S2=(Q,R), S3=(R,S) with and without a local-only member of S2, comparing projected cloud relationships.
+- [x] CR.26 — Resolve shared stack ownership and validity independently of local-only members, then apply local overlays. Test identical shared proposals S1=(P,Q), S2=(Q,R), S3=(R,S) with and without a local-only member of S2, comparing projected cloud relationships.
 - [ ] CR.27 — Durably finalize every upload receipt covered by shared acknowledgement with exact publication evidence. Retry local proof writes after restart independently of media transfer; test delayed bulk siblings and subsequent local-copy removal without manual verification. Keep staging protection intact.
 - [ ] CR.28 — Make per-import preflight failures explicit queue outcomes with retained blocked reasons and defined retry eligibility. Test one unreadable manifest alongside a healthy import: healthy work completes and the blocked item exposes its specific recovery action.
 - [ ] CR.29 — Model subsystem health explicitly: user pause, polling halted by error, publication waiting, structural conflicts, and last successful remote scan. A success clears only the recovered subsystem's failure. Test failed automatic sync followed by upload success, and structural-only conflicts; never infer healthy synchronization solely from no pending local work.
@@ -348,3 +348,33 @@ and request logs; C: scratch `lightcraft-cr25-native/native-eaf723bb/` and
 `native-d6f2920a/`. The native script was corrected to decode UTF-8 and wait for queued
 UI clicks. Shared browser behavior is engine-tested/WASM-compiled; no fresh browser
 or provider deployment acceptance is claimed.
+
+
+2026-10-15 — CR.26: shared stack proposals resolve against live global
+photo documents in stable global stack order, before local catalog IDs or members enter
+the calculation. Deleted and unresolved photo targets cannot decide ownership. Local
+members attach to shared winners afterward; dissolved/deleted proposals retain only
+local-only groups of at least two members, with their local collapsed state. Existing
+unsynchronized mixed stacks relinquish photos claimed by shared winners. Changes detach
+all affected stacks before final installation, preserving uniqueness.
+
+The initial focused synchronization run passed 27 tests. Additional regression coverage
+compares projected shared relationships with different local IDs and zero/one/two local
+members, surviving and dissolved overlays, an unsynchronized mixed stack, tombstones,
+unresolved targets, snapshot/restart and idempotent repeated materialization. The real-CLI
+fixture freezes lexical stack identity order, then creates and publishes all overlapping
+proposals through normal commands on three devices in both protocols. Final source passed all eight CI stages: C: build `cr26-ci.log`; native binaries were
+rebuilt successfully (`cr26-native-build.log`). The first CLI test compile used `cloned()`
+on a string slice and was corrected to `str::to_owned` before the final passing gate.
+Broader extracted structural property coverage remains CR.33.
+
+Native three-device acceptance passed on both protocols. Shared projections were identical
+on all three catalogs and a fresh checkpoint join; the losing shared stack retained its
+two local-only photos as a local group through app restart and checkpoint maintenance.
+Zero pending mutations remained. Both rendered grids and structural-choice dialogs were
+inspected; `ui.inspect` was captured. All 510 signed loopback requests verified (242 head /
+268 append). The script's initial paused-sync call was corrected to resume before manual
+publication. Evidence: ignored `target/cloud-reliability/cr26-native-results-*.json` and
+request logs; C: scratch `lightcraft-cr26-native/native-ae64acdb/` and `native-c0a58e32/`.
+Shared browser materialization is engine-tested/WASM-compiled; no fresh browser or live
+provider acceptance is claimed.

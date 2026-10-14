@@ -128,10 +128,14 @@ are recorded in [cloud-history-compaction-design.md](cloud-history-compaction-de
 
 Album moves are projected from the desired graph and detached before reattachment. For a
 cross-entity parent cycle, the album with the greatest global identity in that cycle is shown
-at the root. Proposed edges remain in the causal registers. Stacks resolve disputed ownership
-in increasing global stack identity order, retain photo ordering, and dissolve projections
-with fewer than two members; existing device-local stack ownership remains local. Changed
-stacks are removed before installing the final membership map. `cloud.syncStatus` reports
+at the root. Proposed edges remain in the causal registers. Stacks resolve disputed ownership in increasing global stack identity order using only
+shared photo identities. Deleted and unresolved shared photo targets cannot claim ownership;
+a projection with fewer than two live shared members dissolves. Device-local members are
+attached only after those shared decisions. A dissolved or deleted shared stack can retain
+a group of at least two local-only members, with its local collapsed state. An unsynchronized
+mixed stack relinquishes members owned by shared winners and retains its other members when
+at least two remain. Local singletons remain unstacked. Changed stacks are removed before
+installing the final membership map; local overlays never change shared ownership or validity. `cloud.syncStatus` reports
 `structuralConflicts` with both proposed and projected values. The Cloud Synchronization
 dialog shows these choices and offers Keep current structure. Its
 `cloud.acceptStructure {entity}` command creates a causal resolution using the displayed
