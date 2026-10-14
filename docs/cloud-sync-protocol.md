@@ -25,9 +25,10 @@ documented in [cloud-storage-implementation.md](cloud-storage-implementation.md)
 
 | Key | Contents |
 |---|---|
-| `catalog/head.json` | Small version-2 head: library, increasing generation, tip and optional checkpoint |
+| `catalog/head.json` | Small version-3 head: library, increasing generation, tip and optional checkpoint; archive-aware writer barrier |
 | `catalog/changes/<sha256>.json` | Immutable version-3 batch: parent and version-1 mutations |
-| `catalog/checkpoints/<sha256>.json` | Immutable version-1 portable state; obsolete import-receipt map stays empty |
+| `catalog/checkpoints/<sha256>.json` | Version-1 wrapper containing version-2 portable state and authenticated receipt forests; obsolete import-receipt map stays empty |
+| `sync-v2/<library>/receipts/<sha256>.json` | Immutable bounded Merkle receipt node shared by both transports |
 
 Readers reject version-1 heads, version-1/2 import batches, nonempty legacy import receipt
 maps and synthetic `baseline_`/`legacy_` replica identities. The maintainer confirms those
@@ -86,10 +87,10 @@ adding one synthetic legacy author per import. Their version-4 device-local rece
 the library, exact mutation proofs and conditional-head generation. Version-1/2 standalone
 and version-3 append receipts remain readable for conservative local recovery. The standalone
 legacy publisher and native/browser synthetic-author bridge have been removed. Uploads without
-enabled synchronization retain staged data and require explicit setup. The proposed versioned
-maintenance contract is in
-[cloud-history-compaction-design.md](cloud-history-compaction-design.md), not an implemented
-compactor or a reason to discard existing receipts.
+enabled synchronization retain staged data and require explicit setup. `checkpoint:true`
+archives historical receipt proofs with bounded Merkle roots while retaining full live-head,
+tombstone and pending contexts. The implemented contract and remaining author/entity limits
+are recorded in [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
 
 Album moves are projected from the desired graph and detached before reattachment. For a
 cross-entity parent cycle, the album with the greatest global identity in that cycle is shown
@@ -277,7 +278,7 @@ device has acknowledged the user's edits.
 
 ### Checkpoints and retention
 
-Publish immutable checkpoints containing `Portable` state, complete deduplication receipts,
+Publish immutable checkpoints containing `Portable` state, authenticated deduplication coverage,
 tombstones/conflict versions, and a certified contiguous coverage vector. Build them from
 verified published state, never directly from the local catalog's `portable()` while it has
 unpublished changes: that representation excludes the outbox field but still contains effects
@@ -290,13 +291,14 @@ the uncovered tails of every discovered author afterward. Coverage requires rece
 complete claimed prefixes and a causally closed state; a maximum clock alone is insufficient.
 Preserve the local outbox when bootstrapping or merging a snapshot.
 
-The first release does not remove remote operation records, checkpoints, tombstones, originals
-or revisions. Disable lifecycle expiry for these namespaces. Checkpoints accelerate replay;
-they do not currently compact the core's retained receipts or remove its bounds (100,000
-records, 64 MiB state, 4,096 causal authors). Reaching a bound reports an actionable error and
-retains local data. Receipt compaction and remote garbage collection need a separate design
-proving new/offline-device bootstrap, immutable checkpoint availability and collision/deletion
-preservation. Neither a recent timestamp nor a few devices' acknowledgements proves safe GC.
+The first release does not remove remote operation records, checkpoints, receipt archive nodes,
+tombstones, originals or revisions. Disable lifecycle expiry for these namespaces. Checkpoint
+maintenance archives exact historical mutation/context hashes in immutable Merkle forests,
+restoring capacity consumed by historical receipts. Full current-head and pending contexts stay
+live. Retired authors remain in the clock; 4,096 authors and the active document/pending/64 MiB
+state bounds still apply. Missing or conflicting archive proofs retain local work and stop the
+merge. Receipt compaction and remote garbage collection are separate operations. Neither a
+recent timestamp nor a few devices' acknowledgements proves safe GC.
 
 ### Native/browser boundaries and compatibility
 
@@ -397,10 +399,11 @@ an append manifest for the same library. It cannot control older binaries: keep 
 Never resume the two protocols concurrently. Legacy heads, changes and checkpoints remain.
 
 `AppendProgress.remote` caches only verified remote state, separate from the local pending
-projection. Both belong to the existing combined 64 MiB local synchronization-state budget;
-checkpointing does not remove receipts or raise this capacity. There is no automatic remote
-GC or arbitrary log expiration policy. Retain operations, checkpoints, original revisions,
-tombstones and exact receipts until a future coordinated retention protocol defines safety.
+projection. Both belong to the existing combined 64 MiB local synchronization-state budget.
+Checkpoint maintenance removes historical full receipts from live state after immutable archive
+verification; it does not raise the budget or drop current/pending contexts. There is no automatic
+remote GC or arbitrary log expiration policy. Retain operations, checkpoints, receipt archive
+nodes, original revisions and tombstones until a separate retention protocol defines safety.
 
 Native uploads verify all assets of a bulk import before publishing its shared mutation. Small
 and multipart writes use ordinary S3 requests in append mode and always verify bytes before

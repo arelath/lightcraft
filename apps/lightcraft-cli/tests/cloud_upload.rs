@@ -5,6 +5,47 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 use support::Fixture;
+#[test]
+fn upload_receipt_recovery_verifies_archived_publication_after_all_field_heads_advance() {
+    use lightcraft_engine::catalog::{FsStore, Journal, Op, replication::Change, uploads::UploadState};
+    let f = Fixture::new();
+    let library = f.dir.join("archived-upload");
+    let (id, _) = f.import(&library, false);
+    let (out, rows) = f.run(&library, &[("cloud.upload", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    {
+        let (mut journal, catalog, _) = Journal::open(Box::new(FsStore::open(&library).unwrap())).unwrap();
+        let mut state = catalog.sync_state().unwrap().clone();
+        // A valid later causal snapshot supersedes every original field head. The durable
+        // upload receipt continues to name its original publication, as it must on retry.
+        let changes = state
+            .documents
+            .iter()
+            .flat_map(|(entity, fields)| {
+                fields.iter().map(|(field, register)| Change {
+                    entity: entity.clone(),
+                    field: field.clone(),
+                    base: None,
+                    value: register.0.values().next().unwrap().clone(),
+                })
+            })
+            .collect();
+        state.enqueue(changes).unwrap();
+        journal.append(&[Op::SetSyncState { state: Some(Box::new(state)) }]).unwrap();
+    }
+    let (out, rows) = f.run(&library, &[("cloud.sync", json!({"checkpoint":true}))]);
+    assert!(out.status.success(), "{rows:?}");
+    {
+        let (mut journal, catalog, _) = Journal::open(Box::new(FsStore::open(&library).unwrap())).unwrap();
+        assert!(!catalog.sync_state().unwrap().archives.is_empty());
+        let mut intent = catalog.upload_intents()[&id].clone();
+        intent.state = UploadState::ObjectsVerified;
+        journal.append(&[Op::SetUploadIntent { id: id.clone(), intent: Some(Box::new(intent)) }]).unwrap();
+    }
+    let (out, rows) = f.run(&library, &[("cloud.upload", json!({"imports":[id]})), ("cloud.uploadStatus", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    assert_eq!(rows[1]["result"]["uploads"][&id]["state"], "synchronized");
+}
 
 struct Child(std::process::Child);
 impl Drop for Child {

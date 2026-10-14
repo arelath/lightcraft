@@ -2,6 +2,8 @@
 
 Last updated: 2026-10-14. Completion and acceptance checks are tracked in [../tasks.md](../tasks.md). The proposal is [cloud-storage.md](cloud-storage.md).
 
+Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
+
 ## Current architecture
 
 The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–12 still load and upgrade; older builds refuse format 13. Format 10 adds associated XMP, stable identity mappings and device-local working-copy bindings. Format 11 adds durable mutation synchronization; format 12 adds explicit append/CAS protocol selection, verified append progress and restored-author ownership. Format 13 adds sync-status filter criteria; absent criteria still mean no status constraint. Shared checkpoints exclude upload intents and all device-local paths and settings.
@@ -84,7 +86,8 @@ and retry creates a new session. See AWS's [lifecycle configuration](https://doc
 
 AWS documents the [conditional-write retry rules and incomplete-upload lifecycle option](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html). The implementation also checks the response body because [multipart completion can report an error inside HTTP 200](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html).
 
-Initial import publication uses a bounded version-1 protocol:
+Historical initial import publication used a bounded version-1 protocol (superseded by
+the causal protocol in [cloud-sync-protocol.md](cloud-sync-protocol.md)):
 
 | Object | Role |
 |---|---|

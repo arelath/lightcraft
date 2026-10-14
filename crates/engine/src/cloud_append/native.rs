@@ -53,7 +53,14 @@ pub fn synchronize_with_audit(
     for key in checkpoints {
         let reply = connection.get_small(&key, MAX_OBJECT, cancel)?.ok_or(AssetError::Missing)?;
         immutable_metadata(&key, &reply.bytes)?;
-        planner.checkpoint(&reply.bytes)?;
+        let p: lightcraft_catalog::replication::AppendProgress =
+            serde_json::from_slice(&reply.bytes).map_err(|_| invalid("malformed append checkpoint"))?;
+        p.validate(&local.library).map_err(ce)?;
+        if p.manifest != sha256(&manifest(&local.library)?).0 || !p.gaps.is_empty() {
+            return Err(AssetError::Integrity);
+        }
+        let remote = crate::cloud_history::native::certify(connection, &planner.remote, &p.remote, &mut planner.proofs, cancel)?;
+        planner.remote.merge(&remote).map_err(ce)?;
     }
     let (_, authors) = scan(connection, list(format!("{root}/ops/"), true), cancel)?;
     if authors.len() > 4096 {
@@ -71,13 +78,42 @@ pub fn synchronize_with_audit(
                 request.start_after = Some(format!("{author_prefix}{:020}-", frontier));
             }
         }
-        let (objects, _) = scan(connection, request, cancel)?;
-        for key in objects {
-            let reply = connection.get_small(&key, lightcraft_catalog::replication::MAX_MUTATION_BYTES, cancel)?.ok_or(AssetError::Missing)?;
-            planner.stage(decode_mutation(&connection.prefix, &local.library, &key, &reply.bytes)?)?;
+        let mut tokens = BTreeSet::new();
+        let mut complete = false;
+        for _ in 0..MAX_RECORDS {
+            let page = connection.list_objects_v2(&request, cancel)?;
+            if !page.prefixes.is_empty() {
+                return Err(AssetError::Integrity);
+            }
+            for key in page.keys {
+                let reply = connection.get_small(&key, lightcraft_catalog::replication::MAX_MUTATION_BYTES, cancel)?.ok_or(AssetError::Missing)?;
+                let mutation = decode_mutation(&connection.prefix, &local.library, &key, &reply.bytes)?;
+                if lightcraft_catalog::replication::archive::covers(&planner.remote.archives, &mutation.revision.id()) {
+                    crate::cloud_history::native::prove(connection, &planner.remote, &mutation, &mut planner.proofs, cancel)?;
+                }
+                planner.stage(mutation)?;
+                // Historical audits may traverse arbitrarily long archived prefixes. Their
+                // verified nodes are a disposable cache, not another retained receipt table.
+                if planner.proofs.len() > 8192 {
+                    planner.proofs.clear();
+                }
+            }
+            let Some(next) = page.next else {
+                complete = true;
+                break;
+            };
+            if !tokens.insert(next.clone()) {
+                return Err(invalid("listing repeated a continuation token"));
+            }
+            request.continuation = Some(next);
+            request.start_after = None;
+        }
+        if !complete {
+            return Err(invalid("too many append listing pages"));
         }
     }
     planner.drain()?;
+    crate::cloud_history::native::hydrate(connection, &mut planner.remote, local, &mut planner.proofs, cancel)?;
     let mut pending: Vec<_> = local.pending.values().collect();
     pending.sort_by_key(|m| m.revision.clone());
     // Each author advances only after its dependencies are remotely verified. Uploads can
@@ -106,13 +142,20 @@ pub fn synchronize_with_audit(
             break;
         }
     }
-    let progress = planner.progress()?;
+    if checkpoint && planner.progress()?.gaps.is_empty() {
+        crate::cloud_history::native::compact(connection, &mut planner.remote, true, cancel)?;
+    }
+    // Newly published effects may supersede an archived pending head. Promote all
+    // pending proofs again immediately before acknowledgement, even without maintenance.
+    crate::cloud_history::native::hydrate(connection, &mut planner.remote, local, &mut planner.proofs, cancel)?;
+    let mut progress = planner.progress()?;
     if checkpoint && progress.gaps.is_empty() {
         let bytes = encode(&progress)?;
         let key = format!("{root}/checkpoints/{}/{}.json", local.device, sha256(&bytes).0);
         connection.put_immutable_verified(&key, &bytes, cancel)?;
     }
     let acknowledged = planner.acknowledged(local)?;
+    progress.remote = crate::cloud_history::native::certify(connection, local, &progress.remote, &mut planner.proofs, cancel)?;
     Ok(crate::cloud_replication::Outcome {
         state: progress.remote.clone(),
         acknowledged,

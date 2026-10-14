@@ -19,6 +19,34 @@ fn config(f: &Fixture) -> Value {
 fn catalog(p: &Path) -> lightcraft_engine::catalog::Catalog {
     Journal::open(Box::new(FsStore::open(p).unwrap())).unwrap().1
 }
+#[test]
+fn archive_checkpoint_acknowledges_old_pending_and_rejects_a_late_fork_without_losing_work() {
+    let f = Fixture::new();
+    let (a, b, _) = initialize(&f);
+    ok(&f, &a, &[("photo.rate", json!({"ids":[1],"rating":2}))]);
+    let saved = ["catalog.snap", "catalog.log"].map(|name| (name, std::fs::read(a.join(name)).unwrap()));
+    let original = catalog(&a).sync_state().unwrap().pending.values().next().unwrap().clone();
+    ok(&f, &a, &[("cloud.sync", json!({}))]);
+    ok(&f, &b, &[("cloud.sync", json!({})), ("photo.rate", json!({"ids":[1],"rating":5})), ("cloud.sync", json!({"checkpoint":true}))]);
+    assert!(!catalog(&b).sync_state().unwrap().archives.is_empty());
+    for (name, bytes) in &saved {
+        std::fs::write(a.join(name), bytes).unwrap();
+    }
+    // The receipt was compacted before this restored device saved its acknowledgement.
+    ok(&f, &a, &[("photo.flag", json!({"ids":[1],"flag":"pick"})), ("cloud.sync", json!({}))]);
+    assert!(catalog(&a).sync_state().unwrap().pending.is_empty());
+    assert_eq!(catalog(&a).photo(PhotoId(1)).unwrap().rating, 5);
+    ok(&f, &a, &[("photo.flag", json!({"ids":[1],"flag":"pick"}))]);
+    let before = catalog(&a).sync_state().unwrap().pending.clone();
+    let mut fork = original;
+    fork.changes[0].value = json!(3);
+    let key = format!("/photos/{}", lightcraft_engine::cloud_append::mutation_key("library", &fork).unwrap());
+    f.state.lock().unwrap().objects.insert(key, serde_json::to_vec(&fork).unwrap());
+    let (out, rows) = f.run(&a, &[("cloud.sync", json!({"audit":true}))]);
+    assert!(!out.status.success());
+    assert!(rows[0]["error"].to_string().contains("collision"), "{rows:?}");
+    assert_eq!(catalog(&a).sync_state().unwrap().pending, before);
+}
 fn initialize(f: &Fixture) -> (PathBuf, PathBuf, String) {
     {
         let mut s = f.state.lock().unwrap();

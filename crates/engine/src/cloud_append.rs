@@ -75,6 +75,11 @@ pub fn immutable_metadata(key: &str, bytes: &[u8]) -> Result<()> {
     let tail = parts.get(start..).ok_or(AssetError::Integrity)?;
     let valid = match tail {
         [_, library, "manifest", name] => identifier(library) && *name == format!("{}.json", sha256(bytes).0),
+        [_, library, "receipts", name] => {
+            identifier(library)
+                && *name == format!("{}.json", sha256(bytes).0)
+                && lightcraft_catalog::replication::archive::Node::decode(&sha256(bytes).0, bytes).is_ok_and(|node| node.library == *library)
+        }
         [_, library, "checkpoints", author, name] => identifier(library) && identifier(author) && *name == format!("{}.json", sha256(bytes).0),
         [_, library, "ops", author, name] => {
             let m: Mutation = serde_json::from_slice(bytes).map_err(|_| invalid("invalid immutable mutation"))?;
@@ -106,6 +111,7 @@ pub fn immutable_blob(blob: &Blob) -> Result<()> {
 }
 pub struct Planner {
     pub remote: SyncState,
+    pub proofs: lightcraft_catalog::replication::archive::Witness,
     staged: BTreeMap<String, Mutation>,
     staged_bytes: usize,
     manifest: String,
@@ -116,9 +122,9 @@ impl Planner {
         let mut remote = SyncState::new(local.library.clone(), "remote".into(), local.connection.clone()).map_err(ce)?;
         if !audit && let Some(progress) = &local.append {
             progress.validate(&local.library).map_err(ce)?;
-            remote.merge(&progress.remote).map_err(ce)?;
+            remote = SyncState::restore_durable(&progress.remote, "remote".into(), local.connection.clone()).map_err(ce)?;
         }
-        Ok(Self { remote, staged: BTreeMap::new(), staged_bytes: 0, manifest: sha256(&manifest(&local.library)?).0 })
+        Ok(Self { remote, proofs: BTreeMap::new(), staged: BTreeMap::new(), staged_bytes: 0, manifest: sha256(&manifest(&local.library)?).0 })
     }
     pub fn checkpoint(&mut self, bytes: &[u8]) -> Result<()> {
         if bytes.len() > MAX_OBJECT {
@@ -135,6 +141,17 @@ impl Planner {
         m.validate().map_err(ce)?;
         let id = m.revision.id();
         let digest = m.digest().map_err(ce)?;
+        if lightcraft_catalog::replication::archive::covers(&self.remote.archives, &id) {
+            lightcraft_catalog::replication::archive::verify_receipt(
+                &self.remote.library,
+                &self.remote.archives,
+                &id,
+                &crate::cloud_history::receipt(&m).map_err(ce)?,
+                &self.proofs,
+            )
+            .map_err(ce)?;
+            return Ok(());
+        }
         if m.library != self.remote.library
             || self.remote.received.get(&id).is_some_and(|r| r.digest != digest)
             || self.staged.get(&id).is_some_and(|old| old != &m)
@@ -188,6 +205,8 @@ impl Planner {
                     return Err(AssetError::Integrity);
                 }
                 result.insert(id.clone());
+            } else if lightcraft_catalog::replication::archive::covers(&self.remote.archives, id) {
+                return Err(invalid("archived acknowledgement requires hydrated exact receipt proof; pending work retained"));
             }
         }
         Ok(result)

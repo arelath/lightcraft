@@ -50,7 +50,13 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
     for key in checkpoints {
         let bytes = get(provider, &key, core::MAX_OBJECT).await?;
         core::immutable_metadata(&key, &bytes).map_err(ce)?;
-        planner.checkpoint(&bytes).map_err(ce)?;
+        let p: lightcraft_engine::catalog::replication::AppendProgress = serde_json::from_slice(&bytes).map_err(|_| "malformed append checkpoint")?;
+        p.validate(&local.library).map_err(|e| e.to_string())?;
+        if p.manifest != sha256(&core::manifest(&local.library).map_err(ce)?).0 || !p.gaps.is_empty() {
+            return Err("incomplete append checkpoint".into());
+        }
+        let remote = super::history::certify(provider, &planner.remote, &p.remote, &mut planner.proofs).await?;
+        planner.remote.merge(&remote).map_err(|e| e.to_string())?;
     }
     let (_, authors) = scan(provider, list(format!("{root}/ops/"), true)).await?;
     if authors.len() > 4096 {
@@ -68,13 +74,40 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
                 request.start_after = Some(format!("{prefix}{frontier:020}-"));
             }
         }
-        let (objects, _) = scan(provider, request).await?;
-        for key in objects {
-            let bytes = get(provider, &key, lightcraft_engine::catalog::replication::MAX_MUTATION_BYTES).await?;
-            planner.stage(core::decode_mutation(&provider.connection.prefix, &local.library, &key, &bytes).map_err(ce)?).map_err(ce)?;
+        let mut tokens = BTreeSet::new();
+        let mut complete = false;
+        for _ in 0..core::MAX_RECORDS {
+            let page = provider.list(&request).await?;
+            if !page.prefixes.is_empty() {
+                return Err("unexpected append operation prefixes".into());
+            }
+            for key in page.keys {
+                let bytes = get(provider, &key, lightcraft_engine::catalog::replication::MAX_MUTATION_BYTES).await?;
+                let m = core::decode_mutation(&provider.connection.prefix, &local.library, &key, &bytes).map_err(ce)?;
+                if lightcraft_engine::catalog::replication::archive::covers(&planner.remote.archives, &m.revision.id()) {
+                    super::history::prove(provider, &planner.remote, &m, &mut planner.proofs).await?;
+                }
+                planner.stage(m).map_err(ce)?;
+                if planner.proofs.len() > 8192 {
+                    planner.proofs.clear();
+                }
+            }
+            let Some(next) = page.next else {
+                complete = true;
+                break;
+            };
+            if !tokens.insert(next.clone()) {
+                return Err("repeated continuation token".into());
+            }
+            request.continuation = Some(next);
+            request.start_after = None;
+        }
+        if !complete {
+            return Err("too many append listing pages".into());
         }
     }
     planner.drain().map_err(ce)?;
+    super::history::hydrate(provider, &mut planner.remote, local, &mut planner.proofs).await?;
     let mut pending: Vec<_> = local.pending.values().collect();
     pending.sort_by_key(|m| m.revision.clone());
     loop {
@@ -93,11 +126,16 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
             break;
         }
     }
-    let p = planner.progress().map_err(ce)?;
+    if checkpoint && planner.progress().map_err(ce)?.gaps.is_empty() {
+        super::history::compact(provider, &mut planner.remote, true).await?;
+    }
+    super::history::hydrate(provider, &mut planner.remote, local, &mut planner.proofs).await?;
+    let mut p = planner.progress().map_err(ce)?;
     if checkpoint && p.gaps.is_empty() {
         let bytes = core::encode(&p).map_err(ce)?;
         provider.put_immutable(&format!("{root}/checkpoints/{}/{}.json", local.device, sha256(&bytes).0), &bytes).await?;
     }
+    p.remote = super::history::certify(provider, local, &p.remote, &mut planner.proofs).await?;
     Ok(Outcome {
         state: p.remote.clone(),
         acknowledged: planner.acknowledged(local).map_err(ce)?,
@@ -113,13 +151,15 @@ pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, 
     }
     let seed = super::protocol::migration_seed(provider, &local.library).await?;
     let mut planner = core::Planner::new(local, true).map_err(ce)?;
+    let seed = super::history::certify(provider, &planner.remote, &seed, &mut planner.proofs).await?;
     planner.remote.merge(&seed).map_err(|e| e.to_string())?;
-    let p = planner.progress().map_err(ce)?;
+    let mut p = planner.progress().map_err(ce)?;
     provider
         .put_immutable(&core::manifest_key(&provider.connection.prefix, &local.library).map_err(ce)?, &core::manifest(&local.library).map_err(ce)?)
         .await?;
     let bytes = core::encode(&p).map_err(ce)?;
     let root = core::root(&provider.connection.prefix, &local.library).map_err(ce)?;
     provider.put_immutable(&format!("{root}/checkpoints/{}/{}.json", local.device, sha256(&bytes).0), &bytes).await?;
+    p.remote = super::history::certify(provider, local, &p.remote, &mut planner.proofs).await?;
     Ok(Outcome { state: p.remote.clone(), acknowledged: Default::default(), cursor: String::new(), generation: 0, append: Some(p) })
 }

@@ -58,12 +58,14 @@ pub fn read(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Re
     }
     let state = SyncState::new(library.into(), "remote".into(), connection.id.clone()).map_err(catalog_error)?;
     let mut remote = Remote { head, state };
+    let mut archive_proofs = lightcraft_catalog::replication::archive::Witness::new();
     let Some((head, _)) = &remote.head else { return Ok(remote) };
     let mut next = Some(head.tip.clone());
     let mut boundary = None;
     if let Some(reference) = &head.checkpoint {
         let checkpoint = read_checkpoint(connection, reference, cancel)?;
-        remote.state.merge(&checkpoint.state).map_err(catalog_error)?;
+        let verified = crate::cloud_history::native::certify(connection, &remote.state, &checkpoint.state, &mut archive_proofs, cancel)?;
+        remote.state.merge(&verified).map_err(catalog_error)?;
         boundary = Some(reference.covers.hash.clone());
     }
     let mut batches = Vec::new();
@@ -97,7 +99,7 @@ pub fn read(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Re
     }
     for batch in batches.into_iter().rev() {
         for mutation in batch.mutations {
-            remote.state.receive(&mutation).map_err(catalog_error)?;
+            crate::cloud_history::native::receive(connection, &mut remote.state, &mutation, &mut archive_proofs, cancel)?;
         }
     }
     Ok(remote)
@@ -121,13 +123,13 @@ fn read_incremental(connection: &S3Connection, local: &SyncState, cancel: &Atomi
         canceled(cancel)?;
         let Some(reference) = next.take() else { break };
         if local.cursor.as_deref() == Some(reference.hash.0.as_str()) {
-            let mut state = SyncState::new(local.library.clone(), "remote".into(), connection.id.clone()).map_err(catalog_error)?;
-            state.merge(&local.portable()).map_err(catalog_error)?;
+            let state = SyncState::restore_durable(&local.portable(), "remote".into(), connection.id.clone()).map_err(catalog_error)?;
             let mut remote = Remote { head, state };
+            let mut archive_proofs = lightcraft_catalog::replication::archive::Witness::new();
             for batch in batches.into_iter().rev() {
                 let batch: Batch = batch;
                 for mutation in batch.mutations {
-                    remote.state.receive(&mutation).map_err(catalog_error)?;
+                    crate::cloud_history::native::receive(connection, &mut remote.state, &mutation, &mut archive_proofs, cancel)?;
                 }
             }
             return Ok(remote);
@@ -238,9 +240,11 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
         }
     }
     let mut dependency_proof = BTreeSet::new();
+    let mut archive_proofs = lightcraft_catalog::replication::archive::Witness::new();
     for _ in 0..64 {
         canceled(cancel)?;
         let mut remote = if checkpoint_requested { read(connection, &local.library, cancel)? } else { read_incremental(connection, local, cancel)? };
+        crate::cloud_history::native::hydrate(connection, &mut remote.state, local, &mut archive_proofs, cancel)?;
         let mut pending = Vec::new();
         let mut acknowledged = BTreeSet::new();
         for mutation in local.pending.values() {
@@ -263,7 +267,8 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
             let Some((head, _)) = remote.head else {
                 return Err(invalid("remote catalog is empty; initial library metadata must be queued first"));
             };
-            return Ok(Outcome { append: None, state: remote.state.portable(), acknowledged, cursor: head.tip.hash.0, generation: head.generation });
+            let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
+            return Ok(Outcome { append: None, state, acknowledged, cursor: head.tip.hash.0, generation: head.generation });
         }
         let pending_count = pending.len();
         pending.sort_by_key(|mutation| mutation.revision.clone());
@@ -302,7 +307,8 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
                 return Err(invalid("pending mutation cannot fit a 2 MiB change batch"));
             }
             let (cursor, generation) = remote.head.as_ref().map_or((String::new(), 0), |(head, _)| (head.tip.hash.0.clone(), head.generation));
-            return Ok(Outcome { append: None, state: remote.state.portable(), acknowledged, cursor, generation });
+            let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
+            return Ok(Outcome { append: None, state, acknowledged, cursor, generation });
         }
         let newly_referenced: Vec<_> = chunk.iter().filter(|mutation| !dependency_proof.contains(&mutation.revision.id())).cloned().collect();
         dependencies(connection, &newly_referenced, cancel)?;
@@ -310,6 +316,7 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
         let mut checkpoint = remote.head.as_ref().and_then(|(head, _)| head.checkpoint.clone());
         let mut parent = remote.head.as_ref().map(|(head, _)| head.tip.clone());
         if checkpoint_requested && let Some((head, _)) = &remote.head {
+            crate::cloud_history::native::compact(connection, &mut remote.state, false, cancel)?;
             let payload = Checkpoint {
                 version: 1,
                 generation: head.generation,
@@ -344,7 +351,7 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
         immutable(connection, &tip.key, &bytes, cancel, 2 << 20)?;
         let generation =
             remote.head.as_ref().map_or(Ok(1), |(head, _)| head.generation.checked_add(1).ok_or_else(|| invalid("remote generation exhausted")))?;
-        let new_head = Head { version: 2, generation, tip, library: Some(local.library.clone()), checkpoint };
+        let new_head = Head { version: 3, generation, tip, library: Some(local.library.clone()), checkpoint };
         let condition = remote.head.as_ref().map_or(PutCondition::Absent, |(_, etag)| PutCondition::Matches(etag));
         let key = keys::in_library(&connection.prefix, "catalog/head.json")?;
         match connection.put_small(&key, &publication::encode(&new_head)?, condition, cancel) {

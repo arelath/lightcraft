@@ -49,6 +49,8 @@ pub use store::{FsStore, MemStore, Store};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum CatalogError {
+    #[error("receipt archive proof {0} is required; local work retained")]
+    ArchiveRequired(String),
     #[error("no such photo {0:?}")]
     NoPhoto(PhotoId),
     #[error("no such album {0:?}")]

@@ -197,6 +197,12 @@ uses `/`; tails and checkpoints use ordinary listings. Each page is bounded to 4
 entries. Keys outside its prefix, repeated tokens, unsupported namespaces and XML DTDs fail.
 
 An immutable PUT includes `operation:"putImmutable"`, exact key, `size` and `contentSha256`.
+Receipt maintenance also reads/writes `sync-v2/<library-id>/receipts/<sha256>.json`:
+canonical, at-most-1-KiB Merkle nodes bound to that library. The signer must permit these
+scoped immutable objects with the same exact content-hash binding as checkpoints.
+Conditional-head maintenance uses conditional PUT plus readback for these objects;
+append maintenance uses `putImmutable`. Retain receipt archives and upgrade devices
+before maintenance. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
 The signer must reject mutable heads and arbitrary keys. Bind the exact SHA-256 using a signed
 content hash or checksum header; the adapter verifies that binding. B2 presigning uses
 `UNSIGNED-PAYLOAD` in the canonical request with a signed `x-amz-checksum-sha256` header

@@ -39,6 +39,7 @@ async fn read(provider: &Provider, library: &str) -> Result<Remote, String> {
     let reply = provider.request("GET", &key, None, None, None, 16 << 10).await?;
     let state = SyncState::new(library.into(), "remote".into(), provider.connection.id.clone()).map_err(|e| e.to_string())?;
     let mut remote = Remote { head: None, state };
+    let mut proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
     if reply.status == 404 {
         return Ok(remote);
     }
@@ -67,7 +68,8 @@ async fn read(provider: &Provider, library: &str) -> Result<Remote, String> {
         if !checkpoint.imports.is_empty() {
             return Err("obsolete pre-release import checkpoint; use a fresh catalog and storage prefix; local data retained".into());
         }
-        remote.state.merge(&checkpoint.state).map_err(|e| e.to_string())?;
+        let verified = super::history::certify(provider, &remote.state, &checkpoint.state, &mut proofs).await?;
+        remote.state.merge(&verified).map_err(|e| e.to_string())?;
         boundary = Some(reference.covers.hash.clone());
     }
     let mut next = Some(head.tip.clone());
@@ -100,12 +102,16 @@ async fn read(provider: &Provider, library: &str) -> Result<Remote, String> {
     remote.head = Some((head, etag));
     for batch in batches.into_iter().rev() {
         for mutation in batch.mutations {
-            remote.state.receive(&mutation).map_err(|e| e.to_string())?;
+            if lightcraft_engine::catalog::replication::archive::covers(&remote.state.archives, &mutation.revision.id()) {
+                super::history::prove(provider, &remote.state, &mutation, &mut proofs).await?;
+            } else {
+                remote.state.receive(&mutation).map_err(|e| e.to_string())?;
+            }
         }
     }
     Ok(remote)
 }
-async fn immutable(provider: &Provider, key: &str, bytes: &[u8]) -> Result<(), String> {
+pub(super) async fn immutable(provider: &Provider, key: &str, bytes: &[u8]) -> Result<(), String> {
     let outcome = provider.request("PUT", key, None, Some("*"), Some(bytes), 16 << 10).await;
     match outcome {
         Ok(reply) if matches!(reply.status, 200 | 201 | 204) => Ok(()),
@@ -159,8 +165,10 @@ pub async fn synchronize(
     }
     local.validate().map_err(|e| e.to_string())?;
     let mut verified = BTreeSet::new();
+    let mut archive_proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
     for _ in 0..64 {
         let mut remote = read(provider, &local.library).await?;
+        super::history::hydrate(provider, &mut remote.state, local, &mut archive_proofs).await?;
         let mut pending = Vec::new();
         for mutation in local.pending.values() {
             if let Some(receipt) = remote.state.received.get(&mutation.revision.id()) {
@@ -178,7 +186,7 @@ pub async fn synchronize(
             let (head, _) = remote.head.ok_or("empty remote library; initial metadata must be queued")?;
             return Ok(Outcome {
                 append: None,
-                state: remote.state.portable(),
+                state: super::history::certify(provider, local, &remote.state.portable(), &mut archive_proofs).await?,
                 acknowledged: local.pending.keys().cloned().collect(),
                 cursor: head.tip.hash.0,
                 generation: head.generation,
@@ -213,6 +221,7 @@ pub async fn synchronize(
         let mut checkpoint = remote.head.as_ref().and_then(|(h, _)| h.checkpoint.clone());
         let parent = remote.head.as_ref().map(|(h, _)| h.tip.clone());
         if checkpoint_requested && let Some((head, _)) = &remote.head {
+            super::history::compact(provider, &mut remote.state, false).await?;
             let payload = Checkpoint {
                 version: 1,
                 generation: head.generation,
@@ -236,7 +245,7 @@ pub async fn synchronize(
         let tip = RecordRef { key: format!("{}/catalog/changes/{}.json", provider.connection.prefix, hash.0), size: bytes.len() as u64, hash };
         immutable(provider, &tip.key, &bytes).await?;
         let generation = remote.head.as_ref().map_or(Ok(1), |(h, _)| h.generation.checked_add(1).ok_or("catalog generation exhausted"))?;
-        let head = Head { version: 2, generation, tip, library: Some(local.library.clone()), checkpoint };
+        let head = Head { version: 3, generation, tip, library: Some(local.library.clone()), checkpoint };
         let condition = remote.head.as_ref().map_or("*", |(_, etag)| etag.as_str());
         let key = format!("{}/catalog/head.json", provider.connection.prefix);
         let bytes = encode(&head, 16 << 10)?;

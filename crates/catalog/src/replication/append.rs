@@ -47,10 +47,13 @@ pub fn prefixes(remote: &Portable) -> Result<Clock> {
         let s = stamp(id)?;
         sequences.entry(s.device).or_default().insert(s.sequence);
     }
-    let mut result = Clock::new();
+    let mut result: Clock = remote.archives.iter().map(|(author, prefix)| (author.clone(), prefix.through)).collect();
     for (author, values) in sequences {
-        let mut prefix = 0u64;
+        let mut prefix = result.get(&author).copied().unwrap_or(0);
         for sequence in values {
+            if sequence <= prefix {
+                continue;
+            }
             if prefix.checked_add(1) != Some(sequence) {
                 break;
             }
@@ -80,7 +83,9 @@ impl AppendProgress {
     /// A local durability proof, never a synthetic globally ordered catalog head.
     pub fn digest(&self) -> Result<String> {
         self.validate(&self.remote.library)?;
-        let bytes = serde_json::to_vec(self).map_err(|e| invalid(&e.to_string()))?;
+        let mut durable = self.clone();
+        durable.remote.proofs.clear();
+        let bytes = serde_json::to_vec(&durable).map_err(|e| invalid(&e.to_string()))?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 }

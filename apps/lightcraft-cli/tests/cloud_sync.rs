@@ -13,6 +13,52 @@ fn success(fixture: &Fixture, library: &Path, commands: &[(&str, Value)]) -> Vec
 fn configure(fixture: &Fixture) -> Value {
     json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":fixture.endpoint,"profile":"acceptance"})
 }
+#[test]
+fn archived_ack_and_missing_or_corrupt_archive_preserve_exact_pending_on_restart() {
+    let f = Fixture::new();
+    let (a, b, _) = initialize(&f);
+    success(&f, &a, &[("photo.rate", json!({"ids":[1],"rating":2}))]);
+    let saved = ["catalog.snap", "catalog.log"].map(|name| (name, std::fs::read(a.join(name)).unwrap()));
+    let pending =
+        lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap().1.sync_state().unwrap().pending.clone();
+    success(&f, &a, &[("cloud.sync", json!({}))]);
+    success(&f, &b, &[("cloud.sync", json!({})), ("photo.rate", json!({"ids":[1],"rating":5})), ("cloud.sync", json!({"checkpoint":true}))]);
+    let archives = {
+        let mut s = f.state.lock().unwrap();
+        let objects: Vec<_> = s.objects.iter().filter(|(key, _)| key.contains("/receipts/")).map(|(k, v)| (k.clone(), v.clone())).collect();
+        assert!(!objects.is_empty());
+        for (key, _) in &objects {
+            s.objects.remove(key);
+        }
+        objects
+    };
+    for (name, bytes) in &saved {
+        std::fs::write(a.join(name), bytes).unwrap();
+    }
+    let (out, rows) = f.run(&a, &[("cloud.sync", json!({}))]);
+    assert!(!out.status.success());
+    assert!(rows[0]["error"].to_string().contains("archive"), "{rows:?}");
+    let after = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap().1;
+    assert_eq!(after.sync_state().unwrap().pending, pending);
+    {
+        let mut s = f.state.lock().unwrap();
+        for (key, _) in &archives {
+            s.objects.insert(key.clone(), b"corrupt".to_vec());
+        }
+    }
+    let (out, _) = f.run(&a, &[("cloud.sync", json!({}))]);
+    assert!(!out.status.success());
+    {
+        let mut s = f.state.lock().unwrap();
+        for (key, bytes) in archives {
+            s.objects.insert(key, bytes);
+        }
+    }
+    success(&f, &a, &[("cloud.sync", json!({}))]);
+    let after = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap().1;
+    assert!(after.sync_state().unwrap().pending.is_empty());
+    assert_eq!(after.photo(lightcraft_catalog::PhotoId(1)).unwrap().rating, 5);
+}
 fn initialize(fixture: &Fixture) -> (std::path::PathBuf, std::path::PathBuf, String) {
     let a = fixture.dir.join("device-a");
     let b = fixture.dir.join("device-b");

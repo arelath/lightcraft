@@ -70,10 +70,10 @@ pub fn read_head(connection: &S3Connection, cancel: &AtomicBool) -> Result<Optio
     let Some(reply) = connection.get_small(&key, 16 << 10, cancel)? else { return Ok(None) };
     let head: Head =
         serde_json::from_slice(&reply.bytes).map_err(|_| invalid("remote catalog head is malformed or from an unsupported version; preserved"))?;
-    if !matches!(head.version, 1 | 2)
+    if !matches!(head.version, 1..=3)
         || head.generation == 0
         || (head.version == 1 && (head.library.is_some() || head.checkpoint.is_some()))
-        || (head.version == 2 && head.library.as_ref().is_none_or(|id| !identifier(id)))
+        || (head.version >= 2 && head.library.as_ref().is_none_or(|id| !identifier(id)))
     {
         return Err(invalid("unsupported remote catalog head; preserved"));
     }
@@ -91,7 +91,7 @@ pub fn read_head(connection: &S3Connection, cancel: &AtomicBool) -> Result<Optio
             return Err(invalid("invalid remote checkpoint reference"));
         }
     }
-    if head.version != 2 {
+    if head.version < 2 {
         return Err(invalid("obsolete pre-release catalog head; use a fresh catalog and storage prefix; local data retained"));
     }
     let etag = reply.etag.ok_or_else(|| invalid("remote head has no ETag; conditional synchronization is unavailable"))?;

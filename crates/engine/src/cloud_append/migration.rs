@@ -17,7 +17,7 @@ pub(crate) fn seed(
 ) -> Result<crate::cloud_replication::Outcome> {
     let remote = crate::cloud_replication::read(conn, &state.library, cancel).map_err(|e| error(e.to_string()))?;
     let portable = remote.state.portable();
-    let progress = AppendProgress {
+    let mut progress = AppendProgress {
         version: 1,
         manifest: crate::assets::sha256(&super::manifest(&state.library).map_err(|e| error(e.to_string()))?).0,
         frontiers: publication_prefixes(&portable)?,
@@ -39,6 +39,8 @@ pub(crate) fn seed(
         crate::assets::sha256(&bytes).0
     );
     conn.put_immutable_verified(&key, &bytes, cancel).map_err(|e| error(e.to_string()))?;
+    progress.remote =
+        crate::cloud_history::native::certify(conn, state, &progress.remote, &mut Default::default(), cancel).map_err(|e| error(e.to_string()))?;
     Ok(crate::cloud_replication::Outcome {
         state: progress.remote.clone(),
         acknowledged: Default::default(),

@@ -77,9 +77,9 @@ impl RecordRef {
 impl Head {
     pub fn validate_scope(&self, prefix: &str, library: &str) -> Result<(), String> {
         if self.generation == 0
-            || !matches!(self.version, 1 | 2)
+            || !matches!(self.version, 1..=3)
             || (self.version == 1 && (self.library.is_some() || self.checkpoint.is_some()))
-            || (self.version == 2 && self.library.as_deref() != Some(library))
+            || (self.version >= 2 && self.library.as_deref() != Some(library))
         {
             return Err("invalid catalog head or library identity".into());
         }
@@ -91,7 +91,7 @@ impl Head {
             checkpoint.object.validate_scope(prefix, "checkpoints", 64 << 20)?;
             checkpoint.covers.validate_scope(prefix, "changes", 2 << 20)?;
         }
-        if self.version != 2 {
+        if self.version < 2 {
             return Err("obsolete pre-release catalog head; use a fresh catalog and storage prefix; local data retained".into());
         }
         Ok(())

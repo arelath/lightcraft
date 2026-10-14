@@ -214,10 +214,10 @@ fn op_variants_are_versioned() {
             Op::SetAsset { .. } => 8,
             Op::SetUploadIntent { .. } => 9,
             Op::SetCloudIdentity { .. } | Op::SetWorkingCopy { .. } => 10,
-            Op::SetSyncState { .. } => 12,
+            Op::SetSyncState { .. } => 14,
             Op::SetAlbumRules { .. } => 13,
         }
     }
-    let newest = since(&Op::SetAlbumRules { id: AlbumId(1), rules: Box::default() });
+    let newest = since(&Op::SetSyncState { state: None });
     assert_eq!(newest, VERSION, "the newest op shape's version must be the current format version");
 }

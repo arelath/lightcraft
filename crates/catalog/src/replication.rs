@@ -12,6 +12,7 @@ const MAX_STATE_BYTES: usize = 64 << 20;
 const MAX_DEVICES: usize = 4096;
 const MAX_RECORDS: usize = 100_000;
 mod append;
+pub mod archive;
 pub use append::{AppendProgress, SyncProtocol, prefixes as publication_prefixes};
 pub type Clock = BTreeMap<String, u64>;
 
@@ -141,6 +142,8 @@ pub struct SyncState {
     pub generation: u64,
     pub documents: BTreeMap<String, BTreeMap<String, Register>>,
     pub received: BTreeMap<String, Receipt>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub archives: archive::Archives,
     pub pending: BTreeMap<String, Mutation>,
 }
 
@@ -154,9 +157,15 @@ pub struct Portable {
     pub clock: Clock,
     pub documents: BTreeMap<String, BTreeMap<String, Register>>,
     pub received: BTreeMap<String, Receipt>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub archives: archive::Archives,
+    /// Transport-only authenticated witnesses. Never retained in local state/checkpoints.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub proofs: archive::Witness,
 }
 impl Portable {
     pub fn validate(&self) -> Result<()> {
+        archive::validate_witness(&self.proofs)?;
         let state = SyncState {
             version: self.version,
             library: self.library.clone(),
@@ -172,12 +181,26 @@ impl Portable {
             generation: 0,
             documents: self.documents.clone(),
             received: self.received.clone(),
+            archives: self.archives.clone(),
             pending: BTreeMap::new(),
         };
         state.validate()
     }
 }
 impl SyncState {
+    /// Restore the portable part of previously verified, device-local durable progress.
+    /// Remote/untrusted checkpoints must instead use `merge` with authenticated witnesses.
+    pub fn restore_durable(remote: &Portable, device: String, connection: String) -> Result<Self> {
+        remote.validate()?;
+        let mut state = Self::new(remote.library.clone(), device, connection)?;
+        state.version = remote.version;
+        state.clock = remote.clock.clone();
+        state.documents = remote.documents.clone();
+        state.received = remote.received.clone();
+        state.archives = remote.archives.clone();
+        state.validate()?;
+        Ok(state)
+    }
     pub fn portable(&self) -> Portable {
         Portable {
             version: self.version,
@@ -185,6 +208,8 @@ impl SyncState {
             clock: self.clock.clone(),
             documents: self.documents.clone(),
             received: self.received.clone(),
+            archives: self.archives.clone(),
+            proofs: BTreeMap::new(),
         }
     }
     /// Merge a verified checkpoint without replacing local identities, pending work or cursor.
@@ -194,6 +219,8 @@ impl SyncState {
             return Err(invalid("checkpoint belongs to another library"));
         }
         let mut next = self.clone();
+        next.version = next.version.max(remote.version);
+        next.archives = archive::merge(self, remote)?;
         for (id, receipt) in &remote.received {
             if next.received.get(id).is_some_and(|old| old != receipt) {
                 return Err(invalid("checkpoint mutation receipt collision; local work retained"));
@@ -232,13 +259,14 @@ impl SyncState {
                 }
             }
         }
+        next.prune_archived_receipts();
         next.validate()?;
         *self = next;
         Ok(())
     }
     pub fn new(library: String, device: String, connection: String) -> Result<Self> {
         let state = Self {
-            version: 1,
+            version: 2,
             library,
             device,
             connection,
@@ -252,6 +280,7 @@ impl SyncState {
             generation: 0,
             documents: BTreeMap::new(),
             received: BTreeMap::new(),
+            archives: BTreeMap::new(),
             pending: BTreeMap::new(),
         };
         state.validate()?;
@@ -261,7 +290,8 @@ impl SyncState {
         if self.clock.keys().any(|device| device.starts_with("baseline_") || device.starts_with("legacy_")) {
             return Err(invalid("obsolete pre-release import state; use a fresh catalog and storage prefix; local data retained"));
         }
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
+            || (self.version == 1 && !self.archives.is_empty())
             || !identifier(&self.library)
             || !identifier(&self.device)
             || self.device.len() > 96
@@ -274,6 +304,7 @@ impl SyncState {
         {
             return Err(invalid("invalid or oversized synchronization state; preserved"));
         }
+        archive::validate(&self.archives, &self.clock)?;
         if (!self.local_owner.is_empty() && !identifier(&self.local_owner))
             || self.previous_authors.len() > MAX_DEVICES
             || self.previous_authors.iter().any(|id| !identifier(id) || id.len() > 96 || id == &self.device)
@@ -298,6 +329,7 @@ impl SyncState {
                 || !valid_clock(&receipt.context)
                 || receipt.context.get(&stamp.device).copied().unwrap_or(0) != stamp.sequence - 1
                 || self.clock.get(&stamp.device).copied().unwrap_or(0) < stamp.sequence
+                || receipt.context.iter().any(|(author, sequence)| self.clock.get(author).copied().unwrap_or(0) < *sequence)
                 || receipt.digest.len() != 64
                 || !receipt.digest.bytes().all(|b| b.is_ascii_hexdigit())
             {
@@ -351,6 +383,7 @@ impl SyncState {
         let mut next = self.clone();
         let changed = next.receive_inner(mutation)?;
         if changed {
+            next.prune_archived_receipts();
             next.validate()?;
             *self = next;
         }
@@ -368,6 +401,9 @@ impl SyncState {
                 return Err(invalid("replayed mutation identity describes different data"));
             }
             return Ok(false);
+        }
+        if archive::covers(&self.archives, &id) {
+            return Err(invalid("archived replay requires exact receipt proof; local work retained"));
         }
         for change in &mutation.changes {
             let register = self.documents.entry(change.entity.clone()).or_default().entry(change.field.clone()).or_default();
@@ -412,6 +448,7 @@ impl SyncState {
         let mut next = self.clone();
         next.receive_inner(&mutation)?;
         next.pending.insert(mutation.revision.id(), mutation.clone());
+        next.prune_archived_receipts();
         next.validate()?;
         *self = next;
         Ok(Some(mutation))
@@ -457,7 +494,10 @@ impl SyncState {
         }
         next.cursor = None;
         next.generation = 0;
+        let mut progress = progress;
+        progress.remote.proofs.clear();
         next.append = Some(Box::new(progress));
+        next.prune_archived_receipts();
         next.validate()?;
         *self = next;
         Ok(())
@@ -474,6 +514,7 @@ impl SyncState {
         }
         let mut next = self.clone();
         next.pending.retain(|id, _| !ids.contains(id));
+        next.prune_archived_receipts();
         next.cursor = Some(cursor);
         next.generation = generation;
         next.validate()?;

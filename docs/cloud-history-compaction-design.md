@@ -1,131 +1,97 @@
-# Causal-history maintenance design
+# Causal-history maintenance
 
-Status: proposed protocol work, 2026-10-14. This document does not describe an
-implemented maintenance command. Current checkpoints retain receipts and clocks;
-they do not restore capacity at the 100,000-record or 64 MiB state bounds.
-See [cloud-reliability-tasks.md](cloud-reliability-tasks.md), CR.4–CR.7.
+Status: implemented receipt compaction, 2026-10-14. `cloud.sync {checkpoint:true}`
+archives verified remote receipt history on native and browser transports. It does
+not delete remote objects, retire causal identities, or expire tombstones.
+See [cloud-reliability-tasks.md](cloud-reliability-tasks.md), CR.5–CR.7.
 
-Maintainer clarification, 2026-10-14: there are no existing users or libraries, only
-disposable test data. A pre-release format boundary can reject those old catalogs
-and remote records; legacy-library migration and support for writable old builds
-are no longer acceptance requirements. The retirement/offline recovery requirements
-below apply to clients created under the replacement format. This clarification
-does not authorize discarding future unsynchronized edits.
+## Representation and integrity
 
-## Compatibility boundary
+Catalog format 14 and synchronization state version 2 add an immutable Merkle forest
+for each author. A forest represents an exact contiguous prefix, with at most 64
+SHA-256 roots: the descending powers of two in the prefix length. History length
+therefore does not grow the number of live roots. Existing causal state version 1
+can be read and upgraded; obsolete synthetic import replicas remain rejected.
 
-Do not rewrite sequence numbers, pool synthetic authors into hash buckets, drop
-tombstones, or increase the device limit. Existing receipts bind exact mutation
-IDs, digests, contexts and register alternatives. A migration must replace that
-representation explicitly, with all writers stopped/upgraded, as the existing
-conditional-head-to-append migration does.
+Each leaf binds library, author, sequence, mutation digest and the hash of the
+canonical causal context. A branch binds the same scope, aligned sequence range,
+and hashes of its two halves. Nodes are canonical JSON, at most 1 KiB, stored at
+`sync-v2/<library>/receipts/<sha256>.json` inside the configured storage prefix.
+The checkpoint commits the forest roots. Readers verify content hashes, scope,
+alignment, lengths and bounded depth; they never accept a clock as an exact receipt.
 
-Use a new protocol/schema and epoch namespace. A new immutable epoch manifest
-binds the old library identity, previous manifest/checkpoint hashes, final covered
-author prefixes, effective seed state, schema, and retirement policy. Keep photo,
-asset and album identities; keep device-local credentials and bindings separate.
-Retain the old namespace and blobs. Compaction and remote reclamation are separate
-operations; a successful compact never deletes the historical recovery evidence.
+All current field heads, concurrent alternatives, deletion heads and local pending
+mutations retain full contexts. Other receipts covered by the authenticated prefix
+can leave live state. Photo IDs, content manifests, metadata, user edit history,
+named versions and tombstone values stay unchanged. This compacts synchronization
+bookkeeping, not user-visible history or the library's document payloads.
 
-Old writers must be fenced before cutover. Current append readers fetch newly
-discovered checkpoints before publication: a hash-verified incompatible checkpoint
-sentinel in the old namespace can make those supported readers fail closed. A
-conditional-head writer already refuses an append manifest. A proposed implementation
-must test the exact supported old native/browser builds; unrecognized older builds
-require revoking/restricting their write credentials. Listing is not an atomic fence.
-The coordinated stopped-writer assertion remains required, including workers that
-started before the sentinel appeared. New clients must verify the sentinel and epoch
-manifest rather than infer cutover from filenames or an incomplete listing.
+Different prefixes of the same author must have identical hashes for their shared
+history. Merge reconstructs trees from locally available full receipts and fetches
+only necessary missing consistency paths. Incomparable authors/checkpoints merge
+normally. A changed body or context under an existing author/sequence stops the
+merge atomically; both remote evidence and local pending work remain available.
 
-## Compact representation
+## Publication and acknowledgement
 
-Code discovery confirms that historical contexts are needed only while a receipt is
-a register head or pending intent. A first implementation may demote other receipts
-to fixed-size proofs of the canonical mutation and context, promoting a matching full
-receipt during checkpoint merge before causal pruning. Every current field head,
-deletion head and pending ID must retain its full context. Replay and acknowledgement
-lookups must accept either representation and compare exact digests. Two forms with
-different context hashes are a collision, even if their mutation digest strings match.
+Only verified remote state seeds an archive/checkpoint. Unpublished local changes
+cannot appear in a checkpoint. New leaves/branches are written and verified before
+the compact checkpoint is published. Uncertain writes reuse the same immutable hash
+keys. Cancellation, failed writes, lost responses and failed local journal saves
+leave the prior durable local state and original pending IDs intact. Unreferenced
+archive objects from an interrupted attempt are harmless and retained.
 
-Inline proof packing is not the complete capacity solution: those proof bytes still
-grow with operation count. To recover at the final byte bound, immutable receipt
-archives need authenticated lookup/prefix proofs, with current state retaining their
-bounded roots rather than every historical digest. Native/browser workers must
-verify archive proofs before owner-thread merge or acknowledgement. Ordinary polls
-must not download whole archives. The checkpoint/frontier and audit changes are part
-of this implementation, not a later reason to discard collision checks.
+A remote checkpoint can compact an operation before its author saves an ACK.
+Workers verify the archived leaf against the exact local pending mutation and hydrate
+its full receipt in the temporary result. Incoming changes and acknowledgement
+commit together. Pending receipts remain full until that durable acknowledgement;
+proof-path caches are removed from saved state. Browser ACK digests exclude temporary
+witnesses so reload can finish after witnesses have been removed.
 
-Retirement is separate from context packing. Retain every actual author clock by
-default; a clock cannot be removed merely because its full receipts were packed or
-archived. Epoch retirement requires the coordinated policy below. This keeps an
-offline device's sequence allocation and causal observations meaningful.
+Missing or corrupt nodes stop synchronization with an archive-recovery error and
+retain the outbox. Restore the retained archive objects; retrying or observing a
+larger clock does not authorize dropping pending work. Archived duplicates are
+verified and do not reapply effects. Old operation records can still expose a cloned
+author fork during an integrity audit, including after compaction.
 
-1. Freeze a remotely verified checkpoint covering exact contiguous author prefixes.
-   Pending local mutations cannot seed it. Retain every causally maximal value,
-   deletion/restore choice, immutable content descriptor and named conflict version.
-2. Anchor those values to the epoch seed. Preserve their historical origin references
-   for inspection, but do not carry a per-photo legacy author in the new live clock.
-   A new-epoch edit observes the seed and supersedes its applicable heads explicitly.
-3. Represent actual legacy imports as seed rows keyed by their immutable import
-   identity, with preserved baseline-versus-authored precedence. Keep old immutable
-   records as external exact collision/recovery evidence. Do not synthesize one
-   active replica for each import or revision.
-4. Keep exact receipts for pending/new-epoch work and current field heads. Covered
-   records are summarized by authenticated contiguous coverage and historical object
-   commitments; older records are verified against retained immutable history when
-   an audit or collision check needs them. Bloom filters cannot be authoritative:
-   a false positive must never discard a real edit.
-5. Live vector clocks contain only admitted authors in this epoch. Retirement is an
-   explicit, previewed operation with a covered prefix and cutover identity, not a
-   timeout inferred from the last poll. Repeated epochs bound historical replica width.
-6. Tombstones remain effective seed rows. Retirement/compaction cannot resurrect a
-   deleted photo, strip retained content/edits, or make an explicit restore implicit.
-   Tombstone expiry needs a separately approved retention contract and fencing proof.
-7. User-visible edit history and versions are not disposable receipt history. If those
-   arrays dominate an entity, retain them in verified immutable history chunks with
-   bounded references. Large album membership requires chunked/sparse membership or
-   an explicit actionable limit; receipt compaction alone does not fix entity size.
+## Offline and retired devices
 
-## Offline clients and recovery
+Receipt maintenance never removes author clocks or renumbers revisions. Restored
+catalogs rotate their current author while retaining previous-author pending IDs.
+An offline current-format device keeps its original sequence and context, merges the
+checkpoint, and publishes its original pending mutations. A late edit of a deleted
+photo remains retained behind the tombstone until explicit restore/resolution.
 
-An old-epoch mutation cannot be submitted as a new-epoch mutation under its old ID.
-Preserve its original immutable bytes and outbox. On upgrading/rejoining, first load
-the verified seed and current changes, then present a proposed replay against the
-retained edits and tombstones. Accepted replay allocates new-epoch revisions and
-records the old origin identity; it never silently discards the original outbox.
-An old deleted-photo edit stays retained until explicit restore/resolution.
+Retired authors remain in the causal clock; retirement by age is unsupported.
+The 4,096-author limit remains explicit. Reclaiming author slots would require a
+separate coordinated epoch/rejoin workflow and must never be inferred from receipt
+compaction. No epoch cutover is needed here because causal identities and deletion
+safety are preserved indefinitely.
 
-An active offline device that has not approved retirement prevents an unattended
-cutover. A user may explicitly retire it and later rejoin it through the recovery
-flow. Stale credentials or unsupported schemas pause with an actionable error;
-transient connectivity does not authorize retirement or a weaker integrity check.
+New conditional-head writers publish head version 3, which older builds reject.
+Append checkpoints carry state version 2, which older builds reject before normal
+publication. Upgrade all devices before maintenance. An already running older append
+writer can finish an immutable write; retaining its original author/sequence space
+allows current readers to verify it without losing edits. This is not a credential
+revocation fence or permission to discard old records. There are no existing users
+or production libraries; the maintainer authorized discarding obsolete test data.
 
-## Transaction and acceptance requirements
+## Capacity and remaining limits
 
-Preview reports state bytes, entity/receipt/replica counts, pending work, proposed
-coverage, retired devices, incompatible clients, retained objects and expected new
-state size. Validate and read back the seed/manifest before switching local protocol.
-Save epoch selection and mappings atomically; cancellation, uncertain writes, full
-disk and restart retain the prior epoch and all unacknowledged work. A resumed
-operation recognizes the same manifest/seed identities. No sequence or key is reused.
+Maintenance restores capacity consumed by historical receipts at the 100,000-record
+and combined 64 MiB live-state bounds. It cannot shrink active document payloads,
+full pending work or current conflicts. Those still have their existing limits;
+oversized entities and early warnings are CR.6/CR.7. Authors and tombstones remain
+bounded by the existing library/causal limits, rather than a new time-based policy.
 
-Required acceptance before CR.5 can be checked (CR.4's current-import author bound
-is verified separately; obsolete pre-release test-library migration is waived):
+Archive writes are one immutable object per leaf/branch (roughly two per newly
+archived receipt). Initial maintenance can therefore make many provider requests;
+it runs in the synchronization worker. Operation audit pages stream with a bounded
+proof cache rather than accumulating all archived history in memory. Audits still
+read covered operations, and unchanged checkpoints are still fetched: request-count
+optimization and budgeted audits remain CR.10. Large-library/provider performance
+has not been established by small fixture acceptance.
 
-- Large current libraries compact with bounded live clock width and unchanged
-  effective metadata, IDs, content and conflict choices.
-- Repeated edits reach the old receipt/byte bound, compact, and can edit again with
-  materially smaller state; user edit history remains inspectable.
-- Duplicate, changed-body and cloned-author replays cannot replace authenticated
-  coverage or acknowledge an unpublished mutation.
-- Concurrent/incomparable checkpoints, a missing predecessor, interrupted cutover,
-  lost response and failed local save preserve exact pending IDs and prior authority.
-- Tombstone versus old offline edit, explicit restore, retirement, and late rejoin
-  preserve both deletion safety and recoverable edits across repeated epochs.
-- Supported old native/browser clients fail before metadata publication after the
-  sentinel; an in-flight old writer is caught by the stopped-writer requirement.
-- Remote garbage collection remains disabled during compaction. Independent future
-  reclamation must prove references/retention from the authoritative epoch graph.
-
-Until this is implemented, warn before existing limits and state plainly that ordinary
-checkpointing and local journal compaction do not remove the synchronization-state cap.
+Remote reclamation remains separate and disabled. Retain checkpoints, archive nodes,
+operations, original revisions and tombstones. Manually deleting an archive node can
+prevent exact pending acknowledgement even when the visible library still opens.

@@ -18,6 +18,17 @@ pub struct AckReceipt {
     generation: u64,
     acknowledged: BTreeMap<String, String>,
 }
+fn local_receipt_matches(state: &SyncState, id: &str, digest: &str) -> bool {
+    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')) {
+        return false;
+    }
+    match state.received.get(id) {
+        Some(receipt) => receipt.digest == digest,
+        // A saved ACK may be replayed after the acknowledgement itself was persisted.
+        // The full receipt can then be demoted. Never use this path for pending work.
+        None => !state.pending.contains_key(id) && lightcraft_engine::catalog::replication::archive::covers(&state.archives, id),
+    }
+}
 impl AckReceipt {
     pub fn new(state: &SyncState, ids: &BTreeSet<String>, cursor: String, generation: u64) -> Result<Self, String> {
         if ids.len() > 10000 {
@@ -72,12 +83,11 @@ impl AckReceipt {
                 return Ok(false);
             }
             for (id, digest) in &self.acknowledged {
-                if state.received.get(id).is_none_or(|r| &r.digest != digest) || progress.remote.received.get(id).is_none_or(|r| &r.digest != digest)
-                {
+                if !local_receipt_matches(state, id, digest) || progress.remote.received.get(id).is_none_or(|r| &r.digest != digest) {
                     return Err("append receipt identity mismatch; work retained".into());
                 }
             }
-            let ids = self.acknowledged.keys().cloned().collect();
+            let ids = self.acknowledged.keys().filter(|id| state.pending.contains_key(*id)).cloned().collect();
             let progress = (**progress).clone();
             state.acknowledge_append(&ids, progress).map_err(|e| e.to_string())?;
             return Ok(true);
@@ -98,11 +108,11 @@ impl AckReceipt {
             return Ok(false);
         }
         for (id, digest) in &self.acknowledged {
-            if state.received.get(id).is_none_or(|receipt| &receipt.digest != digest) {
+            if !local_receipt_matches(state, id, digest) {
                 return Err("browser acknowledgement receipt identity mismatch; pending work retained".into());
             }
         }
-        let ids = self.acknowledged.keys().cloned().collect();
+        let ids = self.acknowledged.keys().filter(|id| state.pending.contains_key(*id)).cloned().collect();
         state.acknowledge(&ids, self.cursor.clone(), self.generation).map_err(|e| e.to_string())?;
         Ok(true)
     }
@@ -112,6 +122,61 @@ mod tests {
     use super::*;
     use lightcraft_engine::catalog::replication::Change;
     use serde_json::json;
+    #[test]
+    fn archived_pending_ack_survives_witness_removal_and_reload() {
+        use lightcraft_engine::{
+            catalog::replication::{SyncProtocol, archive},
+            cloud_append::Planner,
+        };
+        let mut local = SyncState::new("library".into(), "browser".into(), "connection".into()).unwrap();
+        local.protocol = SyncProtocol::AppendLog;
+        let first = local.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(1) }]).unwrap().unwrap();
+        let second =
+            local.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(5) }]).unwrap().unwrap();
+        let mut planner = Planner::new(&local, true).unwrap();
+        planner.stage(first.clone()).unwrap();
+        planner.stage(second.clone()).unwrap();
+        planner.drain().unwrap();
+        let plan = planner.remote.archive_plan().unwrap();
+        planner.remote.compact_receipts(&plan).unwrap();
+        planner.remote.prove_archived(&first.revision.id(), local.received[&first.revision.id()].clone(), &plan.objects).unwrap();
+        let mut progress = planner.progress().unwrap();
+        progress.remote.proofs = plan.objects;
+        let ids = BTreeSet::from([first.revision.id(), second.revision.id()]);
+        let receipt = AckReceipt::new_append(&local, &ids, &progress).unwrap();
+        local.merge(&progress.remote).unwrap();
+        local.acknowledge_append(&BTreeSet::new(), progress).unwrap();
+        assert!(local.append.as_ref().unwrap().remote.proofs.is_empty());
+        let mut reloaded: SyncState = serde_json::from_slice(&serde_json::to_vec(&local).unwrap()).unwrap();
+        assert!(receipt.finish(&mut reloaded).unwrap());
+        assert!(reloaded.pending.is_empty());
+        assert_eq!(reloaded.received.len(), 1);
+        assert!(archive::covers(&reloaded.archives, &first.revision.id()));
+        let mut acknowledged_reload: SyncState = serde_json::from_slice(&serde_json::to_vec(&reloaded).unwrap()).unwrap();
+        assert!(receipt.finish(&mut acknowledged_reload).unwrap(), "saved ACK remains harmless after receipt demotion");
+        assert_eq!(acknowledged_reload, reloaded);
+    }
+    #[test]
+    fn head_ack_after_archive_demotion_is_idempotent_and_cannot_discard_later_work() {
+        let mut state = SyncState::new("library".into(), "browser".into(), "connection".into()).unwrap();
+        let change = |field: &str, value| Change { entity: "photo:one".into(), field: field.into(), base: None, value };
+        let first = state.enqueue(vec![change("rating", json!(1))]).unwrap().unwrap();
+        let second = state.enqueue(vec![change("rating", json!(5))]).unwrap().unwrap();
+        let ids = BTreeSet::from([first.revision.id(), second.revision.id()]);
+        let receipt = AckReceipt::new(&state, &ids, "a".repeat(64), 1).unwrap();
+        state.acknowledge(&ids, "a".repeat(64), 1).unwrap();
+        let plan = state.archive_plan().unwrap();
+        state.compact_receipts(&plan).unwrap();
+        assert!(!state.received.contains_key(&first.revision.id()));
+        state.enqueue(vec![change("flag", json!("pick"))]).unwrap();
+        let mut reloaded: SyncState = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(receipt.finish(&mut reloaded).unwrap());
+        assert_eq!(state, reloaded);
+        let mut bad = receipt;
+        bad.acknowledged.insert(first.revision.id(), "invalid".into());
+        assert!(bad.finish(&mut reloaded).is_err());
+        assert_eq!(state, reloaded);
+    }
     #[test]
     fn append_ack_requires_durable_remote_progress_and_preserves_later_and_historical_pending_ids() {
         use lightcraft_engine::{catalog::replication::SyncProtocol, cloud_append::Planner};

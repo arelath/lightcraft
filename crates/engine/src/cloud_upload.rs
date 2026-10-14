@@ -590,8 +590,12 @@ impl Item {
                         .filter_map(|(id, _)| proof.received.get(id).map(|r| (id.clone(), r.digest.clone())))
                         .collect()
                 };
-                let published =
-                    !expected.is_empty() && expected.iter().all(|(id, digest)| proof.received.get(id).is_some_and(|r| &r.digest == digest));
+                let mut published = !expected.is_empty();
+                let mut witness = Default::default();
+                for (id, digest) in &expected {
+                    published &= crate::cloud_history::native::published(&self.connection, proof, id, digest, &mut witness, cancel)
+                        .map_err(|e| error(e.to_string()))?;
+                }
                 if published {
                     receipt.append_proof = expected;
                     if local.protocol.is_head() {

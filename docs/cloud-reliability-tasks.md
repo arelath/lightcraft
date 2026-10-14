@@ -9,7 +9,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.2 — Fix automatic multi-photo append imports. Represent dependency waiting separately from failure and reconcile every upload intent covered by verified publication. Test delayed sibling transfers and restart/retry.
 - [x] CR.3 — Materialize valid folder rearrangements independently of entity ID order. Validate the desired graph, detach before attaching, and resolve concurrent cycles deterministically while retaining conflict choices. Test reversed ancestry and concurrent cycles; audit stack uniqueness.
 - [x] CR.4 — Bound import replica identities. Route all current imports through normal causal mutations; reject the obsolete synthetic-author format across an explicit pre-release version boundary. Test more than 4,096 managed photos without widening the device limit. The maintainer confirms there are no users or existing libraries to migrate, only disposable test data (2026-10-14).
-- [ ] CR.5 — Specify and implement causal-history compaction, including retired replicas, tombstones, duplicate detection, and old offline clients. Test checkpoint maintenance restores editing capacity without losing conflict or deletion safety.
+- [x] CR.5 — Specify and implement causal-history compaction, including retired replicas, tombstones, duplicate detection, and old offline clients. Test checkpoint maintenance restores editing capacity without losing conflict or deletion safety.
 - [ ] CR.6 — Expose synchronization-state utilization, early warnings, and accurate recovery errors before record/byte bounds.
 - [ ] CR.7 — Define and test oversized-entity bootstrap behavior, especially large album membership sets; implement streaming or an explicit actionable product limit.
 - [ ] CR.8 — Make unchanged conditional-head synchronization a genuine local no-op (no materialization, state operation, or journal write without change, acknowledgement, or progress).
@@ -73,18 +73,17 @@ verified in total. Screenshots were inspected. Evidence: C: build `cr4-cli-tests
 `cr4-scale-test.log`; `target/cloud-reliability/native-results-*.json`,
 `setup-results-*.json`, `native-58f67a97/`, `native-ffd1eb5b/`, `native-2f971724/`,
 `native-bc9b5761/`. The enable-restarts-attempted-work unit test also passed.
-Future history maintenance is specified in the proposed
-[cloud-history-compaction-design.md](cloud-history-compaction-design.md); it is not implemented.
+At CR.4 completion, history maintenance was still proposed; CR.5 below records its implementation. The contract is in [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
 The maintainer confirmed on 2026-10-14 that old libraries are disposable test data;
 preserving their legacy format is no longer required. Fail closed on obsolete formats
-instead of remapping receipt identities. Future offline clients still require safe
-epoch retirement/rejoin behavior for CR.5.
+instead of remapping receipt identities. Current-format offline devices retain their original clocks and pending IDs. Author-slot retirement remains unsupported; CR.5 uses conservative retention instead of an epoch cutover.
 
 Full project gate passed on 2026-10-14: `cargo +1.95.0 xtask ci`, all eight stages
 (fmt, clippy, HEIF, workspace tests, parity, layers, assets, WASM). Final log:
 `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-reliability-target/cr4-ci.log`.
 The complete workspace run includes the new UI, structural, setup, scale and upload
-interaction regressions. No commits made; unrelated concurrent changes are preserved.
+interaction regressions. These changes were saved in `64ac4d07` alongside the completed
+queue controls.
 
 Earlier gate attempts: the initial run stopped
 on a mechanical lint in concurrent popup work; a subsequent run found newly added
@@ -94,3 +93,35 @@ The D: gate passed fmt/clippy, then stopped during compilation because rustc exh
 in place. CI succeeded after switching to C: with debug symbols/incremental storage disabled.
 Live provider checks require an available configured provider and are recorded separately
 from fixture-based tests. Initial checkout contains unrelated uncommitted sync-status/pause work.
+
+
+2026-10-14 — CR.5: catalog format 14 / state version 2 add authenticated immutable
+receipt forests with at most 64 roots per author. Checkpoint maintenance on both
+native/browser transports writes and verifies historical proof objects before the
+compact checkpoint. Full field/conflict/tombstone heads and pending contexts remain;
+retired clocks and remote objects are retained indefinitely. Exact old duplicates,
+changed-body/context collisions, different prefix lengths, incomparable checkpoints,
+offline delete/restore and late pending acknowledgements are covered by regressions.
+Synthetic valid history at the actual 100,000-receipt and 64 MiB state limits rejects
+an additional edit, compacts, and allows editing again with materially smaller state.
+These are model capacity checks, not 100,000 actual UI edits or uploaded photos.
+
+All 36 real-CLI protocol/upload tests passed, including archived pending ACK plus a
+newer publication, missing/corrupt archive recovery and upload-receipt recovery after
+its field heads advance. Browser ACK tests cover temporary witness removal, reload
+before and after acknowledgement, idempotent archived ACK replay, and later pending
+work. Full CI passed all eight stages (`cr5-ci-final.log` in the C: build); the browser
+idempotence correction then passed all four focused durability tests. Final confirmation
+gate after that correction is recorded in `cr5-ci-verified.log`.
+
+Native desktop control-channel acceptance passed on both protocols: checkpoint
+maintenance, exact peer convergence, zero pending work, retained deleted-photo recovery
+and resolved structural conflicts. All 789 signed loopback-fixture requests were
+independently verified (452 append / 337 head); both maintenance screenshots were
+inspected. Evidence: `target/cloud-reliability/cr5-native-results-*.json` and
+`cr5-native-requests-*.json`; C: temporary libraries/screenshots in
+`lightcraft-cr5-native/native-91ed2a2f/` and `native-9e12cc0d/`.
+Browser transport code is WASM-compiled and shared-model/ACK tested; this is not a
+fresh browser/provider archive deployment or large-library request-cost benchmark.
+Archive nodes are one immutable object per leaf/branch; budgeted audit/request-count
+optimization remains CR.10. No author clocks, tombstones or remote objects are removed.
