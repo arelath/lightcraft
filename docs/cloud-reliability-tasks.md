@@ -11,7 +11,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.4 — Bound import replica identities. Route all current imports through normal causal mutations; reject the obsolete synthetic-author format across an explicit pre-release version boundary. Test more than 4,096 managed photos without widening the device limit. The maintainer confirms there are no users or existing libraries to migrate, only disposable test data (2026-10-14).
 - [x] CR.5 — Specify and implement causal-history compaction, including retired replicas, tombstones, duplicate detection, and old offline clients. Test checkpoint maintenance restores editing capacity without losing conflict or deletion safety.
 - [x] CR.6 — Expose synchronization-state utilization, early warnings, and accurate recovery errors before record/byte bounds.
-- [ ] CR.7 — Define and test oversized-entity bootstrap behavior, especially large album membership sets; implement streaming or an explicit actionable product limit.
+- [x] CR.7 — Define and test oversized-entity bootstrap behavior, especially large album membership sets; implement streaming or an explicit actionable product limit.
 - [ ] CR.8 — Make unchanged conditional-head synchronization a genuine local no-op (no materialization, state operation, or journal write without change, acknowledgement, or progress).
 - [ ] CR.9 — Index global-to-local identities once, materialize changed entities, and persist synchronization deltas. Measure unchanged 10,000- and 50,000-photo request counts, journal growth, state size, and owner-thread latency.
 - [ ] CR.10 — Track consumed append checkpoints and avoid downloading unchanged covered history. Separate budgeted integrity audits from ordinary polls; test remote request counts.
@@ -151,3 +151,31 @@ cr6-native-results-*.json`, `cr6-native-requests-*.json`; C: scratch
 `lightcraft-cr6-native/native-ddae4e91/` and `native-fa0fbac8/`. Early warnings use
 synthetic model/UI tests; the native libraries are deliberately small. No large-library
 performance or fresh live-provider/browser deployment claim.
+
+
+2026-10-14 — CR.7: deliberate per-entity enablement/local-edit limits remain 4,000
+changed fields and a 1 MiB serialized change array. Errors include identity/name when
+available, actual count/bytes, limits, and album/metadata-specific recovery. Counting
+serialization avoids a second oversized buffer. Setup explains the limit in all nine
+translation catalogs. This is not a lifetime 4,000-member ceiling: smaller edits can
+accumulate fields up to the separate 10,000-field bound; false memberships remain.
+
+Exact field/byte boundaries pass and one more fails. A synthetic 4,001-managed-photo
+album rejects enablement on both protocols without installing sync state, identities
+or partial outbox; splitting it into two albums permits enablement. A public commit
+that swaps disjoint 2,000/2,001-member sets rejects its 4,001 changes and preserves the
+catalog snapshot, revision and pending journal. These use metadata fixtures, not
+4,001 real media uploads. All 17 focused synchronization tests passed; the final-source
+workspace suite, rendered hint/action and localization tests passed in all eight CI
+stages: C: build `cr7-ci-verified.log`. Initial CI identified the unregistered formatted
+hint; the source format catalogs were updated before this passing gate.
+
+Rebuilt native acceptance submitted an oversized caption through the real control
+channel on both protocols: 1,153,650 serialized bytes were rejected against the
+1,048,576-byte limit with actionable recovery. Metadata, zero pending changes and exact
+catalog journal bytes remained unchanged. Checkpoint maintenance still passed. All
+362 signed fixture requests verified (240 append / 122 head); both setup/capacity
+screenshots were inspected. Evidence: `target/cloud-reliability/cr7-native-results-*.json`
+and `cr7-native-requests-*.json`; C: scratch `lightcraft-cr7-native/native-178875aa/`
+and `native-ea443c02/`. Browser enablement/edit preparation uses the tested shared engine
+path and is WASM-compiled; no fresh browser/provider or scale acceptance is claimed.

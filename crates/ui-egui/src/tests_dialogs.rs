@@ -38,9 +38,15 @@ fn cloud_capacity_warning_explains_recovery_and_dispatches_checkpoint_maintenanc
         h.step();
     }
     let text = h.view.painted_text();
-    for label in
-        ["Synchronization capacity", "80.0%", "80000 / 100000", "nearing their limit", "remote objects are retained", "Archive receipt history"]
-    {
+    for label in [
+        "Synchronization capacity",
+        "80.0%",
+        "80000 / 100000",
+        "nearing their limit",
+        "remote objects are retained",
+        "Archive receipt history",
+        "4000 changed fields and 1 MiB",
+    ] {
         assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
     }
     assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudCheckpoint"}), T)["ok"], true);

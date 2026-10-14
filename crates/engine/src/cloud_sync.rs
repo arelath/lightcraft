@@ -8,6 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 type Documents = BTreeMap<String, BTreeMap<String, Value>>;
 pub(crate) type UndoBase = BTreeMap<(String, String), BTreeSet<String>>;
+/// Product limits for one entity's bootstrap or one local edit. A remote checkpoint
+/// may contain more fields accumulated through smaller edits (up to MAX_FIELDS).
+pub const MAX_ENTITY_CHANGES: usize = 4000;
+pub const MAX_ENTITY_BYTES: usize = 1 << 20;
 #[derive(Default)]
 struct Scope {
     photos: BTreeSet<lightcraft_catalog::PhotoId>,
@@ -425,6 +429,17 @@ pub use materialize::structural_conflicts;
 
 // Keep an entity's bootstrap fields together. Bulk migrations may span bounded mutations;
 // the containing catalog journal operation remains atomic.
+struct EntityBytes(usize);
+impl std::io::Write for EntityBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 =
+            self.0.checked_add(bytes.len()).ok_or_else(|| std::io::Error::other("cloud entity serialized size overflow; local data retained"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 fn enqueue_changes(state: &mut SyncState, changes: Vec<Change>) -> Result<bool> {
     let any = !changes.is_empty();
     let mut groups: BTreeMap<String, Vec<Change>> = BTreeMap::new();
@@ -433,12 +448,29 @@ fn enqueue_changes(state: &mut SyncState, changes: Vec<Change>) -> Result<bool> 
     }
     let mut chunk = Vec::new();
     let mut bytes = 0usize;
-    for group in groups.into_values() {
-        let size = serde_json::to_vec(&group).map_err(|e| error(e.to_string()))?.len();
-        if size > (1 << 20) || group.len() > 4000 {
-            return Err(error("cloud entity exceeds the bounded mutation size; local data retained"));
+    for (entity, group) in groups {
+        // Measure even rejected input without allocating another oversized buffer.
+        let mut measured = EntityBytes(0);
+        serde_json::to_writer(&mut measured, &group).map_err(|e| error(e.to_string()))?;
+        let size = measured.0;
+        if size > MAX_ENTITY_BYTES || group.len() > MAX_ENTITY_CHANGES {
+            let name = group
+                .iter()
+                .find(|c| matches!(c.field.as_str(), "name" | "file_name"))
+                .and_then(|c| c.value.as_str())
+                .or_else(|| state.winning(&entity, "name").and_then(|(_, v)| v.as_str()));
+            let label = name.map(|name| format!(" ({})", name.chars().take(100).collect::<String>())).unwrap_or_default();
+            let recovery = if entity.starts_with("album:") {
+                "split large albums before enabling sync, or split membership edits into smaller commands; removed synchronized membership fields stay retained"
+            } else {
+                "shorten large metadata values or split the entity's bulk edit into smaller commands before retrying"
+            };
+            return Err(error(format!(
+                "cloud entity exceeds the bounded mutation size: {entity}{label}; {} changes (limit {MAX_ENTITY_CHANGES}), {size} bytes (limit {MAX_ENTITY_BYTES} / 1 MiB); {recovery}; current library and outbox retained",
+                group.len()
+            )));
         }
-        if bytes.saturating_add(size) > (1 << 20) || chunk.len().saturating_add(group.len()) > 4000 {
+        if bytes.saturating_add(size) > MAX_ENTITY_BYTES || chunk.len().saturating_add(group.len()) > MAX_ENTITY_CHANGES {
             state.enqueue(std::mem::take(&mut chunk))?;
             bytes = 0;
         }

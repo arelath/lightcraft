@@ -550,3 +550,79 @@ fn large_existing_library_bootstrap_is_split_into_bounded_durable_mutations() {
         mutation.validate().unwrap();
     }
 }
+
+#[test]
+fn entity_group_limits_accept_exact_boundaries_and_reject_one_more_without_changes() {
+    let state = || SyncState::new("library".into(), "device".into(), "personal".into()).unwrap();
+    let mut fields = (0..MAX_ENTITY_CHANGES)
+        .map(|n| Change { entity: "album:large".into(), field: format!("member:{n}"), base: None, value: json!(true) })
+        .collect::<Vec<_>>();
+    let mut fit = state();
+    enqueue_changes(&mut fit, fields.clone()).unwrap();
+    assert_eq!(fit.documents["album:large"].len(), MAX_ENTITY_CHANGES);
+    fields.push(Change { entity: "album:large".into(), field: "name".into(), base: None, value: json!("Large album") });
+    let mut rejected = state();
+    let before = rejected.clone();
+    let error = enqueue_changes(&mut rejected, fields).unwrap_err().to_string();
+    assert!(error.contains("Large album") && error.contains("4001 changes (limit 4000)") && error.contains("split large albums"), "{error}");
+    assert_eq!(rejected, before);
+
+    let mut changes = vec![Change { entity: "photo:one".into(), field: "meta.caption".into(), base: None, value: json!("") }];
+    let overhead = serde_json::to_vec(&changes).unwrap().len();
+    changes[0].value = json!("x".repeat(MAX_ENTITY_BYTES - overhead));
+    assert_eq!(serde_json::to_vec(&changes).unwrap().len(), MAX_ENTITY_BYTES);
+    enqueue_changes(&mut fit, changes.clone()).unwrap();
+    changes[0].value = json!("x".repeat(MAX_ENTITY_BYTES - overhead + 1));
+    let before = fit.clone();
+    let error = enqueue_changes(&mut fit, changes).unwrap_err().to_string();
+    assert!(error.contains("1048577 bytes (limit 1048576") && error.contains("shorten large metadata"), "{error}");
+    assert_eq!(fit, before);
+}
+
+#[test]
+fn oversized_existing_album_setup_is_atomic_on_both_protocols_and_splitting_recovers() {
+    let (s, _) = session();
+    let mut catalog = Catalog::new();
+    let asset_id = AssetId("asset".into());
+    catalog.apply(Op::SetAsset { id: asset_id.clone(), asset: Some(Box::new(s.catalog.asset(&asset_id).unwrap().clone())) }).unwrap();
+    for id in 1..=MAX_ENTITY_CHANGES as u64 + 1 {
+        let mut photo = (**s.catalog.photo(PhotoId(1)).unwrap()).clone();
+        photo.id = PhotoId(id);
+        catalog.apply(Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+    }
+    let mut album = Album::new(AlbumId(1), "Oversized trip");
+    album.photos = catalog.photos().map(|p| p.id).collect();
+    catalog.apply(Op::AddAlbum { album }).unwrap();
+    let before = catalog.to_snapshot();
+    for protocol in [lightcraft_catalog::replication::SyncProtocol::ConditionalHead, lightcraft_catalog::replication::SyncProtocol::AppendLog] {
+        let error = enable_mode(&catalog, "library".into(), "device".into(), "personal".into(), protocol, String::new()).unwrap_err().to_string();
+        assert!(error.contains("Oversized trip") && error.contains("limit 4000") && error.contains("split large albums"), "{error}");
+        assert_eq!(catalog.to_snapshot(), before);
+        assert!(catalog.sync_state().is_none());
+        assert!(catalog.cloud_identities().is_empty());
+    }
+    let photos = catalog.album(AlbumId(1)).unwrap().photos.clone();
+    catalog.apply(Op::SetAlbumPhotos { id: AlbumId(1), photos: photos.iter().copied().take(2000).collect() }).unwrap();
+    let mut other = Album::new(AlbumId(2), "Trip part two");
+    other.photos = photos.iter().copied().skip(2000).collect();
+    catalog.apply(Op::AddAlbum { album: other }).unwrap();
+    catalog.apply(enable(&catalog, "library".into(), "device".into(), "personal".into()).unwrap()).unwrap();
+    let state = catalog.sync_state().unwrap();
+    assert_eq!(state.documents.keys().filter(|id| id.starts_with("photo:")).count(), MAX_ENTITY_CHANGES + 1);
+    assert_eq!(state.documents.values().flat_map(|f| f.keys()).filter(|k| k.starts_with("member:")).count(), MAX_ENTITY_CHANGES + 1);
+    state.validate().unwrap();
+
+    // Swapping disjoint memberships removes 2,000 fields and adds 2,001 in one
+    // entity edit. The public commit path must preserve all durable work on failure.
+    let replacement = catalog.album(AlbumId(2)).unwrap().photos.clone();
+    let mut editing = Session::new();
+    editing.catalog = catalog;
+    let before = editing.catalog.to_snapshot();
+    let revision = editing.catalog.revision;
+    let journal = editing.pending_log.len();
+    let error = editing.commit("oversized membership edit", Op::SetAlbumPhotos { id: AlbumId(1), photos: replacement }).unwrap_err().to_string();
+    assert!(error.contains("4001 changes (limit 4000)") && error.contains("smaller commands"), "{error}");
+    assert_eq!(editing.catalog.to_snapshot(), before);
+    assert_eq!(editing.catalog.revision, revision);
+    assert_eq!(editing.pending_log.len(), journal);
+}

@@ -302,6 +302,23 @@ recent timestamp nor a few devices' acknowledgements proves safe GC.
 
 ### Capacity status and recovery
 
+Existing-catalog enablement and each local edit keep one entity's changed fields in
+one bounded group: at most **4,000 changes and 1 MiB of serialized change-array JSON**.
+Album attributes and managed `member:<id>` entries share this budget; local-only
+members are excluded. This is a deliberate product limit, rather than a streaming
+album representation. Original and preview file bytes are outside this metadata budget.
+An oversized group reports its identity/name, actual count
+and bytes, limits and recovery. Split existing large albums before enabling sync;
+split large membership edits into smaller commands, or shorten oversized metadata.
+Failure installs no partial synchronization state, identities or outbox into the
+catalog. Media is never deleted as recovery.
+
+This limit is per enablement/edit group, not a lifetime 4,000-member album limit.
+Smaller edits may accumulate more fields up to the 10,000-field state limit; removing
+a synchronized member retains a false membership field. Receiving an existing
+remote checkpoint uses the state bounds and does not re-encode it as an enablement
+group. Both native and browser enablement use the same atomic engine path.
+
 `cloud.syncStatus` and `cloud.overview` report `utilization` and `capacityWarnings`.
 The byte count is the exact serialized local `SyncState`, including the outbox,
 measured without allocating another full state buffer and cached by catalog revision

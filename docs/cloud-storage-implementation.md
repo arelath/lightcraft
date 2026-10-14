@@ -9,6 +9,12 @@ with warnings at 80% and critical warnings at 95%. Cloud Synchronization shows
 limit-specific recovery and an Archive receipt history action; Info and the cloud popup
 show compact usage. See [capacity status and recovery](cloud-sync-protocol.md#capacity-status-and-recovery).
 
+Enabling synchronization for an existing catalog and each local entity edit require
+at most 4,000 changed fields and a 1 MiB serialized change array per entity. Large
+managed albums must be split before enablement; oversized metadata must be shortened.
+Setup fails atomically with the entity, usage, limits and recovery in its error.
+Smaller edits can accumulate more members subject to the retained 10,000-field bound.
+
 ## Current architecture
 
 The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–12 still load and upgrade; older builds refuse format 13. Format 10 adds associated XMP, stable identity mappings and device-local working-copy bindings. Format 11 adds durable mutation synchronization; format 12 adds explicit append/CAS protocol selection, verified append progress and restored-author ownership. Format 13 adds sync-status filter criteria; absent criteria still mean no status constraint. Shared checkpoints exclude upload intents and all device-local paths and settings.
