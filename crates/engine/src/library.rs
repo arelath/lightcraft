@@ -535,7 +535,6 @@ impl Session {
             presets_written,
             view_written,
             settings_warnings: unlocked_warning(lock.as_ref()).into_iter().chain(settings.warnings).chain(location_warning).collect(),
-
             warnings_reported: 0,
             blocked: settings.blocked,
             lock: lock.take(),
@@ -590,7 +589,6 @@ impl Session {
         crate::cmd::cloud::resume_offline_pins(self);
         #[cfg(not(target_arch = "wasm32"))]
         crate::cmd::cloud::refresh_keep_all(self);
-
         #[cfg(not(target_arch = "wasm32"))]
         self.cloud_uploads.request_resume(true);
         Ok(())

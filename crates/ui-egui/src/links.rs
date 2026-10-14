@@ -24,6 +24,9 @@ pub const LINKS: &[(&str, &str, &str)] = &[
     ("app.feedback", "Send Feedback…", FEEDBACK),
 ];
 
+/// Settings → Cache → Learn More: how the cloud cache works.
+pub const CACHE_HELP: &str = "https://github.com/storytold/lightcraft/blob/main/docs/cloud-storage-implementation.md#settings--cache";
+
 /// Where feedback and bug reports go.
 pub const FEEDBACK: &str = "https://github.com/storytold/lightcraft/issues/new";
 

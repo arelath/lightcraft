@@ -223,6 +223,7 @@ fn library_blobs(s: &Session, keep: KeepAll) -> std::collections::BTreeMap<light
 
 /// The catalog's managed assets changed (library opened, import, sync): keep library-wide
 /// offline copies in step with it.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn refresh_keep_all(s: &Session) {
     if let Some(resolver) = &s.media.asset_resolver {
         let keep = resolver.keep_all();
@@ -239,13 +240,22 @@ fn storage(s: &mut Session, p: &Value) -> Result<Value> {
     let resolver = resolver(s, C)?;
     let status = resolver.cache_status();
     let root = resolver.root().to_path_buf();
-    let app_data = s.library.as_ref().filter(|lib| lib.on_disk).and_then(|lib| {
-        // the library's own files, without the downloads counted as the photo cache
-        crate::storage_usage::dir_size_cached(&lib.dir, vec![root.clone()], wait)
-    });
+    #[cfg(not(target_arch = "wasm32"))]
+    let (volume, app_data) = (
+        crate::storage_usage::volume(&root),
+        s.library.as_ref().filter(|lib| lib.on_disk).and_then(|lib| {
+            // the library's own files, without the downloads counted as the photo cache
+            crate::storage_usage::dir_size_cached(&lib.dir, vec![root.clone()], wait)
+        }),
+    );
+    #[cfg(target_arch = "wasm32")]
+    let (volume, app_data): (Option<()>, Option<u64>) = {
+        let _ = wait;
+        (None, None)
+    };
     Ok(json!({
         "location": root,
-        "volume": crate::storage_usage::volume(&root),
+        "volume": volume,
         "appDataBytes": app_data,
         "photoCacheBytes": status.used_bytes.saturating_sub(status.pinned_bytes),
         "offlineBytes": status.pinned_bytes,
@@ -254,6 +264,16 @@ fn storage(s: &mut Session, p: &Value) -> Result<Value> {
         "error": status.error,
         "stagingError": status.staging_error,
     }))
+}
+
+fn cache_location(s: &mut Session, p: &Value) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return crate::cloud_cache_location::command(s, p);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (s, p);
+        Err(bad("cloud.cacheLocation", "the browser keeps its cache in browser storage"))
+    }
 }
 
 /// Settings → Cache → Clear cache. Desktop: a background activity task; CLI/MCP `wait`.
@@ -514,7 +534,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "cloud.reconnect", "Reconnect Cloud Storage", [], None, "{id?}; reload saved connections and external credentials, retry failed renders and offline pins", always, reconnect),
         cmd!(query "cloud.cache", "Cloud Cache Settings", [], None, "{budgetMb?, keepAllOriginals?, keepAllPreviews?}; device-local disk budget, usage and offline pins; 0 retains only pinned or active bytes; keepAll* keep every managed original / smart preview offline (downloaded in the background, new arrivals included)", always, cache),
         cmd!(query "cloud.storage", "Cloud Cache Storage", [], None, "{wait?}; the cache's drive (label, total, free), library app data, photo cache and offline bytes, size limit and keep-all choices; app data is measured in the background unless wait (headless)", always, storage),
-        cmd!(query "cloud.cacheLocation", "Cloud Cache Location", [], None, "{path? | reset?, wait?}; where this device keeps the cloud cache; a new folder gets verified copies of every cached file and the retention settings, then the library reopens on it and the old copies are deleted; desktop returns a cancellable activity task", always, crate::cloud_cache_location::command),
+        cmd!(query "cloud.cacheLocation", "Cloud Cache Location", [], None, "{path? | reset?, wait?}; where this device keeps the cloud cache; a new folder gets verified copies of every cached file and the retention settings, then the library reopens on it and the old copies are deleted; desktop returns a cancellable activity task", always, cache_location),
         cmd!(query "cloud.clearCache",
  "Clear Cloud Cache", [], None, "{wait?}; evict every eligible downloaded original/preview now; offline copies, files in use and staged or unsynchronized data are kept; desktop returns an activity task", always, clear_cache),
         cmd!(query "cloud.pin", "Keep Cloud Photos Offline", [], None, "{ids? or albumId?, quality?: original|preview, wait?: false}; persist pin intent and return download task; wait only headless; album pins snapshot current members", always, pin),

@@ -24,7 +24,6 @@ pub mod camera_profiles;
 pub mod cloud_append;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_cache_location;
-
 pub mod cloud_history;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_import;
@@ -85,7 +84,6 @@ pub mod sidecar;
 pub mod smart;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod storage_usage;
-
 pub mod sync;
 mod view;
 pub mod walk;
@@ -634,7 +632,6 @@ impl Session {
             #[cfg(not(target_arch = "wasm32"))]
             cmd::cloud::refresh_keep_all(self);
         }
-
         #[cfg(not(target_arch = "wasm32"))]
         self.notice_staging(&op);
         self.pending_log.push(op);

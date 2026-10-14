@@ -245,5 +245,8 @@
   "{n} added to Apple Photos album “{album}”": "{n}件をAppleの写真のアルバム「{album}」に追加しました",
   "{n} added to Apple Photos": "{n}件をAppleの写真に追加しました",
   "{n} photos opened for editing; each is stacked with its original": "{n}枚の写真を編集用に開きました。それぞれ元の写真とスタックされています",
-  "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "既存の写真やアルバムの同期を有効にする場合、または1つの項目を編集する場合、項目ごとの変更は最大{limit}フィールド、1 MiBです。アルバムのメタデータと管理対象写真の所属情報はこの枠を共有します。設定前に大きなアルバムを分割してください。"
+  "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "既存の写真やアルバムの同期を有効にする場合、または1つの項目を編集する場合、項目ごとの変更は最大{limit}フィールド、1 MiBです。アルバムのメタデータと管理対象写真の所属情報はこの枠を共有します。設定前に大きなアルバムを分割してください。",
+  "{used} of {total} used": "{total} 中 {used} 使用",
+  "{free} free": "空き {free}",
+  "Store a copy of all Smart previews locally on “{drive}”": "すべてのスマートプレビューのコピーを「{drive}」に保存"
 }

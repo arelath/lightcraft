@@ -276,12 +276,11 @@ Settings → Cache, laid out like Lightroom's Preferences → Cache: the cache's
 uses it, the size limit, Clear cache, library-wide offline copies and the originals location.
 
 - [x] **CC.1** Report the cache drive (label, size, free space), library app data, photo cache and offline bytes (`cloud.storage`); clear every eligible download without changing the limit (`cloud.clearCache`); keep every managed original and/or smart preview offline, including later arrivals, with a version-2 retention policy that loads version 1 (`cloud.cache` `keepAllOriginals` / `keepAllPreviews`).
-- [ ] **CC.2** Settings → Cache page with Lightroom's layout (side navigation, usage bar and legend, Manage Storage, size-limit menu, Clear cache with its explanation, the two Store-a-copy choices, originals location) driven by those commands.
-- [ ] **CC.3** Choose another storage location for the cloud cache (Browse…): verified move of the cached blobs and retention settings, then reopen on the new folder; an unavailable folder reports an error and falls back to the library folder.
+- [x] **CC.2** Settings → Cache page with Lightroom's layout (side navigation, usage bar and legend, Manage Storage, size-limit menu, Clear cache with its explanation, the two Store-a-copy choices, originals location) driven by those commands.
+- [x] **CC.3** Choose another storage location for the cloud cache (Browse…): verified move of the cached blobs and retention settings, then reopen on the new folder; an unavailable folder reports an error and falls back to the library folder.
 - [ ] **CC.4** Verify in the running app against the reference screenshot; update cloud storage documentation and the parity tracker.
 
 ## Milestone 6 — Optional managed metadata backend
-
 
 **Deferred at the user's request.** These tasks remain unchecked for a future decision.
 

@@ -735,7 +735,6 @@ impl AssetResolver {
                 }
                 drop(task);
             });
-
             if let Err(error) = spawned {
                 log::warn!("could not start offline copy worker: {error}");
                 self.keep_all_running.store(false, Ordering::Release);

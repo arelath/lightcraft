@@ -245,5 +245,8 @@
   "{n} added to Apple Photos album “{album}”": "{n} zum Apple-Fotos-Album „{album}“ hinzugefügt",
   "{n} added to Apple Photos": "{n} zu Apple Fotos hinzugefügt",
   "{n} photos opened for editing; each is stacked with its original": "{n} Fotos zur Bearbeitung geöffnet; jedes ist mit seinem Original gestapelt",
-  "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "Beim Aktivieren der Synchronisierung vorhandener Fotos und Alben oder beim Bearbeiten eines einzelnen Objekts sind höchstens {limit} geänderte Felder und 1 MiB pro Objekt zulässig. Albummetadaten und verwaltete Mitgliedschaften teilen dieses Budget; teilen Sie große Alben vor der Einrichtung auf."
+  "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "Beim Aktivieren der Synchronisierung vorhandener Fotos und Alben oder beim Bearbeiten eines einzelnen Objekts sind höchstens {limit} geänderte Felder und 1 MiB pro Objekt zulässig. Albummetadaten und verwaltete Mitgliedschaften teilen dieses Budget; teilen Sie große Alben vor der Einrichtung auf.",
+  "{used} of {total} used": "{used} von {total} belegt",
+  "{free} free": "{free} frei",
+  "Store a copy of all Smart previews locally on “{drive}”": "Eine Kopie aller Smart-Vorschauen lokal auf „{drive}“ speichern"
 }

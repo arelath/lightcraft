@@ -97,6 +97,10 @@ pub enum Icon {
     Sun,
     /// Appearance Mode ▸ Dark: a crescent moon.
     Moon,
+    /// An explanation on hover (Settings → Cache → Clear cache): a filled disc with an "i" cut out.
+    InfoFilled,
+    /// A link that opens in the browser: a box with an arrow leaving its corner.
+    External,
 }
 
 struct Pen<'a> {
@@ -329,6 +333,19 @@ fn paint_with(p: &Painter, rect: Rect, icon: Icon, color: Color32, turn: Option<
             pen.circle(10.0, 10.0, 7.5);
             pen.line(&[(10.0, 9.0), (10.0, 14.0)]);
             pen.dot(10.0, 6.3, 0.9);
+        }
+        InfoFilled => {
+            p.circle_filled(pen.pt(10.0, 10.0), 8.0 * k, color);
+            // the "i" contrasts with the disc: dark on a light disc, light on a dark one
+            let light = u16::from(color.r()) + u16::from(color.g()) + u16::from(color.b()) > 384;
+            let hole = Stroke::new((1.8 * k).max(1.0), if light { Color32::from_rgb(0x1e, 0x1e, 0x1e) } else { Color32::WHITE });
+            p.line_segment([pen.pt(10.0, 9.0), pen.pt(10.0, 14.5)], hole);
+            p.circle_filled(pen.pt(10.0, 6.2), 1.1 * k, hole.color);
+        }
+        External => {
+            pen.line(&[(9.0, 4.5), (4.5, 4.5), (4.5, 15.5), (15.5, 15.5), (15.5, 11.0)]);
+            pen.line(&[(9.5, 10.5), (16.0, 4.0)]);
+            pen.line(&[(11.5, 4.0), (16.0, 4.0), (16.0, 8.5)]);
         }
         GridPhoto => {
             pen.rect_fill(3.0, 4.0, 10.0, 9.5, 0.5);
