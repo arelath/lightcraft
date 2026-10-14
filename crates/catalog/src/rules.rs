@@ -874,9 +874,12 @@ impl Rule {
             "sharpness" => num_op(op, p.analysis.map(|a| a.sharpness as f64), value),
             "bestOfGroup" => yes(p.analysis.is_some_and(|a| a.best || a.group.is_none())),
             "album" => {
-                let id = album_rule_id(value);
+                let Some(id) = album_rule_id(value) else { return false };
+                if !cat.album_targets_available([id]) {
+                    return false;
+                }
                 // a smart album's photos are its matches; one being evaluated (a loop) holds none
-                id.is_some_and(|a| cat.album_contains(a, p)) == (op == "is")
+                cat.album_contains(id, p) == (op == "is")
             }
             _ => false,
         }
@@ -885,6 +888,11 @@ impl Rule {
 
 impl RuleSet {
     pub fn matches(&self, p: &Photo, cat: &Catalog) -> bool {
+        // An unavailable criterion is not false to be inverted by `none` or
+        // bypassed by `any`. Keep the whole saved set unavailable until repaired.
+        if !cat.album_targets_available(self.albums_tested()) {
+            return false;
+        }
         if self.rules.is_empty() {
             return self.mode != Match::Any;
         }

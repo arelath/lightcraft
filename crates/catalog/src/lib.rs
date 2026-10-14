@@ -448,6 +448,23 @@ impl Catalog {
         false
     }
 
+    /// Missing targets make saved criteria unavailable, including negation and
+    /// criteria that reference another smart album with an unavailable target.
+    pub(crate) fn album_targets_available(&self, targets: impl IntoIterator<Item = AlbumId>) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        let mut next: Vec<_> = targets.into_iter().collect();
+        while let Some(id) = next.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(album) = self.album(id).filter(|a| !a.folder) else { return false };
+            if let Some(filter) = &album.smart {
+                next.extend(filter.albums_tested());
+            }
+        }
+        true
+    }
+
     /// What is wrong with a saved smart album's rules now (`RuleSet::check`, after
     /// `RuleSet::upgrade`): typically a rule testing an album that has since been deleted. Empty
     /// for a sound smart album, a plain album or no album.
@@ -464,7 +481,16 @@ impl Catalog {
     /// A loop through `filter`'s own album field (not its rules): smart album `owner` filtered to
     /// itself, or to an album that leads back to it.
     pub fn album_filter_problem(&self, filter: &Filter, owner: Option<AlbumId>) -> Option<rules::Problem> {
-        let (a, owner) = (filter.album?, owner?);
+        let a = filter.album?;
+        if self.album(a).is_none_or(|a| a.folder) {
+            return Some(rules::Problem {
+                path: Vec::new(),
+                field: Some("album".into()),
+                issue: rules::Issue::NoSuchAlbum,
+                message: format!("no album {}", a.0),
+            });
+        }
+        let owner = owner?;
         (a == owner || self.album_reaches(a, owner)).then(|| rules::Problem {
             path: Vec::new(),
             field: Some("album".into()),
@@ -584,6 +610,13 @@ impl Catalog {
                         || (!self.cloud_identities.contains_key(&entity) && self.cloud_identities.len() >= 100_000)
                     {
                         return Err(CatalogError::Invalid("cloud identities must be unique and stable".into()));
+                    }
+                    // Retained/unresolved album references reserve identities without
+                    // AddAlbum. Replaying their mapping must advance the allocator too.
+                    if let Some(local) = entity.strip_prefix("album:") {
+                        let local = local.parse::<u64>().map_err(|_| CatalogError::Invalid("invalid album identity".into()))?;
+                        self.next_album =
+                            self.next_album.max(local.checked_add(1).ok_or_else(|| CatalogError::Invalid("album identity exhausted".into()))?);
                     }
                     self.cloud_identities.insert(entity.clone(), id)
                 } else {

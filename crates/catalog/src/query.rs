@@ -253,6 +253,9 @@ impl Filter {
     /// [`Filter::matches`] with the library folder already turned into its identity, so a query
     /// over a big library does that once, not once per photo.
     fn matches_in(&self, p: &Photo, cat: &Catalog, root: Option<&str>) -> bool {
+        if !cat.album_targets_available(self.albums_tested()) {
+            return false;
+        }
         if p.deleted != self.deleted {
             return false;
         }

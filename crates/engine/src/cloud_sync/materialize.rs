@@ -35,7 +35,17 @@ fn photo_reference(catalog: &Catalog, value: &Value) -> Result<Option<PhotoId>> 
     let global = value.as_str().ok_or_else(|| error("invalid global photo reference"))?;
     Ok(local(catalog, "photo", global).map(PhotoId))
 }
-fn filter_to_local(value: &mut Value, catalog: &Catalog, depth: usize) -> Result<()> {
+fn album_reference(catalog: &mut Catalog, ops: &mut Vec<Op>, global: &str) -> Result<AlbumId> {
+    if let Some(id) = local(catalog, "album", global) {
+        return Ok(AlbumId(id));
+    }
+    // A reference can arrive before its target or outlive a tombstone. Reserve an
+    // identity, never a live album; later delivery/restoration uses this same ID.
+    let id = catalog.alloc_album_id();
+    apply(catalog, ops, Op::SetCloudIdentity { entity: format!("album:{}", id.0), id: Some(global.into()) })?;
+    Ok(id)
+}
+fn filter_to_local(value: &mut Value, catalog: &mut Catalog, ops: &mut Vec<Op>, depth: usize) -> Result<()> {
     if depth > 64 {
         return Err(error("cloud smart filter exceeds 64 nesting levels"));
     }
@@ -56,22 +66,22 @@ fn filter_to_local(value: &mut Value, catalog: &Catalog, depth: usize) -> Result
         if let Some(album) = map.get_mut("album")
             && let Some(global) = album.as_str()
         {
-            let id = local(catalog, "album", global).ok_or_else(|| error("cloud filter refers to an unknown album"))?;
+            let id = album_reference(catalog, ops, global)?;
             *album = json!(id);
         }
         if map.get("field").and_then(Value::as_str) == Some("album")
             && let Some(value) = map.get_mut("value")
             && let Some(global) = value.as_str()
         {
-            let id = local(catalog, "album", global).ok_or_else(|| error("cloud rule refers to an unknown album"))?;
+            let id = album_reference(catalog, ops, global)?;
             *value = json!(id);
         }
         for child in map.values_mut() {
-            filter_to_local(child, catalog, depth + 1)?;
+            filter_to_local(child, catalog, ops, depth + 1)?;
         }
     } else if let Some(values) = value.as_array_mut() {
         for child in values {
-            filter_to_local(child, catalog, depth + 1)?;
+            filter_to_local(child, catalog, ops, depth + 1)?;
         }
     }
     Ok(())
@@ -228,11 +238,14 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
                 }
                 photo_ids.insert(entity.clone(), id);
             }
-            "album" if !deleted => {
+            "album" => {
                 let known = local(&next, kind, global).map(AlbumId);
                 let id = known.unwrap_or_else(|| next.alloc_album_id());
                 if known.is_none() {
                     apply(&mut next, &mut ops, Op::SetCloudIdentity { entity: format!("album:{}", id.0), id: Some(global.into()) })?;
+                }
+                if deleted {
+                    continue;
                 }
                 if next.album(id).is_none() {
                     let mut album = Album::new(id, values.get("name").and_then(Value::as_str).unwrap_or("Cloud album"));
@@ -245,7 +258,7 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
                 }
                 album_ids.insert(entity.clone(), id);
             }
-            "photo" | "album" | "stack" | "keyword" | "library" => {}
+            "photo" | "stack" | "keyword" | "library" => {}
             _ => return Err(error("unsupported synchronized entity type")),
         }
     }
@@ -417,7 +430,7 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
                     value = encode(&parents.get(id).copied().flatten())?;
                 }
                 "cover" => value = encode(&photo_reference(&next, &value)?)?,
-                "smart" if !value.is_null() => filter_to_local(&mut value, &next, 0)?,
+                "smart" if !value.is_null() => filter_to_local(&mut value, &mut next, &mut ops, 0)?,
                 _ => {}
             }
             map.insert(field.clone(), value);

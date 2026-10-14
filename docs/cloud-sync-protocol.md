@@ -18,6 +18,20 @@ Managed uploads require synchronization enabled for their connection. Select the
 in Cloud Synchronization (or `cloud.syncEnable`) before uploading; staging an import while
 disabled remains safe and uploading returns an actionable setup error.
 
+## Retained smart-album references
+
+Album identities survive deletion separately from live album objects. Fresh catalogs
+reserve mappings for album tombstones and references whose target has not arrived;
+reservation advances the durable local ID allocator. Later delivery or explicit
+restoration uses the same identity without creating a placeholder live album.
+
+A missing or folder target makes the saved smart criterion unavailable and nonmatching.
+This propagates through smart-album dependencies, negative operators and nested any/none
+groups: missing data cannot broaden a restrictive album. The saved reference remains
+intact and existing rule diagnostics identify missing targets. Repair or restoration
+makes the criterion usable again. Nonportable folder/selection rules remain a separate
+open reliability item (CR.25).
+
 ## Object layout and publication
 
 All keys are scoped beneath the configured library prefix. Original/rendition layouts are

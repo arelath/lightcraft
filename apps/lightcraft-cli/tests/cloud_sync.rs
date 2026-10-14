@@ -23,6 +23,56 @@ fn saved_catalog(path: &Path) -> lightcraft_catalog::Catalog {
     lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(path).unwrap())).unwrap().1
 }
 #[test]
+fn fresh_device_bootstraps_deleted_smart_album_targets_in_both_protocols() {
+    for append in [false, true] {
+        let f = Fixture::new();
+        f.state.lock().unwrap().append_mode = append;
+        let protocol = if append { "append-log-v1" } else { "conditional-head-v1" };
+        let a = f.dir.join("deleted-target-source");
+        let rows = success(&f, &a, &[("cloud.configure", configure(&f)), ("cloud.syncEnable", json!({"connection":"personal","protocol":protocol}))]);
+        let library = rows[1]["result"]["library"].as_str().unwrap();
+        f.import(&a, false);
+        success(
+            &f,
+            &a,
+            &[
+                ("cloud.upload", json!({})),
+                ("album.create", json!({"name":"Target"})),
+                ("album.addPhotos", json!({"id":1,"ids":[1]})),
+                ("album.createSmart", json!({"name":"In target","rules":{"album":1}})),
+                ("album.createSmart", json!({"name":"Not in target","rules":{"ruleSet":{"rules":[{"field":"album","op":"isNot","value":"1"}]}}})),
+                ("album.delete", json!({"id":1})),
+                ("cloud.sync", json!({"checkpoint":true})),
+            ],
+        );
+        let source = saved_catalog(&a);
+        let target = source.cloud_identity("album:1").unwrap();
+        let b = f.dir.join("fresh-deleted-target");
+        success(
+            &f,
+            &b,
+            &[
+                ("cloud.configure", configure(&f)),
+                ("cloud.syncEnable", json!({"connection":"personal","library":library,"protocol":protocol})),
+                ("cloud.sync", json!({})),
+            ],
+        );
+        let peer = saved_catalog(&b);
+        assert_eq!(peer.photos().count(), 1);
+        assert_eq!(peer.albums().count(), 2);
+        assert!(peer.sync_state().unwrap().pending.is_empty());
+        let retained = peer.cloud_identities().iter().find(|(_, global)| global.as_str() == target).unwrap().0;
+        let retained = lightcraft_catalog::AlbumId(retained.strip_prefix("album:").unwrap().parse().unwrap());
+        assert!(peer.album(retained).is_none());
+        for album in peer.albums() {
+            assert_eq!(peer.album_count(album.id), 0);
+            assert_eq!(peer.smart_album_problems(album.id)[0].issue, lightcraft_catalog::rules::Issue::NoSuchAlbum);
+        }
+        success(&f, &b, &[("album.create", json!({"name":"New local album"}))]);
+        assert!(saved_catalog(&b).album(retained).is_none(), "restart must not reuse a retained identity");
+    }
+}
+#[test]
 fn copied_conditional_catalog_uses_distinct_writers_for_independent_offline_edits() {
     let f = Fixture::new();
     let (a, _, _) = initialize(&f);

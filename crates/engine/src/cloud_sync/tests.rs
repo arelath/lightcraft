@@ -546,6 +546,81 @@ fn metadata_clear_virtual_copy_references_and_smart_filters_roundtrip_across_dif
 }
 
 #[test]
+fn deleted_album_references_bootstrap_fresh_peers_without_live_targets_or_broader_rules() {
+    let (mut a, _) = session();
+    a.execute("album.create", &json!({"name":"Target","addSelected":true})).unwrap();
+    let target = a.catalog.cloud_identity("album:1").unwrap().to_string();
+    let mut globals = Vec::new();
+    for rules in [
+        json!({"album":1}),
+        json!({"ruleSet":{"rules":[{"field":"album","op":"is","value":1}]}}),
+        json!({"ruleSet":{"rules":[{"field":"album","op":"isNot","value":1}]}}),
+        json!({"ruleSet":{"rules":[{"field":"album","op":"isNot","value":"1"}]}}),
+        json!({"ruleSet":{"match":"none","rules":[{"group":{"rules":[{"field":"album","op":"is","value":1}]}}]}}),
+    ] {
+        let id = a.execute("album.createSmart", &json!({"name":"Smart","rules":rules})).unwrap()["id"].as_u64().unwrap();
+        globals.push(a.catalog.cloud_identity(&format!("album:{id}")).unwrap().to_string());
+    }
+    a.execute("album.delete", &json!({"id":1})).unwrap();
+    let (mut b, files) = peer("fresh");
+    b.commit("private album", Op::AddAlbum { album: Album::new(AlbumId(1), "Private") }).unwrap();
+    deliver(&a, &mut b, 1);
+    let retained = AlbumId(local_id(&b.catalog, "album", &target));
+    assert!(b.catalog.album(retained).is_none());
+    for global in &globals {
+        let id = AlbumId(local_id(&b.catalog, "album", global));
+        assert_eq!(b.catalog.album_count(id), 0);
+        assert_eq!(b.catalog.smart_album_problems(id)[0].issue, lightcraft_catalog::rules::Issue::NoSuchAlbum);
+    }
+    let mut restarted = Session::new();
+    restarted
+        .open_library_in(LibraryStores { dir: "fresh".into(), catalog: Box::new(files), files: Box::new(MemStore::new()), on_disk: false }, false)
+        .unwrap();
+    let next = restarted.catalog.alloc_album_id();
+    assert_ne!(next, retained);
+    assert!(restarted.catalog.cloud_identity(&format!("album:{}", next.0)).is_none());
+    a.undo_step().unwrap();
+    deliver(&a, &mut restarted, 2);
+    assert_eq!(local_id(&restarted.catalog, "album", &target), retained.0);
+    assert!(restarted.catalog.album(retained).is_some());
+    for global in &globals {
+        let id = AlbumId(local_id(&restarted.catalog, "album", global));
+        assert!(restarted.catalog.smart_album_problems(id).is_empty());
+    }
+}
+
+#[test]
+fn unresolved_album_reference_reserves_identity_until_target_delivery() {
+    let (mut a, _) = session();
+    let photo = a.catalog.cloud_identity("photo:1").unwrap().to_string();
+    let mut state = a.catalog.sync_state().unwrap().clone();
+    state
+        .enqueue(vec![
+            Change { entity: "album:waiting-smart".into(), field: "name".into(), base: None, value: json!("Waiting") },
+            Change { entity: "album:waiting-smart".into(), field: "smart".into(), base: None, value: json!({"album":"future-album"}) },
+        ])
+        .unwrap();
+    a.apply_received(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+    let (mut b, _) = peer("receiver");
+    deliver(&a, &mut b, 1);
+    let target = AlbumId(local_id(&b.catalog, "album", "future-album"));
+    let smart = AlbumId(local_id(&b.catalog, "album", "waiting-smart"));
+    assert!(b.catalog.album(target).is_none());
+    assert_eq!(b.catalog.album_count(smart), 0);
+    let mut state = a.catalog.sync_state().unwrap().clone();
+    state
+        .enqueue(vec![
+            Change { entity: "album:future-album".into(), field: "name".into(), base: None, value: json!("Arrived") },
+            Change { entity: "album:future-album".into(), field: format!("member:{photo}"), base: None, value: json!(true) },
+        ])
+        .unwrap();
+    a.apply_received(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+    deliver(&a, &mut b, 2);
+    assert_eq!(local_id(&b.catalog, "album", "future-album"), target.0);
+    assert_eq!(b.catalog.album_count(smart), 1);
+}
+
+#[test]
 fn deletion_wins_offline_edit_without_resurrection_and_explicit_recovery_preserves_the_edit() {
     let (mut a, _) = session();
     let (mut b, _) = peer("device-b");

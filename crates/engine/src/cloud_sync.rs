@@ -141,9 +141,9 @@ fn portable_filter(value: &mut Value, catalog: &Catalog, ids: &Catalog, connecti
         }
         if map.get("field").and_then(Value::as_str) == Some("album")
             && let Some(value) = map.get_mut("value")
-            && let Some(id) = value.as_u64()
+            && let Some(id) = lightcraft_catalog::rules::album_rule_id(value)
         {
-            *value = Value::String(global(ids, "album", id)?);
+            *value = Value::String(global(ids, "album", id.0)?);
         }
         for child in map.values_mut() {
             portable_filter(child, catalog, ids, connection, depth + 1)?;

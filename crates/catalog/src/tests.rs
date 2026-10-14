@@ -517,6 +517,46 @@ fn smart_album_problems_flag_stale_rules() {
     assert_eq!(p.iter().map(ToString::to_string).collect::<Vec<_>>(), vec!["rule 1: no album 1".to_string()]);
 }
 
+#[test]
+fn unavailable_album_rules_never_broaden_under_negation_or_nested_smart_references() {
+    let mut c = Catalog::new();
+    let p = photo(&mut c, "a.jpg", "2026-04-01");
+    c.apply(Op::AddAlbum { album: Album::new(AlbumId(1), "Target") }).unwrap();
+    for (i, rules) in [
+        serde_json::json!({"album":1}),
+        serde_json::json!({"ruleSet":{"rules":[{"field":"album","op":"isNot","value":1}]}}),
+        serde_json::json!({"ruleSet":{"match":"none","rules":[{"group":{"rules":[{"field":"album","op":"is","value":1}]}}]}}),
+        serde_json::json!({"ruleSet":{"match":"any","rules":[{"field":"album","op":"is","value":1},{"field":"rating","op":"gte","value":0}]}}),
+        serde_json::json!({"ruleSet":{"rules":[{"field":"album","op":"isNot","value":3}]}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let filter: Filter = serde_json::from_value(rules).unwrap();
+        c.apply(Op::AddAlbum { album: Album { smart: Some(Box::new(filter)), ..Album::new(AlbumId(i as u64 + 2), "Smart") } }).unwrap();
+    }
+    assert!(c.album_contains(AlbumId(3), c.photo(p).unwrap()));
+    c.apply(Op::RemoveAlbum { id: AlbumId(1) }).unwrap();
+    for id in 2..=6 {
+        assert!(!c.album_contains(AlbumId(id), c.photo(p).unwrap()), "unavailable album {id}");
+    }
+    assert_eq!(c.smart_album_problems(AlbumId(2))[0].issue, rules::Issue::NoSuchAlbum);
+    c.apply(Op::AddAlbum { album: Album::new(AlbumId(1), "Restored") }).unwrap();
+    assert!(c.album_contains(AlbumId(3), c.photo(p).unwrap()));
+    assert!(c.album_contains(AlbumId(4), c.photo(p).unwrap()));
+}
+
+#[test]
+fn retained_album_identity_reserves_allocator_through_replay_and_snapshot() {
+    let mut c = Catalog::new();
+    let op = Op::SetCloudIdentity { entity: "album:70".into(), id: Some("retained-album".into()) };
+    c.replay(&(serde_json::to_string(&op).unwrap() + "\n")).unwrap();
+    assert!(c.album(AlbumId(70)).is_none());
+    let mut reloaded = Catalog::from_snapshot(&c.to_snapshot()).unwrap();
+    assert_eq!(reloaded.alloc_album_id(), AlbumId(71));
+    assert_eq!(c.alloc_album_id(), AlbumId(71));
+}
+
 /// A smart album can test another smart album: "Keywords contain travel" and "Album isn't Excluded
 /// Photos" (red or rejected) leaves out the excluded photos, and follows that album's rules as they
 /// change.

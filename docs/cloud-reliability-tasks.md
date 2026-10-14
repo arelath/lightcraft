@@ -36,7 +36,7 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 
 - [x] CR.22 — Apply verified synchronization results monotonically across upload and ordinary workers. Distinguish stale valid completions from inconsistent remote history, retain newer head cursors, merge append publication progress, and qualify phase events by attempt so obsolete failures cannot overwrite success. Test held generation 10 after generation 11 and append frontier preservation; retain deliberate integrity-verification failures.
 - [x] CR.23 — Claim installation/catalog writer ownership in both protocols before editing, preserving pending IDs. Provide a safe writing epoch for explicit same-directory backup restore and causally schedule retained historical-author mutations. Test copied conditional-head catalogs making distinct offline edits and restoring an older backup.
-- [ ] CR.24 — Materialize smart-album references to deleted or unresolved albums deterministically without broadening their criteria or blocking fresh-device bootstrap. Test a retained smart album referencing a deleted regular album.
+- [x] CR.24 — Materialize smart-album references to deleted or unresolved albums deterministically without broadening their criteria or blocking fresh-device bootstrap. Test a retained smart album referencing a deleted regular album.
 - [ ] CR.25 — Define a nonportable smart-album policy that preserves originating-device semantics. Preserve folder criteria and local-only selections, and distinguish absent selection restrictions from explicitly empty sets. Test self-sync with folder-restricted and exclusively local-photo rules.
 - [ ] CR.26 — Resolve shared stack ownership and validity independently of local-only members, then apply local overlays. Test identical shared proposals S1=(P,Q), S2=(Q,R), S3=(R,S) with and without a local-only member of S2, comparing projected cloud relationships.
 - [ ] CR.27 — Durably finalize every upload receipt covered by shared acknowledgement with exact publication evidence. Retry local proof writes after restart independently of media transfer; test delayed bulk siblings and subsequent local-copy removal without manual verification. Keep staging protection intact.
@@ -288,3 +288,30 @@ logs; C: scratch `lightcraft-cr23-native/native-634f6b4c/` and `native-aa73c898/
 The first native script correctly hit the persisted pause and was amended to resume.
 Browser ownership/causal ordering is WASM-compiled and shared-model tested; fresh
 browser deployment and live-provider acceptance are not claimed.
+
+
+2026-10-14 — CR.24: materialization now reserves stable local identities for
+album tombstones and valid references whose target is not yet delivered, without
+creating live placeholder albums. Mapping replay advances the album allocator;
+snapshot/restart cannot reuse a reserved identity. Album-rule projection converts
+numeric strings through the same ID parser as local matching. Missing/folder
+references make a saved criterion unavailable and nonmatching, including negative
+operators, nested any/none groups and dependencies through other smart albums.
+Saved references remain intact; existing diagnostics show missing targets.
+
+The focused catalog unavailable-rule regression and all 22 focused engine sync tests
+passed. They cover fresh bootstrap with different IDs, delayed target delivery,
+restart and delete undo restoring the same identity. The first restoration test used
+the photo-only recovery command and was corrected to use album-delete undo. Final source passed all eight CI stages: C: build `cr24-ci-verified.log`, including
+numeric-string references, mapping replay/snapshot and real-CLI fresh checkpoint
+bootstrap on both protocols. The initial full run was stopped before completion to
+include numeric-string projection in this final passing gate.
+
+Rebuilt native fresh-device acceptance passed for both protocols. Positive and
+negative smart albums opened with zero matches and missing-target diagnostics;
+restart and another album allocation retained the absent target identity. All 202
+signed loopback requests verified (65 head / 137 append); both rendered empty-album
+views were inspected. Evidence: ignored `target/cloud-reliability/cr24-native-results-*`
+and request logs; C: scratch `lightcraft-cr24-native/native-78d6f8a6/` and
+`native-536562df/`. Shared browser materialization is WASM-compiled and engine tested;
+fresh browser/provider acceptance is not claimed. Nonportable filters remain CR.25.
