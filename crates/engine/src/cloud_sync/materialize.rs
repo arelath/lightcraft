@@ -719,14 +719,11 @@ pub fn incoming_checkpoint(
     cursor: String,
     generation: u64,
 ) -> Result<Op> {
+    crate::cloud_outcome::HeadPosition::new(cursor.clone(), generation).map_err(error)?;
     let mut state = catalog.sync_state().cloned().ok_or_else(|| error("enable synchronization first"))?;
     let uploads = acknowledged_uploads(catalog, remote, acknowledged, Some(generation))?;
     state.merge(remote)?;
-    if generation == 0 && cursor.is_empty() && acknowledged.is_empty() && state.generation == 0 && state.cursor.is_none() {
-        // No head yet: the first import may still be waiting for media transfers.
-    } else {
-        state.acknowledge(acknowledged, cursor, generation)?;
-    }
+    state.acknowledge(acknowledged, cursor, generation)?;
     let mut ops = install(catalog, &state)?;
     ops.extend(uploads);
     ops.push(Op::SetSyncState { state: Some(Box::new(state)) });
@@ -743,6 +740,7 @@ pub fn completed_checkpoint(
     generation: u64,
     started_generation: u64,
 ) -> Result<Op> {
+    crate::cloud_outcome::HeadPosition::new(cursor.clone(), generation).map_err(error)?;
     let current = catalog.sync_state().ok_or_else(|| error("enable synchronization first"))?;
     if generation < started_generation {
         return Err(error("remote catalog rolled back below the worker's acknowledged generation; pending work retained"));
@@ -819,4 +817,29 @@ fn acknowledged_uploads(
             Some(Op::SetUploadIntent { id: id.clone(), intent: Some(Box::new(intent)) })
         })
         .collect())
+}
+
+/// Apply certified evidence with an explicit protocol shape. Browser callers first
+/// pass no ACKs, flush received state, then finish their durable ACK receipt.
+pub fn completed_outcome(catalog: &Catalog, outcome: &crate::cloud_outcome::Outcome, ids: &BTreeSet<String>, started_generation: u64) -> Result<Op> {
+    if !ids.is_subset(outcome.acknowledged()) {
+        return Err(error("result does not certify the requested acknowledgements"));
+    }
+    if let Some(progress) = outcome.append_progress() {
+        return incoming_append(catalog, progress.clone(), ids);
+    }
+    if let Some(position) = outcome.head_position() {
+        return completed_checkpoint(catalog, outcome.state(), ids, position.cursor().to_owned(), position.generation(), started_generation);
+    }
+    if started_generation > 0 {
+        return Err(error("remote catalog rolled back to an empty head; pending work retained"));
+    }
+    let mut state = catalog.sync_state().cloned().ok_or_else(|| error("enable synchronization first"))?;
+    if !state.protocol.is_head() {
+        return Err(error("empty conditional head cannot update an append library"));
+    }
+    state.merge(outcome.state())?;
+    let mut ops = install(catalog, &state)?;
+    ops.push(Op::SetSyncState { state: Some(Box::new(state)) });
+    Ok(Op::Batch { ops })
 }

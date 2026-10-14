@@ -4,7 +4,7 @@ use crate::assets::s3::{PutCondition, S3Connection};
 use crate::assets::{AssetError, Result, keys, sha256};
 use crate::cloud_publication::{self as publication, Batch, CheckpointRef, Head, RecordRef};
 use lightcraft_catalog::assets::{Asset, identifier};
-use lightcraft_catalog::replication::{Mutation, Portable, SyncState};
+use lightcraft_catalog::replication::{Mutation, SyncState};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -180,13 +180,8 @@ pub(crate) fn dependencies_verified(connection: &S3Connection, mutations: &[Muta
 mod media;
 pub(crate) use media::{SharedMedia, VerifiedMedia};
 
-pub struct Outcome {
-    pub append: Option<lightcraft_catalog::replication::AppendProgress>,
-    pub state: Portable,
-    pub acknowledged: BTreeSet<String>,
-    pub cursor: String,
-    pub generation: u64,
-}
+use crate::cloud_outcome::HeadPosition;
+pub use crate::cloud_outcome::Outcome;
 /// Reconcile each failed conditional head update by reading the competing history. Mutation
 /// IDs and payloads never change across attempts, including uncertain publication responses.
 pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requested: bool, cancel: &AtomicBool) -> Result<Outcome> {
@@ -214,13 +209,7 @@ pub(crate) fn synchronize_verified(
             if head.library.as_deref() != Some(local.library.as_str()) || head.generation != local.generation {
                 return Err(invalid("remote library/cursor generation changed inconsistently"));
             }
-            return Ok(Outcome {
-                append: None,
-                state: local.portable(),
-                acknowledged: BTreeSet::new(),
-                cursor: head.tip.hash.0,
-                generation: head.generation,
-            });
+            return Ok(Outcome::unchanged(local.portable(), HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?));
         }
     }
     let mut dependency_proof = BTreeSet::new();
@@ -255,7 +244,7 @@ pub(crate) fn synchronize_verified(
                 return Err(invalid("remote catalog is empty; initial library metadata must be queued first"));
             };
             let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
-            return Ok(Outcome { append: None, state, acknowledged, cursor: head.tip.hash.0, generation: head.generation });
+            return Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged));
         }
         let pending_count = pending.len();
         pending = crate::cloud_sync::publication_order(pending, &remote.state.clock).map_err(|e| invalid(e.to_string()))?;
@@ -293,9 +282,15 @@ pub(crate) fn synchronize_verified(
             if !waiting_for_media {
                 return Err(invalid("pending mutation cannot fit a 2 MiB change batch"));
             }
-            let (cursor, generation) = remote.head.as_ref().map_or((String::new(), 0), |(head, _)| (head.tip.hash.0.clone(), head.generation));
             let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
-            return Ok(Outcome { append: None, state, acknowledged, cursor, generation });
+            return Ok(if let Some((head, _)) = &remote.head {
+                Outcome::head(state, HeadPosition::new(head.tip.hash.0.clone(), head.generation).map_err(invalid)?, acknowledged)
+            } else {
+                if !acknowledged.is_empty() {
+                    return Err(invalid("empty remote head cannot acknowledge mutations"));
+                }
+                Outcome::empty(state)
+            });
         }
         let newly_referenced: Vec<_> = chunk.iter().filter(|mutation| !dependency_proof.contains(&mutation.revision.id())).cloned().collect();
         dependencies_verified(connection, &newly_referenced, cancel, media)?;

@@ -65,18 +65,7 @@ pub(super) fn completion_ops(
     covered: Vec<CoveredUpload>,
     ids: &BTreeMap<String, lightcraft_catalog::assets::AssetId>,
 ) -> Result<(Vec<Op>, bool)> {
-    let reconciled = if let Some(progress) = outcome.append.clone() {
-        crate::cloud_sync::incoming_append(catalog, progress, &outcome.acknowledged)
-    } else {
-        crate::cloud_sync::completed_checkpoint(
-            catalog,
-            &outcome.state,
-            &outcome.acknowledged,
-            outcome.cursor.clone(),
-            outcome.generation,
-            started_generation,
-        )
-    };
+    let reconciled = crate::cloud_sync::completed_outcome(catalog, outcome, outcome.acknowledged(), started_generation);
     let (mut ops, refresh) = match reconciled {
         Err(reason) if crate::cloud_sync::obsolete_completion_needs_proof(catalog, outcome, &reason) => (Vec::new(), true),
         result => (
@@ -327,25 +316,25 @@ pub(super) fn publish_ready(
             receipt.append_proof.clone()
         } else {
             outcome
-                .state
+                .state()
                 .documents
                 .get(&format!("photo:{}", item.imported.photo_id))
                 .and_then(|fields| fields.get("content"))
                 .into_iter()
                 .flat_map(|r| r.0.iter())
                 .filter(|(_, v)| v.get("assetId").and_then(Value::as_str) == Some(item.imported.asset_id.0.as_str()))
-                .filter_map(|(id, _)| outcome.state.received.get(id).map(|r| (id.clone(), r.digest.clone())))
+                .filter_map(|(id, _)| outcome.state().received.get(id).map(|r| (id.clone(), r.digest.clone())))
                 .collect()
         };
         let mut published = !expected.is_empty();
         for (id, digest) in &expected {
-            published &= crate::cloud_history::native::published(&first.connection, &outcome.state, id, digest, &mut witness, cancel)
+            published &= crate::cloud_history::native::published(&first.connection, outcome.state(), id, digest, &mut witness, cancel)
                 .map_err(|e| error(e.to_string()))?;
         }
         if published {
             receipt.append_proof = expected;
             if local.protocol.is_head() {
-                receipt.generation = Some(outcome.generation);
+                receipt.generation = outcome.head_position().map(|position| position.generation());
             }
             covered.push(CoveredUpload {
                 id: item.id.clone(),
@@ -515,7 +504,7 @@ mod tests {
                 latest.finalization = None;
                 s.apply_system(Op::SetUploadIntent { id: id.clone(), intent: Some(Box::new(latest)) }).unwrap();
                 let old =
-                    crate::cloud_replication::Outcome { append: None, state: published, acknowledged: ids, cursor: "a".repeat(64), generation: 11 };
+                    crate::cloud_replication::Outcome::head(published, crate::cloud_outcome::HeadPosition::new("a".repeat(64), 11).unwrap(), ids);
                 let (ops, refresh) =
                     completion_ops(&s.catalog, &old, 0, vec![covered.clone()], &BTreeMap::from([(id.clone(), covered.asset_id.clone())])).unwrap();
                 assert!(refresh, "obsolete archive evidence must request a rescan");

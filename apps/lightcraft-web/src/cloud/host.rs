@@ -30,6 +30,7 @@ enum Stage {
     SaveThenSync { checkpoint: bool, audit: bool },
     Network(Rc<RefCell<Option<Result<Outcome, String>>>>),
     Ack { receipt: AckReceipt, result: Value },
+    Received { result: Value },
     Acquire { command: String, params: Value, sources: Vec<(PhotoId, Source)>, ready: Rc<RefCell<Option<Result<(), String>>>> },
 }
 struct Job {
@@ -466,7 +467,7 @@ impl Host {
             match result {
                 None => remaining.push(job),
                 Some(result) => {
-                    let sync = matches!(&job.stage, Stage::SaveThenSync { .. } | Stage::Network(_) | Stage::Ack { .. });
+                    let sync = matches!(&job.stage, Stage::SaveThenSync { .. } | Stage::Network(_) | Stage::Ack { .. } | Stage::Received { .. });
                     let mut data = self.data.borrow_mut();
                     if sync {
                         data.sync_running = false;
@@ -582,20 +583,12 @@ impl Host {
                         *ready.borrow_mut() = Some(Ok(outcome));
                         return Ok(None);
                     }
-                    if !job.migrating
-                        && outcome.append.is_none()
-                        && lightcraft_engine::cloud_sync::unchanged_head(
-                            &app.session.catalog,
-                            &outcome.state,
-                            &outcome.acknowledged,
-                            &outcome.cursor,
-                            outcome.generation,
-                        )
-                    {
-                        // No received state or ACK to save: bypass both the catalog
-                        // transaction and browser ACK-file/flush stages entirely.
-                        return Ok(Some(json!({"unchanged":true,"protocol":app.session.catalog.sync_state().map(|s|s.protocol),
-                            "generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":0,"pending":0})));
+                    if !job.migrating && lightcraft_engine::cloud_sync::unchanged_outcome(&app.session.catalog, &outcome) {
+                        let mut value = outcome.report();
+                        value["unchanged"] = json!(true);
+                        value["protocol"] = json!(app.session.catalog.sync_state().map(|s| s.protocol));
+                        value["pending"] = json!(0);
+                        return Ok(Some(value));
                     }
                     let mut binding = None;
                     let mut next = app.session.catalog.clone();
@@ -612,41 +605,45 @@ impl Host {
                         next.apply(op.clone()).map_err(|e| e.to_string())?;
                         binding = Some(op);
                     }
-                    let mut receipt = if let Some(progress) = &outcome.append {
-                        AckReceipt::new_append(next.sync_state().ok_or("synchronization identity unavailable")?, &outcome.acknowledged, progress)?
-                    } else {
-                        AckReceipt::new(
-                            app.session.catalog.sync_state().ok_or("synchronization identity is unavailable")?,
-                            &outcome.acknowledged,
-                            outcome.cursor.clone(),
-                            outcome.generation,
-                        )?
-                    };
-                    let op = if let Some(progress) = outcome.append.clone() {
-                        lightcraft_engine::cloud_sync::incoming_append(&next, progress, &BTreeSet::new()).map_err(|e| e.to_string())?
-                    } else {
-                        lightcraft_engine::cloud_sync::incoming_checkpoint(
-                            &app.session.catalog,
-                            &outcome.state,
-                            &BTreeSet::new(),
-                            outcome.cursor.clone(),
-                            outcome.generation,
-                        )
-                        .map_err(|e| e.to_string())?
-                    };
+                    let op = lightcraft_engine::cloud_sync::completed_outcome(&next, &outcome, &BTreeSet::new(), 0).map_err(|e| e.to_string())?;
                     let op = if let Some(binding) = binding { Op::Batch { ops: vec![binding, op] } } else { op };
                     app.session.apply_received(op).map_err(|e| e.to_string())?;
-                    if outcome.append.is_some() {
-                        let received = app.session.catalog.sync_state().ok_or("synchronization identity unavailable")?;
+                    let received = app.session.catalog.sync_state().ok_or("synchronization identity unavailable")?;
+                    let receipt = if outcome.append_progress().is_some() {
                         let progress = received.append.as_ref().ok_or("append publication progress unavailable")?;
-                        receipt = AckReceipt::new_append(received, &outcome.acknowledged, progress)?;
-                    }
+                        Some(AckReceipt::new_append(received, outcome.acknowledged(), progress)?)
+                    } else if outcome.head_position().is_some() {
+                        let position = lightcraft_engine::cloud_outcome::HeadPosition::new(
+                            received.cursor.clone().ok_or("received head cursor unavailable")?,
+                            received.generation,
+                        )?;
+                        Some(AckReceipt::new(received, outcome.acknowledged(), position.cursor().to_owned(), position.generation())?)
+                    } else {
+                        None
+                    };
                     app.session.persist().map_err(|e| e.to_string())?;
-                    self.files.write(ACK_FILE, &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?);
-                    let value = json!({"unchanged":false,"protocol":app.session.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len()});
-                    job.guard.handle().detail("Saving received changes and remote acknowledgement in browser storage");
-                    job.stage = Stage::Ack { receipt, result: value };
+                    let mut value = outcome.report();
+                    value["unchanged"] = json!(false);
+                    value["protocol"] = json!(app.session.catalog.sync_state().map(|s| s.protocol));
+                    if let Some(receipt) = receipt {
+                        self.files.write(ACK_FILE, &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?);
+                        job.guard.handle().detail("Saving received changes and remote acknowledgement in browser storage");
+                        job.stage = Stage::Ack { receipt, result: value };
+                    } else {
+                        job.guard.handle().detail("Saving received empty-head state; pending work retained");
+                        job.stage = Stage::Received { result: value };
+                    }
                     Ok(None)
+                }
+                Stage::Received { result } => {
+                    if let Some(error) = self.files.error() {
+                        return Err(format!("browser received-state save failed: {error}; pending work retained"));
+                    }
+                    if self.files.is_dirty() || flushing {
+                        return Ok(None);
+                    }
+                    result["pending"] = json!(app.session.catalog.sync_state().map_or(0, |state| state.pending.len()));
+                    Ok(Some(result.clone()))
                 }
                 Stage::Ack { receipt, result } => {
                     if let Some(error) = self.files.error() {

@@ -31,6 +31,10 @@ fn local_receipt_matches(state: &SyncState, id: &str, digest: &str) -> bool {
 }
 impl AckReceipt {
     pub fn new(state: &SyncState, ids: &BTreeSet<String>, cursor: String, generation: u64) -> Result<Self, String> {
+        if !state.protocol.is_head() {
+            return Err("head acknowledgement cannot acknowledge append work".into());
+        }
+        lightcraft_engine::cloud_outcome::HeadPosition::new(cursor.clone(), generation)?;
         if ids.len() > 10000 {
             return Err("browser acknowledgement exceeds its bounded count".into());
         }
@@ -225,5 +229,24 @@ mod tests {
         bad.acknowledged.insert(first.revision.id(), "wrong digest".into());
         assert!(bad.finish(&mut state).is_err());
         assert_eq!(state.pending.len(), 1);
+    }
+    #[test]
+    fn cr32_typed_head_ack_uses_retained_newer_position_and_rejects_sentinels() {
+        let mut state = SyncState::new("library".into(), "browser".into(), "connection".into()).unwrap();
+        let mutation =
+            state.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(4) }]).unwrap().unwrap();
+        let ids = BTreeSet::from([mutation.revision.id()]);
+        assert!(AckReceipt::new(&state, &ids, String::new(), 0).is_err());
+        state.acknowledge(&BTreeSet::new(), "b".repeat(64), 12).unwrap();
+        let position = lightcraft_engine::cloud_outcome::HeadPosition::new(state.cursor.clone().unwrap(), state.generation).unwrap();
+        let receipt = AckReceipt::new(&state, &ids, position.cursor().to_owned(), position.generation()).unwrap();
+        let saved = serde_json::to_vec(&receipt).unwrap();
+        let receipt: AckReceipt = serde_json::from_slice(&saved).unwrap();
+        assert!(receipt.finish(&mut state).unwrap());
+        assert!(state.pending.is_empty());
+        assert_eq!(state.generation, 12);
+        assert_eq!(state.cursor.as_deref(), Some("b".repeat(64).as_str()));
+        state.protocol = lightcraft_engine::catalog::replication::SyncProtocol::AppendLog;
+        assert!(AckReceipt::new(&state, &BTreeSet::new(), "b".repeat(64), 12).is_err());
     }
 }

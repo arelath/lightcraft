@@ -28,6 +28,7 @@ pub mod cloud_import;
 #[cfg(target_arch = "wasm32")]
 #[path = "cloud_import_web.rs"]
 pub(crate) mod cloud_import;
+pub mod cloud_outcome;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_owner;
 #[cfg(not(target_arch = "wasm32"))]

@@ -166,11 +166,5 @@ pub(crate) fn synchronize_verified(
     }
     let acknowledged = planner.acknowledged(local)?;
     progress.remote = crate::cloud_history::native::certify(connection, local, &progress.remote, &mut planner.proofs, cancel)?;
-    Ok(crate::cloud_replication::Outcome {
-        state: progress.remote.clone(),
-        acknowledged,
-        cursor: String::new(),
-        generation: 0,
-        append: Some(progress),
-    })
+    Ok(crate::cloud_replication::Outcome::append(progress, acknowledged))
 }

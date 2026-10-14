@@ -283,23 +283,31 @@ impl Session {
         let current_owner =
             Arc::ptr_eq(&pending.library, &self.library_token()) && pending.connection_revision == pending.resolver.connection_revision();
         let result = result.and_then(|outcome| {
-            if pending.guard.is_cancelled() { return Err(error("synchronization cancelled; pending work and prior protocol retained")); }
+            if pending.guard.is_cancelled() {
+                return Err(error("synchronization cancelled; pending work and prior protocol retained"));
+            }
             if !Arc::ptr_eq(&pending.library, &self.library_token()) || pending.connection_revision != pending.resolver.connection_revision() {
                 return Err(error("library or storage connection changed; remote result ignored and local pending work retained"));
             }
-            if pending.migration_owner.is_none() && outcome.append.is_none()
-                && crate::cloud_sync::unchanged_head(&self.catalog, &outcome.state, &outcome.acknowledged, &outcome.cursor, outcome.generation) {
-                // Retry any existing unsaved local work, but create no new catalog
-                // operation or journal entry for an unchanged synchronization poll.
-                if !self.pending_log.is_empty() { self.persist()?; }
-                return Ok(json!({"unchanged":true,"migrated":false,"legacyHistoryRetained":true,"protocol":self.catalog.sync_state().map(|s|s.protocol),
-                    "generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":0,"pending":0}));
+            if pending.migration_owner.is_none() && crate::cloud_sync::unchanged_outcome(&self.catalog, &outcome) {
+                if !self.pending_log.is_empty() {
+                    self.persist()?;
+                }
+                let mut value = outcome.report();
+                value["unchanged"] = json!(true);
+                value["migrated"] = json!(false);
+                value["legacyHistoryRetained"] = json!(true);
+                value["protocol"] = json!(self.catalog.sync_state().map(|s| s.protocol));
+                value["pending"] = json!(0);
+                return Ok(value);
             }
             let mut migrated = None;
             let binding = if let Some(owner) = &pending.migration_owner {
                 let mut next = self.catalog.clone();
                 let mut state = next.sync_state().cloned().ok_or_else(|| error("synchronization identity unavailable"))?;
-                if !state.protocol.is_head() { return Err(error("protocol changed during migration; result retained remotely")); }
+                if !state.protocol.is_head() {
+                    return Err(error("protocol changed during migration; result retained remotely"));
+                }
                 state.protocol = lightcraft_catalog::replication::SyncProtocol::AppendLog;
                 state.migrated_from_head = true;
                 state.cursor = None;
@@ -309,18 +317,22 @@ impl Session {
                 next.apply(op.clone())?;
                 migrated = Some(next);
                 Some(op)
-            } else { None };
-            let reconciled = if let Some(progress)=outcome.append.clone() {crate::cloud_sync::incoming_append(migrated.as_ref().unwrap_or(&self.catalog),progress,&outcome.acknowledged)}else{crate::cloud_sync::completed_checkpoint(
-                &self.catalog,
-                &outcome.state,
-                &outcome.acknowledged,
-                outcome.cursor.clone(),
-                outcome.generation,
+            } else {
+                None
+            };
+            let reconciled = crate::cloud_sync::completed_outcome(
+                migrated.as_ref().unwrap_or(&self.catalog),
+                &outcome,
+                outcome.acknowledged(),
                 pending.started_generation,
-            )};
+            );
             let op = match reconciled {
-                Err(error) if pending.migration_owner.is_none() && crate::cloud_sync::obsolete_completion_needs_proof(&self.catalog, &outcome, &error) => {
-                    return Ok(json!({"superseded":true,"refreshRequired":true,"pending":self.catalog.sync_state().map_or(0,|state|state.pending.len())}));
+                Err(error)
+                    if pending.migration_owner.is_none() && crate::cloud_sync::obsolete_completion_needs_proof(&self.catalog, &outcome, &error) =>
+                {
+                    return Ok(
+                        json!({"superseded":true,"refreshRequired":true,"pending":self.catalog.sync_state().map_or(0,|state|state.pending.len())}),
+                    );
                 }
                 result => result?,
             };
@@ -330,8 +342,13 @@ impl Session {
                 self.apply_received(inverse)?;
                 return Err(error);
             }
-            Ok(json!({"unchanged":false,"migrated":pending.migration_owner.is_some(),"legacyHistoryRetained":true,"protocol":self.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len(),
-                "pending":self.catalog.sync_state().map_or(0,|state|state.pending.len())}))
+            let mut value = outcome.report();
+            value["unchanged"] = json!(false);
+            value["migrated"] = json!(pending.migration_owner.is_some());
+            value["legacyHistoryRetained"] = json!(true);
+            value["protocol"] = json!(self.catalog.sync_state().map(|s| s.protocol));
+            value["pending"] = json!(self.catalog.sync_state().map_or(0, |state| state.pending.len()));
+            Ok(value)
         });
         if current_owner {
             self.cloud_replication_jobs.paused = result.is_err() || self.cloud_replication_jobs.preparing_migration;
@@ -419,13 +436,11 @@ mod tests {
                 value: json!("Remote green"),
             }])
             .unwrap();
-        let outcome = Outcome {
-            append: None,
-            state: remote.portable(),
-            acknowledged: local.pending.keys().cloned().collect(),
-            cursor: "a".repeat(64),
-            generation: 1,
-        };
+        let outcome = Outcome::head(
+            remote.portable(),
+            crate::cloud_outcome::HeadPosition::new("a".repeat(64), 1).unwrap(),
+            local.pending.keys().cloned().collect(),
+        );
         let resolver = Arc::new(AssetResolver::new(std::env::temp_dir().join("lightcraft-sync-owner-unused")));
         let guard = s.activity.start("cloudSync", "test sync", crate::activity::Cancel::Yes);
         let cancel = guard.cancel_flag().unwrap();
@@ -514,22 +529,21 @@ mod tests {
         let pending = s.cloud_replication_jobs.pending.as_mut().unwrap();
         pending.migration_owner = Some("migration-owner".into());
         let outcome = pending.ready.as_mut().unwrap().as_mut().unwrap();
-        outcome.acknowledged.clear();
-        outcome.append = Some(lightcraft_catalog::replication::AppendProgress {
-            version: 1,
-            manifest: crate::assets::sha256(&crate::cloud_append::manifest("library").unwrap()).0,
-            frontiers: lightcraft_catalog::replication::publication_prefixes(&outcome.state).unwrap(),
-            remote: outcome.state.clone(),
-            gaps: Default::default(),
-        });
-        outcome.cursor.clear();
-        outcome.generation = 0;
+        *outcome = Outcome::append(
+            lightcraft_catalog::replication::AppendProgress {
+                version: 1,
+                manifest: crate::assets::sha256(&crate::cloud_append::manifest("library").unwrap()).0,
+                frontiers: lightcraft_catalog::replication::publication_prefixes(outcome.state()).unwrap(),
+                remote: outcome.state().clone(),
+                gaps: Default::default(),
+            },
+            BTreeSet::new(),
+        );
     }
     fn ready_same_head(s: &mut Session, generation: u64) {
         ready(s);
         let local = s.catalog.sync_state().unwrap();
-        let same =
-            Outcome { append: None, state: local.portable(), acknowledged: BTreeSet::new(), cursor: local.cursor.clone().unwrap(), generation };
+        let same = Outcome::unchanged(local.portable(), crate::cloud_outcome::HeadPosition::new(local.cursor.clone().unwrap(), generation).unwrap());
         s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Ok(same));
     }
     #[test]
@@ -563,7 +577,8 @@ mod tests {
         let initial = files.files.get(lightcraft_catalog::journal::LOG);
         ready(&mut s);
         let local = s.catalog.sync_state().unwrap().portable();
-        s.cloud_replication_jobs.pending.as_mut().unwrap().ready.as_mut().unwrap().as_mut().unwrap().state = local;
+        let outcome = s.cloud_replication_jobs.pending.as_mut().unwrap().ready.as_mut().unwrap().as_mut().unwrap();
+        *outcome = Outcome::head(local, outcome.head_position().unwrap().clone(), outcome.acknowledged().clone());
         s.poll_cloud_replication(); // Exact ACK, even though portable field values agree.
         assert!(s.catalog.sync_state().unwrap().pending.is_empty());
         assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["result"]["unchanged"], false);
@@ -621,7 +636,7 @@ mod tests {
         let (mut s, _) = session();
         ready(&mut s);
         let old = s.cloud_replication_jobs.pending.as_mut().unwrap().ready.take().unwrap().unwrap();
-        let mut newer = SyncState::restore_durable(&old.state, "other".into(), "personal".into()).unwrap();
+        let mut newer = SyncState::restore_durable(old.state(), "other".into(), "personal".into()).unwrap();
         newer
             .enqueue(vec![lightcraft_catalog::replication::Change {
                 entity: "library:library".into(),
@@ -635,11 +650,15 @@ mod tests {
         newer.compact_receipts(&plan).unwrap();
         let mut portable = newer.portable();
         portable.proofs = plan.objects;
-        let op = crate::cloud_sync::incoming_checkpoint(&s.catalog, &portable, &old.acknowledged, "b".repeat(64), 11).unwrap();
+        let op = crate::cloud_sync::incoming_checkpoint(&s.catalog, &portable, old.acknowledged(), "b".repeat(64), 11).unwrap();
         s.apply_received(op).unwrap();
         s.persist().unwrap();
         let before = s.catalog.to_snapshot();
-        s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Ok(Outcome { generation: 10, ..old }));
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Ok(Outcome::head(
+            old.state().clone(),
+            crate::cloud_outcome::HeadPosition::new("a".repeat(64), 10).unwrap(),
+            old.acknowledged().clone(),
+        )));
         s.poll_cloud_replication();
         assert!(!s.cloud_replication_jobs.paused);
         assert_eq!(s.catalog.to_snapshot(), before);
@@ -651,14 +670,18 @@ mod tests {
         let (mut s, _) = session();
         ready(&mut s);
         let old = s.cloud_replication_jobs.pending.as_mut().unwrap().ready.take().unwrap().unwrap();
-        let old_state = old.state.clone();
-        let old_ids = old.acknowledged.clone();
-        s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Ok(Outcome { generation: 11, cursor: "b".repeat(64), ..old }));
+        let old_state = old.state().clone();
+        let old_ids = old.acknowledged().clone();
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Ok(Outcome::head(
+            old.state().clone(),
+            crate::cloud_outcome::HeadPosition::new("b".repeat(64), 11).unwrap(),
+            old.acknowledged().clone(),
+        )));
         s.poll_cloud_replication();
         ready(&mut s);
         s.cloud_replication_jobs.pending.as_mut().unwrap().started_generation = 0;
         s.cloud_replication_jobs.pending.as_mut().unwrap().ready =
-            Some(Ok(Outcome { append: None, state: old_state, acknowledged: old_ids, cursor: "a".repeat(64), generation: 10 }));
+            Some(Ok(Outcome::head(old_state, crate::cloud_outcome::HeadPosition::new("a".repeat(64), 10).unwrap(), old_ids)));
         s.poll_cloud_replication();
         assert!(!s.cloud_replication_jobs.paused);
         assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["ok"], true);
@@ -671,7 +694,12 @@ mod tests {
         assert!(s.cloud_replication_jobs.paused);
         assert_eq!(s.catalog.to_snapshot(), before);
         ready_same_head(&mut s, 11);
-        s.cloud_replication_jobs.pending.as_mut().unwrap().ready.as_mut().unwrap().as_mut().unwrap().cursor = "c".repeat(64);
+        let outcome = s.cloud_replication_jobs.pending.as_mut().unwrap().ready.as_mut().unwrap().as_mut().unwrap();
+        *outcome = Outcome::head(
+            outcome.state().clone(),
+            crate::cloud_outcome::HeadPosition::new("c".repeat(64), 11).unwrap(),
+            outcome.acknowledged().clone(),
+        );
         s.poll_cloud_replication();
         assert!(s.cloud_replication_jobs.paused);
         assert_eq!(s.catalog.to_snapshot(), before);
@@ -843,13 +871,11 @@ mod tests {
             let p = lightcraft_catalog::replication::AppendProgress {
                 version: 1,
                 manifest: crate::assets::sha256(&crate::cloud_append::manifest("library").unwrap()).0,
-                frontiers: lightcraft_catalog::replication::publication_prefixes(&outcome.state).unwrap(),
-                remote: outcome.state.clone(),
+                frontiers: lightcraft_catalog::replication::publication_prefixes(outcome.state()).unwrap(),
+                remote: outcome.state().clone(),
                 gaps: Default::default(),
             };
-            outcome.append = Some(p);
-            outcome.cursor.clear();
-            outcome.generation = 0;
+            *outcome = Outcome::append(p, outcome.acknowledged().clone());
         };
         prepare(&mut s);
         files.fail.store(true, Ordering::Relaxed);

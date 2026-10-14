@@ -41,11 +41,5 @@ pub(crate) fn seed(
     conn.put_immutable_verified(&key, &bytes, cancel).map_err(|e| error(e.to_string()))?;
     progress.remote =
         crate::cloud_history::native::certify(conn, state, &progress.remote, &mut Default::default(), cancel).map_err(|e| error(e.to_string()))?;
-    Ok(crate::cloud_replication::Outcome {
-        state: progress.remote.clone(),
-        acknowledged: Default::default(),
-        cursor: String::new(),
-        generation: 0,
-        append: Some(progress),
-    })
+    Ok(crate::cloud_replication::Outcome::append(progress, Default::default()))
 }

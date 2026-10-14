@@ -9,13 +9,8 @@ use lightcraft_engine::catalog::replication::{Mutation, Portable, SyncState};
 use lightcraft_engine::cloud_records::{Batch, Checkpoint, CheckpointRef, Head, RecordRef};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub struct Outcome {
-    pub append: Option<lightcraft_engine::catalog::replication::AppendProgress>,
-    pub state: Portable,
-    pub acknowledged: BTreeSet<String>,
-    pub cursor: String,
-    pub generation: u64,
-}
+use lightcraft_engine::cloud_outcome::HeadPosition;
+pub use lightcraft_engine::cloud_outcome::Outcome;
 struct Remote {
     head: Option<(Head, String)>,
     state: SyncState,
@@ -187,13 +182,19 @@ pub async fn synchronize(
                 || remote.head.as_ref().is_none_or(|(h, _)| h.checkpoint.as_ref().is_some_and(|c| c.generation.saturating_add(1) == h.generation)))
         {
             let (head, _) = remote.head.ok_or("empty remote library; initial metadata must be queued")?;
-            return Ok(Outcome {
-                append: None,
-                state: super::history::certify(provider, local, &remote.state.portable(), &mut archive_proofs).await?,
-                acknowledged: local.pending.keys().cloned().collect(),
-                cursor: head.tip.hash.0,
-                generation: head.generation,
-            });
+            let state = super::history::certify(provider, local, &remote.state.portable(), &mut archive_proofs).await?;
+            let position = HeadPosition::new(head.tip.hash.0, head.generation)?;
+            return Ok(
+                if local.pending.is_empty()
+                    && !checkpoint_requested
+                    && local.cursor.as_deref() == Some(position.cursor())
+                    && local.generation == position.generation()
+                {
+                    Outcome::unchanged(state, position)
+                } else {
+                    Outcome::head(state, position, local.pending.keys().cloned().collect())
+                },
+            );
         }
         let count = pending.len();
         let pending = lightcraft_engine::cloud_sync::publication_order(pending, &remote.state.clock).map_err(|e| e.to_string())?;

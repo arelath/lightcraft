@@ -136,13 +136,7 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
         provider.put_immutable(&format!("{root}/checkpoints/{}/{}.json", local.device, sha256(&bytes).0), &bytes).await?;
     }
     p.remote = super::history::certify(provider, local, &p.remote, &mut planner.proofs).await?;
-    Ok(Outcome {
-        state: p.remote.clone(),
-        acknowledged: planner.acknowledged(local).map_err(ce)?,
-        cursor: String::new(),
-        generation: 0,
-        append: Some(p),
-    })
+    Ok(Outcome::append(p, planner.acknowledged(local).map_err(ce)?))
 }
 
 pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, String> {
@@ -161,5 +155,5 @@ pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, 
     let root = core::root(&provider.connection.prefix, &local.library).map_err(ce)?;
     provider.put_immutable(&format!("{root}/checkpoints/{}/{}.json", local.device, sha256(&bytes).0), &bytes).await?;
     p.remote = super::history::certify(provider, local, &p.remote, &mut planner.proofs).await?;
-    Ok(Outcome { state: p.remote.clone(), acknowledged: Default::default(), cursor: String::new(), generation: 0, append: Some(p) })
+    Ok(Outcome::append(p, Default::default()))
 }

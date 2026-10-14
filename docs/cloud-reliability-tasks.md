@@ -44,7 +44,7 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 - [x] CR.29 — Model subsystem health explicitly: user pause, polling halted by error, publication waiting, structural conflicts, and last successful remote scan. A success clears only the recovered subsystem's failure. Test failed automatic sync followed by upload success, and structural-only conflicts; never infer healthy synchronization solely from no pending local work.
 - [x] CR.30 — Record logical fields changed by actions and construct undo/redo inverses against current state. Guard those fields' revisions while preserving independent remote metadata and membership changes. Test local title undo after remote caption editing, plus concurrent changes to the same title.
 - [x] CR.31 — Separate verified media readiness, metadata publication, and covered-receipt finalization under one authoritative per-library coordinator (with CR.13/CR.22/CR.27). Share bounded fresh media evidence across active producers, journal exact late-worker proof, and assert bulk request/byte costs for batch and sibling workers.
-- [ ] CR.32 — Replace contradictory protocol outcome combinations and sentinel cursors/generations with explicit unchanged, conditional-head, and append outcome variants. Test evidence merging, monotonic cursors, and no-op writes.
+- [x] CR.32 — Replace contradictory protocol outcome combinations and sentinel cursors/generations with explicit unchanged, conditional-head, and append outcome variants. Test evidence merging, monotonic cursors, and no-op writes.
 - [ ] CR.33 — Extract independently testable shared structural reconciliation. Add property tests: identical shared synchronization state yields identical shared relationships regardless of local IDs, local-only content, iteration order, or delivery order. Test local-only preservation separately.
 
 ## Verification log
@@ -593,3 +593,39 @@ were inspected and `ui.inspect` captured. All 141 signed loopback requests verif
 and C: scratch `lightcraft-cr31-native/native-9e227312/`, `native-a22f785b/`.
 CR.31 is complete. This is native fixture acceptance; no new live-provider/browser
 runtime or large-library latency claim is made. Earlier scale work stays open.
+
+2026-10-15 — CR.32 implementation: native/browser producers and owners now use a
+shared explicit outcome enum. Published heads require validated digest/nonzero
+positions; empty head and unchanged scans carry no ACKs, and append owns its sole
+portable state through progress. A common application path handles monotonic cursors,
+ACK subsets and empty-head rollback. Unchanged evidence is retained and compared
+against current owner state before skipping writes. Browser incoming state flushes
+before durable acknowledgement; head receipts use the retained position, append
+receipts use merged progress, and empty heads need no fabricated receipt. Legacy
+browser receipt-file encoding remains compatible; transport reports omit meaningless
+head fields. Initial checks caught two tests mutating removed struct fields; those
+fixtures now construct typed variants. Native and browser-WASM checks passed. Focused
+regressions, full CI and rebuilt native acceptance remain pending; CR.32 stays open.
+
+Focused CR.32 verification passed: 102 engine cloud tests, five browser durable-ACK
+tests, native all-target clippy, and browser-WASM checking. The tests include exact
+archived ACK replay/reload, late owner edits, head rollback/fork refusal, append
+full-disk rollback, unchanged head no-write behavior, typed empty heads and validated
+positions. Published-head legacy helpers now reject sentinel arguments as well.
+Full gate and rebuilt native checks remain pending.
+
+CR.32 final source passed all eight CI stages (`cr32-ci.log`), including the opaque
+published-position compile-fail documentation test. Native rebuild and both-protocol
+acceptance of the changed report shape remain pending before checking the task off.
+
+Rebuilt native acceptance passed on both protocols (`cr32-native-build.log`,
+`cr32-native-{head,append}.log`): actual ordinary-sync reports contained validated
+head positions or append frontiers with no fabricated cursor/generation. Automatic
+bulk upload, exact receipt completion, no-network original removal after restart,
+and fresh explicit verification retained their one-object byte costs. All 141 signed
+requests verified (64 head / 77 append). Both cloud-pop-up screenshots were inspected,
+with no queued work; `ui.inspect` was captured. Evidence: ignored
+`target/cloud-reliability/cr32-native-*.json`, C: scratch
+`lightcraft-cr32-native/native-74966b4b/` and `native-c246e98c/`. CR.32 is complete.
+Browser receipt semantics are unit-tested and full WASM-compiled; this run does not
+claim fresh browser runtime or live-provider acceptance. CR.33 remains open.

@@ -560,29 +560,29 @@ mod materialize;
 #[cfg(test)]
 mod tests;
 pub use materialize::accept_structure;
-pub use materialize::completed_checkpoint;
 pub use materialize::incoming;
 pub use materialize::incoming_append;
 pub use materialize::incoming_checkpoint;
 pub use materialize::resolve;
 pub use materialize::restore_deleted;
 pub use materialize::structural_conflicts;
+pub use materialize::{completed_checkpoint, completed_outcome};
 
 /// Old verified results can lack witnesses for archives installed since they
 /// started. Retain newer state and refresh rather than pausing on missing proofs.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn obsolete_completion_needs_proof(catalog: &Catalog, outcome: &crate::cloud_replication::Outcome, failure: &EngineError) -> bool {
+pub(crate) fn obsolete_completion_needs_proof(catalog: &Catalog, outcome: &crate::cloud_outcome::Outcome, failure: &EngineError) -> bool {
     if !matches!(failure, EngineError::Catalog(lightcraft_catalog::CatalogError::ArchiveRequired(_))) {
         return false;
     }
     let Some(current) = catalog.sync_state() else { return false };
-    if let Some(incoming) = &outcome.append {
+    if let Some(incoming) = outcome.append_progress() {
         current.append.as_ref().is_some_and(|previous| {
             previous.manifest == incoming.manifest
                 && incoming.frontiers.iter().all(|(author, sequence)| previous.frontiers.get(author).copied().unwrap_or(0) >= *sequence)
         })
     } else {
-        current.protocol.is_head() && outcome.generation < current.generation
+        current.protocol.is_head() && outcome.head_position().is_none_or(|position| position.generation() < current.generation)
     }
 }
 
@@ -601,7 +601,8 @@ pub fn unchanged_head(
     local.protocol.is_head()
         && local.pending.is_empty()
         && acknowledged.is_empty()
-        && local.cursor.as_deref().unwrap_or("") == cursor
+        && generation > 0
+        && local.cursor.as_deref() == Some(cursor)
         && local.generation == generation
         && local.version == remote.version
         && local.library == remote.library
@@ -663,4 +664,11 @@ fn enqueue_changes(state: &mut SyncState, changes: Vec<Change>) -> Result<bool> 
     }
     state.enqueue(chunk)?;
     Ok(any)
+}
+
+/// A transport's unchanged hint never bypasses comparison with the current owner.
+pub fn unchanged_outcome(catalog: &Catalog, outcome: &crate::cloud_outcome::Outcome) -> bool {
+    outcome
+        .head_position()
+        .is_some_and(|position| unchanged_head(catalog, outcome.state(), outcome.acknowledged(), position.cursor(), position.generation()))
 }

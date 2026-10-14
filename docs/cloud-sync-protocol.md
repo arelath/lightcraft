@@ -698,3 +698,28 @@ preserving historical publication evidence and keeping staging protected. Per-im
 completion and fresh-media signals scope recovery correctly; abort/local finalization
 cannot clear a verification failure. Typed maintenance purposes prevent user
 connection names from colliding with receipt-worker routing/reservations.
+
+
+### Typed transport outcomes (2026-10-15)
+
+Native and browser transports share `cloud_outcome::Outcome`: an unchanged certified
+head scan, a conditional-head result, or append progress with exact acknowledgements.
+An unchanged hint retains its portable evidence; the owner compares its current
+catalog before deciding that no write is needed. Conditional-head results explicitly
+separate an empty remote head from a published head. Published positions require a
+SHA-256 cursor and nonzero generation. Empty-head results cannot carry ACKs; append
+results have one authoritative portable state inside progress and no head fields.
+
+Owner application preserves newer head positions, merges append evidence, and
+checks requested ACKs against the result. Browser received state reaches storage
+before an ACK receipt retires pending mutations. Its head receipt uses the retained
+current position after reconciliation; empty-head state flushes without a fabricated
+ACK. Existing version-1/version-2 browser receipt files remain readable; their legacy
+on-disk encoding does not define the transport result type. Catalog/wire formats
+are unchanged by this refactoring.
+
+`cloud.sync` completion reports include `outcome` (`unchanged`, `conditionalHead`,
+or `append`). Only a published head includes `cursor` and `generation`; an empty
+head reports `head: "empty"`, and append reports `frontiers`/`gaps`. Poll status still
+exposes the saved catalog's protocol-specific state. Existing append checkpoint
+request-cost/large-library work stays open in CR.9/CR.10.
