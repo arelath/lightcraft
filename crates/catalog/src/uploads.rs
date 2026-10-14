@@ -4,7 +4,35 @@
 use crate::PhotoId;
 use crate::assets::{Asset, AssetId, identifier};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Exact verified publication evidence awaiting its device-local receipt write.
+/// This queue is journaled with the shared ACK and never enters portable state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UploadFinalization {
+    pub version: u32,
+    pub protocol: crate::replication::SyncProtocol,
+    pub library: String,
+    pub generation: Option<u64>,
+    pub proofs: BTreeMap<String, String>,
+}
+
+impl UploadFinalization {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != 1
+            || !identifier(&self.library)
+            || self.proofs.is_empty()
+            || self.proofs.len() > crate::replication::MAX_PENDING
+            || self.proofs.iter().any(|(id, digest)| !identifier(id) || digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            || (self.protocol.is_head() && self.generation.is_none_or(|generation| generation == 0))
+            || (!self.protocol.is_head() && self.generation.is_some())
+        {
+            return Err("invalid upload receipt-finalization proof; staged data retained".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +55,8 @@ pub struct UploadIntent {
     pub verified: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization: Option<UploadFinalization>,
 }
 
 impl UploadIntent {
@@ -35,6 +65,12 @@ impl UploadIntent {
             return Err("invalid upload identity".into());
         }
         asset.validate()?;
+        if let Some(proof) = &self.finalization {
+            proof.validate()?;
+            if self.state != UploadState::Synchronized {
+                return Err("receipt finalization requires a durable synchronization acknowledgement".into());
+            }
+        }
         if self.verified.len() > asset.blobs().count() || self.verified.iter().any(|key| !asset.blobs().any(|blob| &blob.remote.key == key)) {
             return Err("upload verification refers to another asset".into());
         }
@@ -76,6 +112,7 @@ mod tests {
             state: UploadState::SavedLocally,
             verified: Default::default(),
             error: None,
+            finalization: None,
         };
         let op = Op::Batch {
             ops: vec![
@@ -94,6 +131,43 @@ mod tests {
         journal.snapshot(&recovered).unwrap();
         let (_, compacted, _) = Journal::open(Box::new(store)).unwrap();
         assert_eq!(compacted.upload_intents(), recovered.upload_intents());
+        for protocol in [crate::replication::SyncProtocol::ConditionalHead, crate::replication::SyncProtocol::AppendLog] {
+            let mut complete = intent.clone();
+            complete.state = UploadState::Synchronized;
+            complete.verified.insert("originals/a".into());
+            complete.finalization = Some(UploadFinalization {
+                version: 1,
+                protocol,
+                library: "library".into(),
+                generation: protocol.is_head().then_some(7),
+                proofs: BTreeMap::from([("device-1".into(), "b".repeat(64))]),
+            });
+            let op = Op::SetUploadIntent { id: "import-1".into(), intent: Some(Box::new(complete.clone())) };
+            catalog.apply(op.clone()).unwrap();
+            let files = MemStore::default();
+            let (mut durable, _, _) = Journal::open(Box::new(files.clone())).unwrap();
+            durable.snapshot(&catalog).unwrap();
+            durable.append(&[op]).unwrap();
+            let (_, loaded, _) = Journal::open(Box::new(files.clone())).unwrap();
+            assert_eq!(loaded.upload_intents()["import-1"], complete);
+            durable.snapshot(&loaded).unwrap();
+            assert_eq!(Journal::open(Box::new(files)).unwrap().1.upload_intents()["import-1"], complete);
+            for invalid in 0..5 {
+                let mut bad = complete.clone();
+                let proof = bad.finalization.as_mut().unwrap();
+                match invalid {
+                    0 => proof.version = 2,
+                    1 => proof.generation = if protocol.is_head() { None } else { Some(7) },
+                    2 => proof.proofs.clear(),
+                    3 => {
+                        proof.proofs.insert("device-1".into(), "wrong".into());
+                    }
+                    _ => bad.state = UploadState::Failed,
+                }
+                assert!(catalog.apply(Op::SetUploadIntent { id: "import-1".into(), intent: Some(Box::new(bad)) }).is_err());
+                assert_eq!(catalog.upload_intents()["import-1"], complete);
+            }
+        }
         catalog.apply(inverse).unwrap();
         assert!(catalog.upload_intents().is_empty() && catalog.assets().is_empty() && catalog.photo(PhotoId(1)).is_none());
     }
@@ -109,6 +183,7 @@ mod tests {
             state: UploadState::SavedLocally,
             verified: Default::default(),
             error: None,
+            finalization: None,
         };
         assert!(
             catalog

@@ -353,6 +353,7 @@ mod tests {
                             state: UploadState::SavedLocally,
                             verified: BTreeSet::new(),
                             error: None,
+                            finalization: None,
                         })),
                     },
                 ],

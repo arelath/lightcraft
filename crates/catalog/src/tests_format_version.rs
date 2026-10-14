@@ -211,11 +211,11 @@ fn op_variants_are_versioned() {
             Op::SetFolderRecord { .. } => 6,
             Op::SetAsShotWb { .. } => 7,
             Op::SetAsset { .. } => 8,
-            Op::SetUploadIntent { .. } => 9,
+            Op::SetUploadIntent { .. } => 16,
             Op::SetCloudIdentity { .. } | Op::SetWorkingCopy { .. } => 10,
             Op::SetSyncState { .. } | Op::SetAlbumRules { .. } | Op::AddAlbum { .. } => 15,
         }
     }
-    let newest = since(&Op::SetSyncState { state: None });
+    let newest = since(&Op::SetUploadIntent { id: "import-1".into(), intent: None });
     assert_eq!(newest, VERSION, "the newest op shape's version must be the current format version");
 }

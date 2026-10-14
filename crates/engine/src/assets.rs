@@ -288,7 +288,9 @@ impl AssetResolver {
                     managed::Intent {
                         asset_id: intent.asset_id.clone(),
                         asset: Arc::new(asset.clone()),
-                        acknowledged: durable && intent.state == lightcraft_catalog::uploads::UploadState::Synchronized,
+                        acknowledged: durable
+                            && intent.state == lightcraft_catalog::uploads::UploadState::Synchronized
+                            && intent.finalization.is_none(),
                     },
                 );
             }

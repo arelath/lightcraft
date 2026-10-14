@@ -211,6 +211,7 @@ mod tests {
                         state: [UploadState::SavedLocally, UploadState::Uploading, UploadState::Failed][(i - 1) as usize],
                         error: None,
                         verified: Default::default(),
+                        finalization: None,
                     })),
                 })
                 .unwrap();

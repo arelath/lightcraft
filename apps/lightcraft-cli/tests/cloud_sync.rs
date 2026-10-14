@@ -24,6 +24,80 @@ fn saved_catalog(path: &Path) -> lightcraft_catalog::Catalog {
     lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(path).unwrap())).unwrap().1
 }
 #[test]
+fn shared_upload_ack_finalizes_receipts_after_restart_without_media_requests() {
+    use lightcraft_catalog::uploads::UploadState;
+    for append in [false, true] {
+        let f = Fixture::new();
+        f.state.lock().unwrap().append_mode = append;
+        let protocol = if append { "append-log-v1" } else { "conditional-head-v1" };
+        let a = f.dir.join("shared-receipts");
+        success(&f, &a, &[("cloud.configure", configure(&f)), ("cloud.syncEnable", json!({"connection":"personal","protocol":protocol}))]);
+        let paths: Vec<_> = (0..2)
+            .map(|n| {
+                let pixels = lightcraft_raster::Rgba8::from_fn(32, 24, |x, y| [x as u8 * 5, y as u8 * 7, n * 100, 255]);
+                let path = f.dir.join(format!("receipt-{n}.png"));
+                std::fs::write(&path, lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&pixels), &Default::default()).unwrap())
+                    .unwrap();
+                path
+            })
+            .collect();
+        success(&f, &a, &[("cloud.import", json!({"connection":"personal","paths":paths}))]);
+        let before = saved_catalog(&a);
+        let imports: Vec<_> = before.upload_intents().keys().cloned().collect();
+        assert_eq!(imports.len(), 2);
+        let first = &imports[0];
+        let photo = before.upload_intents()[first].photo_id;
+        let rows = success(&f, &a, &[("cloud.upload", json!({"imports":[first]}))]);
+        assert_eq!(rows[0]["result"]["results"][0]["publicationPending"], true);
+        assert_eq!(saved_catalog(&a).upload_intents()[first].state, UploadState::ObjectsVerified);
+        let path = a.join("Managed/uploads").join(format!("{first}.json"));
+        let held = f.dir.join("held-receipt.json");
+        let unfinished: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(unfinished["generation"].is_null());
+        assert!(unfinished.get("appendProof").is_none());
+        std::fs::rename(&path, &held).unwrap();
+        std::fs::create_dir(&path).unwrap(); // Force a local completion error, not an upload retry.
+        success(&f, &a, &[("cloud.upload", json!({"imports":[imports[1]]}))]);
+        let acknowledged = saved_catalog(&a);
+        let intent = &acknowledged.upload_intents()[first];
+        assert_eq!(intent.state, UploadState::Synchronized);
+        let proof = intent.finalization.clone().unwrap();
+        assert!(!proof.proofs.is_empty());
+        assert!(acknowledged.sync_state().unwrap().pending.is_empty());
+        let (requests, objects) = {
+            let state = f.state.lock().unwrap();
+            (state.requests.len(), state.objects.clone())
+        };
+        let blocked = success(&f, &a, &[("cloud.removeLocalCopy", json!({"ids":[photo]}))]);
+        assert!(!blocked[0]["result"]["failed"].as_array().unwrap().is_empty());
+        assert_eq!(saved_catalog(&a).upload_intents()[first].finalization.as_ref(), Some(&proof));
+        let asset = acknowledged.asset(&intent.asset_id).unwrap();
+        assert!(a.join("Managed/blobs").join(&asset.original.id.0).is_file(), "failed finalization keeps staging protected");
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&held, &path).unwrap();
+        let removed = success(&f, &a, &[("cloud.removeLocalCopy", json!({"ids":[photo]}))]);
+        assert!(removed[0]["result"]["failed"].as_array().unwrap().is_empty(), "{removed:?}");
+        assert!(!a.join("Managed/blobs").join(&asset.original.id.0).exists());
+        let done: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(done["state"], "synchronized");
+        for (id, digest) in &proof.proofs {
+            assert_eq!(done["appendProof"][id], digest.as_str());
+        }
+        if let Some(generation) = proof.generation {
+            assert!(done["generation"].as_u64().unwrap() >= generation);
+        }
+        let complete = saved_catalog(&a);
+        assert!(complete.upload_intents()[first].finalization.is_none());
+        assert!(complete.upload_intents()[first].error.is_none());
+        assert!(complete.sync_state().unwrap().pending.is_empty());
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.requests.len(), requests, "receipt retry and removal must make zero remote requests and transfer zero network bytes");
+        assert_eq!(state.objects, objects);
+        assert_eq!(state.signature_errors, 0);
+    }
+}
+
+#[test]
 fn overlapping_shared_stacks_converge_with_a_device_local_member_in_both_protocols() {
     use lightcraft_catalog::{FsStore, Journal, Op, PhotoId};
     for append in [false, true] {

@@ -39,11 +39,11 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 - [x] CR.24 — Materialize smart-album references to deleted or unresolved albums deterministically without broadening their criteria or blocking fresh-device bootstrap. Test a retained smart album referencing a deleted regular album.
 - [x] CR.25 — Define a nonportable smart-album policy that preserves originating-device semantics. Preserve folder criteria and local-only selections, and distinguish absent selection restrictions from explicitly empty sets. Test self-sync with folder-restricted and exclusively local-photo rules.
 - [x] CR.26 — Resolve shared stack ownership and validity independently of local-only members, then apply local overlays. Test identical shared proposals S1=(P,Q), S2=(Q,R), S3=(R,S) with and without a local-only member of S2, comparing projected cloud relationships.
-- [ ] CR.27 — Durably finalize every upload receipt covered by shared acknowledgement with exact publication evidence. Retry local proof writes after restart independently of media transfer; test delayed bulk siblings and subsequent local-copy removal without manual verification. Keep staging protection intact.
+- [x] CR.27 — Durably finalize every upload receipt covered by shared acknowledgement with exact publication evidence. Retry local proof writes after restart independently of media transfer; test delayed bulk siblings and subsequent local-copy removal without manual verification. Keep staging protection intact.
 - [ ] CR.28 — Make per-import preflight failures explicit queue outcomes with retained blocked reasons and defined retry eligibility. Test one unreadable manifest alongside a healthy import: healthy work completes and the blocked item exposes its specific recovery action.
 - [ ] CR.29 — Model subsystem health explicitly: user pause, polling halted by error, publication waiting, structural conflicts, and last successful remote scan. A success clears only the recovered subsystem's failure. Test failed automatic sync followed by upload success, and structural-only conflicts; never infer healthy synchronization solely from no pending local work.
 - [ ] CR.30 — Record logical fields changed by actions and construct undo/redo inverses against current state. Guard those fields' revisions while preserving independent remote metadata and membership changes. Test local title undo after remote caption editing, plus concurrent changes to the same title.
-- [ ] CR.31 — Separate verified media readiness, metadata publication, and covered-receipt finalization under one authoritative per-library coordinator (with CR.13/CR.22/CR.27). The per-library publication gate landed in CR.22; stage extraction, receipt finalization, and bulk-import request-count/transferred-byte assertions remain open.
+- [ ] CR.31 — Separate verified media readiness, metadata publication, and covered-receipt finalization under one authoritative per-library coordinator (with CR.13/CR.22/CR.27). The per-library publication gate landed in CR.22 and durable local receipt finalization in CR.27; media stage extraction and bulk-import request-count/transferred-byte assertions remain open.
 - [ ] CR.32 — Replace contradictory protocol outcome combinations and sentinel cursors/generations with explicit unchanged, conditional-head, and append outcome variants. Test evidence merging, monotonic cursors, and no-op writes.
 - [ ] CR.33 — Extract independently testable shared structural reconciliation. Add property tests: identical shared synchronization state yields identical shared relationships regardless of local IDs, local-only content, iteration order, or delivery order. Test local-only preservation separately.
 
@@ -378,3 +378,36 @@ publication. Evidence: ignored `target/cloud-reliability/cr26-native-results-*.j
 request logs; C: scratch `lightcraft-cr26-native/native-ae64acdb/` and `native-c0a58e32/`.
 Shared browser materialization is engine-tested/WASM-compiled; no fresh browser or live
 provider acceptance is claimed.
+
+
+2026-10-15 — CR.27 implementation: shared publication ACKs now retain a catalog-local exact
+receipt proof queue in the same journal batch. Local format 16 prevents older readers from
+dropping this queue. Staging acknowledgement requires the queue to be durably cleared, after
+its bound sidecar has been finalized. Local receipt jobs use the durable staging lock,
+release it before owner ACK, retry after restart or local I/O failure, and run while metadata
+publication is paused. Resume resets their 30-second per-import retry backoff. Upload workers
+complete their own queue entry after writing final proof. Local-copy removal completes
+covered queues first; neither receipt retry nor removal transfers media.
+
+Initial all-target engine check passed. Catalog upload journal/schema tests passed (2);
+initial upload-engine tests passed (12). The two-protocol real-CLI shared bulk-import case
+held A's unfinished receipt, published through B, preserved staging through local failure,
+then restarted and removed A's copy without `verify:true`. Exact proofs were written, the
+queue cleared, and request counts and remote objects stayed unchanged (zero network bytes).
+All 14 focused upload-engine tests passed, including owner-journal failure and obsolete
+library/connection completions. The initial full CI caught the format guard still naming
+the previous newest operation; the corrected final source passed all eight stages
+(`cr27-ci-verified.log`). Native binaries rebuilt successfully (`cr27-native-build.log`).
+
+Native restart acceptance passed on both protocols while publication was paused. A's
+unfinished receipt stayed queued and its original stayed protected through a local-file
+failure after B supplied shared publication acknowledgement. After restoring A's receipt
+and restarting, local-copy removal finalized its exact proof and durably cleared the queue
+without manual verification. Remote object contents were unchanged and finalization/removal
+made zero cloud requests. All 100 signed loopback requests verified (46 head / 54 append);
+both rendered grids were inspected and `ui.inspect` captured. Evidence: ignored
+`target/cloud-reliability/cr27-native-results-*.json` and request logs; C: scratch
+`lightcraft-cr27-native/native-bbcdc804/` and `native-27ee4ae9/`. CR.27 is complete.
+Shared acknowledgement/schema behavior is engine-tested/WASM-compiled; native local receipt
+workers have no browser equivalent. No live-provider acceptance is claimed. Queue/scheduler
+health UI remains CR.29, and broader media-stage/request-cost work remains CR.31.

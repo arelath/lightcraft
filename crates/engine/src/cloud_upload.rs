@@ -7,6 +7,7 @@ use crate::assets::{AssetError, AssetResolver, BlobStore, TransferManager, sha25
 use crate::cloud_publication::Imported;
 use crate::{EngineError, Result, Session};
 use lightcraft_catalog::assets::{Asset, Blob, BlobId, identifier};
+use lightcraft_catalog::uploads::UploadFinalization;
 use lightcraft_catalog::uploads::{UploadIntent, UploadState};
 use lightcraft_catalog::{Op, Source};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ use std::time::Duration;
 const PART_BYTES: usize = 8 << 20;
 const MAX_RECEIPT: u64 = 4 << 20;
 mod cleanup;
+mod finalize;
 pub use cleanup::{observed as observed_cleanup, start as cleanup};
 fn error(value: impl Into<String>) -> EngineError {
     EngineError::Other(value.into())
@@ -105,6 +107,7 @@ impl Receipt {
             state: self.state,
             verified: self.verified.clone(),
             error: self.error.clone(),
+            finalization: None,
         };
         intent.validate(&self.imported.asset).map_err(error)?;
         for (key, upload) in &self.multipart {
@@ -212,6 +215,11 @@ pub(crate) fn staging_proofs(root: &Path, policy: &crate::assets::managed::Polic
 }
 
 enum Event {
+    Finalized {
+        id: String,
+        proof: UploadFinalization,
+        reply: mpsc::SyncSender<Result<()>>,
+    },
     Publication {
         outcome: Box<crate::cloud_replication::Outcome>,
         started_generation: u64,
@@ -667,8 +675,22 @@ impl Item {
             self.phase(&receipt, events, cancel)?;
             receipt.state = UploadState::Synchronized;
             self.phase(&receipt, events, cancel)?; // Durable local acknowledgement before completion.
-            if let Err(e) = self.write_receipt(&receipt, cancel) {
-                log::warn!("final upload receipt marker: {e}; journal acknowledgement is durable");
+            match self.write_receipt(&receipt, cancel) {
+                Err(e) => log::warn!("final upload receipt marker: {e}; journal acknowledgement is durable"),
+                Ok(()) => {
+                    if let Some(local) = &self.sync {
+                        let proof = UploadFinalization {
+                            version: 1,
+                            protocol: local.protocol,
+                            library: local.library.clone(),
+                            generation: if local.protocol.is_head() { receipt.generation } else { None },
+                            proofs: receipt.append_proof.clone(),
+                        };
+                        if let Err(reason) = finalize::acknowledge(&self.id, proof, events, cancel) {
+                            log::warn!("final receipt acknowledgement: {reason}; local proof remains queued for retry");
+                        }
+                    }
+                }
             }
             Ok(json!({"import": self.id, "synchronized": true, "generation": receipt.generation}))
         })();
@@ -714,6 +736,9 @@ pub struct Uploads {
     requested: bool,
     include_failed: bool,
     attempted: BTreeSet<String>,
+    finalization_retry: BTreeMap<String, web_time::Instant>,
+    finalization_revision: Option<u64>,
+    finalization_candidates: BTreeSet<String>,
 }
 impl Uploads {
     pub fn active_files(&self, catalog: &lightcraft_catalog::Catalog) -> usize {
@@ -740,6 +765,7 @@ impl Uploads {
         self.include_failed |= include_failed;
         if include_failed {
             self.attempted.clear();
+            self.finalization_retry.clear();
         }
     }
 }
@@ -936,6 +962,8 @@ pub(crate) fn remove_local(s: &mut Session, p: &Value, blobs: Vec<Blob>, observe
         return Err(error("four storage tasks are running; wait or cancel before removing local copies"));
     }
     let resolver = s.media.asset_resolver.clone().ok_or_else(|| error("open a persistent library first"))?;
+    let finalizations = finalize::for_removal(s, &blobs)?;
+    let ids = finalizations.iter().map(|item| (item.id.clone(), item.intent.asset_id.clone())).collect();
     let task = s.activity.start("cache", "Remove Local Originals", crate::activity::Cancel::Yes);
     let id = task.id();
     let handle = task.handle();
@@ -948,7 +976,9 @@ pub(crate) fn remove_local(s: &mut Session, p: &Value, blobs: Vec<Blob>, observe
         .spawn(move || {
             let result = crate::guard::catch("local cloud copy removal", || {
                 handle.detail("Checking uploaded storage and staging ownership");
-                let prepared = worker_resolver.prepare_cache_removal(&worker_cancel);
+                let prepared = finalize::run(&finalizations, &worker_resolver, &sender, &worker_cancel)
+                    .map_err(|e| AssetError::Disk(e.to_string()))
+                    .and_then(|_| worker_resolver.prepare_cache_removal(&worker_cancel));
                 let mut removed = Vec::new();
                 let mut failed = Vec::new();
                 let total = blobs.len() as u64;
@@ -978,7 +1008,7 @@ pub(crate) fn remove_local(s: &mut Session, p: &Value, blobs: Vec<Blob>, observe
         library: s.library_token(),
         connection_revision: resolver.connection_revision(),
         resolver,
-        ids: BTreeMap::new(),
+        ids,
         connections: BTreeSet::new(),
         maintenance: None,
         guard: task,
@@ -1182,6 +1212,36 @@ impl Session {
         uploads.pending.retain(|pending| {
             for _ in 0..8 {
                 match pending.receiver.try_recv() {
+                    Ok(Event::Finalized { id, proof, reply }) => {
+                        let result = (|| {
+                            if !Arc::ptr_eq(&pending.library, &self.library_token())
+                                || pending.connection_revision != pending.resolver.connection_revision() {
+                                return Err(error("library or connection changed; receipt proof remains queued"));
+                            }
+                            let previous = self.catalog.upload_intents().get(&id).cloned().ok_or_else(|| error("upload intent disappeared; receipt proof retained"))?;
+                            if pending.ids.get(&id) != Some(&previous.asset_id) || previous.state != UploadState::Synchronized {
+                                return Err(error("upload acknowledgement changed; receipt proof retained"));
+                            }
+                            let Some(current) = &previous.finalization else { return Ok(()) };
+                            if current.version != proof.version || current.protocol != proof.protocol || current.library != proof.library
+                                || current.generation.is_some_and(|generation| proof.generation.is_none_or(|written| written < generation))
+                                || current.proofs.iter().any(|(id, digest)| proof.proofs.get(id) != Some(digest)) {
+                                return Err(error("upload receipt proof changed; newer finalization remains queued"));
+                            }
+                            let mut intent = previous.clone();
+                            intent.finalization = None;
+                            intent.error = None;
+                            let inverse = self.apply_catalog_mode(Op::SetUploadIntent { id: id.clone(), intent: Some(Box::new(intent)) }, false)?;
+                            if let Err(reason) = self.persist() {
+                                self.apply_received(inverse)?;
+                                return Err(reason);
+                            }
+                            Ok(())
+                        })();
+                        if Arc::ptr_eq(&pending.library, &self.library_token()) && pending.connection_revision == pending.resolver.connection_revision()
+                            && let Err(reason) = &result { finalize::record_error(self, &id, &reason.to_string()); }
+                        let _ = reply.send(result);
+                    }
                     Ok(Event::Publication { outcome, started_generation, reply }) => {
                         let result = (|| {
                             if !Arc::ptr_eq(&pending.library, &self.library_token())
@@ -1238,6 +1298,9 @@ impl Session {
                                 intent.state = if paused { UploadState::SavedLocally } else { state };
                                 intent.verified = verified;
                                 intent.error = if paused { None } else { message };
+                                if state == UploadState::Failed && remote_invalid {
+                                    intent.finalization = None;
+                                }
                             }
                             if intent == previous {
                                 return Ok(());
@@ -1254,6 +1317,10 @@ impl Session {
                         let _ = reply.send(result);
                     }
                     Ok(Event::Finished(result)) => {
+                        if Arc::ptr_eq(&pending.library, &self.library_token()) && pending.connection_revision == pending.resolver.connection_revision()
+                            && let Err(reason) = &result {
+                            for id in pending.ids.keys() { finalize::record_error(self, id, &reason.to_string()); }
+                        }
                         uploads.reports.push(match result {
                             Ok(value) => json!({"task": pending.guard.id(), "ok": true, "result": value}),
                             Err(e) => json!({"task": pending.guard.id(), "ok": false, "error": e.to_string(), "paused":self.cloud_paused && pending.cancel.load(Ordering::Relaxed)}),
@@ -1275,6 +1342,7 @@ impl Session {
             uploads.reports.drain(..uploads.reports.len() - 32);
         }
         self.cloud_uploads = uploads;
+        finalize::schedule(self);
     }
 }
 
@@ -1349,6 +1417,7 @@ mod tests {
                             state: UploadState::Published,
                             verified: BTreeSet::from(["originals/test".into()]),
                             error: None,
+                            finalization: None,
                         })),
                     },
                 ],

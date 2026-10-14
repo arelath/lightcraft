@@ -713,6 +713,7 @@ fn commit(s: &mut Session, manifests: Vec<Manifest>) -> Result<Value> {
             state: UploadState::SavedLocally,
             verified: Default::default(),
             error: None,
+            finalization: None,
         };
         if let Some(relative) = &manifest.working {
             let root = s

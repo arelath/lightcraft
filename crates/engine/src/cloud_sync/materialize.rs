@@ -720,7 +720,7 @@ pub fn incoming_checkpoint(
     generation: u64,
 ) -> Result<Op> {
     let mut state = catalog.sync_state().cloned().ok_or_else(|| error("enable synchronization first"))?;
-    let uploads = acknowledged_uploads(catalog, remote, acknowledged)?;
+    let uploads = acknowledged_uploads(catalog, remote, acknowledged, Some(generation))?;
     state.merge(remote)?;
     if generation == 0 && cursor.is_empty() && acknowledged.is_empty() && state.generation == 0 && state.cursor.is_none() {
         // No head yet: the first import may still be waiting for media transfers.
@@ -760,7 +760,7 @@ pub fn completed_checkpoint(
 /// Incoming effects and exact publication receipts commit in the same journal record.
 pub fn incoming_append(catalog: &Catalog, progress: lightcraft_catalog::replication::AppendProgress, ids: &BTreeSet<String>) -> Result<Op> {
     let mut state = catalog.sync_state().cloned().ok_or_else(|| error("enable synchronization first"))?;
-    let uploads = acknowledged_uploads(catalog, &progress.remote, ids)?;
+    let uploads = acknowledged_uploads(catalog, &progress.remote, ids, None)?;
     state.merge(&progress.remote)?;
     state.acknowledge_append(ids, progress)?;
     let mut ops = install(catalog, &state)?;
@@ -771,19 +771,25 @@ pub fn incoming_append(catalog: &Catalog, progress: lightcraft_catalog::replicat
 
 /// One mutation can introduce many photos. Exact receipt proof acknowledges every
 /// covered, fully byte-verified upload, including a sibling worker's waiting intent.
-fn acknowledged_uploads(catalog: &Catalog, remote: &lightcraft_catalog::replication::Portable, ids: &BTreeSet<String>) -> Result<Vec<Op>> {
+fn acknowledged_uploads(
+    catalog: &Catalog,
+    remote: &lightcraft_catalog::replication::Portable,
+    ids: &BTreeSet<String>,
+    generation: Option<u64>,
+) -> Result<Vec<Op>> {
     let Some(state) = catalog.sync_state() else { return Ok(Vec::new()) };
-    let mut content = BTreeSet::new();
+    let mut content: BTreeMap<_, BTreeMap<String, String>> = BTreeMap::new();
     for id in ids {
         let Some(mutation) = state.pending.get(id) else { continue };
-        if remote.received.get(id).is_none_or(|receipt| !mutation.digest().is_ok_and(|digest| receipt.digest == digest)) {
+        let digest = mutation.digest()?;
+        if remote.received.get(id).is_none_or(|receipt| receipt.digest != digest) {
             return Err(error("upload acknowledgement lacks exact publication proof"));
         }
         for change in &mutation.changes {
             if change.field == "content"
                 && let Some(asset) = change.value.get("assetId").and_then(Value::as_str)
             {
-                content.insert((change.entity.clone(), asset.to_owned()));
+                content.entry((change.entity.clone(), asset.to_owned())).or_default().insert(id.clone(), digest.clone());
             }
         }
     }
@@ -795,7 +801,7 @@ fn acknowledged_uploads(catalog: &Catalog, remote: &lightcraft_catalog::replicat
             let asset = catalog.asset(&intent.asset_id)?;
             if intent.state == lightcraft_catalog::uploads::UploadState::Synchronized
                 || asset.original.remote.connection != state.connection
-                || !content.contains(&(format!("photo:{global}"), intent.asset_id.0.clone()))
+                || !content.contains_key(&(format!("photo:{global}"), intent.asset_id.0.clone()))
                 || asset.blobs().any(|blob| !intent.verified.contains(&blob.remote.key))
             {
                 return None;
@@ -803,6 +809,13 @@ fn acknowledged_uploads(catalog: &Catalog, remote: &lightcraft_catalog::replicat
             let mut intent = intent.clone();
             intent.state = lightcraft_catalog::uploads::UploadState::Synchronized;
             intent.error = None;
+            intent.finalization = Some(lightcraft_catalog::uploads::UploadFinalization {
+                version: 1,
+                protocol: state.protocol,
+                library: state.library.clone(),
+                generation,
+                proofs: content.get(&(format!("photo:{global}"), intent.asset_id.0.clone()))?.clone(),
+            });
             Some(Op::SetUploadIntent { id: id.clone(), intent: Some(Box::new(intent)) })
         })
         .collect())

@@ -1,6 +1,6 @@
 # Direct bucket synchronization
 
-Last updated: 2026-10-14
+Last updated: 2026-10-15
 
 Configure the same bucket and library prefix on each computer. In File → Cloud Synchronization,
 the first computer leaves Library ID blank; subsequent computers enter the first computer's
@@ -45,7 +45,7 @@ Filter chips clear the marker; legacy `only:[]` command patches still clear the
 restriction unless they explicitly set the marker. Empty similarity results remain
 constrained rather than showing the whole library.
 
-Upgrade all devices before using these semantics. New local snapshots use format 15,
+Upgrade all devices before using these semantics. New local snapshots use format 16 (15 introduced the smart-selection barrier),
 new mutations version 2, and new synchronization/checkpoint states version 3. Older
 builds reject these required versions before applying an empty allowed set. New
 readers accept legacy mutation/state versions and retain their exact identities and
@@ -112,9 +112,20 @@ healthy selected items continue and durable data remains retained.
 Automatic single-import jobs can reach `objectsVerified` while sibling imports still need
 transfers. This means publication pending, not failed. Exact append publication proof and
 fully verified object keys acknowledge every covered upload intent in one catalog transaction.
-A stale non-error worker phase cannot regress an already acknowledged intent. A sibling's on-disk
-receipt may retain its waiting marker until explicit verification/retry; staging cleanup remains
-conservative until that receipt also has exact remote proof.
+Obsolete worker phases cannot regress an already acknowledged intent. Shared ACKs also
+journal a device-local receipt-finalization queue (local format 16) with the exact mutation
+IDs/digests and protocol/library binding; head proofs include their acknowledged generation.
+A separate local worker writes this evidence into every covered sidecar, then durably clears
+that import's queue entry. Upload workers also clear their own entries after successfully
+writing final proof. Local write or catalogue-clear failure keeps staging protected.
+
+Finalization does not upload or download originals and can finish while cloud publication is
+user-paused. Restart retries queued work; local failures retain per-import reasons and retry
+with a 30-second backoff. Explicit resume clears the backoff. Local-copy removal finalizes
+covered receipts before staging promotion/removal, so it needs no manual verification upload.
+Receipt/asset/global-photo/library/protocol/destination mismatches and unfinished multipart
+records remain protected and require repair. Old synchronized imports lacking a queued exact
+proof retain the conservative legacy recovery policy; generation alone cannot invent evidence.
 
 Sync-enabled conditional-head imports also publish normal causal mutations rather than
 adding one synthetic legacy author per import. Their version-4 device-local receipts bind
@@ -558,7 +569,7 @@ Upload phase events identify their attempt. Ordinary older failures cannot undo
 shared acknowledgement. Explicit verification started on an already synchronized
 import can invalidate it when it confirms missing or corrupt remote bytes and
 cannot repair them; connectivity or old publication failures do not revoke proof.
-Receipt finalization after another worker acknowledges publication remains CR.27;
+Receipt finalization after another worker acknowledges publication is durable (CR.27);
 transfer/publication stage extraction and request-cost assertions remain CR.31.
 
 

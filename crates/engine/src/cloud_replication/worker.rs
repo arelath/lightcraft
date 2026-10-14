@@ -749,6 +749,7 @@ mod tests {
                 state: lightcraft_catalog::uploads::UploadState::Failed,
                 verified: Default::default(),
                 error: Some("offline".into()),
+                finalization: None,
             })),
         })
         .unwrap();
