@@ -208,8 +208,9 @@ The Info panel identifies cloud storage, reports original availability and offer
 Settings opens on Cache, laid out like Lightroom's Preferences → Cache: a page list on the left and,
 on the right, the drive the cloud cache is on with a Learn More link to this section.
 
-- **Usage bar and legend.** The bar shows the drive's used and free space ("X GB of Y GB used",
-  "Z GB free"). The legend splits what LightCraft uses: *App & user data* (the library folder
+- **Usage bar and legend.** As in the reference, "X GB of Y GB used" counts what LightCraft keeps
+  on the drive (the three entries below) against that plus the free space ("Z GB free"), so the
+  bar shows how much of the room left to it LightCraft takes. The legend splits what LightCraft uses: *App & user data* (the library folder
   without the cloud cache: catalog, thumbnails, smart previews, staged imports; measured in the
   background), *Photo cache* (downloads that can be evicted), *Stored offline* (pinned and
   library-wide offline copies) and *Free*. Figures are GiB shown as "GB"; an unknown figure

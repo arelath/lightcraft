@@ -152,6 +152,10 @@ pub(crate) fn command(s: &mut Session, p: &Value) -> Result<Value> {
     if !paths_equal(&target, &default) && target.join(RETENTION).exists() {
         return Err(bad(C, "that folder already holds a cloud cache (another library's?); choose an empty folder"));
     }
+    // the library reopens on the new folder when the copy is done, which would stop these
+    if s.cloud_imports.preparing() > 0 || s.cloud_uploads.running() > 0 {
+        return Err(bad(C, "cloud imports or uploads are running; wait for them to finish (or pause cloud sync) before moving the cache"));
+    }
     if !resolver.transfer_status().active.is_empty() {
         return Err(bad(C, "cloud downloads are running; wait for them to finish (or cancel them) before moving the cache"));
     }

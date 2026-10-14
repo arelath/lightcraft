@@ -24,6 +24,15 @@ pub fn gb(bytes: u64) -> String {
     if g < 0.05 { "0 GB".into() } else { format!("{g:.1} GB") }
 }
 
+/// The usage bar's (used, total), as in the reference: "used" is what LightCraft keeps on the
+/// drive (app & user data + photo cache + stored offline) and "total" is that plus the free
+/// space, so the bar shows how much of the room left to it LightCraft takes. Unknown while any
+/// part is unknown (app data is measured in the background).
+pub fn bar_usage(app_data: Option<u64>, photo_cache: Option<u64>, offline: Option<u64>, free: Option<u64>) -> Option<(u64, u64)> {
+    let used = app_data?.saturating_add(photo_cache?).saturating_add(offline?);
+    Some((used, used.saturating_add(free?)))
+}
+
 /// What the page shows, fetched at most once a second (and right after a change).
 #[derive(Clone)]
 struct Fetched {
@@ -70,7 +79,10 @@ pub fn cache_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
     let u = |key: &str| storage[key].as_u64();
     let volume = &storage["volume"];
     let drive = volume["label"].as_str().unwrap_or("?").to_string();
-    let (total, free) = (volume["totalBytes"].as_u64(), volume["freeBytes"].as_u64());
+    let free = volume["freeBytes"].as_u64();
+    let usage = bar_usage(u("appDataBytes"), u("photoCacheBytes"), u("offlineBytes"), free);
+    // the size limit can't exceed the drive
+    let total = volume["totalBytes"].as_u64();
 
     // Cache on: C:                                                    Learn More ↗
     ui.horizontal(|ui| {
@@ -97,19 +109,18 @@ pub fn cache_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
     // the drive's usage bar
     let (bar, _) = ui.allocate_exact_size(vec2(width, 4.0), Sense::hover());
     ui.painter().rect_filled(bar, 2.0, t.track);
-    if let (Some(total), Some(free)) = (total, free)
-        && total > 0
+    if let Some((used, all)) = usage
+        && all > 0
     {
-        let used = total.saturating_sub(free);
-        let w = bar.width() * (used as f64 / total as f64).clamp(0.0, 1.0) as f32;
+        let w = bar.width() * (used as f64 / all as f64).clamp(0.0, 1.0) as f32;
         ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(w, bar.height())), 2.0, t.accent);
     }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let small = t.font(10.0);
-        let used = match (total, free) {
-            (Some(total), Some(free)) => crate::i18n::tr_format!("{used} of {total} used", used = gb(total.saturating_sub(free)), total = gb(total)),
-            _ => crate::i18n::tr("Drive size unknown").to_string(),
+        let used = match usage {
+            Some((used, all)) => crate::i18n::tr_format!("{used} of {total} used", used = gb(used), total = gb(all)),
+            None => crate::i18n::tr("Measuring…").to_string(),
         };
         ui.label(RichText::new(used).font(small.clone()).color(t.text_label));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -296,4 +307,22 @@ fn pill_button(ui: &mut egui::Ui, t: &Tokens, id: &str, label: &str) -> egui::Re
     p.rect_stroke(r.shrink(1.0), 13.0, Stroke::new(1.5, t.text), egui::StrokeKind::Middle);
     p.galley_with_override_text_color(r.center() - galley.size() / 2.0, galley, t.text);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reference's figures: 7.9 + 58.1 + 0 GB used and 109.73 GB free read "66.0 GB of 175.7 GB used".
+    #[test]
+    fn the_bar_counts_lightcrafts_usage_against_the_room_left_to_it() {
+        let g = |x: f64| (x * GB) as u64;
+        let (used, total) = bar_usage(Some(g(7.9)), Some(g(58.1)), Some(0), Some(g(109.73))).unwrap();
+        assert_eq!((gb(used), gb(total)), ("66.0 GB".to_string(), "175.7 GB".to_string()));
+        assert!((used as f64 / total as f64 - 0.3756).abs() < 0.001, "about 38% full");
+        assert_eq!(bar_usage(None, Some(1), Some(0), Some(1)), None, "unknown until app data is measured");
+        assert_eq!(bar_usage(Some(0), Some(0), Some(0), None), None);
+        assert_eq!(bar_usage(Some(u64::MAX), Some(1), Some(1), Some(1)), Some((u64::MAX, u64::MAX)));
+        assert_eq!(gb(0), "0 GB");
+    }
 }
