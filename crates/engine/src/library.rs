@@ -499,7 +499,18 @@ impl Session {
         // photo ids are per library: drop decoded sources of the previous one
         self.media.clear_sources();
         self.media.managed_assets = self.catalog.assets().clone();
-        self.media.asset_resolver = cache_dir.as_ref().map(|d| std::sync::Arc::new(crate::assets::AssetResolver::new(d.join("assets-cache"))));
+        // Settings → Cache → Storage location (a disconnected drive: the library folder meanwhile)
+        #[cfg(not(target_arch = "wasm32"))]
+        let (asset_root, location_warning) = match &cache_dir {
+            Some(d) if on_disk => {
+                let (root, warning) = crate::cloud_cache_location::resolve(d);
+                (Some(root), warning)
+            }
+            other => (other.as_ref().map(|d| d.join("assets-cache")), None),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (asset_root, location_warning): (Option<PathBuf>, Option<String>) = (cache_dir.as_ref().map(|d| d.join("assets-cache")), None);
+        self.media.asset_resolver = asset_root.map(|root| std::sync::Arc::new(crate::assets::AssetResolver::new(root)));
         if let Some(resolver) = &self.media.asset_resolver {
             resolver.set_activity(self.activity.clone());
             if on_disk {
@@ -523,7 +534,8 @@ impl Session {
             forgot_local: None,
             presets_written,
             view_written,
-            settings_warnings: unlocked_warning(lock.as_ref()).into_iter().chain(settings.warnings).collect(),
+            settings_warnings: unlocked_warning(lock.as_ref()).into_iter().chain(settings.warnings).chain(location_warning).collect(),
+
             warnings_reported: 0,
             blocked: settings.blocked,
             lock: lock.take(),

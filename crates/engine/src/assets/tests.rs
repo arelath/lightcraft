@@ -1016,3 +1016,88 @@ fn cache_settings_commands_report_the_drive_keep_new_cloud_photos_offline_and_cl
     assert_eq!(session.execute("cloud.cache", &serde_json::json!({})).unwrap()["usedBytes"], 0);
     assert_eq!(provider.1.load(Ordering::Relaxed), 2, "each original was downloaded once");
 }
+
+#[test]
+fn moving_the_cloud_cache_copies_verified_files_reopens_on_the_new_folder_and_survives_restart() {
+    let (scratch, elsewhere) = (Scratch::new(), Scratch::new());
+    let target = elsewhere.0.join("Cloud cache");
+    let bytes = b"a cached cloud original";
+    let b = blob(bytes);
+    let asset = Asset { associated: Default::default(), original: b.clone(), smart_preview: None, thumbnail: None };
+    let mut session = crate::Session::new().with_fs();
+    session.open_library(&scratch.0, false).unwrap();
+    let resolver = session.media.asset_resolver.clone().unwrap();
+    resolver.connect("memory".into(), store(bytes)).unwrap();
+    session
+        .execute(
+            "cloud.attach",
+            &serde_json::json!({"assetId": "moved", "asset": asset, "fileName": "moved.raw", "width": 32, "height": 24, "kind": "raw"}),
+        )
+        .unwrap();
+    drop(resolver.acquire(&b, &AtomicBool::new(false)).unwrap());
+    session.execute("cloud.cache", &serde_json::json!({"budgetMb": 3})).unwrap();
+    let old_root = resolver.root().to_path_buf();
+    drop(resolver);
+
+    for bad in [
+        serde_json::json!({"path": "relative/folder"}),
+        serde_json::json!({"path": scratch.0.join("Managed/cache")}),
+        serde_json::json!({"path": old_root.join("inner")}),
+    ] {
+        assert!(session.execute("cloud.cacheLocation", &bad).is_err(), "{bad}");
+    }
+    let used = elsewhere.0.join("used");
+    std::fs::create_dir_all(&used).unwrap();
+    std::fs::write(used.join("retention.json"), b"{}").unwrap();
+    assert!(session.execute("cloud.cacheLocation", &serde_json::json!({"path": used})).is_err(), "another cache's folder is refused");
+
+    let moved = session.execute("cloud.cacheLocation", &serde_json::json!({"path": target, "wait": true})).unwrap();
+    assert_eq!(moved["result"]["ok"], true, "{moved}");
+    let resolver = session.media.asset_resolver.clone().unwrap();
+    assert_eq!(resolver.root(), target.as_path());
+    assert_eq!(std::fs::read(target.join(&b.id.0)).unwrap(), bytes);
+    assert_eq!(resolver.cache_status().budget_bytes, 3 << 20, "retention settings moved too");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while old_root.join(&b.id.0).exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!old_root.join(&b.id.0).exists(), "the old copy is deleted after the switch");
+    let location = session.execute("cloud.cacheLocation", &serde_json::json!({})).unwrap();
+    assert_eq!(location["custom"], true);
+    drop(resolver);
+
+    // restart: still there; a disconnected folder falls back to the library folder with a warning
+    session.close_library().unwrap();
+    session.open_library(&scratch.0, false).unwrap();
+    assert_eq!(session.media.asset_resolver.as_ref().unwrap().root(), target.as_path());
+    session.close_library().unwrap();
+    std::fs::rename(&target, elsewhere.0.join("unplugged")).unwrap();
+    session.open_library(&scratch.0, false).unwrap();
+    assert_eq!(session.media.asset_resolver.as_ref().unwrap().root(), old_root.as_path());
+    assert!(session.library.as_ref().unwrap().settings_warnings.iter().any(|w| w.contains("not available")));
+    session.close_library().unwrap();
+    std::fs::rename(elsewhere.0.join("unplugged"), &target).unwrap();
+    session.open_library(&scratch.0, false).unwrap();
+
+    // back to the library folder, as a background task finished by the owner
+    let started = session.execute("cloud.cacheLocation", &serde_json::json!({"reset": true})).unwrap();
+    assert_eq!(started["background"], true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !session.poll_cache_move() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(session.media.asset_resolver.as_ref().unwrap().root(), old_root.as_path());
+    assert_eq!(std::fs::read(old_root.join(&b.id.0)).unwrap(), bytes);
+    assert!(!scratch.0.join(crate::cloud_cache_location::POINTER).exists());
+    assert_eq!(session.cache_move_report.as_ref().unwrap()["ok"], true);
+}
+
+#[test]
+fn a_damaged_cache_location_pointer_falls_back_with_a_warning() {
+    let scratch = Scratch::new();
+    std::fs::write(scratch.0.join(crate::cloud_cache_location::POINTER), b"not json").unwrap();
+    let mut session = crate::Session::new().with_fs();
+    session.open_library(&scratch.0, false).unwrap();
+    assert_eq!(session.media.asset_resolver.as_ref().unwrap().root(), scratch.0.join("assets-cache").as_path());
+    assert!(session.library.as_ref().unwrap().settings_warnings.iter().any(|w| w.contains("damaged")));
+}
