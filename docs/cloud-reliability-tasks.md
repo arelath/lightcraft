@@ -43,7 +43,7 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 - [x] CR.28 — Make per-import preflight failures explicit queue outcomes with retained blocked reasons and defined retry eligibility. Test one unreadable manifest alongside a healthy import: healthy work completes and the blocked item exposes its specific recovery action.
 - [x] CR.29 — Model subsystem health explicitly: user pause, polling halted by error, publication waiting, structural conflicts, and last successful remote scan. A success clears only the recovered subsystem's failure. Test failed automatic sync followed by upload success, and structural-only conflicts; never infer healthy synchronization solely from no pending local work.
 - [x] CR.30 — Record logical fields changed by actions and construct undo/redo inverses against current state. Guard those fields' revisions while preserving independent remote metadata and membership changes. Test local title undo after remote caption editing, plus concurrent changes to the same title.
-- [ ] CR.31 — Separate verified media readiness, metadata publication, and covered-receipt finalization under one authoritative per-library coordinator (with CR.13/CR.22/CR.27). The per-library publication gate landed in CR.22 and durable local receipt finalization in CR.27; media stage extraction and bulk-import request-count/transferred-byte assertions remain open.
+- [x] CR.31 — Separate verified media readiness, metadata publication, and covered-receipt finalization under one authoritative per-library coordinator (with CR.13/CR.22/CR.27). Share bounded fresh media evidence across active producers, journal exact late-worker proof, and assert bulk request/byte costs for batch and sibling workers.
 - [ ] CR.32 — Replace contradictory protocol outcome combinations and sentinel cursors/generations with explicit unchanged, conditional-head, and append outcome variants. Test evidence merging, monotonic cursors, and no-op writes.
 - [ ] CR.33 — Extract independently testable shared structural reconciliation. Add property tests: identical shared synchronization state yields identical shared relationships regardless of local IDs, local-only content, iteration order, or delivery order. Test local-only preservation separately.
 
@@ -525,3 +525,71 @@ Both protocol Info screenshots showing exact title/caption values were inspected
 and request logs; C: scratch `lightcraft-cr30-native/native-499569f9/` and
 `native-aa221dfe/`. CR.30 is complete. Browser/shared undo behavior is engine-tested
 and WASM-compiled; fresh browser and live-provider acceptance are not claimed.
+
+
+2026-10-15 — CR.31 implementation: media readiness, one coordinated ready-batch
+publication and local receipt finalization are distinct stages. Exact proof queues
+commit before sidecar finalization; local failure retries without media transfer.
+Append's repeated item passes and implicit retry are removed. Frozen publication
+intent stays intact and a batch shares one immutable sync snapshot. A bounded private
+fresh-evidence set covers destination/key/version/hash/size, including dependency
+verification and uncertain-write recovery. Persisted markers never populate it;
+reopen/explicit verify freshly checks media. Verification dependency bytes enter
+the transferred-byte counter. Sidecar writes preserve compatible newer proof and
+ordinary acknowledged state. Item outcomes/fresh-media signals prevent sibling or
+local-receipt failures from creating false verification errors. Typed maintenance
+purposes fix a connection named receipt colliding with receipt-worker routing.
+
+Focused initial acceptance passed: four engine evidence/receipt/resource tests and
+the two-protocol real-CLI bulk/multipart cost/reopen test. Wire counters assert one
+successful full GET and one payload upload per unique object, zero media requests
+for metadata-only work, and fresh verification after reopen. Existing lost-completion
+bulk acceptance now carries the same byte/request assertions. Initial checks caught
+missing trait/mutable-owner imports and a fixture path typo; corrected checks passed.
+Final clippy passes; expanded recovery-signal tests, full CI and rebuilt native
+acceptance remain pending. CR.31 stays unchecked.
+
+The first full extraction gate passed all eight stages (`cr31-ci.log`). Review of
+automatic scheduling found cross-task dependency downloads and late ready imports
+whose sibling had already cleared the outbox. The coordinator now carries bounded
+fresh readiness across active uploads, defers reads owned by active producers, and
+queues sealed exact receipt proof from late verified workers. Fresh verification
+invalidates shared evidence; connection epochs reject stale contributions. New
+regressions cover readiness visibility, explicit audits, epoch reset, and durable
+late proof after the pending mutation is gone. Final gate/native cost checks pending.
+
+The coordinator gate also passed all eight stages (`cr31-ci-coordinated.log`). A
+final transaction review found that an obsolete archive result requested a rescan
+before journaling its independently checked receipt proof. Owner preparation now
+retains that proof while leaving metadata for the fresh scan; its regression keeps
+the newer cursor. Separate sibling real-CLI workers now carry transfer/request-cost
+assertions as well as the one-task batch. Final-source gate and native checks pending.
+
+Final sibling real-CLI request/byte checks passed on both protocols. The gate found
+a synthetic stale-history fixture that did not actually advance an author already
+present in the old result; its rescan assertion was therefore invalid. The fixture
+now includes that author's earlier revision before advancing/archiving it. The
+corrected focused check and final confirmation gate remain pending.
+
+The final confirmation gate was stopped while queued behind the focused build:
+explicit verify must bypass shared evidence for waiting/failed imports too, not
+only synchronized intents. The verification-request flag now controls that policy;
+attempt reverification identity still separately governs acknowledged-state failure.
+
+Final source passed all eight stages (`cr31-ci-verified.log`), including the corrected
+stale-archive proof regression and both one-batch/separate-worker transfer-cost
+checks. Rebuilt native acceptance is the remaining CR.31 verification step; its
+checkbox stays open until those runs finish.
+
+Rebuilt native acceptance passed on both protocols (`cr31-native-build.log`,
+`cr31-native-{head,append}.log`). Automatic three-import scheduling (including a
+9 MiB multipart original) sent and fully checked each of nine unique objects once:
+9,457,252 payload bytes each direction per library. Every receipt finalized and
+pending publication reached zero. After reopening, an original was removed without
+manual upload verification or any network request; a subsequent explicit audit
+read each object once without uploading again. The two cloud-popup screenshots
+were inspected and `ui.inspect` captured. All 141 signed loopback requests verified
+(64 head / 77 append). Evidence: ignored `target/cloud-reliability/cr31-native-*.json`
+and C: scratch `lightcraft-cr31-native/native-9e227312/`, `native-a22f785b/`.
+CR.31 is complete. This is native fixture acceptance; no new live-provider/browser
+runtime or large-library latency claim is made. Earlier scale work stays open.

@@ -7,14 +7,17 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 /// One metadata publisher per library, held through durable owner acknowledgement.
 /// Media transfer and receipt I/O use separate locks and continue independently.
 #[derive(Default)]
-pub(crate) struct Coordinator(Mutex<()>);
+pub(crate) struct Coordinator {
+    gate: Mutex<()>,
+    pub(crate) media: Arc<SharedMedia>,
+}
 impl Coordinator {
     pub(crate) fn acquire(&self, cancel: &AtomicBool) -> crate::Result<MutexGuard<'_, ()>> {
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(error("metadata publication cancelled; pending work retained"));
             }
-            match self.0.try_lock() {
+            match self.gate.try_lock() {
                 Ok(guard) => return Ok(guard),
                 Err(TryLockError::Poisoned(e)) => return Ok(e.into_inner()),
                 Err(TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(20)),
@@ -162,6 +165,8 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
     let (sender, receiver) = mpsc::sync_channel(1);
     let (owner_done, applied) = mpsc::sync_channel(1);
     let coordinator = s.cloud_replication_jobs.coordinator.clone();
+    let revision = resolver.connection_revision();
+    coordinator.media.prepare(revision, &connection, !state.pending.is_empty());
     std::thread::Builder::new()
         .name("cloud-catalog-sync".into())
         .spawn(move || {
@@ -177,13 +182,15 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
             } else {
                 "Reconciling and publishing saved library changes"
             });
+            let mut media = VerifiedMedia::coordinated(coordinator.media.clone(), revision, None, false);
+            media.publication();
             let result = crate::guard::catch("cloud synchronization worker", || {
                 if migrating {
                     crate::cloud_append::migration::seed(&connection, &state, &worker_cancel).map_err(|e| AssetError::Invalid(e.to_string()))
                 } else if !state.protocol.is_head() {
-                    crate::cloud_append::native::synchronize_with_audit(&connection, &state, checkpoint, audit, &worker_cancel)
+                    crate::cloud_append::native::synchronize_verified(&connection, &state, checkpoint, audit, &worker_cancel, &mut media)
                 } else {
-                    synchronize(&connection, &state, checkpoint, &worker_cancel)
+                    synchronize_verified(&connection, &state, checkpoint, &worker_cancel, &mut media)
                 }
             })
             .map_err(error)
@@ -600,11 +607,11 @@ mod tests {
         holding.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         s.begin_interaction("slider").unwrap();
         s.poll_cloud_replication();
-        assert!(coordinator.0.try_lock().is_err());
+        assert!(coordinator.gate.try_lock().is_err());
         s.end_interaction().unwrap();
         s.poll_cloud_replication();
         worker.join().unwrap();
-        assert!(coordinator.0.try_lock().is_ok());
+        assert!(coordinator.gate.try_lock().is_ok());
         assert_eq!(s.catalog.sync_state().unwrap().generation, 1);
         let _permit = coordinator.acquire(&AtomicBool::new(false)).unwrap();
         assert!(coordinator.acquire(&AtomicBool::new(true)).is_err());

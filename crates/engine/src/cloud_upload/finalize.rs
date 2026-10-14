@@ -198,8 +198,10 @@ fn start(s: &mut Session, id: &str) -> Result<()> {
         resolver,
         ids,
         verification_ids: BTreeSet::new(),
+        item_outcomes: BTreeMap::new(),
         connections: BTreeSet::new(),
-        maintenance: Some("receipt".into()),
+        media_verified: BTreeSet::new(),
+        maintenance: Some(Maintenance::Receipt),
         guard: task,
         cancel,
     });
@@ -504,8 +506,10 @@ mod tests {
                 resolver,
                 ids: BTreeMap::from([(item.id.clone(), item.intent.asset_id.clone())]),
                 verification_ids: BTreeSet::new(),
+                item_outcomes: BTreeMap::new(),
                 connections: BTreeSet::new(),
-                maintenance: Some("receipt".into()),
+                media_verified: BTreeSet::new(),
+                maintenance: Some(Maintenance::Receipt),
                 guard,
                 cancel,
             });
@@ -524,6 +528,45 @@ mod tests {
             s.close_library().unwrap();
             drop(s);
             cleanup(root);
+        }
+    }
+    #[test]
+    fn cr31_ordinary_stage_markers_preserve_finalized_proof_and_explicit_failure_protects_data() {
+        for protocol in [SyncProtocol::ConditionalHead, SyncProtocol::AppendLog] {
+            let (mut s, root, ready, mut stale) = fixture(protocol);
+            s.cloud_paused = true;
+            schedule(&mut s);
+            drain(&mut s);
+            let path = root.join("library/Managed/uploads").join(format!("{}.json", ready.id));
+            let finalized = read_receipt(&path).unwrap().unwrap();
+            assert_eq!(finalized.state, UploadState::Synchronized);
+            let (mut items, skipped) = super::super::items(&mut s, &json!({"imports":[ready.id],"verify":true}), false).unwrap();
+            assert!(skipped.is_empty());
+            let mut item = items.remove(0);
+            item.reverification = false;
+            for state in [UploadState::Uploading, UploadState::ObjectsVerified, UploadState::Failed] {
+                stale.state = state;
+                stale.error = (state == UploadState::Failed).then(|| "obsolete worker failure".into());
+                stale.generation = protocol.is_head().then_some(5);
+                item.write_receipt(&stale, &AtomicBool::new(false)).unwrap();
+                let saved = read_receipt(&path).unwrap().unwrap();
+                assert_eq!(saved.state, UploadState::Synchronized);
+                assert_eq!(saved.append_proof, finalized.append_proof);
+                assert_eq!(saved.generation, finalized.generation);
+                assert_eq!(saved.error, None);
+            }
+            item.reverification = true;
+            stale.state = UploadState::Failed;
+            stale.error = Some("confirmed remote integrity failure".into());
+            item.write_receipt(&stale, &AtomicBool::new(false)).unwrap();
+            let saved = read_receipt(&path).unwrap().unwrap();
+            assert_eq!(saved.state, UploadState::Failed);
+            assert_eq!(saved.append_proof, finalized.append_proof);
+            assert_eq!(saved.generation, finalized.generation);
+            s.close_library().unwrap();
+            drop(s);
+            drop(item);
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 }

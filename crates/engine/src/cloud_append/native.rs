@@ -41,6 +41,16 @@ pub fn synchronize_with_audit(
     audit: bool,
     cancel: &AtomicBool,
 ) -> Result<crate::cloud_replication::Outcome> {
+    synchronize_verified(connection, local, checkpoint, audit, cancel, &mut crate::cloud_replication::VerifiedMedia::default())
+}
+pub(crate) fn synchronize_verified(
+    connection: &S3Connection,
+    local: &SyncState,
+    checkpoint: bool,
+    audit: bool,
+    cancel: &AtomicBool,
+    media: &mut crate::cloud_replication::VerifiedMedia,
+) -> Result<crate::cloud_replication::Outcome> {
     if local.protocol != SyncProtocol::AppendLog {
         return Err(invalid("append synchronization requires explicit protocol selection"));
     }
@@ -127,7 +137,7 @@ pub fn synchronize_with_audit(
             if !planner.ready(mutation) {
                 continue;
             }
-            match crate::cloud_replication::dependencies(connection, std::slice::from_ref(*mutation), cancel) {
+            match crate::cloud_replication::dependencies_verified(connection, std::slice::from_ref(*mutation), cancel, media) {
                 Ok(()) => {}
                 Err(AssetError::Missing) => continue,
                 Err(e) => return Err(e),

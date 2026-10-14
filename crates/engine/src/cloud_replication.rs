@@ -1,13 +1,11 @@
 //! Native conditional S3 synchronization protocol. Mutable head writes always carry an ETag;
 //! immutable records and checkpoints are created conditionally and verified after uncertain writes.
 use crate::assets::s3::{PutCondition, S3Connection};
-use crate::assets::{AssetError, BlobStore, Result, keys, sha256};
+use crate::assets::{AssetError, Result, keys, sha256};
 use crate::cloud_publication::{self as publication, Batch, CheckpointRef, Head, RecordRef};
 use lightcraft_catalog::assets::{Asset, identifier};
 use lightcraft_catalog::replication::{Mutation, Portable, SyncState};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAX_CHECKPOINT: usize = 64 << 20;
@@ -156,27 +154,7 @@ fn immutable(connection: &S3Connection, key: &str, bytes: &[u8], cancel: &Atomic
         Err(error) => Err(error),
     }
 }
-#[derive(Default)]
-struct Verify {
-    hash: Sha256,
-    size: u64,
-    limit: u64,
-}
-impl Write for Verify {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.size.saturating_add(bytes.len() as u64) > self.limit {
-            return Err(std::io::Error::other("remote blob exceeds its declared length"));
-        }
-        self.hash.update(bytes);
-        self.size = self.size.saturating_add(bytes.len() as u64);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-pub(crate) fn dependencies(connection: &S3Connection, mutations: &[Mutation], cancel: &AtomicBool) -> Result<()> {
-    let mut verified = BTreeSet::new();
+pub(crate) fn dependencies_verified(connection: &S3Connection, mutations: &[Mutation], cancel: &AtomicBool, media: &mut VerifiedMedia) -> Result<()> {
     for change in mutations.iter().flat_map(|mutation| &mutation.changes).filter(|change| change.field == "content") {
         let mut asset: Asset = serde_json::from_value(change.value.get("asset").cloned().ok_or_else(|| invalid("mutation content has no asset"))?)
             .map_err(|_| invalid("invalid mutation asset description"))?;
@@ -192,19 +170,16 @@ pub(crate) fn dependencies(connection: &S3Connection, mutations: &[Mutation], ca
         }
         asset.validate().map_err(invalid)?;
         for blob in asset.blobs() {
-            if !verified.insert((blob.id.clone(), blob.remote.key.clone(), blob.remote.version.clone())) {
-                continue;
-            }
-            canceled(cancel)?;
-            let mut writer = Verify { limit: blob.size, ..Default::default() };
-            connection.download(blob, &mut writer, cancel, &mut |_| {})?;
-            if writer.size != blob.size || format!("{:x}", writer.hash.finalize()) != blob.id.0 {
-                return Err(AssetError::Integrity);
+            if !media.verify(connection, blob, cancel, &mut |_| {})? {
+                return Err(AssetError::Missing);
             }
         }
     }
     Ok(())
 }
+mod media;
+pub(crate) use media::{SharedMedia, VerifiedMedia};
+
 pub struct Outcome {
     pub append: Option<lightcraft_catalog::replication::AppendProgress>,
     pub state: Portable,
@@ -215,8 +190,17 @@ pub struct Outcome {
 /// Reconcile each failed conditional head update by reading the competing history. Mutation
 /// IDs and payloads never change across attempts, including uncertain publication responses.
 pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requested: bool, cancel: &AtomicBool) -> Result<Outcome> {
+    synchronize_verified(connection, local, checkpoint_requested, cancel, &mut VerifiedMedia::default())
+}
+pub(crate) fn synchronize_verified(
+    connection: &S3Connection,
+    local: &SyncState,
+    checkpoint_requested: bool,
+    cancel: &AtomicBool,
+    media: &mut VerifiedMedia,
+) -> Result<Outcome> {
     if local.protocol == lightcraft_catalog::replication::SyncProtocol::AppendLog {
-        return crate::cloud_append::native::synchronize(connection, local, checkpoint_requested, cancel);
+        return crate::cloud_append::native::synchronize_verified(connection, local, checkpoint_requested, false, cancel, media);
     }
     if connection.get_small(&crate::cloud_append::manifest_key(&connection.prefix, &local.library)?, 16 << 10, cancel)?.is_some() {
         return Err(invalid("this library has an append manifest; stop conditional-head writers and explicitly migrate before continuing"));
@@ -281,7 +265,7 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
             // Preserve the author's causal prefix, but still receive remote changes when
             // an import's bytes have not arrived. Dependency waiting is ordinary progress.
             if !dependency_proof.contains(&mutation.revision.id()) {
-                match dependencies(connection, std::slice::from_ref(&mutation), cancel) {
+                match dependencies_verified(connection, std::slice::from_ref(&mutation), cancel, media) {
                     Ok(()) => {
                         dependency_proof.insert(mutation.revision.id());
                     }
@@ -314,7 +298,7 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
             return Ok(Outcome { append: None, state, acknowledged, cursor, generation });
         }
         let newly_referenced: Vec<_> = chunk.iter().filter(|mutation| !dependency_proof.contains(&mutation.revision.id())).cloned().collect();
-        dependencies(connection, &newly_referenced, cancel)?;
+        dependencies_verified(connection, &newly_referenced, cancel, media)?;
         dependency_proof.extend(newly_referenced.iter().map(|mutation| mutation.revision.id()));
         let mut checkpoint = remote.head.as_ref().and_then(|(head, _)| head.checkpoint.clone());
         let mut parent = remote.head.as_ref().map(|(head, _)| head.tip.clone());

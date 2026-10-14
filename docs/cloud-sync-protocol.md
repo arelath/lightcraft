@@ -664,3 +664,37 @@ redo create fresh revisions and carry their logical field masks forward. A later
 competing revision to a touched field still refuses the operation atomically, with
 the history entry available for explicit conflict-aware recovery. Independent
 remote fields do not become accidental targets of a whole-metadata inverse.
+
+
+### Native upload stages and transfer evidence (2026-10-15)
+
+A native upload task prepares each selected import's media once, reconciles one
+ready metadata batch through the per-library owner gate, then finalizes covered
+receipts after the owner has journaled exact proof. Local receipt-write failures
+retain that durable queue and retry independently of media transfer. Abort is a
+separate stage. Failed transfers are reported per import rather than silently
+repeated in additional append publication passes. A batch shares one immutable
+synchronization snapshot instead of cloning the entire state per item.
+
+Successful full hash/size checks supply bounded verification evidence to publication
+checks and sibling tasks through the live library coordinator. Its key includes
+connection revision, destination, object key/version, hash and size. A separate
+short-held lock tracks active producers; publication waits for their durable media
+readiness instead of downloading the same original during each attempt. No network,
+staging I/O or owner reply runs under this readiness lock. The publication gate
+continues to cover metadata through owner durability.
+
+Evidence is never reconstructed from disk markers. A new library/connection epoch,
+completed outbox without active producers, or explicit verification retires it;
+reopen and deliberate verification check bytes afresh. Overflow falls back to actual
+verification. Dependency reads enter the task's transferred-byte counter. A late
+ready import supplies exact checked proof for a durable finalization job even when
+another worker already removed its mutation from the current outbox.
+
+Sidecar writes under the staging lock preserve compatible exact proof and the
+newest generation supplied by another finalizer. An obsolete ordinary phase cannot
+erase its synchronized marker; deliberate later verification can still fail while
+preserving historical publication evidence and keeping staging protected. Per-import
+completion and fresh-media signals scope recovery correctly; abort/local finalization
+cannot clear a verification failure. Typed maintenance purposes prevent user
+connection names from colliding with receipt-worker routing/reservations.

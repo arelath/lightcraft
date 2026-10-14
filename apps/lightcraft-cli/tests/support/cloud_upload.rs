@@ -94,6 +94,16 @@ fn signature(method: &str, target: &str, headers: &BTreeMap<String, String>, bod
     fields.get("Signature") == Some(&actual.as_str())
 }
 
+// Shared fixture: only transfer-cost suites inspect these counters.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct Traffic {
+    pub method: String,
+    pub target: String,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+    pub status: u16,
+}
 #[derive(Default)]
 pub struct State {
     pub append_mode: bool,
@@ -104,6 +114,7 @@ pub struct State {
     pub objects: BTreeMap<String, Vec<u8>>,
     multipart: BTreeMap<String, (String, BTreeMap<u16, Vec<u8>>)>,
     pub requests: Vec<(String, String)>,
+    pub traffic: Vec<Traffic>,
     pub created: usize,
     pub lost_part: bool,
     pub lost_put: bool,
@@ -179,6 +190,7 @@ impl Fixture {
                 let valid = signature(&method, &target, &headers, &body);
                 let mut state = worker_state.lock().unwrap();
                 state.requests.push((method.clone(), target.clone()));
+                let request_bytes = body.len() as u64;
                 let (status, response, etag, lose) = if !valid || state.unauthorized {
                     if !valid {
                         state.signature_errors += 1;
@@ -190,6 +202,13 @@ impl Fixture {
                 let hold_part = state.hold_part && method == "PUT" && target.contains("partNumber=1&");
                 let hold_head = state.hold_head && method == "PUT" && target.ends_with("/catalog/head.json");
                 let hold_abort = state.hold_abort && method == "DELETE" && target.contains("uploadId=");
+                state.traffic.push(Traffic {
+                    method: method.clone(),
+                    target: target.clone(),
+                    request_bytes,
+                    response_bytes: if lose || hold_part || hold_head || hold_abort { 0 } else { response.len() as u64 },
+                    status,
+                });
                 drop(state);
                 if hold_part || hold_head || hold_abort {
                     while !worker_stop.load(Ordering::Relaxed) {

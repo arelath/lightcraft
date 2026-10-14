@@ -216,8 +216,10 @@ fn start_impl(s: &mut Session, p: &Value, observer: Option<&mut dyn FnMut(u64, u
         resolver,
         ids: BTreeMap::new(),
         verification_ids: BTreeSet::new(),
+        item_outcomes: BTreeMap::new(),
         connections: BTreeSet::from([connection_id.to_owned()]),
-        maintenance: Some(connection_id.to_owned()),
+        media_verified: BTreeSet::new(),
+        maintenance: Some(Maintenance::Cleanup { connection: connection_id.to_owned() }),
         guard: task,
         cancel: cancel.clone(),
     });
@@ -372,8 +374,10 @@ mod tests {
             resolver,
             ids: BTreeMap::new(),
             verification_ids: BTreeSet::new(),
+            item_outcomes: BTreeMap::new(),
             connections: BTreeSet::from([fixture.connection.id.clone()]),
-            maintenance: Some(fixture.connection.id.clone()),
+            media_verified: BTreeSet::new(),
+            maintenance: Some(Maintenance::Cleanup { connection: fixture.connection.id.clone() }),
             guard,
             cancel,
         });

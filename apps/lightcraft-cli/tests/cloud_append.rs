@@ -311,6 +311,8 @@ fn bulk_import_verifies_all_assets_before_publishing_shared_mutation_and_handles
     assert!(c.sync_state().unwrap().pending.is_empty());
     assert!(f.state.lock().unwrap().created > 0);
     assert!(!f.state.lock().unwrap().lost_complete, "committed multipart response was lost");
+    assert_cr31_media_cost(&f, &c, false);
+
     for entry in std::fs::read_dir(a.join("Managed/uploads")).unwrap() {
         let receipt: Value = serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
         assert!(receipt["multipart"].as_object().unwrap().is_empty());
@@ -474,4 +476,133 @@ fn append_dng_xmp_and_external_revisions_keep_photo_identity_edits_and_verified_
     assert_eq!((p.width, p.height), (13, 9));
     assert!(c.sync_state().unwrap().pending.is_empty());
     assert!(f.state.lock().unwrap().objects.keys().any(|k| k.ends_with(".xmp")));
+}
+
+/// Normal and lost-completion publication use fresh evidence, not another media download.
+fn assert_cr31_media_cost(f: &Fixture, c: &lightcraft_engine::catalog::Catalog, existing: bool) {
+    let objects: std::collections::BTreeMap<_, _> = c
+        .upload_intents()
+        .values()
+        .flat_map(|intent| c.asset(&intent.asset_id).unwrap().blobs())
+        .map(|blob| (format!("/photos/{}", blob.remote.key), blob.size))
+        .collect();
+    let state = f.state.lock().unwrap();
+    assert_eq!(state.signature_errors, 0);
+    for (key, size) in objects {
+        let media: Vec<_> = state.traffic.iter().filter(|request| request.target.split('?').next() == Some(key.as_str())).collect();
+        let gets: Vec<_> = media.iter().filter(|request| request.method == "GET" && !request.target.contains("uploadId=")).collect();
+        assert_eq!(
+            gets.iter().filter(|request| request.status == 200).count(),
+            1,
+            "one full verification, including recovery probes: {key}: {gets:?}"
+        );
+        assert_eq!(
+            gets.iter().map(|request| request.response_bytes).sum::<u64>(),
+            size,
+            "no original/preview bytes repeated during publication: {key}"
+        );
+        assert_eq!(gets.len(), if existing { 1 } else { 2 }, "only initial availability and one byte check: {key}");
+        let puts: Vec<_> = media.iter().filter(|request| request.method == "PUT").collect();
+        assert_eq!(puts.iter().map(|request| request.request_bytes).sum::<u64>(), if existing { 0 } else { size }, "send each payload once: {key}");
+        assert_eq!(
+            puts.len(),
+            if existing {
+                0
+            } else if size > 8 << 20 {
+                2
+            } else {
+                1
+            },
+            "no hidden upload retry: {key}"
+        );
+    }
+}
+
+#[test]
+fn cr31_bulk_stage_costs_are_bounded_in_both_protocols_and_restart_verifies_again() {
+    for protocol in ["conditional-head-v1", "append-log-v1"] {
+        let f = Fixture::new();
+        f.state.lock().unwrap().append_mode = protocol == "append-log-v1";
+        let library = f.dir.join("stages");
+        ok(&f, &library, &[("cloud.configure", config(&f)), ("cloud.syncEnable", json!({"connection":"personal","protocol":protocol}))]);
+        let mut paths = Vec::new();
+        for n in 0..3 {
+            let pixels = lightcraft_raster::Rgba8::from_fn(32, 24, |x, y| [x as u8 * 5, y as u8 * 7, n * 50, 255]);
+            let mut bytes = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&pixels), &Default::default()).unwrap();
+            if n == 2 {
+                bytes.resize(9 << 20, 0);
+            }
+            let path = f.dir.join(format!("stage-{n}.png"));
+            std::fs::write(&path, bytes).unwrap();
+            paths.push(path);
+        }
+        ok(&f, &library, &[("cloud.import", json!({"connection":"personal","paths":paths})), ("cloud.upload", json!({}))]);
+        let c = catalog(&library);
+        assert!(
+            c.upload_intents()
+                .values()
+                .all(|intent| intent.state == lightcraft_engine::catalog::uploads::UploadState::Synchronized && intent.finalization.is_none())
+        );
+        assert_cr31_media_cost(&f, &c, false);
+        // Empty publication/ordinary scans have no media payload requests.
+        let before = f.state.lock().unwrap().traffic.len();
+        ok(&f, &library, &[("cloud.sync", json!({})), ("cloud.upload", json!({}))]);
+        let state = f.state.lock().unwrap();
+        let media_keys: std::collections::BTreeSet<_> =
+            c.assets().values().flat_map(|asset| asset.blobs()).map(|blob| format!("/photos/{}", blob.remote.key)).collect();
+        assert!(
+            state.traffic[before..].iter().all(|request| !media_keys.contains(request.target.split('?').next().unwrap())),
+            "metadata-only work must not fetch originals"
+        );
+        drop(state);
+        // Explicit verification after reopen must freshly check bytes once, never trust disk keys.
+        f.state.lock().unwrap().traffic.clear();
+        ok(&f, &library, &[("cloud.upload", json!({"verify":true}))]);
+        assert_cr31_media_cost(&f, &catalog(&library), true);
+    }
+}
+
+#[test]
+fn cr31_separate_sibling_workers_do_not_download_each_others_bulk_media_again() {
+    for protocol in ["conditional-head-v1", "append-log-v1"] {
+        let f = Fixture::new();
+        f.state.lock().unwrap().append_mode = protocol == "append-log-v1";
+        let library = f.dir.join("sibling-stages");
+        let mut paths = Vec::new();
+        for n in 0..3 {
+            let pixels = lightcraft_raster::Rgba8::from_fn(32, 24, |x, y| [x as u8 * 5, y as u8 * 7, n * 50, 255]);
+            let mut bytes = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&pixels), &Default::default()).unwrap();
+            if n == 2 {
+                bytes.resize(9 << 20, 0)
+            }
+            let path = f.dir.join(format!("sibling-{n}.png"));
+            std::fs::write(&path, bytes).unwrap();
+            paths.push(path);
+        }
+        ok(
+            &f,
+            &library,
+            &[
+                ("cloud.configure", config(&f)),
+                ("cloud.syncEnable", json!({"connection":"personal","protocol":protocol})),
+                ("cloud.import", json!({"connection":"personal","paths":paths})),
+            ],
+        );
+        let c = catalog(&library);
+        let mut ids: Vec<_> = c.upload_intents().iter().map(|(id, intent)| (c.asset(&intent.asset_id).unwrap().original.size, id.clone())).collect();
+        ids.sort();
+        ok(
+            &f,
+            &library,
+            &[
+                ("cloud.upload", json!({"imports":[ids[0].1],"wait":false})),
+                ("cloud.upload", json!({"imports":[ids[1].1],"wait":false})),
+                ("cloud.upload", json!({"imports":[ids[2].1],"wait":true})),
+                ("cloud.sync", json!({})),
+            ],
+        );
+        let c = catalog(&library);
+        assert!(c.upload_intents().values().all(|intent| intent.state == lightcraft_engine::catalog::uploads::UploadState::Synchronized));
+        assert_cr31_media_cost(&f, &c, false);
+    }
 }
