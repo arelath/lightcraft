@@ -37,7 +37,7 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 - [x] CR.22 — Apply verified synchronization results monotonically across upload and ordinary workers. Distinguish stale valid completions from inconsistent remote history, retain newer head cursors, merge append publication progress, and qualify phase events by attempt so obsolete failures cannot overwrite success. Test held generation 10 after generation 11 and append frontier preservation; retain deliberate integrity-verification failures.
 - [x] CR.23 — Claim installation/catalog writer ownership in both protocols before editing, preserving pending IDs. Provide a safe writing epoch for explicit same-directory backup restore and causally schedule retained historical-author mutations. Test copied conditional-head catalogs making distinct offline edits and restoring an older backup.
 - [x] CR.24 — Materialize smart-album references to deleted or unresolved albums deterministically without broadening their criteria or blocking fresh-device bootstrap. Test a retained smart album referencing a deleted regular album.
-- [ ] CR.25 — Define a nonportable smart-album policy that preserves originating-device semantics. Preserve folder criteria and local-only selections, and distinguish absent selection restrictions from explicitly empty sets. Test self-sync with folder-restricted and exclusively local-photo rules.
+- [x] CR.25 — Define a nonportable smart-album policy that preserves originating-device semantics. Preserve folder criteria and local-only selections, and distinguish absent selection restrictions from explicitly empty sets. Test self-sync with folder-restricted and exclusively local-photo rules.
 - [ ] CR.26 — Resolve shared stack ownership and validity independently of local-only members, then apply local overlays. Test identical shared proposals S1=(P,Q), S2=(Q,R), S3=(R,S) with and without a local-only member of S2, comparing projected cloud relationships.
 - [ ] CR.27 — Durably finalize every upload receipt covered by shared acknowledgement with exact publication evidence. Retry local proof writes after restart independently of media transfer; test delayed bulk siblings and subsequent local-copy removal without manual verification. Keep staging protection intact.
 - [ ] CR.28 — Make per-import preflight failures explicit queue outcomes with retained blocked reasons and defined retry eligibility. Test one unreadable manifest alongside a healthy import: healthy work completes and the blocked item exposes its specific recovery action.
@@ -315,3 +315,36 @@ views were inspected. Evidence: ignored `target/cloud-reliability/cr24-native-re
 and request logs; C: scratch `lightcraft-cr24-native/native-78d6f8a6/` and
 `native-536562df/`. Shared browser materialization is WASM-compiled and engine tested;
 fresh browser/provider acceptance is not claimed. Nonportable filters remain CR.25.
+
+
+2026-10-14 — CR.25: smart albums with local folder criteria or unmappable photo
+selections, and dependent smart albums, stay device-local. Their complete rules are
+preserved across enablement and self-sync. Shared-to-local transitions withdraw the
+shared copy while keeping the origin; removing nonportable criteria republishes the
+local copy. Selection restrictions have an explicit empty-set marker, retained when
+incoming target photos are absent. Later recovery resolves the saved global selection.
+Legacy empty-list command clearing still works, and an empty similarity result remains
+constrained. The setup policy hint is registered in all nine translation catalogs;
+`albums.list` reports smart-album scope.
+
+Local format 15, mutation version 2 and checkpoint/state version 3 prevent older readers
+from silently ignoring the new marker. Legacy records remain readable without changing
+IDs/digests. Compaction retains the newer state version. Catalog regressions passed
+(223); focused sync tests passed (26) before the final legacy-clear adjustment. The
+first dependency tests used the direct album field, which forbids smart targets, and
+were corrected to use supported Album rules; the test helper uses public publication
+prefixes. Final source passed all eight CI stages: C: build `cr25-ci.log`, including the legacy
+clear adjustment, version/compaction tests, two-protocol real-CLI self-sync/checkpoint
+and fresh-peer tests, rendered setup hint and WASM compilation.
+
+Rebuilt native acceptance passed on both protocols. All five origin smart albums
+retained exact rules and match counts after synchronization/checkpoint maintenance;
+the fresh peer received only the shared empty selection, which matched nothing even
+with an added local photo. The real `Only 0 photos` chip cleared after its queued UI
+action, and legacy command clearing also worked. Both empty-grid and policy-dialog
+screenshots were inspected. All 165 signed loopback requests verified (74 head /
+91 append). Evidence: ignored `target/cloud-reliability/cr25-native-results-*.json`
+and request logs; C: scratch `lightcraft-cr25-native/native-eaf723bb/` and
+`native-d6f2920a/`. The native script was corrected to decode UTF-8 and wait for queued
+UI clicks. Shared browser behavior is engine-tested/WASM-compiled; no fresh browser
+or provider deployment acceptance is claimed.

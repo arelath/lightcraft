@@ -23,6 +23,64 @@ fn saved_catalog(path: &Path) -> lightcraft_catalog::Catalog {
     lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(path).unwrap())).unwrap().1
 }
 #[test]
+fn self_sync_preserves_nonportable_smart_rules_and_shares_explicit_empty_selection() {
+    for append in [false, true] {
+        let f = Fixture::new();
+        f.state.lock().unwrap().append_mode = append;
+        let protocol = if append { "append-log-v1" } else { "conditional-head-v1" };
+        let a = f.dir.join("smart-origin");
+        let b = f.dir.join("smart-peer");
+        let rows = success(&f, &a, &[("cloud.configure", configure(&f)), ("cloud.syncEnable", json!({"connection":"personal","protocol":protocol}))]);
+        let library = rows[1]["result"]["library"].as_str().unwrap();
+        f.import(&a, false);
+        success(&f, &a, &[("cloud.upload", json!({}))]);
+        let pixels = lightcraft_raster::Rgba8::from_fn(32, 24, |x, y| [x as u8 * 5, y as u8 * 7, 200, 255]);
+        let local = f.dir.join("private.png");
+        std::fs::write(&local, lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&pixels), &Default::default()).unwrap()).unwrap();
+        success(
+            &f,
+            &a,
+            &[
+                ("library.import", json!({"paths":[local]})),
+                ("photo.rate", json!({"ids":[1,2],"rating":4})),
+                ("album.createSmart", json!({"name":"Folder","rules":{"folder":f.dir,"rating":4}})),
+                ("album.createSmart", json!({"name":"Local selection","rules":{"only":[2]}})),
+                ("album.createSmart", json!({"name":"Mixed selection","rules":{"only":[1,2]}})),
+                ("album.createSmart", json!({"name":"Dependent","rules":{"ruleSet":{"rules":[{"field":"album","op":"is","value":1}]}}})),
+                ("album.createSmart", json!({"name":"Empty selection","rules":{"only":[],"onlyRestricted":true}})),
+            ],
+        );
+        let before = saved_catalog(&a);
+        let originals: Vec<_> = before.albums().map(|album| (album.id, album.smart.clone(), before.album_photos(album.id))).collect();
+        assert_eq!(before.album_photos(lightcraft_catalog::AlbumId(1)), vec![lightcraft_catalog::PhotoId(2)]);
+        success(&f, &a, &[("cloud.sync", json!({})), ("cloud.sync", json!({"checkpoint":true}))]);
+        let after = saved_catalog(&a);
+        for (id, rules, matches) in originals {
+            assert_eq!(after.album(id).unwrap().smart, rules);
+            assert_eq!(after.album_photos(id), matches);
+        }
+        assert_eq!(after.sync_state().unwrap().version, 3);
+        success(
+            &f,
+            &b,
+            &[
+                ("cloud.configure", configure(&f)),
+                ("cloud.syncEnable", json!({"connection":"personal","library":library,"protocol":protocol})),
+                ("cloud.sync", json!({})),
+                ("library.import", json!({"paths":[local]})),
+            ],
+        );
+        let peer = saved_catalog(&b);
+        assert_eq!(peer.photos().count(), 2);
+        assert_eq!(peer.albums().count(), 1);
+        let empty = peer.albums().next().unwrap();
+        assert_eq!(empty.name, "Empty selection");
+        assert_eq!(peer.album_count(empty.id), 0);
+        assert!(empty.smart.as_ref().unwrap().only_restricted);
+        assert!(peer.sync_state().unwrap().pending.is_empty());
+    }
+}
+#[test]
 fn fresh_device_bootstraps_deleted_smart_album_targets_in_both_protocols() {
     for append in [false, true] {
         let f = Fixture::new();

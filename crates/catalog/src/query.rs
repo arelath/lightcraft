@@ -27,6 +27,10 @@ pub struct Filter {
     /// Only these photos (Find Similar results…); empty = no constraint.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub only: Vec<PhotoId>,
+    /// An explicitly constrained empty selection matches nothing. Legacy empty
+    /// `only` without this marker still means no selection restriction.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub only_restricted: bool,
     /// Any of these labels (the filter bar's multi-select); empty = no constraint.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<ColorLabel>,
@@ -173,6 +177,9 @@ impl Filter {
 
     fn describe_in(&self, cat: Option<&crate::Catalog>) -> String {
         let mut v: Vec<String> = Vec::new();
+        if self.only_restricted || !self.only.is_empty() {
+            v.push(format!("only {} photos", self.only.len()));
+        }
         if let Some(state) = self.sync_status {
             v.push(format!("sync status: {}", state.label()));
         }
@@ -297,7 +304,7 @@ impl Filter {
         if !self.labels.is_empty() && !p.label.is_some_and(|l| self.labels.contains(&l)) {
             return false;
         }
-        if !self.only.is_empty() && !self.only.contains(&p.id) {
+        if (self.only_restricted || !self.only.is_empty()) && !self.only.contains(&p.id) {
             return false;
         }
         if let Some(want) = &self.merged {

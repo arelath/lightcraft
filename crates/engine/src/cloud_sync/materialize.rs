@@ -54,6 +54,7 @@ fn filter_to_local(value: &mut Value, catalog: &mut Catalog, ops: &mut Vec<Op>, 
             return Err(error("cloud smart filter contains a device-local path"));
         }
         if let Some(only) = map.get_mut("only").and_then(Value::as_array_mut) {
+            let restricted = !only.is_empty();
             *only = only
                 .iter()
                 .map(|value| photo_reference(catalog, value))
@@ -62,6 +63,13 @@ fn filter_to_local(value: &mut Value, catalog: &mut Catalog, ops: &mut Vec<Op>, 
                 .flatten()
                 .map(|id| json!(id))
                 .collect();
+            if restricted && only.is_empty() {
+                map.insert("onlyRestricted".into(), json!(true));
+            } else if !only.is_empty() {
+                // Nonempty legacy selections already constrain matching. Preserve
+                // their original local representation on self-synchronization.
+                map.remove("onlyRestricted");
+            }
         }
         if let Some(album) = map.get_mut("album")
             && let Some(global) = album.as_str()
@@ -218,6 +226,7 @@ pub fn structural_conflicts(catalog: &Catalog) -> Vec<Value> {
 fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
     let mut next = catalog.clone();
     let mut ops = Vec::new();
+    let device_local = device_local_smart_albums(catalog, &state.connection);
     // Allocate all photo/album identities first so virtual copies and nested filters can
     // resolve references regardless of lexical/global-ID order.
     let mut photo_ids = BTreeMap::new();
@@ -245,6 +254,9 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
                     apply(&mut next, &mut ops, Op::SetCloudIdentity { entity: format!("album:{}", id.0), id: Some(global.into()) })?;
                 }
                 if deleted {
+                    continue;
+                }
+                if device_local.contains(&id) {
                     continue;
                 }
                 if next.album(id).is_none() {
@@ -531,7 +543,7 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
         let values = fields(state, entity);
         match kind {
             "album" if values.get("deleted").and_then(Value::as_bool) == Some(true) => {
-                if let Some(id) = local(&next, "album", global).map(AlbumId).filter(|id| next.album(*id).is_some()) {
+                if let Some(id) = local(&next, "album", global).map(AlbumId).filter(|id| next.album(*id).is_some() && !device_local.contains(id)) {
                     let children: Vec<_> = next.albums().filter(|a| a.parent == Some(id)).map(|a| a.id).collect();
                     for child in children {
                         apply(&mut next, &mut ops, Op::MoveAlbum { id: child, parent: None })?;

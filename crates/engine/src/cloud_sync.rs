@@ -121,6 +121,46 @@ fn mapped_photo(catalog: &Catalog, ids: &Catalog, connection: &str, local: u64) 
     }
     ids.cloud_identity(&format!("photo:{local}")).map(str::to_owned)
 }
+fn shared_selection(catalog: &Catalog, connection: &str, id: lightcraft_catalog::PhotoId) -> bool {
+    if let Some(photo) = catalog.photo(id) {
+        let Source::Managed { asset_id } = &photo.source else { return false };
+        return catalog.asset(asset_id).is_some_and(|a| a.original.remote.connection == connection);
+    }
+    // A retained cloud selection can outlive the local photo object.
+    catalog.cloud_identity(&format!("photo:{}", id.0)).is_some_and(|global| {
+        catalog
+            .sync_state()
+            .filter(|s| s.connection == connection)
+            .is_some_and(|s| s.documents.get(&format!("photo:{global}")).is_some_and(|fields| fields.contains_key("content")))
+    })
+}
+pub(crate) fn device_local_smart_albums(catalog: &Catalog, connection: &str) -> BTreeSet<lightcraft_catalog::AlbumId> {
+    let mut excluded = BTreeSet::new();
+    let mut dependents = BTreeMap::<_, Vec<_>>::new();
+    for album in catalog.albums() {
+        let Some(filter) = &album.smart else { continue };
+        let references = filter.albums_tested();
+        if filter.folder.is_some()
+            || filter.library_folder.is_some()
+            || filter.only.iter().any(|id| !shared_selection(catalog, connection, *id))
+            || references.iter().any(|id| catalog.album(*id).is_none() && catalog.cloud_identity(&format!("album:{}", id.0)).is_none())
+        {
+            excluded.insert(album.id);
+        }
+        for target in references {
+            dependents.entry(target).or_default().push(album.id);
+        }
+    }
+    let mut pending: Vec<_> = excluded.iter().copied().collect();
+    while let Some(target) = pending.pop() {
+        for dependent in dependents.get(&target).into_iter().flatten() {
+            if excluded.insert(*dependent) {
+                pending.push(*dependent);
+            }
+        }
+    }
+    excluded
+}
 // Smart filters contain local photo/album IDs at their schema-defined reference positions.
 // Paths such as a Local filesystem folder are device-local and cannot be portable filters.
 fn portable_filter(value: &mut Value, catalog: &Catalog, ids: &Catalog, connection: &str, depth: usize) -> Result<()> {
@@ -132,7 +172,20 @@ fn portable_filter(value: &mut Value, catalog: &Catalog, ids: &Catalog, connecti
             map.remove(key);
         }
         if let Some(only) = map.get_mut("only").and_then(Value::as_array_mut) {
-            *only = only.iter().filter_map(|id| id.as_u64().and_then(|id| mapped_photo(catalog, ids, connection, id))).map(Value::String).collect();
+            let restricted = !only.is_empty();
+            *only = only
+                .iter()
+                .map(|value| {
+                    let id = value.as_u64().ok_or_else(|| error("invalid local selection reference"))?;
+                    if !shared_selection(catalog, connection, lightcraft_catalog::PhotoId(id)) {
+                        return Err(error("a device-local smart selection cannot be published"));
+                    }
+                    Ok(Value::String(global(ids, "photo", id)?))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if restricted {
+                map.insert("onlyRestricted".into(), json!(true));
+            }
         }
         if let Some(album) = map.get_mut("album")
             && let Some(id) = album.as_u64()
@@ -203,7 +256,11 @@ fn project(catalog: &Catalog, ids: &Catalog, state: &SyncState, scope: Option<&S
         docs.insert(format!("photo:{}", global(ids, "photo", photo.id.0)?), fields);
     }
     let albums: Vec<_> = scope.map_or_else(|| catalog.albums().collect(), |s| s.albums.iter().filter_map(|id| catalog.album(*id)).collect());
+    let excluded = device_local_smart_albums(catalog, &state.connection);
     for album in albums {
+        if excluded.contains(&album.id) {
+            continue;
+        }
         let mut value = encode(album)?;
         let map = value.as_object_mut().ok_or_else(|| error("album metadata is not an object"))?;
         map.remove("id");
@@ -288,7 +345,10 @@ pub(crate) fn prepare(catalog: &Catalog, op: Op) -> Result<(Op, Op)> {
         return Ok((op, inverse));
     };
     let inverse = user_inverse(inverse);
-    let scope = affected(catalog, &next, &op);
+    let mut scope = affected(catalog, &next, &op);
+    let was_local = device_local_smart_albums(catalog, &state.connection);
+    let now_local = device_local_smart_albums(&next, &state.connection);
+    scope.albums.extend(was_local.symmetric_difference(&now_local).copied());
     let mut metadata = ensure_ids(&mut next, &state, Some(&scope))?;
     let before = project(catalog, &next, &state, Some(&scope))?;
     let after = project(&next, &next, &state, Some(&scope))?;

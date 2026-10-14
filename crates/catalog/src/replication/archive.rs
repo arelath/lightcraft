@@ -317,7 +317,7 @@ impl SyncState {
             return Err(invalid("archive plan no longer matches state"));
         }
         let mut next = self.clone();
-        next.version = 2;
+        next.version = next.version.max(2);
         next.archives = plan.archives.clone();
         next.prune_archived_receipts();
         next.validate()?;

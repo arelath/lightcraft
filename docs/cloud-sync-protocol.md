@@ -29,8 +29,28 @@ A missing or folder target makes the saved smart criterion unavailable and nonma
 This propagates through smart-album dependencies, negative operators and nested any/none
 groups: missing data cannot broaden a restrictive album. The saved reference remains
 intact and existing rule diagnostics identify missing targets. Repair or restoration
-makes the criterion usable again. Nonportable folder/selection rules remain a separate
-open reliability item (CR.25).
+makes the criterion usable again. Smart albums with filesystem folder criteria or any photo selection that cannot be
+shared on this connection stay device-local, along with smart albums depending on
+them. Their complete local criteria survive enablement and self-synchronization.
+Converting a previously shared album to this policy withdraws its shared copy with
+a retained tombstone; the local album stays intact. Returning to portable criteria
+republishes that device's complete local album under the same identity. `albums.list`
+reports `syncScope: deviceLocal|shared` for smart albums.
+
+Selection restrictions distinguish legacy absent/empty `only` (unrestricted) from
+`onlyRestricted:true` with an empty/absent allowed list (match nothing). Nonempty
+portable selections carry the marker so undelivered/deleted targets cannot broaden
+them after local mapping. A later target delivery resolves the retained wire IDs.
+Filter chips clear the marker; legacy `only:[]` command patches still clear the
+restriction unless they explicitly set the marker. Empty similarity results remain
+constrained rather than showing the whole library.
+
+Upgrade all devices before using these semantics. New local snapshots use format 15,
+new mutations version 2, and new synchronization/checkpoint states version 3. Older
+builds reject these required versions before applying an empty allowed set. New
+readers accept legacy mutation/state versions and retain their exact identities and
+digests. Receipt maintenance preserves the newer checkpoint barrier. Head, batch,
+append manifest and outer checkpoint wrappers keep their existing formats.
 
 ## Object layout and publication
 
@@ -40,8 +60,8 @@ documented in [cloud-storage-implementation.md](cloud-storage-implementation.md)
 | Key | Contents |
 |---|---|
 | `catalog/head.json` | Small version-3 head: library, increasing generation, tip and optional checkpoint; archive-aware writer barrier |
-| `catalog/changes/<sha256>.json` | Immutable version-3 batch: parent and version-1 mutations |
-| `catalog/checkpoints/<sha256>.json` | Version-1 wrapper containing version-2 portable state and authenticated receipt forests; obsolete import-receipt map stays empty |
+| `catalog/changes/<sha256>.json` | Immutable version-3 batch: parent and version-2 mutations (legacy version 1 remains readable) |
+| `catalog/checkpoints/<sha256>.json` | Version-1 wrapper containing version-3 portable state and authenticated receipt forests; obsolete import-receipt map stays empty |
 | `sync-v2/<library>/receipts/<sha256>.json` | Immutable bounded Merkle receipt node shared by both transports |
 
 Readers reject version-1 heads, version-1/2 import batches, nonempty legacy import receipt

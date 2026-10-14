@@ -189,7 +189,6 @@ fn op_variants_are_versioned() {
             | Op::SetVersions { .. }
             | Op::SetHistory { .. }
             | Op::PushHistory { .. }
-            | Op::AddAlbum { .. }
             | Op::RemoveAlbum { .. }
             | Op::RenameAlbum { .. }
             | Op::MoveAlbum { .. }
@@ -214,8 +213,7 @@ fn op_variants_are_versioned() {
             Op::SetAsset { .. } => 8,
             Op::SetUploadIntent { .. } => 9,
             Op::SetCloudIdentity { .. } | Op::SetWorkingCopy { .. } => 10,
-            Op::SetSyncState { .. } => 14,
-            Op::SetAlbumRules { .. } => 13,
+            Op::SetSyncState { .. } | Op::SetAlbumRules { .. } | Op::AddAlbum { .. } => 15,
         }
     }
     let newest = since(&Op::SetSyncState { state: None });

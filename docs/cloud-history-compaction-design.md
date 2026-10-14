@@ -7,7 +7,7 @@ See [cloud-reliability-tasks.md](cloud-reliability-tasks.md), CR.5–CR.7.
 
 ## Representation and integrity
 
-Catalog format 14 and synchronization state version 2 add an immutable Merkle forest
+Catalog format 14 and synchronization state version 2 introduced an immutable Merkle forest
 for each author. A forest represents an exact contiguous prefix, with at most 64
 SHA-256 roots: the descending powers of two in the prefix length. History length
 therefore does not grow the number of live roots. Existing causal state version 1
@@ -69,7 +69,9 @@ compaction. No epoch cutover is needed here because causal identities and deleti
 safety are preserved indefinitely.
 
 New conditional-head writers publish head version 3, which older builds reject.
-Append checkpoints carry state version 2, which older builds reject before normal
+Current checkpoints carry state version 3 (CR.25 selection semantics), preserving the
+required reader barrier; archive roots were introduced in version 2. Older builds reject
+the newer state before normal
 publication. Upgrade all devices before maintenance. An already running older append
 writer can finish an immutable write; retaining its original author/sequence space
 allows current readers to verify it without losing edits. This is not a credential

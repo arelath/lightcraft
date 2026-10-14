@@ -557,6 +557,24 @@ fn retained_album_identity_reserves_allocator_through_replay_and_snapshot() {
     assert_eq!(c.alloc_album_id(), AlbumId(71));
 }
 
+#[test]
+fn explicit_empty_selection_is_distinct_from_legacy_unrestricted_filters() {
+    let mut c = Catalog::new();
+    let id = photo(&mut c, "a.jpg", "2026-04-01");
+    let legacy: Filter = serde_json::from_value(serde_json::json!({"only":[]})).unwrap();
+    assert!(legacy.matches(c.photo(id).unwrap(), &c));
+    let empty = Filter { only_restricted: true, ..Default::default() };
+    assert!(!empty.matches(c.photo(id).unwrap(), &c));
+    let encoded = serde_json::to_value(&empty).unwrap();
+    assert_eq!(encoded["onlyRestricted"], true);
+    assert!(encoded.get("only").is_none());
+    let decoded: Filter = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded, empty);
+    assert_eq!(decoded.describe(), "only 0 photos");
+    assert!(Filter { only: vec![id], ..Default::default() }.matches(c.photo(id).unwrap(), &c));
+    assert!(serde_json::to_value(&legacy).unwrap().get("onlyRestricted").is_none());
+}
+
 /// A smart album can test another smart album: "Keywords contain travel" and "Album isn't Excluded
 /// Photos" (red or rejected) leaves out the excluded photos, and follows that album's rules as they
 /// change.

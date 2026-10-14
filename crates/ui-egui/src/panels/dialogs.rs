@@ -1020,6 +1020,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 }
                 Dialog::CloudSync { connection, library,protocol } => {
                     ui.label(crate::i18n::tr("Use the same storage prefix and library ID on each device. Leave Library ID empty only when creating a shared library."));
+                    ui.label(crate::i18n::tr("Smart albums with local folders or local photo selections stay on this device."));
                     ui.label(crate::i18n::tr_format!("Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.", limit = lightcraft_engine::cloud_sync::MAX_ENTITY_CHANGES));
                     field(ui, "Connection name", |ui| { crate::text_field::TextField::singleline("cloudSyncConnection", connection).width(f32::INFINITY).show(ui); });
                     ui.add_enabled_ui(app.session.catalog.sync_state().is_none(),|ui|{

@@ -57,6 +57,7 @@
 //! | 12 | Append-only synchronization | Explicit protocol, remote prefix proofs and local author ownership |
 //! | 13 | Cloud queue UX | Device-local sync-status filter criteria in saved smart albums; older criteria default to no status constraint |
 //! | 14 | Receipt archives | Authenticated bounded causal-history roots; full live-head and pending contexts retained |
+//! | 15 | Smart selection semantics | Explicit empty allowed sets; device-local nonportable smart albums |
 //!
 //! Rules:
 //! - **Bump [`VERSION`]** (and add a row above) in the change that adds an [`Op`] variant or a
@@ -81,7 +82,7 @@ pub const LOG: &str = "catalog.log";
 const FORMAT: &str = "lightcraft-catalog";
 /// The catalog format this build writes (and the newest it reads). See the module docs →
 /// *Format versions*; bump it whenever an [`Op`] variant or a serialized field is added.
-pub const VERSION: u32 = 14;
+pub const VERSION: u32 = 15;
 
 /// When [`Journal::wants_snapshot`] says it's time to compact the log.
 #[derive(Clone, Copy, Debug)]

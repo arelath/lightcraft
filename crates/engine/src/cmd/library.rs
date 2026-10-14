@@ -368,13 +368,10 @@ pub fn specs() -> Vec<CommandSpec> {
             "Filter",
             [],
             None,
-            "partial Filter: {text?, rating?, ratingOp?: atLeast|exactly|atMost, flag?: pick|reject|none|null, label?, kind?, merged?: hdr|panorama|hdrPanorama|any, edited?, date?, libraryFolder?: a path from library.folders, keyword?, person?, camera?, syncStatus?: pending|syncing|synced|issues|localOnly|null}",
+            "partial Filter: {text?, rating?, ratingOp?: atLeast|exactly|atMost, flag?: pick|reject|none|null, label?, kind?, merged?: hdr|panorama|hdrPanorama|any, edited?, date?, libraryFolder?: a path from library.folders, keyword?, person?, camera?, syncStatus?: pending|syncing|synced|issues|localOnly|null, only?: [photoIds], onlyRestricted?: bool} — empty only with onlyRestricted:true matches nothing; only:[] without the marker clears the selection restriction",
             always,
             |s, p| {
-                let mut v = serde_json::to_value(&s.filter).unwrap_or_default();
-                lightcraft_develop::presets::deep_merge(&mut v, p);
-                let f: Filter = serde_json::from_value(v).map_err(|e| bad("library.filter", e.to_string()))?;
-                let mut f = f;
+                let mut f = merge_filter(&s.filter, p, "library.filter")?;
                 // a blank folder is no folder: no hidden "filters active" state
                 f.library_folder = f.library_folder.filter(|d| !d.trim().is_empty());
                 if f.library_folder.is_some() && s.source == LibrarySource::LibraryFolder {
@@ -383,9 +380,6 @@ pub fn specs() -> Vec<CommandSpec> {
                 // checked like a smart album's rules when this call sets them: an unknown field or a value
                 // that can't match is an error, not an empty grid. Rules that stopped checking since
                 // (their album was deleted) don't block other filter changes.
-                if let Some(rules) = f.rule_set.as_mut() {
-                    rules.upgrade();
-                }
                 let sets_rules = p.get("ruleSet").is_some_and(|r| !r.is_null());
                 if let Some(problems) = f.rule_set.as_ref().filter(|_| sets_rules).map(|rs| rs.check(&s.catalog)).filter(|p| !p.is_empty()) {
                     return Err(bad("library.filter", problems.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")));
@@ -1463,6 +1457,11 @@ fn merge_filter(base: &lightcraft_catalog::Filter, patch: &Value, c: &str) -> Re
     let mut v = serde_json::to_value(base).unwrap_or_default();
     lightcraft_develop::presets::deep_merge(&mut v, patch);
     let mut f: lightcraft_catalog::Filter = serde_json::from_value(v).map_err(|e| bad(c, e.to_string()))?;
+    // Preserve the longstanding command-level clearing operation. Explicit
+    // empty allowed sets opt in with the marker; unrelated patches retain it.
+    if patch.get("only").and_then(Value::as_array).is_some_and(Vec::is_empty) && patch.get("onlyRestricted").is_none() {
+        f.only_restricted = false;
+    }
     if let Some(rules) = f.rule_set.as_mut() {
         rules.upgrade();
     }

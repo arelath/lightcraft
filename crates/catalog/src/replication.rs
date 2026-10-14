@@ -80,7 +80,7 @@ impl Mutation {
                 "mutation context exceeds 4,096 authors; retired clocks cannot be removed by checkpoints; safe author-slot retirement is unsupported; current library and outbox retained",
             ));
         }
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || !identifier(&self.library)
             || !valid_clock(&self.context)
             || self.context.get(&self.revision.device).copied().unwrap_or(0) != self.revision.sequence - 1
@@ -275,7 +275,7 @@ impl SyncState {
     }
     pub fn new(library: String, device: String, connection: String) -> Result<Self> {
         let state = Self {
-            version: 2,
+            version: 3,
             library,
             device,
             connection,
@@ -316,13 +316,13 @@ impl SyncState {
                 "synchronization pending-change limit reached (10,000); finish uploads and synchronization before editing again; current library and outbox retained",
             ));
         }
-        if !matches!(self.version, 1 | 2) {
+        if !matches!(self.version, 1..=3) {
             return Err(invalid("unsupported synchronization state version; update LightCraft on every device; current library and outbox retained"));
         }
         if self.clock.keys().any(|device| device.starts_with("baseline_") || device.starts_with("legacy_")) {
             return Err(invalid("obsolete pre-release import state; use a fresh catalog and storage prefix; local data retained"));
         }
-        if !matches!(self.version, 1 | 2)
+        if !matches!(self.version, 1..=3)
             || (self.version == 1 && !self.archives.is_empty())
             || !identifier(&self.library)
             || !identifier(&self.device)
@@ -460,6 +460,9 @@ impl SyncState {
             }
         }
         self.received.insert(id, Receipt { context: mutation.context.clone(), digest });
+        if mutation.version == 2 {
+            self.version = self.version.max(3);
+        }
         self.clock
             .entry(mutation.revision.device.clone())
             .and_modify(|v| *v = (*v).max(mutation.revision.sequence))
@@ -475,7 +478,7 @@ impl SyncState {
         }
         let sequence = self.clock.get(&self.device).copied().unwrap_or(0).checked_add(1).ok_or_else(|| invalid("device revision exhausted"))?;
         let mutation = Mutation {
-            version: 1,
+            version: 2,
             library: self.library.clone(),
             revision: Stamp { sequence, device: self.device.clone() },
             context: self.clock.clone(),
@@ -572,6 +575,38 @@ impl SyncState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smart_semantics_are_versioned_in_mutations_checkpoints_and_compaction() {
+        let mut local = SyncState::new("library".into(), "author".into(), "personal".into()).unwrap();
+        assert_eq!(local.version, 3);
+        let change = local
+            .enqueue(vec![Change { entity: "album:smart".into(), field: "smart".into(), base: None, value: json!({"onlyRestricted":true}) }])
+            .unwrap()
+            .unwrap();
+        assert_eq!(change.version, 2);
+        let mut future = change.clone();
+        future.version = 3;
+        assert!(future.validate().is_err());
+        let mut legacy = SyncState::new("library".into(), "peer".into(), "personal".into()).unwrap();
+        legacy.version = 2;
+        legacy.receive(&change).unwrap();
+        assert_eq!(legacy.version, 3);
+        let plan = legacy.archive_plan().unwrap();
+        legacy.compact_receipts(&plan).unwrap();
+        assert_eq!(legacy.portable().version, 3, "compaction must retain the checkpoint reader barrier");
+        let mut future = legacy.portable();
+        future.version = 4;
+        assert!(future.validate().is_err());
+        let mut old = change;
+        old.version = 1;
+        old.changes[0].value = json!({"rating":4});
+        old.validate().unwrap();
+        let mut old_receiver = SyncState::new("library".into(), "old-reader-data".into(), "personal".into()).unwrap();
+        old_receiver.version = 2;
+        old_receiver.receive(&old).unwrap();
+        assert_eq!(old_receiver.version, 2, "legacy records keep their original digest and version");
+    }
     use serde_json::json;
     fn state(device: &str) -> SyncState {
         SyncState::new("library".into(), device.into(), "personal".into()).unwrap()

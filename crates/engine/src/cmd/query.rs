@@ -31,17 +31,23 @@ pub fn photo_summary(p: &Photo) -> Value {
     })
 }
 
-fn album_json(a: &Album, all: &[Album], cat: &lightcraft_catalog::Catalog) -> Value {
+fn album_json(
+    a: &Album,
+    all: &[Album],
+    cat: &lightcraft_catalog::Catalog,
+    device_local: &std::collections::BTreeSet<lightcraft_catalog::AlbumId>,
+) -> Value {
     let mut v = json!({
         "id": a.id.0,
         "name": a.name,
         "folder": a.folder,
         "count": cat.album_count(a.id),
         "cover": a.cover.map(|c| c.0),
-        "children": all.iter().filter(|c| c.parent == Some(a.id)).map(|c| album_json(c, all, cat)).collect::<Vec<_>>(),
+        "children": all.iter().filter(|c| c.parent == Some(a.id)).map(|c| album_json(c, all, cat, device_local)).collect::<Vec<_>>(),
     });
     if let Some(rules) = &a.smart {
         v["smart"] = json!(true);
+        v["syncScope"] = json!(if cat.sync_state().is_none() || device_local.contains(&a.id) { "deviceLocal" } else { "shared" });
         v["rules"] = serde_json::to_value(rules).unwrap_or_default();
         v["rulesText"] = json!(rules.describe_with(cat));
         // rules that no longer check (an album they test was deleted…), as `rule 1: …`
@@ -140,7 +146,8 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         cmd!(query "albums.list", "List Albums", [], None, "{}", always, |s, _| {
             let all: Vec<Album> = s.catalog.albums().cloned().collect();
-            Ok(Value::Array(all.iter().filter(|a| a.parent.is_none()).map(|a| album_json(a, &all, &s.catalog)).collect()))
+            let device_local = s.catalog.sync_state().map(|state| crate::cloud_sync::device_local_smart_albums(&s.catalog, &state.connection)).unwrap_or_default();
+            Ok(Value::Array(all.iter().filter(|a| a.parent.is_none()).map(|a| album_json(a, &all, &s.catalog, &device_local)).collect()))
         }),
         cmd!(query "photo.inspect", "Inspect Photo", [], None, "{id?}", always, |s, p| {
             let id = photo_arg(s, p, "photo.inspect")?;

@@ -620,6 +620,135 @@ fn unresolved_album_reference_reserves_identity_until_target_delivery() {
     assert_eq!(b.catalog.album_count(smart), 1);
 }
 
+fn self_publication(s: &mut Session, generation: u64) {
+    let state = s.catalog.sync_state().unwrap();
+    let remote = state.portable();
+    let ids = state.pending.keys().cloned().collect();
+    let op = if state.protocol.is_head() {
+        incoming_checkpoint(&s.catalog, &remote, &ids, format!("{generation:064x}"), generation).unwrap()
+    } else {
+        let progress = lightcraft_catalog::replication::AppendProgress {
+            version: 1,
+            manifest: "a".repeat(64),
+            frontiers: lightcraft_catalog::replication::publication_prefixes(&remote).unwrap(),
+            remote,
+            gaps: BTreeSet::new(),
+        };
+        incoming_append(&s.catalog, progress, &ids).unwrap()
+    };
+    s.apply_received(op).unwrap();
+    s.persist().unwrap();
+}
+#[test]
+fn nonportable_smart_albums_keep_exact_local_rules_through_enablement_and_self_sync() {
+    for protocol in [lightcraft_catalog::replication::SyncProtocol::ConditionalHead, lightcraft_catalog::replication::SyncProtocol::AppendLog] {
+        let (mut s, _) = session();
+        s.apply_received(Op::SetSyncState { state: None }).unwrap();
+        let mut local = Photo::new(PhotoId(2), Source::File { path: "/local/a.jpg".into() }, "a.jpg", "JPEG", 32, 24, "");
+        local.rating = 4;
+        s.commit("local photo", Op::AddPhoto { photo: Box::new(local) }).unwrap();
+        s.commit("cloud rating", Op::SetRating { id: PhotoId(1), rating: 4 }).unwrap();
+        for (id, filter) in [
+            (1, lightcraft_catalog::Filter { folder: Some("/local".into()), rating: 4, ..Default::default() }),
+            (2, lightcraft_catalog::Filter { library_folder: Some("/local".into()), rating: 4, ..Default::default() }),
+            (3, lightcraft_catalog::Filter { only: vec![PhotoId(2)], ..Default::default() }),
+            (4, lightcraft_catalog::Filter { only: vec![PhotoId(1), PhotoId(2)], ..Default::default() }),
+            (5, serde_json::from_value(json!({"ruleSet":{"rules":[{"field":"album","op":"is","value":1}]}})).unwrap()),
+        ] {
+            s.commit("local smart", Op::AddAlbum { album: Album { smart: Some(Box::new(filter)), ..Album::new(AlbumId(id), "Private smart") } })
+                .unwrap();
+        }
+        let before: Vec<_> = s.catalog.albums().map(|a| (a.id, a.smart.clone(), s.catalog.album_photos(a.id))).collect();
+        assert_eq!(before[0].2, vec![PhotoId(2)]);
+        let op = enable_mode(&s.catalog, "library".into(), "new-author".into(), "personal".into(), protocol, String::new()).unwrap();
+        s.apply_system(op).unwrap();
+        assert!(s.catalog.sync_state().unwrap().documents.keys().all(|e| !e.starts_with("album:")));
+        self_publication(&mut s, 1);
+        for (id, filter, matches) in before {
+            assert_eq!(s.catalog.album(id).unwrap().smart, filter);
+            assert_eq!(s.catalog.album_photos(id), matches);
+        }
+        let listed = s.execute("albums.list", &json!({})).unwrap();
+        assert!(listed.as_array().unwrap().iter().all(|a| a["syncScope"] == "deviceLocal"));
+    }
+}
+#[test]
+fn shared_to_local_smart_transition_withdraws_dependents_without_overwriting_origin_rules() {
+    let (mut a, _) = session();
+    let mut local = Photo::new(PhotoId(2), Source::File { path: "/local/a.jpg".into() }, "a.jpg", "JPEG", 1, 1, "");
+    local.rating = 4;
+    a.commit("local", Op::AddPhoto { photo: Box::new(local) }).unwrap();
+    a.execute("album.createSmart", &json!({"name":"First","rules":{"rating":4}})).unwrap();
+    a.execute("album.createSmart", &json!({"name":"Dependent","rules":{"ruleSet":{"rules":[{"field":"album","op":"is","value":1}]}}})).unwrap();
+    self_publication(&mut a, 1);
+    a.execute("album.setRules", &json!({"id":1,"rules":{"folder":"/local"}})).unwrap();
+    let rule = a.catalog.album(AlbumId(1)).unwrap().smart.clone();
+    for id in [1, 2] {
+        let global = a.catalog.cloud_identity(&format!("album:{id}")).unwrap();
+        assert_eq!(a.catalog.sync_state().unwrap().winning(&format!("album:{global}"), "deleted").unwrap().1, &json!(true));
+    }
+    self_publication(&mut a, 2);
+    assert_eq!(a.catalog.album(AlbumId(1)).unwrap().smart, rule);
+    assert_eq!(a.catalog.album_photos(AlbumId(1)), vec![PhotoId(2)]);
+    assert!(a.catalog.album(AlbumId(2)).is_some());
+    a.execute("album.setRules", &json!({"id":1,"rules":{"folder":null}})).unwrap();
+    for id in [1, 2] {
+        let global = a.catalog.cloud_identity(&format!("album:{id}")).unwrap();
+        assert_eq!(a.catalog.sync_state().unwrap().winning(&format!("album:{global}"), "deleted").unwrap().1, &json!(false));
+    }
+    self_publication(&mut a, 3);
+    assert!(device_local_smart_albums(&a.catalog, "personal").is_empty());
+}
+#[test]
+fn missing_cloud_selection_matches_nothing_then_resolves_after_photo_recovery() {
+    let (mut a, _) = session();
+    a.commit(
+        "selected smart",
+        Op::AddAlbum {
+            album: Album {
+                smart: Some(Box::new(lightcraft_catalog::Filter { only: vec![PhotoId(1)], ..Default::default() })),
+                ..Album::new(AlbumId(1), "Selected")
+            },
+        },
+    )
+    .unwrap();
+    let photo = a.catalog.cloud_identity("photo:1").unwrap().to_string();
+    let album = a.catalog.cloud_identity("album:1").unwrap().to_string();
+    a.commit("delete", Op::RemovePhoto { id: PhotoId(1) }).unwrap();
+    assert!(device_local_smart_albums(&a.catalog, "personal").is_empty());
+    let (mut b, _) = peer("fresh-selection");
+    b.commit(
+        "private photo",
+        Op::AddPhoto { photo: Box::new(Photo::new(PhotoId(1), Source::File { path: "private.jpg".into() }, "private.jpg", "JPEG", 1, 1, "")) },
+    )
+    .unwrap();
+    deliver(&a, &mut b, 1);
+    let smart = AlbumId(local_id(&b.catalog, "album", &album));
+    let filter = b.catalog.album(smart).unwrap().smart.as_ref().unwrap();
+    assert!(filter.only.is_empty() && filter.only_restricted);
+    assert_eq!(b.catalog.album_count(smart), 0);
+    a.execute("cloud.restoreDeleted", &json!({"entity":format!("photo:{photo}")})).unwrap();
+    deliver(&a, &mut b, 2);
+    assert_eq!(b.catalog.album_count(smart), 1);
+    let filter = b.catalog.album(smart).unwrap().smart.as_ref().unwrap();
+    assert_eq!(filter.only.len(), 1);
+    assert_ne!(filter.only[0], PhotoId(1));
+}
+#[test]
+fn empty_selection_has_a_removable_chip_and_no_unrestricted_fallback() {
+    let (mut s, _) = session();
+    s.execute("library.filter", &json!({"onlyRestricted":true,"only":[]})).unwrap();
+    assert!(s.visible().is_empty());
+    let chips = crate::view::filter_chips(&s.filter, &s.catalog);
+    let clear = &chips.iter().find(|c| c.clear.get("only").is_some()).unwrap().clear;
+    assert_eq!(clear["onlyRestricted"], false);
+    s.execute("library.filter", clear).unwrap();
+    assert_eq!(s.visible(), vec![PhotoId(1)]);
+    s.execute("library.filter", &json!({"onlyRestricted":true,"only":[]})).unwrap();
+    s.execute("library.filter", &json!({"only":[]})).unwrap();
+    assert_eq!(s.visible(), vec![PhotoId(1)], "legacy clearing must still work after an explicit empty selection");
+}
+
 #[test]
 fn deletion_wins_offline_edit_without_resurrection_and_explicit_recovery_preserves_the_edit() {
     let (mut a, _) = session();

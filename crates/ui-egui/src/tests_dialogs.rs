@@ -39,6 +39,7 @@ fn cloud_capacity_warning_explains_recovery_and_dispatches_checkpoint_maintenanc
     }
     let text = h.view.painted_text();
     for label in [
+        "Smart albums with local folders or local photo selections stay on this device.",
         "Synchronization capacity",
         "80.0%",
         "80000 / 100000",

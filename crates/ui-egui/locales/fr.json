@@ -1951,5 +1951,6 @@
   "Adding to Apple Photos…": "Ajout à Apple Photos…",
   "not added to Apple Photos (cancelled)": "non ajouté à Apple Photos (annulé)",
   "The first time, macOS asks whether LightCraft may control Photos.": "La première fois, macOS demande si LightCraft peut contrôler Photos.",
-  "Adding to Apple Photos": "Ajout à Apple Photos"
+  "Adding to Apple Photos": "Ajout à Apple Photos",
+  "Smart albums with local folders or local photo selections stay on this device.": "Les albums intelligents avec des dossiers locaux ou des sélections de photos locales restent sur cet appareil."
 }
