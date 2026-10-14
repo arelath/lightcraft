@@ -8,7 +8,7 @@ use crate::cloud_publication::Imported;
 use crate::{EngineError, Result, Session};
 use lightcraft_catalog::assets::{Asset, Blob, BlobId, identifier};
 use lightcraft_catalog::uploads::UploadFinalization;
-use lightcraft_catalog::uploads::{UploadIntent, UploadState};
+use lightcraft_catalog::uploads::{UploadBlock, UploadIntent, UploadState};
 use lightcraft_catalog::{Op, Source};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -108,6 +108,7 @@ impl Receipt {
             verified: self.verified.clone(),
             error: self.error.clone(),
             finalization: None,
+            blocked: None,
         };
         intent.validate(&self.imported.asset).map_err(error)?;
         for (key, upload) in &self.multipart {
@@ -821,7 +822,10 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<(Vec<Item>, Vec<Valu
         if selected.as_ref().is_some_and(|selected| !selected.contains(id)) || (intent.state == UploadState::Synchronized && !verify) {
             continue;
         }
-        if result.len() == 32 {
+        if selected.is_none() && intent.blocked.is_some() && !verify {
+            continue; // Unrelated upload batches must not repeatedly retry blocked imports.
+        }
+        if result.len().saturating_add(skipped.len()) == 32 {
             break;
         }
         if s.cloud_uploads.pending.iter().any(|pending| pending.ids.contains_key(id)) {
@@ -839,30 +843,40 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<(Vec<Item>, Vec<Valu
             skipped.push(json!({"import":id,"error":"removed photo has no synchronized content; staged original retained"}));
             continue;
         }
+        let Some(connection) = connections.iter().find(|connection| connection.id == asset.original.remote.connection).cloned() else {
+            skipped.push(json!({"import":id,"error":"configure the import's cloud connection before uploading"}));
+            continue;
+        };
+        // A temporary maintenance reservation is not an import preparation failure.
+        if s.cloud_uploads.pending.iter().any(|pending| pending.maintenance.as_deref() == Some(connection.id.as_str())) {
+            if selected.is_some() {
+                return Err(error("upload retention cleanup is using this connection; wait or cancel cleanup before resuming"));
+            }
+            continue;
+        }
         // An external or DNG revision can supersede this photo while the earlier import is
         // still pending. Its immutable staged description remains publishable under the same
         // global identity; never relabel the new photo's bytes as the old asset.
+        let manifest = match crate::cloud_import::read_manifest(&root, id) {
+            Ok(manifest) => manifest,
+            Err(e) => {
+                skipped.push(json!({"import":id,"error":format!("Cannot read staged import manifest for {id}: {e}. Restore the manifest and retry; original retained")}));
+                continue;
+            }
+        };
+        if !manifest.prepared
+            || manifest.asset_id != intent.asset_id
+            || manifest.asset != *asset
+            || manifest.target.as_ref().is_some_and(|target| target.photo_id != intent.photo_id)
+        {
+            skipped.push(json!({"import":id,"error":"staged identity differs or is incomplete; preserved"}));
+            continue;
+        }
+        let base_asset = manifest.target.as_ref().map(|target| target.base_asset.clone());
         let staged;
         let photo = if let Some(photo) = photo.filter(|p| !p.deleted && p.source == (Source::Managed { asset_id: intent.asset_id.clone() })) {
             photo.as_ref()
         } else {
-            let manifest = match crate::cloud_import::read_manifest(&root, id) {
-                Ok(manifest) => manifest,
-                Err(e) => {
-                    log::warn!("upload {id}: {e}; other imports continue");
-                    skipped.push(json!({"import":id,"error":e.to_string()}));
-                    continue;
-                }
-            };
-            if !manifest.prepared
-                || manifest.asset_id != intent.asset_id
-                || manifest.asset != *asset
-                || manifest.target.as_ref().is_some_and(|t| t.photo_id != intent.photo_id)
-            {
-                log::warn!("upload {id}: staged identity differs; preserved");
-                skipped.push(json!({"import":id,"error":"staged identity differs or is incomplete; preserved"}));
-                continue;
-            }
             let Some(snapshot) = manifest.photo else {
                 log::warn!("upload {id}: staged photo description missing; preserved");
                 skipped.push(json!({"import":id,"error":"staged photo description missing; preserved"}));
@@ -871,26 +885,11 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<(Vec<Item>, Vec<Valu
             staged = snapshot;
             staged.as_ref()
         };
-        let Some(connection) = connections.iter().find(|connection| connection.id == asset.original.remote.connection).cloned() else {
-            skipped.push(json!({"import":id,"error":"configure the import's cloud connection before uploading"}));
-            continue;
-        };
-        if s.cloud_uploads.pending.iter().any(|pending| pending.maintenance.as_deref() == Some(connection.id.as_str())) {
-            if selected.is_some() {
-                return Err(error("upload retention cleanup is using this connection; wait or cancel cleanup before resuming"));
-            }
-            continue;
-        }
         if blobs(asset).any(|blob| blob.remote.connection != connection.id) {
-            return Err(error("import renditions refer to different connections"));
+            skipped
+                .push(json!({"import":id,"error":"import renditions refer to different connections; restore the staged connection before retrying"}));
+            continue;
         }
-        let base_asset = match crate::cloud_import::revision_target(&root, id) {
-            Ok(target) => target.map(|target| target.base_asset),
-            Err(e) => {
-                skipped.push(json!({"import":id,"error":e.to_string()}));
-                continue;
-            }
-        };
         let imported = Imported {
             mutation_id: id.clone(),
             photo_id: s.catalog.cloud_identity(&format!("photo:{}", intent.photo_id.0)).unwrap_or(id).to_owned(),
@@ -903,7 +902,10 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<(Vec<Item>, Vec<Valu
             asset: Box::new(asset.clone()),
             base_asset,
         };
-        imported.validate().map_err(|e| error(e.to_string()))?;
+        if let Err(reason) = imported.validate() {
+            skipped.push(json!({"import":id,"error":reason.to_string()}));
+            continue;
+        }
         let sync = s.catalog.sync_state().filter(|state| state.connection == connection.id).cloned();
         if !abort && sync.is_none() {
             skipped.push(json!({"import":id,"error":"this import uses another synchronization connection; open its library or restore the original connection; staged originals retained"}));
@@ -1027,6 +1029,36 @@ pub fn observed(s: &mut Session, p: &Value, abort: bool, observer: &mut dyn FnMu
     s.execute_fn(if abort { "cloud.abortUploads" } else { "cloud.upload" }, |s| start_impl(s, p, abort, Some(observer)))
 }
 
+fn save_preflight(s: &mut Session, ready: &[Item], skipped: &mut [Value], verify: bool) -> Result<()> {
+    let mut ops = Vec::new();
+    for entry in skipped {
+        let Some(id) = entry["import"].as_str().map(str::to_owned) else { continue };
+        let reason = entry["error"].as_str().unwrap_or("upload preparation failed");
+        let Some(previous) = s.catalog.upload_intents().get(&id) else { continue };
+        let verify = verify || previous.state == UploadState::Synchronized;
+        let block = UploadBlock::new(reason, verify);
+        entry["blocked"] = json!(true);
+        entry["retry"] = json!({"command":"cloud.upload","params":{"imports":[id],"verify":verify,"wait":false}});
+        if previous.blocked.as_ref() != Some(&block) {
+            let mut intent = previous.clone();
+            intent.blocked = Some(block);
+            ops.push(Op::SetUploadIntent { id, intent: Some(Box::new(intent)) });
+        }
+    }
+    for item in ready {
+        if let Some(previous) = s.catalog.upload_intents().get(&item.id).filter(|intent| intent.blocked.is_some()) {
+            let mut intent = previous.clone();
+            intent.blocked = None;
+            ops.push(Op::SetUploadIntent { id: item.id.clone(), intent: Some(Box::new(intent)) });
+        }
+    }
+    if !ops.is_empty() {
+        s.apply_system(Op::Batch { ops })?;
+        s.persist()?;
+    }
+    Ok(())
+}
+
 fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
     if !abort && s.catalog.sync_state().is_none() {
         return Err(error(
@@ -1052,7 +1084,9 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
         return Err(error("four upload tasks are already running; wait or cancel before retrying"));
     }
     s.persist()?; // A queued import must be durable before any network operation.
-    let (mut items, skipped) = items(s, p, abort)?;
+    let (mut items, mut skipped) = items(s, p, abort)?;
+    // A skipped item is a durable queue outcome even if no worker can start.
+    save_preflight(s, &items, &mut skipped, p["verify"] == true)?;
     if items.is_empty() {
         return Ok(json!({"tasks": [], "results": [], "skipped":skipped, "remaining": 0}));
     }
@@ -1175,7 +1209,7 @@ impl Session {
             .iter()
             .filter(|(id, intent)| {
                 intent.state != UploadState::Synchronized
-                    && (self.cloud_uploads.include_failed || intent.state != UploadState::Failed)
+                    && (self.cloud_uploads.include_failed || (intent.state != UploadState::Failed && intent.blocked.is_none()))
                     && !self.cloud_uploads.attempted.contains(*id)
                     && !self.cloud_uploads.pending.iter().any(|pending| pending.ids.contains_key(*id))
                     && !self.catalog.asset(&intent.asset_id).is_some_and(|asset| {
@@ -1197,7 +1231,11 @@ impl Session {
             return;
         }
         self.cloud_uploads.attempted.extend(ids.iter().cloned());
-        if let Err(e) = start(self, &json!({"imports": ids, "wait": false})) {
+        if let Err(e) = start(self, &json!({"imports": &ids, "wait": false})) {
+            let mut skipped: Vec<_> = ids.iter().map(|id| json!({"import":id,"error":e.to_string()})).collect();
+            if let Err(reason) = save_preflight(self, &[], &mut skipped, false) {
+                log::warn!("queued upload preparation could not be saved: {reason}");
+            }
             log::warn!("queued cloud uploads: {e}; originals remain durable");
         }
     }
@@ -1418,6 +1456,7 @@ mod tests {
                             verified: BTreeSet::from(["originals/test".into()]),
                             error: None,
                             finalization: None,
+                            blocked: None,
                         })),
                     },
                 ],
@@ -1519,6 +1558,50 @@ mod tests {
             drop(sender);
             s.poll_cloud_uploads();
         }
+    }
+    #[test]
+    fn automatic_preflight_failure_is_durable_and_retryable_without_revoking_verified_state() {
+        let root = std::env::temp_dir().join(format!(
+            "lightcraft-upload-blocked-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut s, _) = session(&root);
+        s.execute("cloud.configure", &json!({"id":"test","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":"http://127.0.0.1:1"}))
+            .unwrap();
+        s.execute("cloud.syncEnable", &json!({"connection":"test"})).unwrap();
+        s.cloud_uploads.request_resume(true);
+        s.resume_cloud_uploads();
+        let intent = s.catalog.upload_intents()["upload-ack-test"].clone();
+        assert!(!intent.blocked.as_ref().unwrap().reason.is_empty());
+        assert_eq!(intent.state, UploadState::Published);
+        assert_eq!(s.cloud_uploads.running(), 0);
+        assert_eq!(s.catalog.sync_overview().blocked_import_count, 1);
+        assert!(items(&mut s, &json!({}), false).unwrap().1.is_empty(), "ordinary batches do not reattempt blocked preflight");
+        assert_eq!(items(&mut s, &json!({"imports":["upload-ack-test"]}), false).unwrap().1.len(), 1);
+        s.close_library().unwrap();
+        drop(s);
+        let mut reopened = Session::new().with_fs();
+        reopened.open_library(&root, false).unwrap();
+        assert_eq!(reopened.catalog.upload_intents()["upload-ack-test"], intent);
+        reopened.cloud_uploads.attempted.insert("upload-ack-test".into());
+        reopened.execute("cloud.resume", &json!({})).unwrap();
+        assert!(reopened.cloud_uploads.attempted.is_empty());
+        let mut verified = intent;
+        verified.state = UploadState::Synchronized;
+        verified.blocked = None;
+        reopened.apply_system(Op::SetUploadIntent { id: "upload-ack-test".into(), intent: Some(Box::new(verified.clone())) }).unwrap();
+        let result = start(&mut reopened, &json!({"imports":["upload-ack-test"],"verify":true})).unwrap();
+        assert_eq!(result["skipped"][0]["blocked"], true);
+        assert_eq!(result["skipped"][0]["retry"]["params"]["verify"], true);
+        let blocked = &reopened.catalog.upload_intents()["upload-ack-test"];
+        assert_eq!(blocked.state, UploadState::Synchronized);
+        assert_eq!(blocked.verified, verified.verified);
+        assert!(blocked.blocked.as_ref().unwrap().verify);
+        reopened.close_library().unwrap();
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn enabling_sync_restarts_staged_imports_attempted_while_disabled() {

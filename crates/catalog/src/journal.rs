@@ -59,6 +59,7 @@
 //! | 14 | Receipt archives | Authenticated bounded causal-history roots; full live-head and pending contexts retained |
 //! | 15 | Smart selection semantics | Explicit empty allowed sets; device-local nonportable smart albums |
 //! | 16 | Durable receipt finalization | Device-local exact proof queue committed with shared upload acknowledgements |
+//! | 17 | Blocked upload preparation | Durable per-import reasons and verification retry mode without revoking ACKs |
 //!
 //! Rules:
 //! - **Bump [`VERSION`]** (and add a row above) in the change that adds an [`Op`] variant or a
@@ -83,7 +84,7 @@ pub const LOG: &str = "catalog.log";
 const FORMAT: &str = "lightcraft-catalog";
 /// The catalog format this build writes (and the newest it reads). See the module docs →
 /// *Format versions*; bump it whenever an [`Op`] variant or a serialized field is added.
-pub const VERSION: u32 = 16;
+pub const VERSION: u32 = 17;
 
 /// When [`Journal::wants_snapshot`] says it's time to compact the log.
 #[derive(Clone, Copy, Debug)]

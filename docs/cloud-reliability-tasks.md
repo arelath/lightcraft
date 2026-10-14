@@ -40,7 +40,7 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 - [x] CR.25 — Define a nonportable smart-album policy that preserves originating-device semantics. Preserve folder criteria and local-only selections, and distinguish absent selection restrictions from explicitly empty sets. Test self-sync with folder-restricted and exclusively local-photo rules.
 - [x] CR.26 — Resolve shared stack ownership and validity independently of local-only members, then apply local overlays. Test identical shared proposals S1=(P,Q), S2=(Q,R), S3=(R,S) with and without a local-only member of S2, comparing projected cloud relationships.
 - [x] CR.27 — Durably finalize every upload receipt covered by shared acknowledgement with exact publication evidence. Retry local proof writes after restart independently of media transfer; test delayed bulk siblings and subsequent local-copy removal without manual verification. Keep staging protection intact.
-- [ ] CR.28 — Make per-import preflight failures explicit queue outcomes with retained blocked reasons and defined retry eligibility. Test one unreadable manifest alongside a healthy import: healthy work completes and the blocked item exposes its specific recovery action.
+- [x] CR.28 — Make per-import preflight failures explicit queue outcomes with retained blocked reasons and defined retry eligibility. Test one unreadable manifest alongside a healthy import: healthy work completes and the blocked item exposes its specific recovery action.
 - [ ] CR.29 — Model subsystem health explicitly: user pause, polling halted by error, publication waiting, structural conflicts, and last successful remote scan. A success clears only the recovered subsystem's failure. Test failed automatic sync followed by upload success, and structural-only conflicts; never infer healthy synchronization solely from no pending local work.
 - [ ] CR.30 — Record logical fields changed by actions and construct undo/redo inverses against current state. Guard those fields' revisions while preserving independent remote metadata and membership changes. Test local title undo after remote caption editing, plus concurrent changes to the same title.
 - [ ] CR.31 — Separate verified media readiness, metadata publication, and covered-receipt finalization under one authoritative per-library coordinator (with CR.13/CR.22/CR.27). The per-library publication gate landed in CR.22 and durable local receipt finalization in CR.27; media stage extraction and bulk-import request-count/transferred-byte assertions remain open.
@@ -411,3 +411,38 @@ both rendered grids were inspected and `ui.inspect` captured. Evidence: ignored
 Shared acknowledgement/schema behavior is engine-tested/WASM-compiled; native local receipt
 workers have no browser equivalent. No live-provider acceptance is claimed. Queue/scheduler
 health UI remains CR.29, and broader media-stage/request-cost work remains CR.31.
+
+2026-10-15 — CR.28 implementation: preparation failures retain a device-local blocked reason
+and retry mode in the upload intent before workers start, including successful batches with
+skipped imports and automatic start failures. Format 17 prevents older readers from dropping
+this recovery state. Specific popup/photo actions retry that import, preserving deliberate
+verification mode. Preparation failures do not revoke synchronized state or verified keys.
+Blocked imports become issues instead of ordinary waiting work. Automatic eligibility resets
+on resume, relevant configuration/setup changes and reopen; manual import retry bypasses the
+attempted set. Healthy work proceeds within causal publication requirements. Manifest identity
+is checked even for still-live photos. Preparation/status detail batches are bounded to 32.
+
+Focused schema/status tests passed (2), as did automatic engine persistence/retry and the
+rendered popup's concrete retry dispatch. The two-protocol real CLI case passed after enabling
+append mode in its storage fixture (the initial fixture rejected legitimate append writes).
+It verifies healthy causal-prefix publication, durable manifest errors and preservation of a
+prior ACK during deliberate verification preparation failure. Ordinary unselected batches
+skip already-blocked work so a bounded batch cannot be starved by repeat preflight failures.
+The first full CI exposed a retention-reservation regression from manifest-check ordering;
+connection maintenance now checks first, preserving its existing wait/cancel behavior without
+creating a blocked-import error. Its focused test passed, then the final source passed all
+eight CI stages (`cr28-ci-verified.log`). Native binaries rebuilt (`cr28-native-build.log`).
+
+Native automatic scheduling and restart acceptance passed for both protocols. The healthy
+import synchronized while the damaged later import retained its manifest error and appeared
+as a sync issue with zero ordinary waiting files. Restart preserved its specific reason;
+after repairing the file, clicking the actual per-import Retry button synchronized it and
+cleared the block. A later deliberate verification preparation failure retained the prior
+ACK/verified keys and exposed verification retry mode. All 118 signed loopback requests
+verified (49 head / 69 append). Both blocked popup and recovered grid screenshots were
+inspected; `ui.inspect` was captured. The first native fixture timed out at its initial quit;
+the passing fixture explicitly pauses/drains background work and renders before quitting.
+Evidence: ignored `target/cloud-reliability/cr28-native-results-*.json` and request logs;
+C: scratch `lightcraft-cr28-native/native-d461fb22/` and `native-76cf7cf8/`. CR.28 is complete.
+Shared status/UI/schema behavior is tested and WASM-compiled; native staged-upload preparation
+has no browser equivalent. No live-provider acceptance is claimed. Scheduler health remains CR.29.

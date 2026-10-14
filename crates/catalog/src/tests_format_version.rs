@@ -211,7 +211,7 @@ fn op_variants_are_versioned() {
             Op::SetFolderRecord { .. } => 6,
             Op::SetAsShotWb { .. } => 7,
             Op::SetAsset { .. } => 8,
-            Op::SetUploadIntent { .. } => 16,
+            Op::SetUploadIntent { .. } => 17,
             Op::SetCloudIdentity { .. } | Op::SetWorkingCopy { .. } => 10,
             Op::SetSyncState { .. } | Op::SetAlbumRules { .. } | Op::AddAlbum { .. } => 15,
         }

@@ -79,6 +79,52 @@ fn upload_requires_explicit_sync_protocol_and_preserves_staged_import() {
 }
 
 #[test]
+fn preflight_blocks_one_import_without_hiding_its_reason_or_stopping_a_ready_predecessor() {
+    use lightcraft_engine::catalog::{FsStore, Journal};
+    for protocol in ["conditional-head-v1", "append-log-v1"] {
+        let f = Fixture::new();
+        f.state.lock().unwrap().append_mode = protocol == "append-log-v1";
+        let library = f.dir.join("preflight-library");
+        let (healthy, _) = f.import_unsynchronized(&library, false);
+        let (output, rows) = f.run(&library, &[("cloud.syncEnable", json!({"connection":"personal","protocol":protocol}))]);
+        assert!(output.status.success(), "{rows:?}");
+        // Its own later mutation does not prevent the healthy causal prefix publishing.
+        let (damaged, _) = f.import_unsynchronized(&library, false);
+        let path = library.join("Managed/imports").join(format!("{damaged}.json"));
+        let manifest = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"damaged").unwrap();
+        let (output, rows) = f.run(&library, &[("cloud.upload", json!({})), ("cloud.overview", json!({}))]);
+        assert!(output.status.success(), "{rows:?} {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(rows[0]["result"]["skipped"][0]["import"], damaged);
+        assert_eq!(rows[0]["result"]["skipped"][0]["blocked"], true);
+        let problem = &rows[1]["result"]["summary"]["blockedImports"][0];
+        assert_eq!(problem["id"], damaged);
+        assert!(problem["reason"].as_str().unwrap().contains("invalid revision manifest"));
+        assert_eq!(rows[1]["result"]["waitingFiles"], 0);
+        let catalog = Journal::open(Box::new(FsStore::open(&library).unwrap())).unwrap().1;
+        assert_eq!(catalog.upload_intents()[&healthy].state, lightcraft_engine::catalog::uploads::UploadState::Synchronized);
+        assert!(catalog.upload_intents()[&damaged].blocked.is_some());
+        let verified = catalog.upload_intents()[&healthy].clone();
+        // A preparation failure during deliberate verification preserves the prior ACK.
+        let healthy_path = library.join("Managed/imports").join(format!("{healthy}.json"));
+        let healthy_manifest = std::fs::read(&healthy_path).unwrap();
+        std::fs::write(&healthy_path, b"damaged").unwrap();
+        let (output, rows) = f.run(&library, &[("cloud.upload", json!({"imports":[healthy],"verify":true})), ("cloud.uploadStatus", json!({}))]);
+        assert!(output.status.success(), "{rows:?}");
+        assert_eq!(rows[1]["result"]["uploads"][&healthy]["state"], "synchronized");
+        assert_eq!(rows[1]["result"]["uploads"][&healthy]["blocked"]["verify"], true);
+        let catalog = Journal::open(Box::new(FsStore::open(&library).unwrap())).unwrap().1;
+        assert_eq!(catalog.upload_intents()[&healthy].verified, verified.verified);
+        std::fs::write(&healthy_path, healthy_manifest).unwrap();
+        std::fs::write(&path, manifest).unwrap();
+        let (output, rows) = f.run(&library, &[("cloud.upload", json!({"imports":[healthy,damaged],"verify":true})), ("cloud.overview", json!({}))]);
+        assert!(output.status.success(), "{rows:?} {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(rows[1]["result"]["summary"]["blockedImportCount"], 0);
+        assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+    }
+}
+
+#[test]
 fn orphaned_non_synchronized_import_is_reported_without_blocking_healthy_uploads() {
     let fixture = Fixture::new();
     let library = fixture.dir.join("orphan-library");

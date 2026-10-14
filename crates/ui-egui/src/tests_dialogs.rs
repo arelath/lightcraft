@@ -8,6 +8,43 @@ use std::time::Duration;
 const T: Duration = Duration::from_secs(20);
 
 #[test]
+fn cloud_popup_exposes_preflight_reason_and_dispatches_exact_import_retry() {
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let services = Services {
+        cloud_action: Some(Box::new(move |_, id, params| match id {
+            "cloud.overview" => Some(Ok(json!({"summary":{"cloudPhotos":1,"albums":0,"blockedImportCount":1,
+                "blockedImports":[{"id":"blocked-import","name":"camera.dng","reason":"invalid revision manifest; restore it and retry","verify":true}]},
+                "syncEnabled":true,"canResume":true,"paused":false,"tasks":[]}))),
+            "cloud.upload" => {
+                recorded.lock().unwrap().push(params.clone());
+                Some(Ok(json!({"tasks":[]})))
+            }
+            _ => None,
+        })),
+        ..Default::default()
+    };
+    let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::with_demo(), services), [1400., 1000.], 1.);
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(h.request("ui.clickWidget", json!({"id":"icon:cloud"}), T)["ok"], true);
+    for _ in 0..4 {
+        h.step();
+    }
+    let text = h.view.painted_text();
+    for label in ["Sync needs attention", "camera.dng", "invalid revision manifest", "Retry upload"] {
+        assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
+    }
+    assert!(!text.iter().any(|value| value == "Up to date"));
+    assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudRetryImport:blocked-import"}), T)["ok"], true);
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(*calls.lock().unwrap(), vec![json!({"imports":["blocked-import"],"verify":true,"wait":false})]);
+}
+
+#[test]
 fn cloud_capacity_warning_explains_recovery_and_dispatches_checkpoint_maintenance() {
     let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let recorded = calls.clone();

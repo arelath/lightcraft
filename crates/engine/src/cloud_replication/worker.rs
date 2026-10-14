@@ -750,6 +750,7 @@ mod tests {
                 verified: Default::default(),
                 error: Some("offline".into()),
                 finalization: None,
+                blocked: None,
             })),
         })
         .unwrap();

@@ -42,8 +42,19 @@ pub struct Overview {
     pub failed_files: u64,
     pub queued_bytes: u64,
     pub pending_changes: u64,
+    pub blocked_import_count: u64,
+    pub blocked_imports: Vec<BlockedImport>,
     #[serde(skip)]
     pub statuses: BTreeMap<PhotoId, SyncStatus>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockedImport {
+    pub id: String,
+    pub photo_id: PhotoId,
+    pub name: String,
+    pub reason: String,
+    pub verify: bool,
 }
 #[derive(Debug, Default)]
 pub(crate) struct Cache(Mutex<Option<Arc<Overview>>>);
@@ -98,19 +109,35 @@ fn build(cat: &Catalog) -> Overview {
     let mut files = BTreeSet::new();
     let mut failed_files = BTreeSet::new();
     let mut queue_blobs = BTreeSet::new();
-    for intent in cat.upload_intents().values() {
+    for (id, intent) in cat.upload_intents() {
+        if let Some(block) = &intent.blocked {
+            out.blocked_import_count = out.blocked_import_count.saturating_add(1);
+            if out.blocked_imports.len() < 32 {
+                out.blocked_imports.push(BlockedImport {
+                    id: id.clone(),
+                    photo_id: intent.photo_id,
+                    name: cat.photo(intent.photo_id).map(|photo| photo.file_name.clone()).unwrap_or_else(|| id.clone()),
+                    reason: block.reason.clone(),
+                    verify: block.verify || intent.state == UploadState::Synchronized,
+                });
+            }
+        }
         let Some(photo) = cat.photo(intent.photo_id).filter(|p| p.in_library() && matches!(p.source, Source::Managed { .. })) else { continue };
-        let state = match intent.state {
-            UploadState::Synchronized => SyncStatus::Synced,
-            UploadState::Failed => SyncStatus::Issues,
-            UploadState::Uploading => SyncStatus::Syncing,
-            _ => SyncStatus::Pending,
+        let state = if intent.blocked.is_some() {
+            SyncStatus::Issues
+        } else {
+            match intent.state {
+                UploadState::Synchronized => SyncStatus::Synced,
+                UploadState::Failed => SyncStatus::Issues,
+                UploadState::Uploading => SyncStatus::Syncing,
+                _ => SyncStatus::Pending,
+            }
         };
         by_photo.entry(photo.id).and_modify(|s| *s = (*s).max(state)).or_insert(state);
         by_asset.entry(intent.asset_id.clone()).and_modify(|s| *s = (*s).max(state)).or_insert(state);
-        if intent.state != UploadState::Synchronized {
+        if intent.state != UploadState::Synchronized || intent.blocked.is_some() {
             files.insert(photo.id);
-            if intent.state == UploadState::Failed {
+            if intent.state == UploadState::Failed || intent.blocked.is_some() {
                 failed_files.insert(photo.id);
             }
             if let Some(asset) = cat.asset(&intent.asset_id) {
@@ -212,6 +239,7 @@ mod tests {
                         error: None,
                         verified: Default::default(),
                         finalization: None,
+                        blocked: None,
                     })),
                 })
                 .unwrap();
@@ -253,6 +281,30 @@ mod tests {
         right.apply(Op::SetDeleted { id: PhotoId(3), deleted: true }).unwrap();
         assert_eq!(left.revision, right.revision);
         assert_ne!(left.sync_overview().statuses, right.sync_overview().statuses);
+    }
+    #[test]
+    fn blocked_preflight_is_an_issue_without_revoking_a_synchronized_upload() {
+        let mut c = catalog();
+        let mut intent = c.upload_intents()["upload-1"].clone();
+        intent.state = UploadState::Synchronized;
+        intent.verified.insert("originals/1".into());
+        // A shared ACK may complete the upload after the original preflight was blocked.
+        intent.blocked = Some(crate::uploads::UploadBlock::new("invalid revision manifest; restore it and retry", false));
+        c.apply(Op::SetUploadIntent { id: "upload-1".into(), intent: Some(Box::new(intent.clone())) }).unwrap();
+        let view = c.sync_overview();
+        assert_eq!(c.photo_sync_status(PhotoId(1)), SyncStatus::Issues);
+        assert_eq!((view.queued_files, view.failed_files, view.blocked_import_count), (3, 2, 1));
+        assert_eq!(view.blocked_imports[0].id, "upload-1");
+        assert!(view.blocked_imports[0].verify);
+        let files = MemStore::new();
+        let (mut journal, _, _) = Journal::open(Box::new(files.clone())).unwrap();
+        journal.snapshot(&c).unwrap();
+        let (_, mut reopened, _) = Journal::open(Box::new(files)).unwrap();
+        assert_eq!(reopened.upload_intents()["upload-1"], intent);
+        intent.blocked = None;
+        reopened.apply(Op::SetUploadIntent { id: "upload-1".into(), intent: Some(Box::new(intent)) }).unwrap();
+        assert_eq!(reopened.photo_sync_status(PhotoId(1)), SyncStatus::Synced);
+        assert_eq!(reopened.sync_overview().blocked_import_count, 0);
     }
     #[test]
     fn virtual_copies_share_upload_work_and_original_size_without_counting_deleted_photos() {

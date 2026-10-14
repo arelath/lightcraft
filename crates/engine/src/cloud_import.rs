@@ -156,10 +156,6 @@ pub(crate) fn visit_staging(root: &Path, mut visit: impl FnMut(&Manifest) -> Res
     Ok(())
 }
 
-pub(crate) fn revision_target(root: &Path, id: &str) -> Result<Option<RevisionTarget>> {
-    Ok(read_manifest(root, id)?.target)
-}
-
 pub(crate) fn read_manifest(root: &Path, id: &str) -> Result<Manifest> {
     if !lightcraft_catalog::assets::identifier(id) {
         return Err(error("invalid staging identity"));
@@ -714,6 +710,7 @@ fn commit(s: &mut Session, manifests: Vec<Manifest>) -> Result<Value> {
             verified: Default::default(),
             error: None,
             finalization: None,
+            blocked: None,
         };
         if let Some(relative) = &manifest.working {
             let root = s

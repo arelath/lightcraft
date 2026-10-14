@@ -45,6 +45,30 @@ pub enum UploadState {
     Synchronized,
 }
 
+/// Preparation failed before a media attempt. This never revokes a verified ACK.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UploadBlock {
+    pub reason: String,
+    pub verify: bool,
+}
+impl UploadBlock {
+    pub fn new(reason: &str, verify: bool) -> Self {
+        let mut reason = reason.replace('\0', "�");
+        if reason.len() > 4096 {
+            let mut end = 4096;
+            while !reason.is_char_boundary(end) {
+                end = end.saturating_sub(1);
+            }
+            reason.truncate(end);
+        }
+        if reason.is_empty() {
+            reason = "upload preparation failed; restore the import's staging and connection settings, then retry".into();
+        }
+        Self { reason, verify }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UploadIntent {
@@ -57,6 +81,8 @@ pub struct UploadIntent {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalization: Option<UploadFinalization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<UploadBlock>,
 }
 
 impl UploadIntent {
@@ -65,6 +91,9 @@ impl UploadIntent {
             return Err("invalid upload identity".into());
         }
         asset.validate()?;
+        if self.blocked.as_ref().is_some_and(|block| block.reason.is_empty() || block.reason.len() > 4096 || block.reason.contains('\0')) {
+            return Err("invalid upload preparation error".into());
+        }
         if let Some(proof) = &self.finalization {
             proof.validate()?;
             if self.state != UploadState::Synchronized {
@@ -113,6 +142,7 @@ mod tests {
             verified: Default::default(),
             error: None,
             finalization: None,
+            blocked: None,
         };
         let op = Op::Batch {
             ops: vec![
@@ -173,6 +203,18 @@ mod tests {
     }
 
     #[test]
+    fn blocked_reasons_are_bounded_and_legacy_intents_default_to_unblocked() {
+        let reason = format!("{}\0", "あ".repeat(2000));
+        let block = UploadBlock::new(&reason, true);
+        assert!(block.reason.len() <= 4096 && !block.reason.contains('\0'));
+        assert!(!UploadBlock::new("", false).reason.is_empty());
+        let intent: UploadIntent = serde_json::from_value(serde_json::json!({
+            "assetId":"staged","photoId":1,"state":"savedLocally","verified":[]
+        }))
+        .unwrap();
+        assert!(intent.blocked.is_none());
+    }
+    #[test]
     fn invalid_intent_rolls_back_its_whole_import_batch() {
         let mut catalog = Catalog::new();
         let before = catalog.to_snapshot();
@@ -184,6 +226,7 @@ mod tests {
             verified: Default::default(),
             error: None,
             finalization: None,
+            blocked: None,
         };
         assert!(
             catalog

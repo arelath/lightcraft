@@ -825,11 +825,19 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 if let Some(message) = &upload.error {
                     ui.label(egui::RichText::new(message).color(t.text_dim));
                 }
+                if let Some(block) = &upload.blocked {
+                    ui.label(egui::RichText::new(&block.reason).color(t.caution));
+                }
                 #[cfg(not(target_arch = "wasm32"))]
-                if matches!(upload.state, UploadState::SavedLocally | UploadState::Failed | UploadState::ObjectsVerified | UploadState::Published) {
-                    let label = if upload.state == UploadState::Failed { "Retry upload" } else { "Upload now" };
+                if upload.blocked.is_some()
+                    || matches!(upload.state, UploadState::SavedLocally | UploadState::Failed | UploadState::ObjectsVerified | UploadState::Published)
+                {
+                    let label = if upload.blocked.is_some() || upload.state == UploadState::Failed { "Retry upload" } else { "Upload now" };
                     if text_button(ui, "cloudUploadOriginal", crate::i18n::tr(label), false).clicked()
-                        && let Err(error) = app.run("cloud.upload", json!({"imports":[_import_id], "wait":false}))
+                        && let Err(error) = app.run(
+                            "cloud.upload",
+                            json!({"imports":[_import_id], "verify":upload.blocked.as_ref().is_some_and(|block| block.verify || upload.state == UploadState::Synchronized), "wait":false}),
+                        )
                     {
                         app.toast(ui.ctx(), error);
                     }

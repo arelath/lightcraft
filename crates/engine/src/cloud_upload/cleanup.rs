@@ -354,6 +354,7 @@ mod tests {
                             verified: BTreeSet::new(),
                             error: None,
                             finalization: None,
+                            blocked: None,
                         })),
                     },
                 ],

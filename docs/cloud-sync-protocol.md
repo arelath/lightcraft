@@ -45,7 +45,7 @@ Filter chips clear the marker; legacy `only:[]` command patches still clear the
 restriction unless they explicitly set the marker. Empty similarity results remain
 constrained rather than showing the whole library.
 
-Upgrade all devices before using these semantics. New local snapshots use format 16 (15 introduced the smart-selection barrier),
+Upgrade all devices before using these semantics. New local snapshots use format 17 (15 introduced the smart-selection barrier),
 new mutations version 2, and new synchronization/checkpoint states version 3. Older
 builds reject these required versions before applying an empty allowed set. New
 readers accept legacy mutation/state versions and retain their exact identities and
@@ -106,8 +106,23 @@ bound to another connection. Missing media delays only the local causal publicat
 It is a normal waiting condition; integrity and transport errors still produce actionable errors.
 A deleted managed photo's frozen staged import is published before its tombstone, including
 after local permanent deletion. This completes its causal sequence without restoring the photo.
-An orphan with missing/incompatible staging is reported in `cloud.upload`'s `skipped` results;
-healthy selected items continue and durable data remains retained.
+An import with missing/incompatible staging or connection settings is reported in
+`cloud.upload`'s `skipped` results and retains a device-local `blocked` reason and retry mode
+in its upload intent (local format 17). This preparation outcome is saved even when no
+worker starts or an otherwise successful batch includes skipped imports. Healthy selected
+items continue and durable data remains retained; causal publication dependencies still apply.
+Preparation failures never revoke a previously verified synchronization acknowledgement.
+Deliberate verification retries retain `verify:true` so the retry cannot silently skip them.
+
+The cloud popup and photo details show specific blocked reasons and import-specific retry
+actions. Blocked imports count as issues, rather than ordinary waiting uploads. Explicit
+import retry reruns preparation; resume, connection/setup changes and library reopen reset
+automatic attempt eligibility. Unrelated upload batches do not repeatedly retry blocked work;
+use the displayed import-specific retry action (or explicit `imports` selection).
+Restoring a manifest alone requires an explicit retry or resume while the app remains open.
+Preparation checks are bounded to 32 imports per invocation; the status overview retains
+the total blocked count with at most 32 detailed records. Catalog upload state is unchanged
+until an actual media attempt reports its verified outcome.
 
 Automatic single-import jobs can reach `objectsVerified` while sibling imports still need
 transfers. This means publication pending, not failed. Exact append publication proof and

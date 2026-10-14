@@ -90,6 +90,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let waiting = data["waitingFiles"].as_u64().unwrap_or(0);
     let active = data["uploadingFiles"].as_u64().unwrap_or(0);
     let failed = summary["failedFiles"].as_u64().unwrap_or(0);
+    let blocked = summary["blockedImports"].as_array();
     ui.separator();
     ui.label(
         egui::RichText::new(crate::i18n::tr(if migrating {
@@ -98,6 +99,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             "Syncing paused"
         } else if summary["issues"].as_u64().unwrap_or(0) > 0
             || failed > 0
+            || blocked.is_some_and(|items| !items.is_empty())
             || data["error"].is_string()
             || data["capacityWarnings"].as_array().is_some_and(|w| !w.is_empty())
         {
@@ -114,6 +116,27 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     ui.label(format!("{waiting} files waiting · {active} uploading"));
     if failed > 0 {
         ui.label(egui::RichText::new(format!("{failed} files need upload retry")).color(t.caution));
+    }
+    if let Some(blocked) = blocked {
+        for item in blocked.iter().take(3) {
+            ui.label(egui::RichText::new(item["name"].as_str().unwrap_or("Cloud import")).size(11.));
+            ui.label(egui::RichText::new(item["reason"].as_str().unwrap_or("Upload preparation failed")).size(11.).color(t.caution));
+            if let Some(id) = item["id"].as_str() {
+                action(
+                    app,
+                    ui,
+                    &format!("button:cloudRetryImport:{id}"),
+                    "Retry upload",
+                    !paused && data["canResume"] == true,
+                    "cloud.upload",
+                    json!({"imports":[id],"verify":item["verify"] == true,"wait":false}),
+                );
+            }
+        }
+        let count = summary["blockedImportCount"].as_u64().unwrap_or(blocked.len() as u64);
+        if count > 3 {
+            ui.label(format!("{} more blocked imports; select a photo for details", count.saturating_sub(3)));
+        }
     }
     if summary["issues"].as_u64().unwrap_or(0) > 0 {
         ui.label(format!("{} photos with sync issues", summary["issues"].as_u64().unwrap_or(0)));
