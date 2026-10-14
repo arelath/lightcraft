@@ -121,6 +121,8 @@ pub enum EngineError {
     Other(String),
 }
 
+mod undo_fields;
+
 pub type Result<T> = std::result::Result<T, EngineError>;
 
 /// One undo step: the inverse op and a label.
@@ -129,6 +131,7 @@ pub struct UndoEntry {
     pub label: String,
     pub op: Op,
     pub(crate) cloud_base: Option<cloud_sync::UndoBase>,
+    pub(crate) fields: undo_fields::Fields,
     /// A folder to rename on disk (`from` → `to`) before `op` is applied: Rename / Move Folder
     /// (whose `op` relinks the photos inside). Never overwrites; refused when `to` exists. An
     /// empty `to` removes the (empty) folder `from`, an empty `from` creates `to` (Create Folder).
@@ -529,12 +532,15 @@ impl Session {
 
     /// Apply an op as one undoable step.
     pub fn commit(&mut self, label: &str, op: Op) -> Result<()> {
+        let clock = cloud_sync::undo_clock(&self.catalog);
         let inv = self.apply_catalog(op)?;
-        let cloud_base = cloud_sync::undo_base(&self.catalog, &inv);
+        let fields = undo_fields::Fields::record(&self.catalog, &inv);
+        let cloud_base = cloud_sync::undo_base(&self.catalog, &clock);
         self.undo.push(UndoEntry {
             label: label.to_string(),
             op: inv,
             cloud_base,
+            fields,
             folder: None,
             retry_inverse: Vec::new(),
             retry_sidecars: Vec::new(),
@@ -725,10 +731,32 @@ impl Session {
             return;
         }
         let tail = self.undo.split_off(self.undo.len() - n);
-        let ops = tail.into_iter().rev().map(|e| e.op).collect();
+        let mut fields = undo_fields::Fields::default();
+        let mut cloud_base: Option<cloud_sync::UndoBase> = None;
+        let ops = tail
+            .into_iter()
+            .rev()
+            .map(|e| {
+                fields.extend(e.fields);
+                if let Some(base) = e.cloud_base {
+                    let merged = cloud_base.get_or_insert_with(Default::default);
+                    for (key, revisions) in base {
+                        merged.entry(key).or_insert(revisions);
+                    }
+                }
+                e.op
+            })
+            .collect();
         let op = Op::Batch { ops };
-        let cloud_base = cloud_sync::undo_base(&self.catalog, &op);
-        self.undo.push(UndoEntry { label: label.to_string(), op, cloud_base, folder: None, retry_inverse: Vec::new(), retry_sidecars: Vec::new() });
+        self.undo.push(UndoEntry {
+            label: label.to_string(),
+            op,
+            cloud_base,
+            fields,
+            folder: None,
+            retry_inverse: Vec::new(),
+            retry_sidecars: Vec::new(),
+        });
     }
 
     /// Apply without recording undo (interactive previews).
@@ -743,6 +771,7 @@ impl Session {
 
     pub(crate) fn undo_step_with(&mut self, fs: &dyn rename::MoveFs) -> Result<String> {
         let mut e = self.undo.pop().ok_or_else(|| EngineError::Other("nothing to undo".into()))?;
+        let clock = cloud_sync::undo_clock(&self.catalog);
         let redo = match self.apply_with_files(&mut e, fs) {
             Ok(r) => r,
             Err(err) => {
@@ -754,7 +783,8 @@ impl Session {
         self.redo.push(UndoEntry {
             label: e.label.clone(),
             op: redo,
-            cloud_base: cloud_sync::undo_base(&self.catalog, &e.op),
+            cloud_base: cloud_sync::undo_base(&self.catalog, &clock),
+            fields: e.fields.clone(),
             folder: e.folder.as_ref().map(FolderMove::reversed),
             retry_inverse: Vec::new(),
             retry_sidecars: Vec::new(),
@@ -768,6 +798,7 @@ impl Session {
 
     pub(crate) fn redo_step_with(&mut self, fs: &dyn rename::MoveFs) -> Result<String> {
         let mut e = self.redo.pop().ok_or_else(|| EngineError::Other("nothing to redo".into()))?;
+        let clock = cloud_sync::undo_clock(&self.catalog);
         let undo = match self.apply_with_files(&mut e, fs) {
             Ok(r) => r,
             Err(err) => {
@@ -779,7 +810,8 @@ impl Session {
         self.undo.push(UndoEntry {
             label: e.label.clone(),
             op: undo,
-            cloud_base: cloud_sync::undo_base(&self.catalog, &e.op),
+            cloud_base: cloud_sync::undo_base(&self.catalog, &clock),
+            fields: e.fields.clone(),
             folder: e.folder.as_ref().map(FolderMove::reversed),
             retry_inverse: Vec::new(),
             retry_sidecars: Vec::new(),
@@ -810,7 +842,9 @@ impl Session {
     /// library follows them (a logged change outside the undo history), so none goes missing; the
     /// folder is only moved back when no file was left behind at its new path.
     fn apply_with_files(&mut self, entry: &mut UndoEntry, fs: &dyn rename::MoveFs) -> Result<Op> {
-        cloud_sync::guard_undo(&self.catalog, &entry.op, entry.cloud_base.as_ref())?;
+        let prepared = entry.fields.prepare(&self.catalog, &entry.op)?;
+        cloud_sync::guard_undo(&self.catalog, &prepared, entry.cloud_base.as_ref())?;
+        entry.op = prepared;
         // The entry is detached from self.undo/self.redo: include it before any global
         // repair can retire, then retry revalidates it before moving its own packets.
         rename::validate_sidecars(fs, &entry.retry_sidecars).map_err(|e| EngineError::Other(format!("can't move the files back: {e}")))?;

@@ -1052,3 +1052,162 @@ fn oversized_existing_album_setup_is_atomic_on_both_protocols_and_splitting_reco
     assert_eq!(editing.catalog.revision, revision);
     assert_eq!(editing.pending_log.len(), journal);
 }
+
+#[test]
+fn logical_metadata_undo_redo_preserves_remote_caption_and_guards_the_title_revision() {
+    let (mut a, _) = session();
+    let (mut b, _) = peer("device-b");
+    deliver(&a, &mut b, 1);
+    b.selection = crate::Selection::single(PhotoId(1));
+    a.execute("photo.setMeta", &json!({"ids":[1],"title":"Local title"})).unwrap();
+    b.execute("photo.setMeta", &json!({"ids":[1],"caption":"Remote caption"})).unwrap();
+    deliver(&b, &mut a, 2);
+    a.undo_step().unwrap();
+    assert_eq!(a.catalog.photo(PhotoId(1)).unwrap().meta.title, "");
+    assert_eq!(a.catalog.photo(PhotoId(1)).unwrap().meta.caption, "Remote caption");
+    b.execute("photo.setMeta", &json!({"ids":[1],"caption":"New remote caption"})).unwrap();
+    deliver(&b, &mut a, 3);
+    a.redo_step().unwrap();
+    assert_eq!(a.catalog.photo(PhotoId(1)).unwrap().meta.title, "Local title");
+    assert_eq!(a.catalog.photo(PhotoId(1)).unwrap().meta.caption, "New remote caption");
+    b.execute("photo.setMeta", &json!({"ids":[1],"title":"Competing title"})).unwrap();
+    deliver(&b, &mut a, 4);
+    let before = a.catalog.to_snapshot();
+    assert!(a.undo_step().unwrap_err().to_string().contains("received another revision"));
+    assert_eq!(a.catalog.to_snapshot(), before);
+}
+
+#[test]
+fn logical_membership_undo_redo_preserves_independent_received_members_and_local_members() {
+    let (mut a, _) = session();
+    let mut second = (**a.catalog.photo(PhotoId(1)).unwrap()).clone();
+    second.id = PhotoId(2);
+    a.commit("second", Op::AddPhoto { photo: Box::new(second) }).unwrap();
+    a.commit(
+        "local",
+        Op::AddPhoto { photo: Box::new(Photo::new(PhotoId(3), Source::File { path: "private.jpg".into() }, "private.jpg", "JPEG", 1, 1, "")) },
+    )
+    .unwrap();
+    a.commit("album", Op::AddAlbum { album: Album::new(AlbumId(1), "Shared") }).unwrap();
+    let (mut b, _) = peer("device-b");
+    b.commit(
+        "offset",
+        Op::AddPhoto { photo: Box::new(Photo::new(PhotoId(1), Source::File { path: "offset.jpg".into() }, "offset.jpg", "JPEG", 1, 1, "")) },
+    )
+    .unwrap();
+    deliver(&a, &mut b, 1);
+    b.selection = crate::Selection::single(PhotoId(1));
+    let p = PhotoId(local_id(&b.catalog, "photo", a.catalog.cloud_identity("photo:1").unwrap()));
+    let q = PhotoId(local_id(&b.catalog, "photo", a.catalog.cloud_identity("photo:2").unwrap()));
+    let album = AlbumId(local_id(&b.catalog, "album", a.catalog.cloud_identity("album:1").unwrap()));
+    assert_ne!(p, PhotoId(1));
+    a.commit("local members", Op::SetAlbumPhotos { id: AlbumId(1), photos: vec![PhotoId(1), PhotoId(3)] }).unwrap();
+    b.commit("remote member", Op::SetAlbumPhotos { id: album, photos: vec![q] }).unwrap();
+    deliver(&b, &mut a, 2);
+    a.undo_step().unwrap();
+    assert_eq!(a.catalog.album(AlbumId(1)).unwrap().photos, vec![PhotoId(2)]);
+    b.commit("remove independent member", Op::SetAlbumPhotos { id: album, photos: vec![] }).unwrap();
+    deliver(&b, &mut a, 3);
+    a.redo_step().unwrap();
+    assert_eq!(a.catalog.album(AlbumId(1)).unwrap().photos, vec![PhotoId(1), PhotoId(3)]);
+    deliver(&a, &mut b, 4);
+    b.commit("remove same member", Op::SetAlbumPhotos { id: album, photos: vec![] }).unwrap();
+    b.commit("replace same member", Op::SetAlbumPhotos { id: album, photos: vec![p] }).unwrap();
+    deliver(&b, &mut a, 5);
+    let before = a.catalog.to_snapshot();
+    assert!(a.undo_step().unwrap_err().to_string().contains("received another revision"));
+    assert_eq!(a.catalog.to_snapshot(), before);
+}
+
+#[test]
+fn merged_logical_metadata_inverses_handle_omitted_defaults_without_overwriting_remote_fields() {
+    let (mut a, _) = session();
+    let (mut b, _) = peer("device-b");
+    deliver(&a, &mut b, 1);
+    b.selection = crate::Selection::single(PhotoId(1));
+    a.execute("photo.setMeta", &json!({"ids":[1],"title":"Title"})).unwrap();
+    a.execute("photo.setMeta", &json!({"ids":[1],"usageTerms":"Contact me","copyrightStatus":"copyrighted"})).unwrap();
+    a.merge_undo(2, "Title and rights");
+    b.execute("photo.setMeta", &json!({"ids":[1],"caption":"Remote caption"})).unwrap();
+    deliver(&b, &mut a, 2);
+    a.undo_step().unwrap();
+    let meta = &a.catalog.photo(PhotoId(1)).unwrap().meta;
+    assert_eq!(meta.title, "");
+    assert_eq!(meta.usage_terms, "");
+    assert_eq!(meta.copyright_status, lightcraft_catalog::CopyrightStatus::Unknown);
+    assert_eq!(meta.caption, "Remote caption");
+    a.redo_step().unwrap();
+    let meta = &a.catalog.photo(PhotoId(1)).unwrap().meta;
+    assert_eq!(meta.title, "Title");
+    assert_eq!(meta.usage_terms, "Contact me");
+    assert_eq!(meta.caption, "Remote caption");
+}
+
+#[test]
+fn merged_logical_undo_does_not_forgive_a_remote_revision_between_local_actions() {
+    let (mut a, _) = session();
+    let (mut b, _) = peer("device-b");
+    deliver(&a, &mut b, 1);
+    b.selection = crate::Selection::single(PhotoId(1));
+    a.execute("photo.setMeta", &json!({"ids":[1],"title":"Local title"})).unwrap();
+    b.execute("photo.setMeta", &json!({"ids":[1],"title":"Remote title"})).unwrap();
+    deliver(&b, &mut a, 2);
+    a.execute("photo.setMeta", &json!({"ids":[1],"caption":"Local caption"})).unwrap();
+    a.merge_undo(2, "Title and caption");
+    let before = a.catalog.to_snapshot();
+    assert!(a.undo_step().unwrap_err().to_string().contains("received another revision"));
+    assert_eq!(a.catalog.to_snapshot(), before);
+}
+
+#[test]
+fn merged_logical_undo_preserves_a_remote_caption_received_between_local_actions() {
+    let (mut a, _) = session();
+    let (mut b, _) = peer("device-b");
+    deliver(&a, &mut b, 1);
+    b.selection = crate::Selection::single(PhotoId(1));
+    a.execute("photo.setMeta", &json!({"ids":[1],"title":"Local title"})).unwrap();
+    b.execute("photo.setMeta", &json!({"ids":[1],"caption":"Remote caption"})).unwrap();
+    deliver(&b, &mut a, 2);
+    a.execute("photo.setMeta", &json!({"ids":[1],"copyright":"Local rights"})).unwrap();
+    a.merge_undo(2, "Title and rights");
+    a.undo_step().unwrap();
+    let meta = &a.catalog.photo(PhotoId(1)).unwrap().meta;
+    assert_eq!(meta.title, "");
+    assert_eq!(meta.copyright, "");
+    assert_eq!(meta.caption, "Remote caption");
+    a.redo_step().unwrap();
+    let meta = &a.catalog.photo(PhotoId(1)).unwrap().meta;
+    assert_eq!(meta.title, "Local title");
+    assert_eq!(meta.copyright, "Local rights");
+    assert_eq!(meta.caption, "Remote caption");
+}
+
+#[test]
+fn logical_restore_guards_different_retained_fields_instead_of_recertifying_an_old_payload() {
+    let (mut a, _) = session();
+    let mut photo = (**a.catalog.photo(PhotoId(1)).unwrap()).clone();
+    photo.id = PhotoId(2);
+    a.commit(
+        "copy",
+        Op::Batch { ops: vec![Op::AddPhoto { photo: Box::new(photo) }, Op::SetCloudIdentity { entity: "photo:2".into(), id: Some("copy".into()) }] },
+    )
+    .unwrap();
+    a.undo_step().unwrap();
+    let mut peer = SyncState::new("library".into(), "remote".into(), "personal".into()).unwrap();
+    peer.merge(&a.catalog.sync_state().unwrap().portable()).unwrap();
+    let mutation = peer
+        .enqueue(vec![Change {
+            entity: "photo:copy".into(),
+            field: "meta.caption".into(),
+            base: peer.winning("photo:copy", "meta.caption").map(|(stamp, _)| stamp),
+            value: json!("Remote retained caption"),
+        }])
+        .unwrap()
+        .unwrap();
+    let mut received = a.catalog.sync_state().unwrap().clone();
+    received.receive(&mutation).unwrap();
+    a.apply_received(Op::SetSyncState { state: Some(Box::new(received)) }).unwrap();
+    let before = a.catalog.to_snapshot();
+    assert!(a.redo_step().unwrap_err().to_string().contains("received another revision"));
+    assert_eq!(a.catalog.to_snapshot(), before);
+}

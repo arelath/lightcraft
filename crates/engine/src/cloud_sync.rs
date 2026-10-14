@@ -456,30 +456,31 @@ fn user_inverse(op: Op) -> Op {
     }
 }
 
-pub(crate) fn undo_base(catalog: &Catalog, op: &Op) -> Option<UndoBase> {
+pub(crate) fn undo_clock(catalog: &Catalog) -> lightcraft_catalog::replication::Clock {
+    catalog.sync_state().map(|state| state.clock.clone()).unwrap_or_default()
+}
+/// Guard only fields authored by this action, retaining its own revision even
+/// when later unrelated actions are folded into the same undo step.
+pub(crate) fn undo_base(catalog: &Catalog, before: &lightcraft_catalog::replication::Clock) -> Option<UndoBase> {
     let state = catalog.sync_state()?;
-    let scope = affected(catalog, catalog, op);
-    let mut entities = BTreeSet::new();
-    for (kind, locals) in [
-        ("photo", scope.photos.iter().map(|id| id.0).collect::<Vec<_>>()),
-        ("album", scope.albums.iter().map(|id| id.0).collect()),
-        ("stack", scope.stacks.iter().map(|id| id.0).collect()),
-    ] {
-        for local in locals {
-            if let Some(id) = catalog.cloud_identity(&format!("{kind}:{local}")) {
-                entities.insert(format!("{kind}:{id}"));
-            }
-        }
-    }
+    let changed: BTreeSet<_> = state
+        .pending
+        .values()
+        .filter(|mutation| mutation.revision.sequence > before.get(&mutation.revision.device).copied().unwrap_or(0))
+        .flat_map(|mutation| mutation.changes.iter().map(|change| (&change.entity, &change.field)))
+        .collect();
     Some(
-        state
-            .documents
-            .iter()
-            .filter(|(entity, _)| {
-                entities.contains(*entity) || (scope.labels && entity.starts_with("library:")) || (scope.keywords && entity.starts_with("keyword:"))
-            })
-            .flat_map(|(entity, fields)| {
-                fields.iter().map(move |(field, register)| ((entity.clone(), field.clone()), register.0.keys().cloned().collect()))
+        changed
+            .into_iter()
+            .map(|(entity, field)| {
+                let revisions = state
+                    .documents
+                    .get(entity)
+                    .and_then(|fields| fields.get(field))
+                    .into_iter()
+                    .flat_map(|register| register.0.keys().cloned())
+                    .collect();
+                ((entity.clone(), field.clone()), revisions)
             })
             .collect(),
     )
@@ -494,6 +495,17 @@ pub(crate) fn guard_undo(catalog: &Catalog, op: &Op, expected: Option<&UndoBase>
     let before = project(catalog, catalog, state, Some(&scope))?;
     let after = project(&next, catalog, state, Some(&scope))?;
     for change in differences(&before, &after, state) {
+        // Recreating a retained tombstone projects its complete object again. Fields
+        // identical to every retained head change no shared value and need no new
+        // authority. A different saved payload still requires its own revision guard.
+        if state
+            .documents
+            .get(&change.entity)
+            .and_then(|fields| fields.get(&change.field))
+            .is_some_and(|register| !register.0.is_empty() && register.0.values().all(|value| value == &change.value))
+        {
+            continue;
+        }
         let current: BTreeSet<_> = state
             .documents
             .get(&change.entity)

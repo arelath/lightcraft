@@ -42,7 +42,7 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 - [x] CR.27 — Durably finalize every upload receipt covered by shared acknowledgement with exact publication evidence. Retry local proof writes after restart independently of media transfer; test delayed bulk siblings and subsequent local-copy removal without manual verification. Keep staging protection intact.
 - [x] CR.28 — Make per-import preflight failures explicit queue outcomes with retained blocked reasons and defined retry eligibility. Test one unreadable manifest alongside a healthy import: healthy work completes and the blocked item exposes its specific recovery action.
 - [x] CR.29 — Model subsystem health explicitly: user pause, polling halted by error, publication waiting, structural conflicts, and last successful remote scan. A success clears only the recovered subsystem's failure. Test failed automatic sync followed by upload success, and structural-only conflicts; never infer healthy synchronization solely from no pending local work.
-- [ ] CR.30 — Record logical fields changed by actions and construct undo/redo inverses against current state. Guard those fields' revisions while preserving independent remote metadata and membership changes. Test local title undo after remote caption editing, plus concurrent changes to the same title.
+- [x] CR.30 — Record logical fields changed by actions and construct undo/redo inverses against current state. Guard those fields' revisions while preserving independent remote metadata and membership changes. Test local title undo after remote caption editing, plus concurrent changes to the same title.
 - [ ] CR.31 — Separate verified media readiness, metadata publication, and covered-receipt finalization under one authoritative per-library coordinator (with CR.13/CR.22/CR.27). The per-library publication gate landed in CR.22 and durable local receipt finalization in CR.27; media stage extraction and bulk-import request-count/transferred-byte assertions remain open.
 - [ ] CR.32 — Replace contradictory protocol outcome combinations and sentinel cursors/generations with explicit unchanged, conditional-head, and append outcome variants. Test evidence merging, monotonic cursors, and no-op writes.
 - [ ] CR.33 — Extract independently testable shared structural reconciliation. Add property tests: identical shared synchronization state yields identical shared relationships regardless of local IDs, local-only content, iteration order, or delivery order. Test local-only preservation separately.
@@ -481,3 +481,47 @@ report before checking upload completion. Evidence: ignored
 `lightcraft-cr29-native/native-2f2db31d/` and `native-191dfc40/`. CR.29 is complete.
 Shared health/UI behavior and browser host are tested/WASM-compiled; fresh browser
 and live-provider acceptance are not claimed.
+
+
+2026-10-15 — CR.30 implementation: undo history records changed metadata keys and
+individual album members, then builds inverses from current state while retaining
+those saved targets. Independent received caption/member changes survive undo and
+redo. Masks carry forward through both directions and merged/nested operations;
+local-only membership is preserved separately from shared revisions. Exhaustive
+metadata construction makes future fields a compiler obligation. Captured revision
+guards cover newly authored fields only; grouped history retains each local field's
+guard instead of recertifying remote changes. Normal commit capture needs no extra
+whole-catalog clone, and no persisted operation/schema changes are introduced.
+
+The initial membership regressions passed; metadata fixtures were corrected to
+select the peer photo required by the existing command. All four initial focused
+logical tests then passed. Additional regressions cover remote same-field and
+independent changes arriving between grouped local actions. Full CI and rebuilt
+native acceptance are pending; CR.30 remains unchecked.
+
+
+The first full gate passed fmt/clippy/HEIF and 916 engine tests, but exposed two
+structural-restore guard regressions (deleted albums and import redo). Recreating
+a retained object projects unchanged fields again; the guard now accepts only
+saved values equal to every retained head without requiring unrelated authority.
+Different retained remote values still require their own guard, with an added
+old-payload restore regression. The final full gate remains pending.
+
+
+Final source passed all eight CI stages (`cr30-ci-verified.log`), including
+restoration guards, grouped-history checks, existing filesystem retry regressions
+and WASM compilation. Native binaries rebuilt (`cr30-native-build.log`). The first
+synthetic retained-caption test incorrectly switched the local device without
+claiming ownership; the passing test receives a proper peer mutation instead.
+
+Rebuilt native acceptance passed on both protocols through normal commands. Title
+undo preserved a received caption; title redo preserved a newer received caption.
+A competing title revision refused undo with values retained. Album-member undo
+kept an independently received member, and redo preserved its later remote removal.
+The album had an existing cover, avoiding a separate intentional cover conflict.
+Both protocol Info screenshots showing exact title/caption values were inspected;
+`ui.inspect` was captured. All 530 signed loopback requests verified (290 head /
+240 append). Evidence: ignored `target/cloud-reliability/cr30-native-results-*.json`
+and request logs; C: scratch `lightcraft-cr30-native/native-499569f9/` and
+`native-aa221dfe/`. CR.30 is complete. Browser/shared undo behavior is engine-tested
+and WASM-compiled; fresh browser and live-provider acceptance are not claimed.

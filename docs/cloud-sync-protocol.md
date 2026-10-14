@@ -644,3 +644,23 @@ work and no unresolved conflicts. The displayed scan age explains the freshness 
 that claim; after reopen the UI checks again before displaying it. Browser media
 download failures are resource-specific and its host reports the same scheduler
 health model.
+
+
+### Logical undo and redo (2026-10-15)
+
+Undo history records the metadata keys and individual album memberships changed
+by each action. Before applying an inverse it combines saved values for those
+fields with current values elsewhere. A title undo therefore preserves a received
+caption; membership undo preserves unrelated received additions and removals.
+Local-only album members are handled by the same local mask without entering the
+shared projection. Nested inverses are prepared in application order with a bounded
+depth. Metadata field construction is exhaustive so new model fields require an
+explicit undo policy. Catalog operation/schema formats remain unchanged.
+
+Revision guards retain the fields actually authored by that action, obtained from
+its newly allocated mutation range. Merged undo entries retain each touched field's
+latest local guard, rather than trusting the entire current entity again. Undo and
+redo create fresh revisions and carry their logical field masks forward. A later
+competing revision to a touched field still refuses the operation atomically, with
+the history entry available for explicit conflict-aware recovery. Independent
+remote fields do not become accidental targets of a whole-metadata inverse.
