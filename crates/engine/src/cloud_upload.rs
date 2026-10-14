@@ -4,7 +4,7 @@
 use crate::activity::{TaskGuard, TaskHandle};
 use crate::assets::s3::S3Connection;
 use crate::assets::{AssetError, AssetResolver, BlobStore, TransferManager, sha256};
-use crate::cloud_publication::{self, Imported};
+use crate::cloud_publication::Imported;
 use crate::{EngineError, Result, Session};
 use lightcraft_catalog::assets::{Asset, Blob, BlobId, identifier};
 use lightcraft_catalog::uploads::{UploadIntent, UploadState};
@@ -68,13 +68,14 @@ struct Receipt {
 
 impl Receipt {
     fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1..=3)
+        if !matches!(self.version, 1..=4)
             || (self.version == 1 && self.storage.is_some())
             || (self.version == 2 && self.storage.is_none())
             || (self.version == 3
                 && (self.storage.is_none()
                     || self.protocol != lightcraft_catalog::replication::SyncProtocol::AppendLog
                     || self.library.as_ref().is_none_or(|s| !identifier(s))))
+            || (self.version == 4 && (self.storage.is_none() || !self.protocol.is_head() || self.library.as_ref().is_none_or(|s| !identifier(s))))
             || (self.version < 3
                 && (!self.protocol.is_head() || self.library.is_some() || !self.append_proof.is_empty() || !self.publication_intent.is_empty()))
             || self.append_proof.len() > 100_000
@@ -466,11 +467,11 @@ impl Item {
             .map(|m| m.digest().map(|digest| (m.revision.id(), digest)).map_err(|e| error(e.to_string())))
             .collect::<Result<BTreeMap<_, _>>>()?;
         let mut receipt = read_receipt(&path)?.unwrap_or_else(|| Receipt {
-            version: if self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()) { 3 } else { 2 },
+            version: self.sync.as_ref().map_or(2, |s| if s.protocol.is_head() { 4 } else { 3 }),
             protocol: self.sync.as_ref().map_or(Default::default(), |s| s.protocol),
-            library: self.sync.as_ref().filter(|s| !s.protocol.is_head()).map(|s| s.library.clone()),
+            library: self.sync.as_ref().map(|s| s.library.clone()),
             append_proof: Default::default(),
-            publication_intent: if self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()) { frozen.clone() } else { Default::default() },
+            publication_intent: if self.sync.is_some() { frozen.clone() } else { Default::default() },
             id: self.id.clone(),
             imported: self.imported.clone(),
             storage: Some(self.connection.storage_snapshot()),
@@ -497,7 +498,7 @@ impl Item {
             self.write_receipt(&receipt, cancel)?;
         }
         if !receipt.protocol.is_head() && receipt.publication_intent.is_empty() {
-            receipt.publication_intent = frozen;
+            receipt.publication_intent = frozen.clone();
         }
         if receipt.protocol != self.sync.as_ref().map_or(Default::default(), |s| s.protocol)
             || (receipt.library.is_some() && receipt.library.as_ref() != self.sync.as_ref().map(|s| &s.library))
@@ -517,6 +518,13 @@ impl Item {
             }
             receipt.storage = Some(self.connection.storage_snapshot());
             receipt.version = 2;
+        }
+        if let Some(local) = self.sync.as_ref().filter(|s| s.protocol.is_head()) {
+            receipt.version = 4;
+            receipt.library = Some(local.library.clone());
+            if receipt.publication_intent.is_empty() {
+                receipt.publication_intent = frozen.clone();
+            }
         }
         let result = (|| {
             receipt.state = UploadState::Uploading;
@@ -566,10 +574,10 @@ impl Item {
             if defer_publication && self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()) {
                 return Ok(json!({"import":self.id,"objectsVerified":true,"publicationPending":true}));
             }
-            if let Some(local) = self.sync.as_ref().filter(|s| !s.protocol.is_head()) {
-                let outcome = crate::cloud_append::native::synchronize(&self.connection, local, false, cancel).map_err(|e| error(e.to_string()))?;
-                let proof = outcome.append.as_ref().ok_or_else(|| error("missing append publication proof"))?;
-                let target = proof.remote.documents.get(&format!("photo:{}", self.imported.photo_id)).and_then(|fields| fields.get("content"));
+            if let Some(local) = self.sync.as_ref() {
+                let outcome = crate::cloud_replication::synchronize(&self.connection, local, false, cancel).map_err(|e| error(e.to_string()))?;
+                let proof = &outcome.state;
+                let target = proof.documents.get(&format!("photo:{}", self.imported.photo_id)).and_then(|fields| fields.get("content"));
                 let expected = if !receipt.publication_intent.is_empty() {
                     receipt.publication_intent.clone()
                 } else if !receipt.append_proof.is_empty() {
@@ -579,14 +587,18 @@ impl Item {
                         .into_iter()
                         .flat_map(|r| r.0.iter())
                         .filter(|(_, v)| v.get("assetId").and_then(Value::as_str) == Some(self.imported.asset_id.0.as_str()))
-                        .filter_map(|(id, _)| proof.remote.received.get(id).map(|r| (id.clone(), r.digest.clone())))
+                        .filter_map(|(id, _)| proof.received.get(id).map(|r| (id.clone(), r.digest.clone())))
                         .collect()
                 };
-                if expected.is_empty() || expected.iter().any(|(id, digest)| proof.remote.received.get(id).is_none_or(|r| &r.digest != digest)) {
-                    return Err(error("earlier causal imports are not uploaded; exact content publication proof missing; staged bytes retained"));
+                let published =
+                    !expected.is_empty() && expected.iter().all(|(id, digest)| proof.received.get(id).is_some_and(|r| &r.digest == digest));
+                if published {
+                    receipt.append_proof = expected;
+                    if local.protocol.is_head() {
+                        receipt.generation = Some(outcome.generation);
+                    }
+                    self.write_receipt(&receipt, cancel)?;
                 }
-                receipt.append_proof = expected;
-                self.write_receipt(&receipt, cancel)?;
                 let (reply, response) = mpsc::sync_channel(1);
                 events
                     .send(Event::Publication { outcome: Box::new(outcome), reply })
@@ -602,9 +614,12 @@ impl Item {
                         Err(_) => {}
                     }
                 }
+                if !published {
+                    task.detail("Objects verified · waiting for other causal imports");
+                    return Ok(json!({"import":self.id,"objectsVerified":true,"publicationPending":true}));
+                }
             } else {
-                receipt.generation =
-                    Some(cloud_publication::publish_import(&self.connection, &receipt.imported, cancel).map_err(|e| error(e.to_string()))?);
+                return Err(error("enable cloud synchronization with cloud.syncEnable before uploading; staged originals retained"));
             }
             receipt.state = UploadState::Published;
             self.write_receipt(&receipt, cancel)?;
@@ -660,6 +675,22 @@ pub struct Uploads {
     attempted: BTreeSet<String>,
 }
 impl Uploads {
+    pub fn active_files(&self, catalog: &lightcraft_catalog::Catalog) -> usize {
+        self.pending
+            .iter()
+            .filter(|p| p.maintenance.is_none())
+            .flat_map(|p| p.ids.keys())
+            .filter_map(|id| catalog.upload_intents().get(id))
+            .filter(|i| i.state != UploadState::Synchronized)
+            .map(|i| i.photo_id)
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+    pub fn pause(&self) {
+        for pending in self.pending.iter().filter(|p| p.maintenance.is_none()) {
+            pending.cancel.store(true, Ordering::Relaxed);
+        }
+    }
     pub fn running(&self) -> usize {
         self.pending.len()
     }
@@ -672,7 +703,27 @@ impl Uploads {
     }
 }
 
-fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
+/// Retained immutable content is still publishable after deletion/revision. Its original
+/// mutation must precede the tombstone; completing it never restores the local photo.
+fn retained_content(catalog: &lightcraft_catalog::Catalog, intent: &UploadIntent) -> bool {
+    let Some(asset) = catalog.asset(&intent.asset_id) else { return false };
+    let Some(state) = catalog.sync_state().filter(|s| s.connection == asset.original.remote.connection) else { return false };
+    let Some(global) = catalog.cloud_identity(&format!("photo:{}", intent.photo_id.0)) else { return false };
+    state
+        .documents
+        .get(&format!("photo:{global}"))
+        .and_then(|fields| fields.get("content"))
+        .is_some_and(|register| register.0.values().any(|value| value.get("assetId").and_then(Value::as_str) == Some(intent.asset_id.0.as_str())))
+        || state.pending.values().any(|mutation| {
+            mutation.changes.iter().any(|change| {
+                change.entity == format!("photo:{global}")
+                    && change.field == "content"
+                    && change.value.get("assetId").and_then(Value::as_str) == Some(intent.asset_id.0.as_str())
+            })
+        })
+}
+
+fn items(s: &mut Session, p: &Value, abort: bool) -> Result<(Vec<Item>, Vec<Value>)> {
     let verify = p.get("verify").map(|value| value.as_bool().ok_or_else(|| error("verify must be true or false"))).transpose()?.unwrap_or(false);
     if abort && verify {
         return Err(error("verification is available through cloud.upload, not multipart abort"));
@@ -698,6 +749,7 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
         })
         .transpose()?;
     let mut result = Vec::new();
+    let mut skipped = Vec::new();
     for (id, intent) in s.catalog.upload_intents() {
         if selected.as_ref().is_some_and(|selected| !selected.contains(id)) || (intent.state == UploadState::Synchronized && !verify) {
             continue;
@@ -708,26 +760,54 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
         if s.cloud_uploads.pending.iter().any(|pending| pending.ids.contains_key(id)) {
             continue;
         }
-        let asset = s.catalog.asset(&intent.asset_id).ok_or_else(|| error("upload intent has no asset; original preserved"))?;
-        let photo = s.catalog.photo(intent.photo_id).ok_or_else(|| error("upload intent's photo was removed; staged original preserved"))?;
-        if photo.deleted || !matches!(photo.source, Source::Managed { .. }) {
+        let Some(asset) = s.catalog.asset(&intent.asset_id) else {
+            log::warn!("upload {id}: asset is absent; staged original preserved; other imports continue");
+            skipped.push(json!({"import":id,"error":"upload asset is absent; staged original preserved"}));
+            continue;
+        };
+        let photo = s.catalog.photo(intent.photo_id);
+        let retained = retained_content(&s.catalog, intent);
+        if photo.is_none_or(|p| p.deleted || !matches!(p.source, Source::Managed { .. })) && !retained {
+            log::warn!("upload {id}: removed photo has no synchronized content; staged original retained");
+            skipped.push(json!({"import":id,"error":"removed photo has no synchronized content; staged original retained"}));
             continue;
         }
         // An external or DNG revision can supersede this photo while the earlier import is
         // still pending. Its immutable staged description remains publishable under the same
         // global identity; never relabel the new photo's bytes as the old asset.
         let staged;
-        let photo = if photo.source == (Source::Managed { asset_id: intent.asset_id.clone() }) {
+        let photo = if let Some(photo) = photo.filter(|p| !p.deleted && p.source == (Source::Managed { asset_id: intent.asset_id.clone() })) {
             photo.as_ref()
         } else {
-            staged = crate::cloud_import::read_manifest(&root, id)?.photo.ok_or_else(|| error("staged photo description is missing"))?;
+            let manifest = match crate::cloud_import::read_manifest(&root, id) {
+                Ok(manifest) => manifest,
+                Err(e) => {
+                    log::warn!("upload {id}: {e}; other imports continue");
+                    skipped.push(json!({"import":id,"error":e.to_string()}));
+                    continue;
+                }
+            };
+            if !manifest.prepared
+                || manifest.asset_id != intent.asset_id
+                || manifest.asset != *asset
+                || manifest.target.as_ref().is_some_and(|t| t.photo_id != intent.photo_id)
+            {
+                log::warn!("upload {id}: staged identity differs; preserved");
+                skipped.push(json!({"import":id,"error":"staged identity differs or is incomplete; preserved"}));
+                continue;
+            }
+            let Some(snapshot) = manifest.photo else {
+                log::warn!("upload {id}: staged photo description missing; preserved");
+                skipped.push(json!({"import":id,"error":"staged photo description missing; preserved"}));
+                continue;
+            };
+            staged = snapshot;
             staged.as_ref()
         };
-        let connection = connections
-            .iter()
-            .find(|connection| connection.id == asset.original.remote.connection)
-            .ok_or_else(|| error("configure the import's cloud connection before uploading"))?
-            .clone();
+        let Some(connection) = connections.iter().find(|connection| connection.id == asset.original.remote.connection).cloned() else {
+            skipped.push(json!({"import":id,"error":"configure the import's cloud connection before uploading"}));
+            continue;
+        };
         if s.cloud_uploads.pending.iter().any(|pending| pending.maintenance.as_deref() == Some(connection.id.as_str())) {
             if selected.is_some() {
                 return Err(error("upload retention cleanup is using this connection; wait or cancel cleanup before resuming"));
@@ -737,6 +817,13 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
         if blobs(asset).any(|blob| blob.remote.connection != connection.id) {
             return Err(error("import renditions refer to different connections"));
         }
+        let base_asset = match crate::cloud_import::revision_target(&root, id) {
+            Ok(target) => target.map(|target| target.base_asset),
+            Err(e) => {
+                skipped.push(json!({"import":id,"error":e.to_string()}));
+                continue;
+            }
+        };
         let imported = Imported {
             mutation_id: id.clone(),
             photo_id: s.catalog.cloud_identity(&format!("photo:{}", intent.photo_id.0)).unwrap_or(id).to_owned(),
@@ -747,17 +834,15 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
                 snapshot
             }),
             asset: Box::new(asset.clone()),
-            base_asset: crate::cloud_import::revision_target(&root, id)?.map(|target| target.base_asset),
+            base_asset,
         };
         imported.validate().map_err(|e| error(e.to_string()))?;
-        result.push(Item {
-            sync: s.catalog.sync_state().filter(|state| state.connection == connection.id).cloned(),
-            id: id.clone(),
-            imported,
-            connection,
-            root: root.clone(),
-            resolver: resolver.clone(),
-        });
+        let sync = s.catalog.sync_state().filter(|state| state.connection == connection.id).cloned();
+        if !abort && sync.is_none() {
+            skipped.push(json!({"import":id,"error":"this import uses another synchronization connection; open its library or restore the original connection; staged originals retained"}));
+            continue;
+        }
+        result.push(Item { sync, id: id.clone(), imported, connection, root: root.clone(), resolver: resolver.clone() });
     }
     if let Some(selected) = selected
         && selected.iter().any(|id| !s.catalog.upload_intents().contains_key(id))
@@ -777,7 +862,7 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<Vec<Item>> {
                 .min()
         })
     });
-    Ok(result)
+    Ok((result, skipped))
 }
 
 pub fn start(s: &mut Session, p: &Value) -> Result<Value> {
@@ -862,6 +947,14 @@ pub fn observed(s: &mut Session, p: &Value, abort: bool, observer: &mut dyn FnMu
 }
 
 fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
+    if !abort && s.catalog.sync_state().is_none() {
+        return Err(error(
+            "enable cloud synchronization with cloud.syncEnable before uploading; choose the storage protocol explicitly; staged originals retained",
+        ));
+    }
+    if s.cloud_paused && !abort {
+        return Err(error("cloud syncing is paused; use cloud.resume first"));
+    }
     if s.cloud_replication_jobs.migrating() || s.cloud_replication_jobs.preparing_migration() {
         return Err(error("uploads are paused for migration; finish migration or resume synchronization first"));
     }
@@ -878,9 +971,9 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
         return Err(error("four upload tasks are already running; wait or cancel before retrying"));
     }
     s.persist()?; // A queued import must be durable before any network operation.
-    let items = items(s, p, abort)?;
+    let (items, skipped) = items(s, p, abort)?;
     if items.is_empty() {
-        return Ok(json!({"tasks": [], "results": [], "remaining": 0}));
+        return Ok(json!({"tasks": [], "results": [], "skipped":skipped, "remaining": 0}));
     }
     let task =
         s.activity.start("upload", if abort { "Abort Resumable Cloud Uploads" } else { "Upload Cloud Originals" }, crate::activity::Cancel::Yes);
@@ -932,7 +1025,7 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
                 if let Some(first) = failures.first() {
                     return Err(error(format!("{} upload(s) failed; {} completed: {first}", failures.len(), results.len())));
                 }
-                Ok(json!({"results": results}))
+                Ok(json!({"results": results,"skipped":skipped}))
             })
             .unwrap_or_else(|message| Err(error(message)));
             let _ = sender.send(Event::Finished(result));
@@ -985,7 +1078,7 @@ impl Session {
     /// Native hosts pump this after polling owner events. Headless one-shot commands
     /// explicitly use `cloud.upload` so local import completion never waits for a bucket.
     pub fn resume_cloud_uploads(&mut self) {
-        if self.cloud_replication_jobs.migrating() || self.cloud_replication_jobs.preparing_migration() {
+        if self.cloud_paused || self.cloud_replication_jobs.migrating() || self.cloud_replication_jobs.preparing_migration() {
             return;
         }
         if !self.cloud_uploads.requested || self.cloud_uploads.pending.len() >= 4 {
@@ -1025,6 +1118,11 @@ impl Session {
     }
 
     pub fn poll_cloud_uploads(&mut self) {
+        // Publication can materialize remote edits. Wait until a slider/command group
+        // finishes, just as the ordinary synchronization owner does.
+        if self.interaction.is_some() {
+            return;
+        }
         let mut uploads = std::mem::take(&mut self.cloud_uploads);
         uploads.pending.retain(|pending| {
             for _ in 0..8 {
@@ -1036,8 +1134,11 @@ impl Session {
                             {
                                 return Err(error("library or connection changed; append publication retained"));
                             }
-                            let progress = outcome.append.ok_or_else(|| error("missing append proof"))?;
-                            let op = crate::cloud_sync::incoming_append(&self.catalog, progress, &outcome.acknowledged)?;
+                            let op = if let Some(progress) = outcome.append {
+                                crate::cloud_sync::incoming_append(&self.catalog, progress, &outcome.acknowledged)?
+                            } else {
+                                crate::cloud_sync::incoming_checkpoint(&self.catalog,&outcome.state,&outcome.acknowledged,outcome.cursor,outcome.generation)?
+                            };
                             let inverse = self.apply_catalog_mode(op, false)?;
                             if let Err(e) = self.persist() {
                                 self.apply_received(inverse)?;
@@ -1061,13 +1162,18 @@ impl Session {
                             if pending.ids.get(&id) != Some(&intent.asset_id) {
                                 return Err(error("import's asset changed; staged data preserved"));
                             }
-                            let photo = self.catalog.photo(intent.photo_id).ok_or_else(|| error("photo was removed; upload publication stopped"))?;
-                            if photo.deleted || !matches!(photo.source, Source::Managed { .. }) {
+                            if self.catalog.photo(intent.photo_id).is_none_or(|photo| photo.deleted || !matches!(photo.source, Source::Managed { .. }))
+                                && !retained_content(&self.catalog, &intent) {
                                 return Err(error("photo was deleted or changed; upload stopped and original preserved"));
                             }
-                            intent.state = state;
-                            intent.verified = verified;
-                            intent.error = message;
+                            let paused = self.cloud_paused && pending.cancel.load(Ordering::Relaxed) && state == UploadState::Failed;
+                            // Another worker may have acknowledged this shared mutation while
+                            // this worker still holds an older phase. Never undo that proof.
+                            if intent.state != UploadState::Synchronized || state == UploadState::Failed {
+                                intent.state = if paused { UploadState::SavedLocally } else { state };
+                                intent.verified = verified;
+                                intent.error = if paused { None } else { message };
+                            }
                             self.apply_system(Op::SetUploadIntent { id: id.clone(), intent: Some(Box::new(intent)) })?;
                             if let Err(e) = self.persist() {
                                 // Do not display synchronized after a failed local acknowledgement.
@@ -1082,7 +1188,7 @@ impl Session {
                     Ok(Event::Finished(result)) => {
                         uploads.reports.push(match result {
                             Ok(value) => json!({"task": pending.guard.id(), "ok": true, "result": value}),
-                            Err(e) => json!({"task": pending.guard.id(), "ok": false, "error": e.to_string()}),
+                            Err(e) => json!({"task": pending.guard.id(), "ok": false, "error": e.to_string(), "paused":self.cloud_paused && pending.cancel.load(Ordering::Relaxed)}),
                         });
                         return false;
                     }
@@ -1216,6 +1322,54 @@ mod tests {
         assert_eq!(session.catalog.to_snapshot(), before);
         session.poll_cloud_uploads();
         response
+    }
+
+    #[test]
+    fn enabling_sync_restarts_staged_imports_attempted_while_disabled() {
+        let root = std::env::temp_dir().join(format!(
+            "lightcraft-upload-setup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut s, _) = session(&root);
+        s.execute("cloud.configure", &json!({"id":"test","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":"http://127.0.0.1:1"}))
+            .unwrap();
+        s.cloud_uploads.request_resume(true);
+        s.resume_cloud_uploads();
+        assert!(s.cloud_uploads.attempted.contains("upload-ack-test"));
+        assert_eq!(s.cloud_uploads.running(), 0);
+        s.execute("cloud.syncEnable", &json!({"connection":"test"})).unwrap();
+        assert!(s.cloud_uploads.requested);
+        assert!(s.cloud_uploads.attempted.is_empty());
+        assert!(s.catalog.sync_state().is_some());
+        s.close_library().unwrap();
+        drop(s);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn upload_owner_acknowledgement_waits_for_active_slider_group() {
+        let root = std::env::temp_dir().join(format!(
+            "lightcraft-upload-interaction-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut s, _) = session(&root);
+        s.selection = crate::Selection::single(PhotoId(1));
+        s.begin_interaction("slider").unwrap();
+        let token = s.library_token();
+        let response = acknowledgement(&mut s, token);
+        assert!(matches!(response.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert_eq!(s.catalog.upload_intents()["upload-ack-test"].state, UploadState::Published);
+        s.end_interaction().unwrap();
+        s.poll_cloud_uploads();
+        assert!(response.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
+        assert_eq!(s.catalog.upload_intents()["upload-ack-test"].state, UploadState::Synchronized);
+        s.close_library().unwrap();
+        drop(s);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

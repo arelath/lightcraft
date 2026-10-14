@@ -234,6 +234,12 @@ impl Fixture {
         (output, rows)
     }
     pub fn import(&self, library: &std::path::Path, large: bool) -> (String, PathBuf) {
+        let result = self.import_unsynchronized(library, large);
+        let (output, rows) = self.run(library, &[("cloud.syncEnable", json!({"connection":"personal"}))]);
+        assert!(output.status.success(), "{rows:?} {}", String::from_utf8_lossy(&output.stderr));
+        result
+    }
+    pub fn import_unsynchronized(&self, library: &std::path::Path, large: bool) -> (String, PathBuf) {
         let source = self.dir.join(format!("source-{}.png", NEXT.fetch_add(1, Ordering::Relaxed)));
         let pixels = lightcraft_raster::Rgba8::from_fn(32, 24, |x, y| [x as u8 * 5, y as u8 * 7, 100, 255]);
         let mut bytes = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&pixels), &Default::default()).unwrap();
@@ -413,7 +419,7 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
                 let head: Value = serde_json::from_slice(&body).unwrap();
                 let batch_key = format!("/photos/{}", head["tip"]["key"].as_str().unwrap());
                 let batch: Value = serde_json::from_slice(&state.objects[&batch_key]).unwrap();
-                for imported in batch["imports"].as_array().unwrap() {
+                for imported in batch.get("imports").and_then(Value::as_array).into_iter().flatten() {
                     for field in ["original", "smartPreview", "thumbnail"] {
                         let blob = &imported["asset"][field];
                         let object = format!("/photos/{}", blob["remote"]["key"].as_str().unwrap());

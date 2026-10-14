@@ -91,6 +91,9 @@ impl Head {
             checkpoint.object.validate_scope(prefix, "checkpoints", 64 << 20)?;
             checkpoint.covers.validate_scope(prefix, "changes", 2 << 20)?;
         }
+        if self.version != 2 {
+            return Err("obsolete pre-release catalog head; use a fresh catalog and storage prefix; local data retained".into());
+        }
         Ok(())
     }
 }
@@ -137,6 +140,9 @@ impl Batch {
             if mutation.library != library || !ids.insert(mutation.revision.id()) {
                 return Err("change batch library or mutation collision".into());
             }
+        }
+        if self.version != 3 || !self.imports.is_empty() {
+            return Err("obsolete pre-release import batch; use a fresh catalog and storage prefix; local data retained".into());
         }
         Ok(())
     }

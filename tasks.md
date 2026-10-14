@@ -2,6 +2,10 @@
 
 Based on [docs/cloud-storage.md](docs/cloud-storage.md). Checkboxes reflect verified work; milestone acceptance remains separate. Evidence: [docs/cloud-storage-implementation.md](docs/cloud-storage-implementation.md). Complete the four core milestones in order. Browser support is an additional adapter, and a managed metadata backend is optional follow-up work.
 
+The supplied reliability review is tracked separately in
+[docs/cloud-reliability-tasks.md](docs/cloud-reliability-tasks.md), in execution order.
+Its unchecked items remain open even when earlier milestone acceptance passed.
+
 The source document describes a particular source snapshot. Verify its implementation assumptions before changing code. Task IDs use the `CS` prefix to distinguish this backlog from the existing project plan.
 
 Scope confirmed by the user: complete direct S3 storage/synchronization and browser support (Milestones 1–5).
@@ -253,6 +257,18 @@ Owner/CLI verification (2026-10-14): all eight replication-worker tests and nine
 Workflow acceptance (2026-10-14) passed on the final native release and browser development bundle against an independently signed loopback S3 fixture. Desktop control requests and Chromium OPFS/IndexedDB exercised setup → migration, disabled confirmation, cancellation of preparation with pause retained, explicit resume, cancellation after the remote marker committed, retry, cutover without acknowledging the pending edit, subsequent append publication and native-peer convergence. Browser reconnect/reconfiguration preserved preparation pause; reload retained completed append mode and no pending work. Desktop Activity and browser Activity/Info migration progress, confirmation and completion screenshots were inspected. Native control inspections stayed below 39 ms during the deliberate network delay. Evidence: `target/cloud-acceptance/migration-native-results.json`, `migration-browser-results.json`, `migration-native-*.png` and `migration-browser-*.png`. These fixtures do not constitute a new live-B2 migration test; MIG.B2 remains blocked by the measured service cap.
 
 Quality gates (2026-10-14): all eight stages of `cargo +1.95.0 xtask ci` passed on the final source (`target/migration-ci-final.log`). Native release and WASM/browser builds passed (`target/migration-native-final.log`, `target/migration-web-final.log`). The fixture independently verified all 429 requests across the final workflow runs and retained legacy heads (`target/cloud-acceptance/migration-fixture-summary.json`). Owned fixture/static helpers were stopped. The final signed B2 GET recheck at 2026-10-13 21:56 UTC again returned the explicit cap-exceeded response, so MIG.B2 stays unchecked.
+
+## Cloud queue UX — follow-up
+
+- [x] **CUX.1** Add indexed per-photo sync status and shared queue/data totals, including metadata pending work, failed uploads and virtual-copy deduplication; support filters/chips and backward-compatible catalog loading.
+- [x] **CUX.2** Persist device-local pause/resume, stop native uploads and metadata publication while preserving receipts/staging, and honor pause during restart/reconnect; support browser metadata pause.
+- [x] **CUX.3** Make the upper-right cloud icon open a status popup with file counts, byte progress, errors and pause/resume; add Sync Status filtering and expose the controls to automation.
+- [x] **CUX.4** Verify queue pause/resume with real native control requests and browser OPFS/IndexedDB workflows; inspect the popup and filters with procedural photos.
+- [x] **CUX.5** Run focused regressions, full CI and native/web builds; update cloud and progress documentation with verified scope and limitations.
+
+Workflow verification (2026-10-14): the signed loopback fixture and real desktop control channel passed a six-file queue with a 9 MiB multipart original. Pause kept the queue idle across reconnect, cancelled active transfers while preserving confirmed part 1, the upload ID and durable originals, and allowed a new pending edit. Resume reused that multipart identity, completed all six files and cleared pending mutations. Control inspections stayed below 56 ms during the delayed transfer. Native popup/byte progress/paused-state and Pending filter screenshots were inspected (`target/cloud-ux-acceptance/native-results.json`, `native-*.png`). Chromium OPFS and IndexedDB passed the popup, status picker, persisted pause across reload/reconnect, explicit resume and native-peer metadata convergence (`browser-results.json`, `browser-*.png`). Browser original uploads remain unsupported; these are fixture checks, not a new live-B2 acceptance run.
+
+Quality gates (2026-10-14): all eight stages of `cargo +1.95.0 xtask ci` passed (`target/cloud-ux-ci.log`). Native release and browser builds passed (`target/cloud-ux-native-final.log`, `target/cloud-ux-web-final.log`). The final full suite passed the indexed-status, pause persistence/write-failure and popup/filter regressions. Incomplete setup in concurrent reliability tests was corrected by selecting the slider's photo, supplying the dialog connection response and initializing its first frame, and enabling sync before testing the cleanup reservation. These corrections affect test fixtures only. Owned cloud-UX fixture/static helpers were stopped.
 
 ## Milestone 6 — Optional managed metadata backend
 

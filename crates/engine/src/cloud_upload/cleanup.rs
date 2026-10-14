@@ -338,6 +338,7 @@ mod tests {
         let mut session = Session::new().with_fs();
         session.open_library(fixture.root.join("library"), false).unwrap();
         session.execute("cloud.configure", &serde_json::to_value(&fixture.connection).unwrap()).unwrap();
+        session.execute("cloud.syncEnable", &json!({"connection": "personal"})).unwrap();
         let asset_id = fixture.receipt.imported.asset_id.clone();
         session
             .apply_system(Op::Batch {

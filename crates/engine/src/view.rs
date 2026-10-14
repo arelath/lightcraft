@@ -184,6 +184,9 @@ pub fn filter_chips(f: &Filter, cat: &Catalog) -> Vec<FilterChip> {
         };
         add(format!("Type: {n}"), json!({"merged": Null}));
     }
+    if let Some(state) = f.sync_status {
+        add(format!("Sync: {}", state.label()), json!({"syncStatus": Null}));
+    }
     if let Some(e) = f.edited {
         add(if e { "Edited".into() } else { "Unedited".into() }, json!({"edited": Null}));
     }

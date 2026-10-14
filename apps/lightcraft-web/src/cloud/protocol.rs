@@ -5,8 +5,8 @@ use super::verify_blob;
 use crate::backend::Backend;
 use lightcraft_engine::assets::sha256;
 use lightcraft_engine::catalog::assets::Asset;
-use lightcraft_engine::catalog::replication::{Mutation, Portable, Stamp, SyncState};
-use lightcraft_engine::cloud_records::{Batch, Checkpoint, CheckpointRef, Head, Imported, RecordRef};
+use lightcraft_engine::catalog::replication::{Mutation, Portable, SyncState};
+use lightcraft_engine::cloud_records::{Batch, Checkpoint, CheckpointRef, Head, RecordRef};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Outcome {
@@ -19,7 +19,6 @@ pub struct Outcome {
 struct Remote {
     head: Option<(Head, String)>,
     state: SyncState,
-    imports: BTreeMap<String, String>,
 }
 fn encode(value: &impl serde::Serialize, max: usize) -> Result<Vec<u8>, String> {
     let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
@@ -35,42 +34,11 @@ async fn object(provider: &Provider, reference: &RecordRef, max: usize) -> Resul
     }
     Ok(reply.bytes)
 }
-fn legacy(remote: &mut Remote, imported: &Imported) -> Result<(), String> {
-    let digest = sha256(&encode(imported, 2 << 20)?).0;
-    if let Some(old) = remote.imports.get(&imported.mutation_id) {
-        if old != &digest {
-            return Err("legacy import identity collision".into());
-        }
-        return Ok(());
-    }
-    let changes = lightcraft_engine::cloud_sync::legacy_changes(imported, &remote.state).map_err(|e| e.to_string())?;
-    let device = format!(
-        "{}_{}",
-        if imported.base_asset.is_some() { "legacy" } else { "baseline" },
-        sha256(format!("legacy-import-v1/{}", imported.mutation_id).as_bytes()).0
-    );
-    let revision = Stamp { device, sequence: 1 };
-    let existing = remote.state.received.get(&revision.id());
-    if existing.is_none()
-        && let Some((_, content)) = remote.state.winning(&format!("photo:{}", imported.photo_id), "content")
-    {
-        let current = content.get("assetId").and_then(serde_json::Value::as_str);
-        if imported.base_asset.as_ref().is_none_or(|base| current != Some(base.0.as_str())) {
-            remote.imports.insert(imported.mutation_id.clone(), digest);
-            return Ok(());
-        }
-    }
-    let context = existing
-        .map_or_else(|| if imported.base_asset.is_some() { remote.state.clock.clone() } else { BTreeMap::new() }, |receipt| receipt.context.clone());
-    remote.state.receive(&Mutation { version: 1, library: remote.state.library.clone(), revision, context, changes }).map_err(|e| e.to_string())?;
-    remote.imports.insert(imported.mutation_id.clone(), digest);
-    Ok(())
-}
 async fn read(provider: &Provider, library: &str) -> Result<Remote, String> {
     let key = format!("{}/catalog/head.json", provider.connection.prefix);
     let reply = provider.request("GET", &key, None, None, None, 16 << 10).await?;
     let state = SyncState::new(library.into(), "remote".into(), provider.connection.id.clone()).map_err(|e| e.to_string())?;
-    let mut remote = Remote { head: None, state, imports: BTreeMap::new() };
+    let mut remote = Remote { head: None, state };
     if reply.status == 404 {
         return Ok(remote);
     }
@@ -96,8 +64,10 @@ async fn read(provider: &Provider, library: &str) -> Result<Remote, String> {
         {
             return Err("invalid checkpoint generation or import receipts".into());
         }
+        if !checkpoint.imports.is_empty() {
+            return Err("obsolete pre-release import checkpoint; use a fresh catalog and storage prefix; local data retained".into());
+        }
         remote.state.merge(&checkpoint.state).map_err(|e| e.to_string())?;
-        remote.imports = checkpoint.imports;
         boundary = Some(reference.covers.hash.clone());
     }
     let mut next = Some(head.tip.clone());
@@ -129,9 +99,6 @@ async fn read(provider: &Provider, library: &str) -> Result<Remote, String> {
     }
     remote.head = Some((head, etag));
     for batch in batches.into_iter().rev() {
-        for imported in batch.imports {
-            legacy(&mut remote, &imported)?;
-        }
         for mutation in batch.mutations {
             remote.state.receive(&mutation).map_err(|e| e.to_string())?;
         }
@@ -251,7 +218,7 @@ pub async fn synchronize(
                 generation: head.generation,
                 covers: head.tip.clone(),
                 state: remote.state.portable(),
-                imports: remote.imports.clone(),
+                imports: BTreeMap::new(),
             };
             let bytes = encode(&payload, 64 << 20)?;
             let hash = sha256(&bytes);

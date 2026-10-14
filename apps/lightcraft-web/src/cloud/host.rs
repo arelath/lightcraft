@@ -152,6 +152,31 @@ impl Host {
             "cloud.migrateAppend" => Some(self.migrate(s, p)),
             "cloud.prepareMigration" => Some(self.prepare_migration(s)),
             "cloud.syncStatus" => Some(self.status(s)),
+            "cloud.overview" => Some(self.overview(s)),
+            "cloud.pause" => Some({
+                let result = lightcraft_engine::cloud_status::pause(s, p).map_err(|e| e.to_string());
+                for job in &self.data.borrow().jobs {
+                    if matches!(job.stage, Stage::SaveThenSync { .. } | Stage::Network(_))
+                        && let Some(cancel) = job.guard.cancel_flag()
+                    {
+                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                result.and_then(|_| self.overview(s))
+            }),
+            "cloud.resume" => Some({
+                if self.data.borrow().sync_running {
+                    return Some(Err("wait for current cloud tasks to stop before resuming".into()));
+                }
+                lightcraft_engine::cloud_status::resume(s, p).map_err(|e| e.to_string()).and_then(|_| {
+                    let mut data = self.data.borrow_mut();
+                    data.paused = false;
+                    data.preparing_migration = false;
+                    data.next_poll = 0.;
+                    drop(data);
+                    self.overview(s)
+                })
+            }),
             "cloud.reconnect" => Some({
                 self.memory.retry();
                 let mut data = self.data.borrow_mut();
@@ -237,6 +262,7 @@ impl Host {
         let data = self.data.borrow();
         status["transportAvailable"] = json!(self.backend.is_some() && !data.providers.is_empty());
         status["running"] = json!(data.sync_running);
+        status["paused"] = json!(s.cloud_paused || data.preparing_migration);
         status["preparingMigration"] = json!(data.preparing_migration);
         status["migrating"] = json!(data.jobs.iter().any(|job| job.migrating));
         status["reports"] = json!(data.reports);
@@ -245,9 +271,24 @@ impl Host {
         status["saveError"] = json!(self.files.error());
         Ok(status)
     }
+    fn overview(&self, s: &mut Session) -> Result<Value, String> {
+        let mut out = lightcraft_engine::cloud_status::overview(s, &Value::Null).map_err(|e| e.to_string())?;
+        let data = self.data.borrow();
+        out["paused"] = json!(s.cloud_paused || data.preparing_migration);
+        out["preparingMigration"] = json!(data.preparing_migration);
+        out["migrating"] = json!(data.jobs.iter().any(|j| j.migrating));
+        out["canResume"] = json!(!data.sync_running);
+        if let Some(report) = data.reports.iter().rev().find(|r| r["paused"] != true).filter(|r| r["ok"] == false) {
+            out["error"] = report["error"].clone();
+        }
+        Ok(out)
+    }
     fn start(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
         self.claim_owner(s)?;
         let migrating = p.get("migrate").map(|v| v.as_bool().ok_or("migrate must be true or false")).transpose()?.unwrap_or(false);
+        if s.cloud_paused && !migrating {
+            return Err("cloud syncing is paused; use cloud.resume first".into());
+        }
         if migrating && p.get("writersStopped").and_then(Value::as_bool) != Some(true) {
             return Err("migration requires writersStopped:true after stopping every old writer".into());
         }
@@ -406,7 +447,7 @@ impl Host {
                         Ok(value) => json!({"task":job.guard.id(),"ok":true,"result":value}),
                         Err(error) => {
                             crate::safety::notice(error.clone());
-                            json!({"task":job.guard.id(),"ok":false,"error":error})
+                            json!({"task":job.guard.id(),"ok":false,"error":error,"paused":app.session.cloud_paused && job.guard.is_cancelled()})
                         }
                     };
                     data.reports.push(report);
@@ -419,7 +460,8 @@ impl Host {
         self.data.borrow_mut().jobs.extend(remaining);
         let poll = {
             let data = self.data.borrow();
-            !data.sync_running
+            !app.session.cloud_paused
+                && !data.sync_running
                 && !data.paused
                 && js_sys::Date::now() >= data.next_poll
                 && app.session.catalog.sync_state().is_some_and(|s| data.providers.contains_key(&s.connection))

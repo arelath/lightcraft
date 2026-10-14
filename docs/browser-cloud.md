@@ -245,3 +245,19 @@ separate from the earlier completed live append tests.
 The final native release and browser bundle built successfully; all eight CI stages passed
 (`target/migration-native-final.log`, `target/migration-web-final.log`, `target/migration-ci-final.log`).
 Owned fixture/static helpers were stopped after acceptance.
+
+
+## Cloud status popup and pause
+
+The upper-right cloud icon now opens a shared status popup with managed-data totals, pending
+photo/library work, activity progress, errors and Pause/Resume Syncing. The Sync Status picker
+filters Waiting to sync, Syncing, Synced, Sync issues or Local only. Status counts describe this
+catalog, not the provider's storage capacity. `cloud.overview` exposes the same summary.
+
+`cloud.pause` saves a device-local preference and cancels catalog network jobs, preserving
+pending work. Reload/reconnect/sign-in changes keep the pause. `cloud.resume` waits for jobs to
+stop, saves the resumed preference, then schedules synchronization after durable saves finish.
+Acquisition/downloads remain available. Native original uploads can be paused/resumed from the
+same popup; browser original upload/import is still unsupported. OPFS and IndexedDB popup/
+filter/pause-reload/native-peer checks passed against the signed loopback fixture:
+`target/cloud-ux-acceptance/browser-results.json` and `browser-*.png`.

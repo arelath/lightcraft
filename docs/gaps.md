@@ -1,6 +1,6 @@
 # Gaps: where LightCraft falls short of Lightroom
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-14 · **Change:** minor (coordinated desktop/browser migration workflow; append-only B2 synchronization; CR3 entry names the EOS R7 C-RAW fix and the refused CRX variants; CI and Windows / Linux entries note the 0.6.0 riscv64 build; camera colour: tone curve from black-and-white camera JPEGs; Compare and Reference get sharp zoom windows; gap 4 shrinks; gap 14: the HDR switch is read from crs XMP; gaps 2 and 10: EOS R5 Mark II CR3 verified) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-14 · **Change:** minor (cloud queue popup, persisted pause and sync filters; coordinated desktop/browser migration workflow; append-only B2 synchronization; CR3 entry names the EOS R7 C-RAW fix and the refused CRX variants; CI and Windows / Linux entries note the 0.6.0 riscv64 build; camera colour: tone curve from black-and-white camera JPEGs; Compare and Reference get sharp zoom windows; gap 4 shrinks; gap 14: the HDR switch is read from crs XMP; gaps 2 and 10: EOS R5 Mark II CR3 verified) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 Every known shortfall, one entry each, ranked by user impact (how many Lightroom users hit it, and
 how hard it blocks them), then by effort. **Agents pick work from the top** (the first entry nobody is
@@ -60,13 +60,18 @@ Beta-blocking gaps (B) total **~230–430 h**; with the stability and platform w
 ## Cloud storage follow-up
 
 Cloud storage is tracked separately in [../tasks.md](../tasks.md). The native managed-original
+reliability review is tracked in [cloud-reliability-tasks.md](cloud-reliability-tasks.md).
+Upload/sync liveness and bulk-publication corrections passed CLI and native signed-fixture
+checks on 2026-10-14; legacy-author width, retained-history growth, poll scaling and the
+remaining storage policies are still open. These corrections do not establish large-library
+or Adobe cloud-service parity. The native managed-original
 read/cache foundation and device-local retention controls are described in [cloud-storage-implementation.md](cloud-storage-implementation.md).
 Durable managed import stages originals and renditions, journals the photo and upload intent atomically,
 and recovers staged work without duplicates. Resumable verified uploads publish initial imports conditionally;
 logical rename and album-folder organization preserve their immutable objects. Explicit idle multipart cleanup
 includes deleted-photo receipts and preserves durable bytes. Verified staging/cache migration and
 local-copy removal are separate from retained-object library deletion. Managed DNG conversion, associated XMP
-and durable external-editor revision ingestion passed native and CLI/MCP acceptance. Direct-bucket mutation synchronization has passed shared-engine, CLI protocol and native control-channel checks (see [cloud-sync-protocol.md](cloud-sync-protocol.md)); browser OPFS/IndexedDB transfers and native-peer convergence also passed acceptance (see [browser-cloud.md](browser-cloud.md)). Explicit append-only B2 synchronization now supports immutable operations/checkpoints, contiguous discovery, exact publication proofs, restored-author recovery and coordinated migration. Its shared migration dialog pauses this device, confirms stopped/upgraded peers and runs a cancellable worker; signed-fixture native/browser cutover checks passed. A fresh live-B2 workflow recheck is blocked by the measured download/Class B cap. Live native B2 uploads, revisions and convergence passed; OPFS/IndexedDB also passed live B2 offline/reload/quota/export and native-peer acceptance. This closes none of the ranked Lightroom parity gaps
+and durable external-editor revision ingestion passed native and CLI/MCP acceptance. Direct-bucket mutation synchronization has passed shared-engine, CLI protocol and native control-channel checks (see [cloud-sync-protocol.md](cloud-sync-protocol.md)); browser OPFS/IndexedDB transfers and native-peer convergence also passed acceptance (see [browser-cloud.md](browser-cloud.md)). Explicit append-only B2 synchronization now supports immutable operations/checkpoints, contiguous discovery, exact publication proofs, restored-author recovery and coordinated migration. Its shared migration dialog pauses this device, confirms stopped/upgraded peers and runs a cancellable worker; signed-fixture native/browser cutover checks passed. A fresh live-B2 workflow recheck is blocked by the measured download/Class B cap. Live native B2 uploads, revisions and convergence passed; OPFS/IndexedDB also passed live B2 offline/reload/quota/export and native-peer acceptance. The cloud icon now exposes queue/data counts and transfer progress, persisted pause/resume and per-photo sync filters; signed-fixture native/browser workflows passed. This closes none of the ranked Lightroom parity gaps
 or beta blockers above.
 
 ## Closed recently (kept for calibration)
@@ -84,6 +89,7 @@ or beta blockers above.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | Track the supplied cloud reliability review and verified liveness, bulk-publication, structural-resolution and bounded-import corrections; remaining storage gaps stay open; no ranked parity gap closes |
 | 2026-10-12 | minor | Record the cloud storage follow-up and foundation evidence; no ranked gap closes |
 | 2026-10-12 | minor | Record verified cloud cache budgets, offline pin owners and local-copy removal; no ranked gap closes |
 | 2026-10-12 | minor | Record cloud logical rename and album-folder organization with immutable original preservation; no ranked gap closes |
@@ -105,5 +111,6 @@ or beta blockers above.
 | 2026-10-13 | minor | Record managed DNG/XMP and external-editor revision acceptance; multi-device synchronization and browser transfers remain open, no ranked parity gap closes |
 | 2026-10-13 | minor | Direct-bucket mutation synchronization, conflict versions and recovery passed native and CLI acceptance; browser adapters remain open; no ranked parity gap closes |
 | 2026-10-13 | minor | Browser managed media and direct-bucket synchronization verified on OPFS/IndexedDB; no ranked Lightroom parity gap closes |
+| 2026-10-14 | minor | Add cloud queue popup, persisted publication pause and sync-status filters; no ranked gap closes |
 | 2026-10-14 | minor | Add coordinated migration dialog and asynchronous desktop cutover; no ranked gap closes |
 | 2026-10-14 | minor | Record append-only B2 synchronization and live native/browser bucket acceptance; no ranked gap closes |

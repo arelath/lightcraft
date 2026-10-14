@@ -42,6 +42,17 @@ impl Jobs {
 fn error(message: impl Into<String>) -> EngineError {
     EngineError::Other(message.into())
 }
+pub fn pause_publication(s: &mut Session) {
+    s.cloud_replication_jobs.paused = true;
+    if let Some(job) = &s.cloud_replication_jobs.pending {
+        job.cancel.store(true, Ordering::Relaxed);
+    }
+}
+pub fn resume_publication(s: &mut Session) {
+    s.cloud_replication_jobs.preparing_migration = false;
+    s.cloud_replication_jobs.paused = false;
+    s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now());
+}
 pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
     start_impl(s, p, false)
 }
@@ -72,6 +83,9 @@ pub fn start_migration(s: &mut Session, p: &Value) -> crate::Result<Value> {
     start_impl(s, p, true)
 }
 fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Value> {
+    if s.cloud_paused && !migrating {
+        return Err(error("cloud syncing is paused; use cloud.resume first"));
+    }
     s.claim_cloud_owner()?;
     if s.cloud_replication_jobs.running() {
         return Err(error("cloud synchronization is already running"));
@@ -161,11 +175,11 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
 }
 impl Session {
     pub fn resume_cloud_replication(&mut self) {
-        if self.catalog.sync_state().is_none()
+        if self.cloud_paused
+            || self.cloud_replication_jobs.preparing_migration()
+            || self.catalog.sync_state().is_none()
             || self.cloud_replication_jobs.running()
             || self.cloud_replication_jobs.paused
-            || self.cloud_uploads.running() > 0
-            || self.catalog.upload_intents().values().any(|intent| intent.state != lightcraft_catalog::uploads::UploadState::Synchronized)
         {
             return;
         }
@@ -242,7 +256,9 @@ impl Session {
         self.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
         let report = match result {
             Ok(result) => json!({"task":id,"ok":true,"result":result}),
-            Err(error) => json!({"task":id,"ok":false,"error":error.to_string()}),
+            Err(error) => {
+                json!({"task":id,"ok":false,"error":error.to_string(),"paused":self.cloud_paused && pending.cancel.load(Ordering::Relaxed)})
+            }
         };
         self.cloud_replication_jobs.reports.push(report);
         if self.cloud_replication_jobs.reports.len() > 64 {
@@ -491,6 +507,39 @@ mod tests {
         assert!(!s.cloud_replication_jobs.running());
         assert!(!s.cloud_replication_jobs.paused);
     }
+    #[test]
+    fn automatic_receive_is_scheduled_despite_failed_or_orphaned_other_connection_uploads() {
+        let (mut s, _) = session();
+        let asset = lightcraft_catalog::assets::Asset {
+            original: lightcraft_catalog::assets::Blob {
+                id: lightcraft_catalog::assets::BlobId("a".repeat(64)),
+                size: 1,
+                remote: lightcraft_catalog::assets::RemoteLocation { connection: "unrelated".into(), key: "originals/a".into(), version: None },
+            },
+            smart_preview: None,
+            thumbnail: None,
+            associated: Default::default(),
+        };
+        s.apply_system(Op::SetAsset { id: lightcraft_catalog::assets::AssetId("orphan".into()), asset: Some(Box::new(asset)) }).unwrap();
+        s.apply_system(Op::SetUploadIntent {
+            id: "orphan".into(),
+            intent: Some(Box::new(lightcraft_catalog::uploads::UploadIntent {
+                asset_id: lightcraft_catalog::assets::AssetId("orphan".into()),
+                photo_id: PhotoId(99),
+                state: lightcraft_catalog::uploads::UploadState::Failed,
+                verified: Default::default(),
+                error: Some("offline".into()),
+            })),
+        })
+        .unwrap();
+        s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() - std::time::Duration::from_secs(1));
+        s.resume_cloud_replication();
+        // This memory-backed test has no connection. Reaching that error proves scheduling
+        // progressed past the unrelated upload, instead of silently waiting forever.
+        assert_eq!(s.cloud_replication_jobs.reports.len(), 1);
+        assert!(s.cloud_replication_jobs.reports[0]["error"].as_str().unwrap().contains("connection"));
+    }
+
     #[test]
     fn slow_sync_completion_leaves_a_window_for_explicit_retry_before_auto_polling() {
         let (mut s, _) = session();

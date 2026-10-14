@@ -472,3 +472,43 @@ fn managed_external_editor_launch_waits_for_durable_preparation_and_failed_jobs_
     assert_eq!(opened.lock().unwrap().len(), 1);
     assert!(app.ui.toast.as_ref().unwrap().0.contains("disk full"));
 }
+
+#[test]
+fn cloud_popup_pauses_resumes_and_status_picker_filters_with_a_removable_chip() {
+    let mut s = lightcraft_engine::Session::with_demo();
+    s.open_library_in(
+        lightcraft_engine::library::LibraryStores {
+            dir: "cloud-popup-test".into(),
+            catalog: Box::new(lightcraft_catalog::MemStore::new()),
+            files: Box::new(lightcraft_catalog::MemStore::new()),
+            on_disk: false,
+        },
+        true,
+    )
+    .unwrap();
+    let mut h = Headless::new(LightcraftApp::new(s, Services { png: None, ..Default::default() }), [1600., 1000.], 1.);
+    h.settle(T);
+    click(&mut h, "icon:cloud");
+    assert!(has(&h, "popup:cloud"));
+    assert!(has(&h, "button:cloudPauseResume"));
+    click(&mut h, "button:cloudPauseResume");
+    assert!(h.app.session.cloud_paused);
+    if !has(&h, "button:cloudPauseResume") {
+        click(&mut h, "icon:cloud");
+    }
+    assert!(h.view.painted_text().iter().any(|s| s.contains("Syncing paused")));
+    click(&mut h, "button:cloudPauseResume");
+    assert!(!h.app.session.cloud_paused);
+    h.app.run("view.filterBar", json!({})).unwrap();
+    h.step();
+    // Close the cloud popup before opening the filter menu.
+    h.request("ui.key", json!({"key":"Escape"}), T);
+    h.step();
+    click(&mut h, "dropdown:filter-syncStatus");
+    click(&mut h, "filter:syncStatus:localOnly");
+    assert_eq!(h.app.session.filter.sync_status, Some(lightcraft_catalog::sync_status::SyncStatus::LocalOnly));
+    assert!(!h.app.session.visible_cloned().is_empty());
+    assert!(lightcraft_engine::filter_chips(&h.app.session.filter, &h.app.session.catalog).iter().any(|c| c.label.contains("Local only")));
+    h.app.run("library.filter", json!({"syncStatus":null})).unwrap();
+    assert!(h.app.session.filter.sync_status.is_none());
+}

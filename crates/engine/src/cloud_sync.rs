@@ -412,38 +412,16 @@ pub fn enable_mode(
     Ok(Op::Batch { ops })
 }
 
-pub fn legacy_changes(imported: &crate::cloud_records::Imported, state: &SyncState) -> Result<Vec<Change>> {
-    let mut catalog = Catalog::new();
-    let mut photo = (*imported.photo).clone();
-    photo.id = lightcraft_catalog::PhotoId(1);
-    photo.copy_of = None;
-    photo.local_baseline = None;
-    photo.local = false;
-    catalog.apply(Op::SetAsset { id: imported.asset_id.clone(), asset: Some(imported.asset.clone()) })?;
-    catalog.apply(Op::AddPhoto { photo: Box::new(photo) })?;
-    catalog.apply(Op::SetCloudIdentity { entity: "photo:1".into(), id: Some(imported.photo_id.clone()) })?;
-    let mut binding = state.clone();
-    binding.connection = imported.asset.original.remote.connection.clone();
-    let mut docs = project(&catalog, &catalog, &binding, None)?;
-    docs.retain(|entity, _| entity.starts_with("photo:"));
-    let mut changes = differences(&Documents::new(), &docs, state);
-    if imported.base_asset.is_some() {
-        changes.retain(|change| matches!(change.field.as_str(), "content" | "file_name"));
-    }
-    for change in &mut changes {
-        change.base = None;
-    }
-    Ok(changes)
-}
-
 mod materialize;
 #[cfg(test)]
 mod tests;
+pub use materialize::accept_structure;
 pub use materialize::incoming;
 pub use materialize::incoming_append;
 pub use materialize::incoming_checkpoint;
 pub use materialize::resolve;
 pub use materialize::restore_deleted;
+pub use materialize::structural_conflicts;
 
 // Keep an entity's bootstrap fields together. Bulk migrations may span bounded mutations;
 // the containing catalog journal operation remains atomic.

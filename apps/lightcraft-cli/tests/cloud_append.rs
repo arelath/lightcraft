@@ -44,6 +44,32 @@ fn initialize(f: &Fixture) -> (PathBuf, PathBuf, String) {
     (a, b, library)
 }
 #[test]
+fn deleted_before_upload_publishes_frozen_import_then_tombstone_without_local_restore() {
+    for permanent in [false, true] {
+        let f = Fixture::new();
+        let (a, b, _) = initialize(&f);
+        let (_, source) = f.import(&f.dir.join("seed"), true);
+        let rows = ok(&f, &a, &[("cloud.import", json!({"connection":"personal","paths":[source]}))]);
+        let id = PhotoId(rows[0]["result"]["ids"][0].as_u64().unwrap());
+        let import = catalog(&a).upload_intents().iter().find(|(_, intent)| intent.photo_id == id).unwrap().0.clone();
+        let entity = format!("photo:{}", catalog(&a).cloud_identity(&format!("photo:{}", id.0)).unwrap());
+        ok(&f, &a, &[(if permanent { "photo.deletePermanently" } else { "photo.delete" }, json!({"ids":[id.0]}))]);
+        ok(&f, &b, &[("photo.rate", json!({"ids":[1],"rating":5})), ("cloud.sync", json!({}))]);
+        ok(&f, &a, &[("cloud.sync", json!({}))]);
+        assert_eq!(catalog(&a).photo(PhotoId(1)).unwrap().rating, 5);
+        assert!(!catalog(&a).sync_state().unwrap().pending.is_empty());
+        ok(&f, &a, &[("cloud.upload", json!({"imports":[import]})), ("cloud.sync", json!({}))]);
+        let c = catalog(&a);
+        assert!(c.sync_state().unwrap().pending.is_empty());
+        assert!(c.photo(id).is_none_or(|p| p.deleted));
+        assert_eq!(c.sync_state().unwrap().winning(&entity, "deleted").unwrap().1, &json!(true));
+        assert!(c.upload_intents().values().all(|i| i.state == lightcraft_engine::catalog::uploads::UploadState::Synchronized));
+        ok(&f, &b, &[("cloud.sync", json!({}))]);
+        assert_eq!(catalog(&b).sync_state().unwrap().winning(&entity, "deleted").unwrap().1, &json!(true));
+    }
+}
+
+#[test]
 fn append_writers_lost_response_pagination_restart_checkpoints_and_scope() {
     let f = Fixture::new();
     let (a, b, library) = initialize(&f);
@@ -199,6 +225,39 @@ fn explicit_migration_keeps_pending_ids_and_legacy_objects_blocks_head_continuat
     );
     assert!(!out.status.success());
     assert!(rows[2]["error"].as_str().unwrap().contains("append manifest"));
+}
+
+#[test]
+fn one_import_per_job_waits_for_siblings_and_reconciles_all_shared_publications() {
+    let f = Fixture::new();
+    f.state.lock().unwrap().append_mode = true;
+    f.state.lock().unwrap().unsupported_conditional = true;
+    let a = f.dir.join("automatic-bulk");
+    ok(&f, &a, &[("cloud.configure", config(&f)), ("cloud.syncEnable", json!({"connection":"personal","protocol":"append-log-v1"}))]);
+    let mut paths = Vec::new();
+    for n in 0..2 {
+        let pixels = lightcraft_raster::Rgba8::from_fn(32, 24, |x, y| [x as u8 * 5, y as u8 * 7, n * 100, 255]);
+        let bytes = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&pixels), &Default::default()).unwrap();
+        let path = f.dir.join(format!("bulk-{n}.png"));
+        std::fs::write(&path, bytes).unwrap();
+        paths.push(path);
+    }
+    ok(&f, &a, &[("cloud.import", json!({"connection":"personal","paths":paths}))]);
+    let c = catalog(&a);
+    let imports = c.upload_intents().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(imports.len(), 2);
+    ok(&f, &a, &[("cloud.upload", json!({"imports":[imports[0]]}))]);
+    let c = catalog(&a);
+    assert_eq!(c.upload_intents()[&imports[0]].state, lightcraft_engine::catalog::uploads::UploadState::ObjectsVerified);
+    assert!(c.upload_intents()[&imports[0]].error.is_none());
+    assert!(!c.sync_state().unwrap().pending.is_empty());
+    // Each command reopens the catalog: dependency waiting and proof reconciliation
+    // must survive a restart as well as the automatic scheduler's single-item jobs.
+    ok(&f, &a, &[("cloud.upload", json!({"imports":[imports[1]]}))]);
+    let c = catalog(&a);
+    assert!(c.sync_state().unwrap().pending.is_empty());
+    assert!(c.upload_intents().values().all(|i| i.state == lightcraft_engine::catalog::uploads::UploadState::Synchronized));
+    assert!(c.upload_intents().values().all(|i| i.error.is_none()));
 }
 
 #[test]

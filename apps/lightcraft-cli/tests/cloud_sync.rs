@@ -32,6 +32,84 @@ fn initialize(fixture: &Fixture) -> (std::path::PathBuf, std::path::PathBuf, Str
     (a, b, library)
 }
 #[test]
+fn obsolete_pre_release_head_is_rejected_without_changing_catalog_or_pending_work() {
+    let fixture = Fixture::new();
+    let (a, _, _) = initialize(&fixture);
+    success(&fixture, &a, &[("photo.rate", json!({"ids":[1],"rating":5}))]);
+    let (_, before, _) = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap();
+    {
+        let mut storage = fixture.state.lock().unwrap();
+        let head = storage.objects.get_mut("/photos/library/catalog/head.json").unwrap();
+        let mut obsolete: Value = serde_json::from_slice(head).unwrap();
+        obsolete["version"] = json!(1);
+        obsolete.as_object_mut().unwrap().remove("library");
+        obsolete.as_object_mut().unwrap().remove("checkpoint");
+        *head = serde_json::to_vec(&obsolete).unwrap();
+    }
+    let (output, rows) = fixture.run(&a, &[("cloud.sync", json!({}))]);
+    assert!(!output.status.success());
+    assert!(rows[0]["error"].as_str().unwrap().contains("obsolete pre-release"), "{rows:?}");
+    let (_, after, _) = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap();
+    assert_eq!(before.to_snapshot(), after.to_snapshot());
+}
+
+#[test]
+fn enabled_conditional_imports_use_causal_author_instead_of_one_replica_per_photo() {
+    let fixture = Fixture::new();
+    let a = fixture.dir.join("causal-imports");
+    success(&fixture, &a, &[("cloud.configure", configure(&fixture)), ("cloud.syncEnable", json!({"connection":"personal"}))]);
+    for _ in 0..3 {
+        fixture.import(&a, false);
+        success(&fixture, &a, &[("cloud.upload", json!({})), ("cloud.sync", json!({}))]);
+    }
+    let (_, catalog, _) = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap();
+    let state = catalog.sync_state().unwrap();
+    assert!(state.pending.is_empty());
+    assert_eq!(state.clock.len(), 1);
+    assert!(state.clock.contains_key(&state.device));
+    for entry in std::fs::read_dir(a.join("Managed/uploads")).unwrap() {
+        let receipt: Value = serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        assert_eq!(receipt["version"], 4);
+        assert!(receipt["generation"].as_u64().unwrap() > 0);
+        assert!(!receipt["publicationIntent"].as_object().unwrap().is_empty());
+    }
+    let objects = &fixture.state.lock().unwrap().objects;
+    for (key, bytes) in objects.iter().filter(|(key, _)| key.contains("/catalog/changes/")) {
+        let batch: Value = serde_json::from_slice(bytes).unwrap();
+        assert!(batch["imports"].as_array().is_none_or(|imports| imports.is_empty()), "{key}: standalone legacy import unexpectedly published");
+    }
+}
+
+#[test]
+fn unuploaded_import_does_not_prevent_receiving_remote_changes_or_acknowledge_missing_media() {
+    let fixture = Fixture::new();
+    let (a, b, _) = initialize(&fixture);
+    let (_, source) = fixture.import(&fixture.dir.join("seed"), true);
+    let rows = success(&fixture, &a, &[("cloud.import", json!({"connection":"personal","paths":[source]}))]);
+    let id = lightcraft_catalog::PhotoId(rows[0]["result"]["ids"][0].as_u64().unwrap());
+    let before = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap().1;
+    let import = before.upload_intents().iter().find(|(_, intent)| intent.photo_id == id).unwrap().0.clone();
+    let waiting = before.sync_state().unwrap().pending.clone();
+    success(&fixture, &b, &[("photo.rate", json!({"ids":[1],"rating":5})), ("cloud.sync", json!({}))]);
+    success(&fixture, &a, &[("cloud.sync", json!({}))]);
+    let (_, after, _) = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap();
+    assert_eq!(after.photo(lightcraft_catalog::PhotoId(1)).unwrap().rating, 5);
+    assert_eq!(after.sync_state().unwrap().pending, waiting);
+    success(
+        &fixture,
+        &a,
+        &[
+            ("photo.deletePermanently", json!({"ids":[after.upload_intents()[&import].photo_id.0]})),
+            ("cloud.upload", json!({})),
+            ("cloud.sync", json!({})),
+        ],
+    );
+    let (_, after, _) = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap();
+    assert!(after.sync_state().unwrap().pending.is_empty());
+    assert_eq!(after.len(), 1);
+}
+
+#[test]
 fn real_cli_reconciles_a_competing_head_and_lost_responses_without_replaying_edits() {
     let fixture = Fixture::new();
     let (a, b, _) = initialize(&fixture);

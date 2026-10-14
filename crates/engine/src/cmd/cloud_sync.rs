@@ -4,28 +4,39 @@ use crate::{Result, Session};
 use serde_json::{Value, json};
 
 pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
+    let token = s.library_token();
     let Some(state) = s.catalog.sync_state() else {
         return Ok(json!({"enabled":false}));
     };
-    let conflicts: Vec<_> = state
-        .documents
-        .iter()
-        .flat_map(|(entity, fields)| {
-            fields
-                .iter()
-                .filter(|(_, register)| register.0.values().next().is_some_and(|first| register.0.values().any(|value| value != first)))
-                .map(move |(field, register)| json!({"entity":entity,"field":field,"revisions":register.0.keys().collect::<Vec<_>>()}))
-        })
-        .collect();
+    if s.cloud_conflicts_cache.as_ref().is_none_or(|(owner, revision, _)| !std::sync::Arc::ptr_eq(owner, &token) || *revision != s.catalog.revision) {
+        let conflicts: Vec<_> = state
+            .documents
+            .iter()
+            .flat_map(|(entity, fields)| {
+                fields
+                    .iter()
+                    .filter(|(_, register)| register.0.values().next().is_some_and(|first| register.0.values().any(|value| value != first)))
+                    .map(move |(field, register)| json!({"entity":entity,"field":field,"revisions":register.0.keys().collect::<Vec<_>>()}))
+            })
+            .collect();
+        s.cloud_conflicts_cache = Some((
+            token,
+            s.catalog.revision,
+            json!({"conflicts":conflicts,"structuralConflicts":crate::cloud_sync::structural_conflicts(&s.catalog)}),
+        ));
+    }
+    let conflicts = s.cloud_conflicts_cache.as_ref().map(|(_, _, value)| value);
     #[cfg(not(target_arch = "wasm32"))]
     let (running, reports) = (s.cloud_replication_jobs.running(), s.cloud_replication_jobs.reports.clone());
     #[cfg(target_arch = "wasm32")]
     let (running, reports) = (false, Vec::<Value>::new());
     Ok(json!({"enabled":true,"library":state.library,"device":state.device,"connection":state.connection,
+        "paused":s.cloud_paused,
         "preparingMigration":preparing_migration(s),
         "migrating":migrating(s),
         "protocol":state.protocol,"frontiers":state.append.as_ref().map(|p|&p.frontiers),"gaps":state.append.as_ref().map(|p|&p.gaps),
-        "pending":state.pending.len(),"generation":state.generation,"cursor":state.cursor,"conflicts":conflicts,
+        "pending":state.pending.len(),"generation":state.generation,"cursor":state.cursor,"conflicts":conflicts.and_then(|v|v.get("conflicts")),
+        "structuralConflicts":conflicts.and_then(|v|v.get("structuralConflicts")),
         "running":running,"reports":reports,
         "transportAvailable":cfg!(not(target_arch="wasm32"))}))
 }
@@ -87,11 +98,15 @@ fn enable(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let op = crate::cloud_sync::enable_mode(&s.catalog, library, identity()?, connection.into(), protocol, owner)?;
     s.apply_system(op)?;
+    s.cloud_uploads.request_resume(true);
     status(s, p)
 }
 pub fn specs() -> Vec<CommandSpec> {
     #[allow(unused_mut)]
     let mut specs = vec![
+        cmd!(query "cloud.overview", "Cloud Library Status", [], None, "{}; managed file counts, known data size, queue and live publication progress", always, crate::cloud_status::overview),
+        cmd!(query "cloud.pause", "Pause Syncing", [], None, "{}; persist device-local pause; stop uploads and catalog publication, retaining durable work", always, crate::cloud_status::pause),
+        cmd!(query "cloud.resume", "Resume Syncing", [], None, "{}; resume durable uploads and catalog publication after paused jobs drain", always, crate::cloud_status::resume),
         cmd!(query "cloud.syncStatus","Cloud synchronization status",[],None,"{} → protocol, pending count, cursor/frontiers, gaps and conflict revisions",always,status),
     ];
     specs.push(cmd!(
@@ -111,6 +126,20 @@ pub fn specs() -> Vec<CommandSpec> {
         "{entity, field, revision}; chooses a retained revision and creates a causal resolution",
         always,
         resolve
+    ));
+    specs.push(cmd!(
+        "cloud.acceptStructure",
+        "Keep current folder or stack structure",
+        [],
+        None,
+        "{entity}; explicitly resolve a structural conflict using the valid displayed parent/membership; preserve immutable history",
+        always,
+        |s, p| {
+            let entity = super::str_param(p, "entity").ok_or_else(|| bad("cloud.acceptStructure", "missing entity"))?;
+            let op = crate::cloud_sync::accept_structure(&s.catalog, entity)?;
+            s.apply_received(op)?;
+            status(s, p)
+        }
     ));
     #[cfg(not(target_arch = "wasm32"))]
     specs.push(cmd!(

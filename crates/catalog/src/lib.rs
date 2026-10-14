@@ -28,6 +28,7 @@ pub mod rules;
 pub mod safe_file;
 pub mod stacks;
 pub mod store;
+pub mod sync_status;
 pub mod uploads;
 
 use std::collections::BTreeMap;
@@ -275,6 +276,8 @@ pub enum Op {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
+    #[serde(skip)]
+    sync_status_cache: sync_status::Cache,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sync_state: Option<Box<replication::SyncState>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -545,7 +548,22 @@ impl Catalog {
     }
 
     fn apply_inner(&mut self, op: Op) -> Result<Op> {
-        Ok(match op {
+        let affects_sync = matches!(
+            &op,
+            Op::SetSyncState { .. }
+                | Op::SetCloudIdentity { .. }
+                | Op::SetUploadIntent { .. }
+                | Op::SetAsset { .. }
+                | Op::AddPhoto { .. }
+                | Op::RemovePhoto { .. }
+                | Op::Relink { .. }
+                | Op::SetFile { .. }
+                | Op::SetDeleted { .. }
+                | Op::SetLocal { .. }
+                | Op::AddAlbum { .. }
+                | Op::RemoveAlbum { .. }
+        );
+        let inverse = match op {
             Op::SetSyncState { state } => {
                 if let Some(state) = &state {
                     state.validate()?;
@@ -913,7 +931,11 @@ impl Catalog {
                 inverses.reverse();
                 Op::Batch { ops: inverses }
             }
-        })
+        };
+        if affects_sync {
+            self.sync_status_cache.invalidate();
+        }
+        Ok(inverse)
     }
 
     /// Ops that remove a photo permanently including album and stack memberships (one undoable

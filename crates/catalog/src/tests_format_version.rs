@@ -171,7 +171,8 @@ fn bad_crc_is_still_a_torn_tail() {
 
 /// Guard for the version rule (see `journal` → *Format versions*): adding an [`Op`] variant breaks
 /// this match. When it does, bump `journal::VERSION`, add a row to the format table, and add the
-/// variant here under the new version.
+/// variant here under the new version. Also update the version when an existing op's serialized
+/// shape changes, such as a new smart-album filter field.
 #[test]
 fn op_variants_are_versioned() {
     fn since(op: &Op) -> u32 {
@@ -194,7 +195,6 @@ fn op_variants_are_versioned() {
             | Op::MoveAlbum { .. }
             | Op::SetAlbumPhotos { .. }
             | Op::SetAlbumCover { .. }
-            | Op::SetAlbumRules { .. }
             | Op::AddStack { .. }
             | Op::RemoveStack { .. }
             | Op::SetStack { .. }
@@ -215,8 +215,9 @@ fn op_variants_are_versioned() {
             Op::SetUploadIntent { .. } => 9,
             Op::SetCloudIdentity { .. } | Op::SetWorkingCopy { .. } => 10,
             Op::SetSyncState { .. } => 12,
+            Op::SetAlbumRules { .. } => 13,
         }
     }
-    let newest = since(&Op::SetSyncState { state: None });
-    assert_eq!(newest, VERSION, "the newest op's version must be the current format version");
+    let newest = since(&Op::SetAlbumRules { id: AlbumId(1), rules: Box::default() });
+    assert_eq!(newest, VERSION, "the newest op shape's version must be the current format version");
 }

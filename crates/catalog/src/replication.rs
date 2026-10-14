@@ -30,6 +30,9 @@ impl Stamp {
         format!("{}-{}", self.device, self.sequence)
     }
     fn validate(&self) -> Result<()> {
+        if self.device.starts_with("baseline_") || self.device.starts_with("legacy_") {
+            return Err(invalid("obsolete pre-release import replica; use a fresh catalog and storage prefix; local data retained"));
+        }
         if !identifier(&self.device) || self.device.len() > 96 || self.sequence == 0 {
             return Err(invalid("invalid synchronization revision"));
         }
@@ -56,7 +59,10 @@ pub struct Mutation {
     pub changes: Vec<Change>,
 }
 fn valid_clock(clock: &Clock) -> bool {
-    clock.len() <= MAX_DEVICES && clock.iter().all(|(id, sequence)| identifier(id) && id.len() <= 96 && *sequence > 0)
+    clock.len() <= MAX_DEVICES
+        && clock
+            .iter()
+            .all(|(id, sequence)| identifier(id) && id.len() <= 96 && !id.starts_with("baseline_") && !id.starts_with("legacy_") && *sequence > 0)
 }
 pub fn entity(value: &str) -> bool {
     value.split_once(':').is_some_and(|(kind, id)| matches!(kind, "photo" | "album" | "stack" | "keyword" | "library") && identifier(id))
@@ -214,9 +220,6 @@ impl SyncState {
                 register.0.retain(|id, _| {
                     let Some(stamp) = Self::stamp(id) else { return true };
                     !ids.iter().any(|other| {
-                        if stamp.device.starts_with("baseline_") && Self::stamp(other).is_some_and(|other| !other.device.starts_with("baseline_")) {
-                            return true;
-                        }
                         other != id
                             && next
                                 .received
@@ -255,6 +258,9 @@ impl SyncState {
         Ok(state)
     }
     pub fn validate(&self) -> Result<()> {
+        if self.clock.keys().any(|device| device.starts_with("baseline_") || device.starts_with("legacy_")) {
+            return Err(invalid("obsolete pre-release import state; use a fresh catalog and storage prefix; local data retained"));
+        }
         if self.version != 1
             || !identifier(&self.library)
             || !identifier(&self.device)
@@ -368,13 +374,6 @@ impl SyncState {
             let mut dominated = false;
             register.0.retain(|current, _| {
                 let Some(stamp) = Self::stamp(current) else { return true };
-                if mutation.revision.device.starts_with("baseline_") && !stamp.device.starts_with("baseline_") {
-                    dominated = true;
-                    return true;
-                }
-                if stamp.device.starts_with("baseline_") && !mutation.revision.device.starts_with("baseline_") {
-                    return false;
-                }
                 if self
                     .received
                     .get(current)
@@ -558,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_baselines_never_replace_offline_edits_and_checkpoint_merge_keeps_pending_work() {
+    fn obsolete_import_replicas_fail_before_changes_and_checkpoint_merge_keeps_pending_work() {
         let mut a = state("a");
         let authored = set(&mut a, "photo:one", "rating", json!(4));
         let baseline = Mutation {
@@ -569,9 +568,10 @@ mod tests {
             changes: vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(0) }],
         };
         let mut remote = state("b");
-        remote.receive(&baseline).unwrap();
         remote.receive(&authored).unwrap();
-        a.receive(&baseline).unwrap();
+        let before = a.clone();
+        assert!(a.receive(&baseline).unwrap_err().to_string().contains("obsolete pre-release"));
+        assert_eq!(a, before);
         assert_eq!(a.documents, remote.documents);
         assert_eq!(a.winning("photo:one", "rating").unwrap().1, &json!(4));
         let pending = a.pending.clone();

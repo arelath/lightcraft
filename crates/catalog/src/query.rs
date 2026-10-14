@@ -32,6 +32,9 @@ pub struct Filter {
     pub labels: Vec<ColorLabel>,
     pub kind: Option<MediaKind>,
     pub edited: Option<bool>,
+    /// Device-local original/recipe synchronization state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_status: Option<crate::sync_status::SyncStatus>,
     pub album: Option<AlbumId>,
     /// Show "Recently Deleted" instead of the library.
     pub deleted: bool,
@@ -170,6 +173,9 @@ impl Filter {
 
     fn describe_in(&self, cat: Option<&crate::Catalog>) -> String {
         let mut v: Vec<String> = Vec::new();
+        if let Some(state) = self.sync_status {
+            v.push(format!("sync status: {}", state.label()));
+        }
         if self.rating > 0 {
             let op = match self.rating_op {
                 RatingOp::AtLeast => "≥",
@@ -272,6 +278,9 @@ impl Filter {
             }
         }
         if self.flag.is_some_and(|f| f != p.flag) || self.label.is_some_and(|l| Some(l) != p.label) || self.kind.is_some_and(|k| k != p.kind) {
+            return false;
+        }
+        if self.sync_status.is_some_and(|want| cat.photo_sync_status(p.id) != want) {
             return false;
         }
         if self.edited.is_some_and(|e| e != p.is_edited()) {

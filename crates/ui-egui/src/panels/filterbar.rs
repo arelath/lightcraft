@@ -13,7 +13,7 @@ use crate::widgets::register;
 
 pub const HEIGHT: f32 = 40.0;
 /// Bar width (points) below which the controls take two rows.
-const WIDE: f32 = 1240.0;
+const WIDE: f32 = 1400.0;
 
 /// Colour-label swatches (UI colours, our own choice).
 pub use crate::theme::label_color;
@@ -71,17 +71,18 @@ fn picker(app: &mut LightcraftApp, ui: &mut egui::Ui, id: &str, current: &str, a
     egui::Popup::menu(&r).show(|ui| {
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             for (label, patch, sel) in &items {
-                if ui
-                    .selectable_label(
-                        *sel,
-                        if matches!(id, "camera" | "lens" | "keyword") && patch.get(id).is_some_and(|value| !value.is_null()) {
-                            label.as_str()
-                        } else {
-                            crate::i18n::tr(label)
-                        },
-                    )
-                    .clicked()
-                {
+                let response = ui.selectable_label(
+                    *sel,
+                    if matches!(id, "camera" | "lens" | "keyword") && patch.get(id).is_some_and(|value| !value.is_null()) {
+                        label.as_str()
+                    } else {
+                        crate::i18n::tr(label)
+                    },
+                );
+                if id == "syncStatus" {
+                    register(ui.ctx(), format!("filter:syncStatus:{}", patch["syncStatus"].as_str().unwrap_or("all")), response.rect);
+                }
+                if response.clicked() {
                     chosen = Some(patch.clone());
                 }
             }
@@ -251,6 +252,14 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
 
     // metadata pickers
     let ui: &mut egui::Ui = if two_rows { &mut row2 } else { &mut row1 };
+    let mut sync_items = vec![("All sync statuses".to_owned(), json!({"syncStatus":null}), f.sync_status.is_none())];
+    sync_items.extend(
+        lightcraft_catalog::sync_status::SyncStatus::ALL
+            .into_iter()
+            .map(|state| (state.label().to_owned(), json!({"syncStatus":state}), f.sync_status == Some(state))),
+    );
+    picker(app, ui, "syncStatus", f.sync_status.map_or("Sync Status", |s| s.label()), f.sync_status.is_some(), sync_items);
+
     let values = app.caches.filter_values(&app.session.catalog);
     let (cameras, lenses, keywords) = (values.cameras.clone(), values.lenses.clone(), values.keywords.clone());
     for (id, key, all_label, current, values) in [

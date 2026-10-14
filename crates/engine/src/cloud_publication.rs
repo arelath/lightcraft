@@ -1,16 +1,15 @@
-//! Direct-S3 import publication: immutable content-addressed batches and a conditional head.
+//! Direct-S3 causal publication records: immutable batches and a conditional head.
 //! The importer verifies all dependencies first. Local acknowledgement is a separate durable step.
 
-use crate::assets::s3::{PutCondition, S3Connection};
+use crate::assets::s3::S3Connection;
 use crate::assets::{AssetError, Result, keys, sha256};
 use lightcraft_catalog::Source;
 use lightcraft_catalog::assets::identifier;
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 const MAX_BYTES: usize = 2 << 20;
-const MAX_CHAIN: usize = 4096;
 
 pub use crate::cloud_records::{Batch, CheckpointRef, Head, Imported, RecordRef};
 
@@ -92,6 +91,9 @@ pub fn read_head(connection: &S3Connection, cancel: &AtomicBool) -> Result<Optio
             return Err(invalid("invalid remote checkpoint reference"));
         }
     }
+    if head.version != 2 {
+        return Err(invalid("obsolete pre-release catalog head; use a fresh catalog and storage prefix; local data retained"));
+    }
     let etag = reply.etag.ok_or_else(|| invalid("remote head has no ETag; conditional synchronization is unavailable"))?;
     Ok(Some((head, etag)))
 }
@@ -130,98 +132,8 @@ pub fn read_batch(connection: &S3Connection, reference: &RecordRef, cancel: &Ato
             return Err(invalid("remote batch repeats a mutation or mixes libraries"));
         }
     }
+    if batch.version != 3 || !batch.imports.is_empty() {
+        return Err(invalid("obsolete pre-release import batch; use a fresh catalog and storage prefix; local data retained"));
+    }
     Ok(batch)
-}
-
-/// Return the generation already containing this exact import, including a lost head response.
-fn contains(connection: &S3Connection, head: &Head, imported: &Imported, cancel: &AtomicBool) -> Result<bool> {
-    if let Some(reference) = &head.checkpoint {
-        let checkpoint = crate::cloud_replication::read_checkpoint(connection, reference, cancel)?;
-        if let Some(digest) = checkpoint.imports.get(&imported.mutation_id) {
-            if digest != &sha256(&encode(imported)?).0 {
-                return Err(invalid("checkpoint import identity describes different data"));
-            }
-            return Ok(true);
-        }
-    }
-    let mut next = Some(head.tip.clone());
-    let mut seen = BTreeSet::new();
-    for _ in 0..MAX_CHAIN {
-        let Some(reference) = next.take() else { return Ok(false) };
-        if cancel.load(Ordering::Relaxed) {
-            return Err(AssetError::Cancelled);
-        }
-        if !seen.insert(reference.hash.clone()) {
-            return Err(invalid("remote catalog chain contains a cycle"));
-        }
-        let batch = read_batch(connection, &reference, cancel)?;
-        for existing in batch.imports {
-            if existing.mutation_id == imported.mutation_id {
-                if &existing != imported {
-                    return Err(invalid("remote mutation identity describes different data; local import preserved"));
-                }
-                return Ok(true);
-            }
-        }
-        next = batch.parent;
-    }
-    Err(invalid("remote catalog history exceeds the current limit; a checkpoint is required"))
-}
-
-/// All writes are conditional. Conflicting head writes rebase the immutable batch on
-/// the current chain; a lost response is reconciled by mutation identity and exact content.
-pub fn publish_import(connection: &S3Connection, imported: &Imported, cancel: &AtomicBool) -> Result<u64> {
-    imported.validate()?;
-    let head_key = keys::in_library(&connection.prefix, "catalog/head.json")?;
-    for _ in 0..16 {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(AssetError::Cancelled);
-        }
-        let current = read_head(connection, cancel)?;
-        if let Some((head, _)) = &current
-            && contains(connection, head, imported, cancel)?
-        {
-            return Ok(head.generation);
-        }
-        let version = if imported.base_asset.is_some() || !imported.asset.associated.is_empty() { 2 } else { 1 };
-        let batch = Batch {
-            version,
-            parent: current.as_ref().map(|(head, _)| head.tip.clone()),
-            imports: vec![imported.clone()],
-            mutations: Vec::new(),
-            checkpoint_marker: false,
-        };
-        let bytes = encode(&batch)?;
-        let hash = sha256(&bytes);
-        let reference =
-            RecordRef { key: keys::in_library(&connection.prefix, &format!("catalog/changes/{}.json", hash.0))?, hash, size: bytes.len() as u64 };
-        match connection.put_small(&reference.key, &bytes, PutCondition::Absent, cancel) {
-            Ok(_) => {}
-            Err(error @ (AssetError::Conflict | AssetError::Network(_))) => {
-                // The write might have succeeded. An ETag alone does not prove its bytes.
-                match connection.get_small(&reference.key, MAX_BYTES, cancel) {
-                    Ok(Some(reply)) if reply.bytes == bytes => {}
-                    _ => return Err(error),
-                }
-            }
-            Err(error) => return Err(error),
-        }
-        let generation = current
-            .as_ref()
-            .map_or(Ok(1), |(head, _)| head.generation.checked_add(1).ok_or_else(|| invalid("remote catalog generation exhausted")))?;
-        let new_head = Head {
-            version: current.as_ref().map_or(1, |(head, _)| head.version),
-            generation,
-            tip: reference,
-            library: current.as_ref().and_then(|(head, _)| head.library.clone()),
-            checkpoint: current.as_ref().and_then(|(head, _)| head.checkpoint.clone()),
-        };
-        let condition = current.as_ref().map_or(PutCondition::Absent, |(_, etag)| PutCondition::Matches(etag));
-        match connection.put_small(&head_key, &encode(&new_head)?, condition, cancel) {
-            Ok(_) => return Ok(generation),
-            Err(AssetError::Conflict | AssetError::Network(_)) => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(AssetError::Network("remote catalog remained busy or unreachable; import and receipts retained for retry".into()))
 }

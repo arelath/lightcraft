@@ -2,9 +2,9 @@
 //! immutable records and checkpoints are created conditionally and verified after uncertain writes.
 use crate::assets::s3::{PutCondition, S3Connection};
 use crate::assets::{AssetError, BlobStore, Result, keys, sha256};
-use crate::cloud_publication::{self as publication, Batch, CheckpointRef, Head, Imported, RecordRef};
+use crate::cloud_publication::{self as publication, Batch, CheckpointRef, Head, RecordRef};
 use lightcraft_catalog::assets::{Asset, identifier};
-use lightcraft_catalog::replication::{Mutation, Portable, Stamp, SyncState};
+use lightcraft_catalog::replication::{Mutation, Portable, SyncState};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -40,44 +40,14 @@ pub fn read_checkpoint(connection: &S3Connection, reference: &CheckpointRef, can
         return Err(invalid("invalid checkpoint generation or import receipts"));
     }
     checkpoint.state.validate().map_err(catalog_error)?;
+    if !checkpoint.imports.is_empty() {
+        return Err(invalid("obsolete pre-release import checkpoint; use a fresh catalog and storage prefix; local data retained"));
+    }
     Ok(checkpoint)
 }
 pub struct Remote {
     pub head: Option<(Head, String)>,
     pub state: SyncState,
-    pub imports: BTreeMap<String, String>,
-}
-fn legacy(remote: &mut Remote, imported: &Imported) -> Result<()> {
-    let digest = sha256(&publication::encode(imported)?).0;
-    if let Some(old) = remote.imports.get(&imported.mutation_id) {
-        if old != &digest {
-            return Err(invalid("remote import identity collision"));
-        }
-        return Ok(());
-    }
-    let changes = crate::cloud_sync::legacy_changes(imported, &remote.state).map_err(|e| invalid(e.to_string()))?;
-    let device = format!(
-        "{}_{}",
-        if imported.base_asset.is_some() { "legacy" } else { "baseline" },
-        sha256(format!("legacy-import-v1/{}", imported.mutation_id).as_bytes()).0
-    );
-    let stamp = Stamp { sequence: 1, device };
-    let existing = remote.state.received.get(&stamp.id());
-    if existing.is_none()
-        && let Some((_, content)) = remote.state.winning(&format!("photo:{}", imported.photo_id), "content")
-    {
-        let current = content.get("assetId").and_then(serde_json::Value::as_str);
-        if imported.base_asset.as_ref().is_none_or(|base| current != Some(base.0.as_str())) {
-            remote.imports.insert(imported.mutation_id.clone(), digest);
-            return Ok(());
-        }
-    }
-    let context = existing
-        .map_or_else(|| if imported.base_asset.is_some() { remote.state.clock.clone() } else { BTreeMap::new() }, |receipt| receipt.context.clone());
-    let mutation = Mutation { version: 1, library: remote.state.library.clone(), revision: stamp, context, changes };
-    remote.state.receive(&mutation).map_err(catalog_error)?;
-    remote.imports.insert(imported.mutation_id.clone(), digest);
-    Ok(())
 }
 /// Read a verified checkpoint plus its incremental tail. Retained older objects are not
 /// traversed after the checkpoint boundary; offline local work is merged by the owner later.
@@ -87,14 +57,13 @@ pub fn read(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Re
         return Err(invalid("storage contains another library; join using its library identity before synchronization"));
     }
     let state = SyncState::new(library.into(), "remote".into(), connection.id.clone()).map_err(catalog_error)?;
-    let mut remote = Remote { head, state, imports: BTreeMap::new() };
+    let mut remote = Remote { head, state };
     let Some((head, _)) = &remote.head else { return Ok(remote) };
     let mut next = Some(head.tip.clone());
     let mut boundary = None;
     if let Some(reference) = &head.checkpoint {
         let checkpoint = read_checkpoint(connection, reference, cancel)?;
         remote.state.merge(&checkpoint.state).map_err(catalog_error)?;
-        remote.imports = checkpoint.imports;
         boundary = Some(reference.covers.hash.clone());
     }
     let mut batches = Vec::new();
@@ -127,9 +96,6 @@ pub fn read(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Re
         return Err(invalid("checkpoint boundary is absent from its history"));
     }
     for batch in batches.into_iter().rev() {
-        for imported in batch.imports {
-            legacy(&mut remote, &imported)?;
-        }
         for mutation in batch.mutations {
             remote.state.receive(&mutation).map_err(catalog_error)?;
         }
@@ -157,12 +123,9 @@ fn read_incremental(connection: &S3Connection, local: &SyncState, cancel: &Atomi
         if local.cursor.as_deref() == Some(reference.hash.0.as_str()) {
             let mut state = SyncState::new(local.library.clone(), "remote".into(), connection.id.clone()).map_err(catalog_error)?;
             state.merge(&local.portable()).map_err(catalog_error)?;
-            let mut remote = Remote { head, state, imports: BTreeMap::new() };
+            let mut remote = Remote { head, state };
             for batch in batches.into_iter().rev() {
                 let batch: Batch = batch;
-                for imported in batch.imports {
-                    legacy(&mut remote, &imported)?;
-                }
                 for mutation in batch.mutations {
                     remote.state.receive(&mutation).map_err(catalog_error)?;
                 }
@@ -279,11 +242,13 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
         canceled(cancel)?;
         let mut remote = if checkpoint_requested { read(connection, &local.library, cancel)? } else { read_incremental(connection, local, cancel)? };
         let mut pending = Vec::new();
+        let mut acknowledged = BTreeSet::new();
         for mutation in local.pending.values() {
             if let Some(receipt) = remote.state.received.get(&mutation.revision.id()) {
                 if receipt.digest != mutation.digest().map_err(catalog_error)? {
                     return Err(invalid("remote mutation identity collision; local work retained"));
                 }
+                acknowledged.insert(mutation.revision.id());
             } else {
                 pending.push(mutation.clone());
             }
@@ -298,17 +263,27 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
             let Some((head, _)) = remote.head else {
                 return Err(invalid("remote catalog is empty; initial library metadata must be queued first"));
             };
-            return Ok(Outcome {
-                append: None,
-                state: remote.state.portable(),
-                acknowledged: local.pending.keys().cloned().collect(),
-                cursor: head.tip.hash.0,
-                generation: head.generation,
-            });
+            return Ok(Outcome { append: None, state: remote.state.portable(), acknowledged, cursor: head.tip.hash.0, generation: head.generation });
         }
         let pending_count = pending.len();
+        pending.sort_by_key(|mutation| mutation.revision.clone());
         let mut chunk = Vec::new();
+        let mut waiting_for_media = false;
         for mutation in pending.into_iter().take(256) {
+            // Preserve the author's causal prefix, but still receive remote changes when
+            // an import's bytes have not arrived. Dependency waiting is ordinary progress.
+            if !dependency_proof.contains(&mutation.revision.id()) {
+                match dependencies(connection, std::slice::from_ref(&mutation), cancel) {
+                    Ok(()) => {
+                        dependency_proof.insert(mutation.revision.id());
+                    }
+                    Err(AssetError::Missing) => {
+                        waiting_for_media = true;
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             chunk.push(mutation);
             let trial = Batch {
                 version: 3,
@@ -323,7 +298,11 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
             }
         }
         if chunk.is_empty() && pending_count > 0 {
-            return Err(invalid("pending mutation cannot fit a 2 MiB change batch"));
+            if !waiting_for_media {
+                return Err(invalid("pending mutation cannot fit a 2 MiB change batch"));
+            }
+            let (cursor, generation) = remote.head.as_ref().map_or((String::new(), 0), |(head, _)| (head.tip.hash.0.clone(), head.generation));
+            return Ok(Outcome { append: None, state: remote.state.portable(), acknowledged, cursor, generation });
         }
         let newly_referenced: Vec<_> = chunk.iter().filter(|mutation| !dependency_proof.contains(&mutation.revision.id())).cloned().collect();
         dependencies(connection, &newly_referenced, cancel)?;
@@ -336,7 +315,7 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
                 generation: head.generation,
                 covers: head.tip.clone(),
                 state: remote.state.portable(),
-                imports: remote.imports.clone(),
+                imports: BTreeMap::new(),
             };
             let bytes = serde_json::to_vec(&payload).map_err(|_| invalid("could not encode checkpoint"))?;
             if bytes.len() > MAX_CHECKPOINT {
@@ -377,4 +356,4 @@ pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requ
 }
 
 mod worker;
-pub use worker::{Jobs, prepare_migration, start, start_migration};
+pub use worker::{Jobs, pause_publication, prepare_migration, resume_publication, start, start_migration};

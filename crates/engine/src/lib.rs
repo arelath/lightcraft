@@ -32,6 +32,7 @@ pub mod cloud_publication;
 pub mod cloud_records;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_replication;
+pub mod cloud_status;
 pub mod cloud_sync;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_upload;
@@ -313,6 +314,10 @@ pub struct Session {
     /// Develop defaults applied on import (persisted in prefs.json).
     pub import_defaults: import::ImportDefaults,
     /// Disk budget of the library's thumbnail cache in MB (0 = default; persisted in prefs.json).
+    /// Device-local pause, persisted in library preferences.
+    pub cloud_paused: bool,
+    /// Derived conflict views are local and reused by UI/CLI queries until this catalog changes.
+    pub(crate) cloud_conflicts_cache: Option<(std::sync::Arc<()>, u64, Value)>,
     pub cache_mb: u32,
     /// Where smart previews are kept when not in the library folder (persisted in prefs.json).
     pub smart_previews_dir: Option<std::path::PathBuf>,
@@ -419,6 +424,8 @@ impl Session {
             staging_dirty: Default::default(),
             preview_build: None,
             import_defaults: import::ImportDefaults::default(),
+            cloud_paused: false,
+            cloud_conflicts_cache: None,
             cache_mb: 0,
             smart_previews_dir: None,
             forget_local_days: lightcraft_catalog::DEFAULT_FORGET_DAYS,

@@ -157,7 +157,18 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                     n = n
                 )
             });
-            let cloud_tip = unsaved.as_deref().unwrap_or("Local library — no cloud account needed");
+            let cloud = app.run("cloud.overview", json!({})).unwrap_or_default();
+            let pending = cloud["summary"]["waiting"]
+                .as_u64()
+                .unwrap_or(0)
+                .saturating_add(cloud["summary"]["syncing"].as_u64().unwrap_or(0))
+                .saturating_add(cloud["summary"]["issues"].as_u64().unwrap_or(0));
+            let cloud_text = if cloud["paused"] == true {
+                "Cloud library — syncing paused".to_owned()
+            } else {
+                format!("Cloud library — {pending} photos waiting to sync")
+            };
+            let cloud_tip = unsaved.as_deref().unwrap_or(&cloud_text);
             for (id, icon, tip, cmd) in [
                 ("discord", Icon::Chat, "Join the ArtCraft community on Discord", "app.discord"),
                 ("cloud", Icon::Cloud, cloud_tip, ""),
@@ -169,7 +180,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 let resp = ui.interact(r, egui::Id::new(("top", id)), Sense::click()).on_hover_text(tip);
                 register(ui.ctx(), format!("icon:{id}"), r);
                 let warn = id == "cloud" && unsaved.is_some();
-                let colour = if warn {
+                let colour = if warn || (id == "cloud" && (cloud["summary"]["issues"].as_u64().unwrap_or(0) > 0 || cloud["error"].is_string())) {
                     t.caution
                 } else if resp.hovered() {
                     t.text
@@ -182,6 +193,32 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                     ui.painter().circle_filled(c, 6.0, t.reject);
                     ui.painter().text(c, Align2::CENTER_CENTER, "!", t.semibold(9.5), t.canvas);
                     register(ui.ctx(), "indicator:unsaved", r);
+                }
+                if id == "cloud" {
+                    if !warn && (pending > 0 || cloud["paused"] == true) {
+                        let c = r.right_top() + vec2(-4., 6.);
+                        ui.painter().circle_filled(c, 7., if cloud["paused"] == true { t.caution } else { t.accent });
+                        if cloud["paused"] == true {
+                            for dx in [-2.5, 1.] {
+                                ui.painter().rect_filled(Rect::from_min_size(c + vec2(dx, -3.), vec2(1.5, 6.)), 0., t.canvas);
+                            }
+                        } else {
+                            ui.painter().text(
+                                c,
+                                Align2::CENTER_CENTER,
+                                if pending > 99 { "99+".into() } else { pending.to_string() },
+                                t.semibold(9.),
+                                t.canvas,
+                            );
+                        }
+                        register(ui.ctx(), "indicator:cloudQueue", r);
+                    }
+                    egui::Popup::menu(&resp).width(320.).show(|ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("cloud-popup-scroll")
+                            .max_height((ui.ctx().content_rect().height() - 80.).clamp(180., 640.))
+                            .show(ui, |ui| crate::panels::cloud::show(app, ui, &cloud));
+                    });
                 }
                 if resp.clicked() && !cmd.is_empty() {
                     let _ = app.run(cmd, json!({}));

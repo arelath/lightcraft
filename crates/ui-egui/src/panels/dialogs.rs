@@ -1,7 +1,7 @@
 //! Modal dialogs (new album, rename, create preset, choose settings to copy, export, about, shortcuts).
 
 use lightcraft_develop::{ControlSpec, Section, SettingsGroup, Track};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::LightcraftApp;
 use crate::state::Dialog;
@@ -1034,6 +1034,27 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         if button.clicked() && let Err(error) = app.run("dialog.cloudMigrate", json!({})) { app.toast(ui.ctx(), error); }
                     }
                     ui.label(crate::i18n::tr("After a failed synchronization, retry from Info. Originals and pending edits stay on this device."));
+                    let status = app.run("cloud.syncStatus",json!({})).unwrap_or_default();
+                    if let Some(conflicts) = status.get("structuralConflicts").and_then(Value::as_array).filter(|conflicts|!conflicts.is_empty()) {
+                        ui.separator();
+                        ui.strong(crate::i18n::tr("Conflicting folder or stack moves"));
+                        ui.label(crate::i18n::tr("Move the affected folder or regroup a stack to resolve. The original choices remain retained."));
+                        for conflict in conflicts.iter().take(16) {
+                            if conflict.get("field").and_then(Value::as_str)==Some("parent") {
+                                ui.strong(conflict.get("name").and_then(Value::as_str).unwrap_or_else(||crate::i18n::tr("Folder")));
+                                for (label,key) in [("Requested parent","proposed"),("Currently shown under","projected")] {
+                                    let parent = conflict.get(key).and_then(Value::as_str).and_then(|global|app.session.catalog.sync_state().and_then(|state|state.winning(&format!("album:{global}"),"name")).and_then(|(_,name)|name.as_str()));
+                                    let fallback = if conflict.get(key).is_none_or(Value::is_null) {crate::i18n::tr("Library root")} else {crate::i18n::tr("Unavailable folder")};
+                                    ui.horizontal(|ui|{ui.label(crate::i18n::tr(label));ui.label(parent.unwrap_or(fallback));});
+                                }
+                            } else { ui.label(crate::i18n::tr("Stack membership")); }
+                            if let Some(entity) = conflict.get("entity").and_then(Value::as_str) {
+                                let button = ui.button(crate::i18n::tr("Keep current structure"));
+                                crate::widgets::register(ui.ctx(),format!("button:cloudAcceptStructure:{entity}"),button.rect);
+                                if button.clicked() && let Err(error) = app.run("cloud.acceptStructure",json!({"entity":entity})) { app.toast(ui.ctx(),error); }
+                            }
+                        }
+                    }
                     let deleted: Vec<_> = app.session.catalog.sync_state().into_iter().flat_map(|state| {
                         state.documents.keys().filter(|entity| entity.starts_with("photo:") && state.winning(entity,"deleted").is_some_and(|(_,v)| v.as_bool()==Some(true)))
                             .map(|entity| (entity.clone(),state.winning(entity,"file_name").and_then(|(_,v)| v.as_str()).unwrap_or("Deleted cloud photo").to_owned()))

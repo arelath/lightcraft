@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod bottombar;
 pub mod chips;
+pub mod cloud;
 pub mod compare;
 pub mod crop_overlay;
 pub mod denoise;

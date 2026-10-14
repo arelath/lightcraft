@@ -14,6 +14,9 @@ into managed storage. Existing catalogs open without a cloud connection.
 runs on a worker and polls every five seconds while enabled. A failure pauses polling until
 an explicit Sync now retry. CLI/MCP wait by default. Activity cancellation preserves pending
 work. `cloud.syncStatus` reports the cursor, pending work and retained conflict revisions.
+Managed uploads require synchronization enabled for their connection. Select the protocol
+in Cloud Synchronization (or `cloud.syncEnable`) before uploading; staging an import while
+disabled remains safe and uploading returns an actionable setup error.
 
 ## Object layout and publication
 
@@ -24,11 +27,14 @@ documented in [cloud-storage-implementation.md](cloud-storage-implementation.md)
 |---|---|
 | `catalog/head.json` | Small version-2 head: library, increasing generation, tip and optional checkpoint |
 | `catalog/changes/<sha256>.json` | Immutable version-3 batch: parent and version-1 mutations |
-| `catalog/checkpoints/<sha256>.json` | Immutable version-1 portable state and legacy-import receipts |
+| `catalog/checkpoints/<sha256>.json` | Immutable version-1 portable state; obsolete import-receipt map stays empty |
 
-Readers also accept version-1 heads and version-1/2 initial import/revision batches. Legacy
-initial import metadata forms a baseline; subsequent mutation edits supersede that baseline.
-Binary revision imports update immutable content and filename, preserving later metadata edits.
+Readers reject version-1 heads, version-1/2 import batches, nonempty legacy import receipt
+maps and synthetic `baseline_`/`legacy_` replica identities. The maintainer confirms those
+pre-release libraries contain only disposable test data. Use a fresh catalog and storage
+prefix for them; rejection preserves their bytes. Current imports and binary revisions use
+normal causal mutations and exact receipts. Existing supported causal-head libraries can
+still migrate to append mode; obsolete standalone import libraries cannot.
 
 Writers verify newly referenced originals, proxies, thumbnails and associated XMP before
 publishing a change batch. Immutable writes use `If-None-Match: *`; head replacement uses
@@ -57,6 +63,50 @@ saves restore the in-memory pending state. Retry after a crash recognizes the or
 Compaction retains pending work. Incoming application does not generate an outgoing echo.
 Results from another open library or changed connection are rejected. Slider interactions finish
 as a single local edit before incoming state is applied.
+
+### Upload readiness and structural conflicts
+
+Receiving remote changes proceeds while unrelated uploads are failed, deleted, waiting, or
+bound to another connection. Missing media delays only the local causal publication prefix.
+It is a normal waiting condition; integrity and transport errors still produce actionable errors.
+A deleted managed photo's frozen staged import is published before its tombstone, including
+after local permanent deletion. This completes its causal sequence without restoring the photo.
+An orphan with missing/incompatible staging is reported in `cloud.upload`'s `skipped` results;
+healthy selected items continue and durable data remains retained.
+
+Automatic single-import jobs can reach `objectsVerified` while sibling imports still need
+transfers. This means publication pending, not failed. Exact append publication proof and
+fully verified object keys acknowledge every covered upload intent in one catalog transaction.
+A stale non-error worker phase cannot regress an already acknowledged intent. A sibling's on-disk
+receipt may retain its waiting marker until explicit verification/retry; staging cleanup remains
+conservative until that receipt also has exact remote proof.
+
+Sync-enabled conditional-head imports also publish normal causal mutations rather than
+adding one synthetic legacy author per import. Their version-4 device-local receipts bind
+the library, exact mutation proofs and conditional-head generation. Version-1/2 standalone
+and version-3 append receipts remain readable for conservative local recovery. The standalone
+legacy publisher and native/browser synthetic-author bridge have been removed. Uploads without
+enabled synchronization retain staged data and require explicit setup. The proposed versioned
+maintenance contract is in
+[cloud-history-compaction-design.md](cloud-history-compaction-design.md), not an implemented
+compactor or a reason to discard existing receipts.
+
+Album moves are projected from the desired graph and detached before reattachment. For a
+cross-entity parent cycle, the album with the greatest global identity in that cycle is shown
+at the root. Proposed edges remain in the causal registers. Stacks resolve disputed ownership
+in increasing global stack identity order, retain photo ordering, and dissolve projections
+with fewer than two members; existing device-local stack ownership remains local. Changed
+stacks are removed before installing the final membership map. `cloud.syncStatus` reports
+`structuralConflicts` with both proposed and projected values. The Cloud Synchronization
+dialog shows these choices and offers Keep current structure. Its
+`cloud.acceptStructure {entity}` command creates a causal resolution using the displayed
+valid parent or membership, including an empty membership for a dissolved stack. An explicit
+valid folder move or stack membership edit can also resolve a choice. A projection alone
+does not discard remote data. Ordinary and structural conflict summaries are cached until
+the catalog revision or open library changes.
+
+Verification of these corrections is recorded in
+[cloud-reliability-tasks.md](cloud-reliability-tasks.md). Earlier acceptance below predates them.
 
 Independent fields merge. Album membership is an individual boolean register per photo, so
 concurrent additions of different photos survive. Global photo references also cover virtual

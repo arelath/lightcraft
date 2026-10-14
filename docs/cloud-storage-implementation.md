@@ -4,7 +4,7 @@ Last updated: 2026-10-14. Completion and acceptance checks are tracked in [../ta
 
 ## Current architecture
 
-The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–11 still load and upgrade; older builds refuse format 12. Format 10 adds associated XMP, stable identity mappings and device-local working-copy bindings. Format 11 adds durable mutation synchronization; format 12 adds explicit append/CAS protocol selection, verified append progress and restored-author ownership. Shared checkpoints exclude upload intents and all device-local paths and settings.
+The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–12 still load and upgrade; older builds refuse format 13. Format 10 adds associated XMP, stable identity mappings and device-local working-copy bindings. Format 11 adds durable mutation synchronization; format 12 adds explicit append/CAS protocol selection, verified append progress and restored-author ownership. Format 13 adds sync-status filter criteria; absent criteria still mean no status constraint. Shared checkpoints exclude upload intents and all device-local paths and settings.
 
 `crates/catalog/src/assets.rs` describes originals and optional smart-preview/thumbnail blobs, with connection IDs, object keys and optional object versions. Device cache paths, transfer state and connection settings are excluded from the catalog. Existing SipHash duplicate-detection and cache hashes retain their semantics.
 
@@ -43,6 +43,15 @@ The import completes locally without storage connectivity or credentials. It rep
 Resolver acquisition prefers durable staged bytes and verifies them before decoding or exporting. Cache trimming and remove-local-copy cannot remove them; output guards prevent overwriting the immutable blob namespace. Invalid overlapping cache/managed directory mappings disable trimming and staging until repaired. `Managed/working` is reserved for durable external-edit revisions and excluded from cache maintenance; the external-editor ingestion workflow remains open.
 
 ## Durable upload and initial remote publication
+
+Enable Cloud Synchronization for the selected connection before uploading, explicitly
+choosing conditional-head or append mode. Imports may be staged while disabled; upload
+returns a setup error and keeps their originals. All current publications use normal
+causal mutations, including conditional-head imports. Version-4 head receipts and
+version-3 append receipts retain exact publication intents/proofs. The obsolete standalone
+import publisher and synthetic-author bridge are removed. Pre-release remote import-only
+records and catalogs with synthetic import replicas are rejected; create a fresh catalog
+and prefix for that disposable test data. Other local catalogs still upgrade normally.
 
 Upload receipts live in `Managed/uploads/<import-id>.json`. They contain a versioned immutable import snapshot, verified object keys, multipart upload identities, acknowledged part ETags with SHA-256 and length, publication generation and a bounded retry error. Version 2 also binds the receipt to its bucket, region, library prefix and endpoint, excluding credential-profile selection. Retries refuse to send recorded multipart IDs to a different storage destination. Version-1 receipts remain readable; a legacy incomplete session needs explicit abort using its original connection settings before retry can bind it. Receipts are atomically saved before sending multipart parts and after each acknowledged part. Corrupt, oversized and future receipts are preserved and return an actionable error. Receipts and connection settings contain no credentials.
 
@@ -392,3 +401,37 @@ and [browser requirements](browser-cloud.md).
 | 2026-10-13 | Durable causal mutation synchronization, conditional head reconciliation, incremental tails/checkpoints, conflict versions and explicit tombstone recovery; shared-engine and CLI failure/rebootstrap checks. |
 | 2026-10-13 | Browser Fetch authorization, verified managed worker media, durable OPFS/IndexedDB outbox acknowledgements, cloud backups and native/browser synchronization acceptance; optional metadata backend remains deferred. |
 | 2026-10-14 | Coordinated migration dialog and asynchronous desktop cutover; operator-confirmed peer pause, cancellation/retry and local save rollback. |
+| 2026-10-14 | Cloud queue popup, indexed sync-status filters and persisted device-local pause/resume; native multipart recovery and browser OPFS/IndexedDB controls verified. |
+
+
+## Cloud queue UX
+
+The upper-right cloud icon opens the cloud-library popup. Its badge counts photos with pending
+original/recipe work or issues; a pause indicator shows a device-local pause. The popup shows
+managed photo/album counts, known original data (deduplicated shared originals), queued files/
+data, active transfer byte progress, pending library mutations and errors. These are this
+catalog's known totals, not a storage-provider quota or an inventory of the whole bucket.
+
+Pause Syncing (`cloud.pause`) persists in this device's library preferences, cancels active
+uploads/catalog network work and prevents manual/automatic publication until Resume Syncing
+(`cloud.resume`). Pending edits, staged originals and multipart receipts remain. Transfers
+finish stopping before resume is enabled; confirmed parts and the upload ID are reused.
+Reconnect/configuration do not override the persisted pause. A failed pause preference write
+still stops this session and reports that it could not save; a failed resume write keeps pause.
+Downloads remain available for editing/export. Explicit migration is a separate coordinated
+operation. Resume also releases cancelled migration preparation, like explicit Sync now.
+
+Sync Status in the filter bar offers Waiting to sync, Syncing, Synced, Sync issues and Local
+only, with a removable chip. Status derives from durable original-upload intent and pending
+photo recipe/metadata mutations; sync issues include failed uploads and retained field
+conflicts. Local files stay Local only until explicitly imported to cloud storage. Browser
+OPFS/IndexedDB supports the same popup/filter and persisted metadata pause; browser original
+upload/import remains unsupported. The shared status index is invalidated by sync/source/
+collection changes, rather than rebuilt for unrelated metadata edits on each frame.
+
+Verification (2026-10-14): native six-file queue/multipart pause-resume and browser OPFS/IndexedDB
+popup/filter/reload/native-peer workflows passed against the signed loopback fixture, with
+screenshots inspected (`target/cloud-ux-acceptance`). Native release and browser builds passed
+(`target/cloud-ux-native-final.log`, `target/cloud-ux-web-final.log`); all eight full CI stages
+passed (`target/cloud-ux-ci.log`). This UX acceptance does not add a fresh live-B2 or large-library
+performance claim.

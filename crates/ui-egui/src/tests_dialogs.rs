@@ -7,6 +7,33 @@ use std::time::Duration;
 
 const T: Duration = Duration::from_secs(20);
 
+#[test]
+fn cloud_setup_explains_retained_structural_conflicts() {
+    let services = Services {
+        cloud_action: Some(Box::new(|_, id, _| {
+            if id == "cloud.connections" {
+                return Some(Ok(json!({"connections": []})));
+            }
+            (id=="cloud.syncStatus").then(||Ok(json!({
+            "structuralConflicts":[{"entity":"album:A","field":"parent","name":"Folder A","proposed":"B","projected":null},{"entity":"stack:one","field":"photos","proposed":["a","b"],"projected":[]}]
+        })))
+        })),
+        ..Default::default()
+    };
+    let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::with_demo(), services), [1400., 1000.], 1.);
+    h.step(); // Finish initial library/UI setup before opening a dialog.
+    h.app.run("dialog.cloudSync", json!({})).unwrap();
+    for _ in 0..4 {
+        h.step();
+    }
+    let text = h.view.painted_text();
+    for label in ["Conflicting folder or stack moves", "Folder A", "Requested parent", "Currently shown under", "Stack membership"] {
+        assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
+    }
+    assert!(text.iter().any(|value| value.contains("original choices remain retained")));
+    assert!(text.iter().any(|value| value.contains("Keep current structure")));
+}
+
 fn demo(size: [f32; 2], ui: serde_json::Value) -> Headless {
     let services = Services { png: None, ..Default::default() };
     let app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), services);

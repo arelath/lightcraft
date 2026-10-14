@@ -23,6 +23,37 @@ fn until(mut ready: impl FnMut() -> bool) {
 }
 
 #[test]
+fn upload_requires_explicit_sync_protocol_and_preserves_staged_import() {
+    let fixture = Fixture::new();
+    let library = fixture.dir.join("explicit-protocol");
+    let (id, source) = fixture.import_unsynchronized(&library, false);
+    let (output, rows) = fixture.run(&library, &[("cloud.upload", json!({}))]);
+    assert!(!output.status.success());
+    assert!(rows[0]["error"].as_str().unwrap().contains("cloud.syncEnable"), "{rows:?}");
+    assert!(source.is_file());
+    assert!(library.join("Managed/imports").join(format!("{id}.json")).is_file());
+    assert!(fixture.state.lock().unwrap().requests.is_empty());
+    let (output, rows) = fixture.run(&library, &[("cloud.syncEnable", json!({"connection":"personal"})), ("cloud.upload", json!({}))]);
+    assert!(output.status.success(), "{rows:?} {}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn orphaned_non_synchronized_import_is_reported_without_blocking_healthy_uploads() {
+    let fixture = Fixture::new();
+    let library = fixture.dir.join("orphan-library");
+    let (orphan, _) = fixture.import_unsynchronized(&library, false);
+    let (output, rows) = fixture.run(&library, &[("photo.deletePermanently", json!({"ids":[1]}))]);
+    assert!(output.status.success(), "{rows:?}");
+    let (healthy, _) = fixture.import(&library, false);
+    let (output, rows) = fixture.run(&library, &[("cloud.upload", json!({})), ("cloud.uploadStatus", json!({}))]);
+    assert!(output.status.success(), "{rows:?} {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(rows[0]["result"]["skipped"][0]["import"], orphan);
+    assert_eq!(rows[1]["result"]["uploads"][&healthy]["state"], "synchronized");
+    assert_eq!(rows[1]["result"]["uploads"][&orphan]["state"], "savedLocally");
+    assert!(library.join("Managed/imports").join(format!("{orphan}.json")).is_file());
+}
+
+#[test]
 fn xmp_and_external_revisions_publish_dependencies_with_stable_photo_identity() {
     let fixture = Fixture::new();
     let library = fixture.dir.join("revision-library");
@@ -186,7 +217,9 @@ fn legacy_synchronized_receipt_requires_explicit_remote_reverification_before_ev
         }
     }
     receipt["version"] = json!(1);
-    receipt.as_object_mut().unwrap().remove("storage");
+    for field in ["storage", "library", "appendProof", "publicationIntent"] {
+        receipt.as_object_mut().unwrap().remove(field);
+    }
     std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
     let (_, rows) = fixture.run(&library, &[("cloud.removeLocalCopy", json!({"ids":[1]}))]);
     assert_eq!(rows[0]["result"]["failed"].as_array().unwrap().len(), 1);
@@ -194,7 +227,7 @@ fn legacy_synchronized_receipt_requires_explicit_remote_reverification_before_ev
     let (_, rows) = fixture.run(&library, &[("cloud.upload", json!({"imports":[id],"verify":true})), ("cloud.removeLocalCopy", json!({"ids":[1]}))]);
     assert!(rows.iter().all(|row| row["ok"] == true), "{rows:?}");
     assert_eq!(rows[1]["result"]["removed"], json!([original]));
-    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()["version"], 2);
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()["version"], 4);
     assert_eq!(
         fixture.state.lock().unwrap().requests.iter().filter(|(method, key)| method == "PUT" && key.ends_with("/catalog/head.json")).count(),
         1
@@ -402,7 +435,7 @@ fn embedded_completion_error_retains_parts_and_explicit_abort_preserves_original
 }
 
 #[test]
-fn one_failed_import_does_not_block_the_remaining_uploads() {
+fn one_failed_import_does_not_block_other_transfers_and_retry_reconciles_the_causal_prefix() {
     let fixture = Fixture::new();
     let library = fixture.dir.join("library");
     let (large, _) = fixture.import(&library, true);
@@ -411,7 +444,13 @@ fn one_failed_import_does_not_block_the_remaining_uploads() {
     let (_, rows) = fixture.run(&library, &[("cloud.upload", json!({})), ("cloud.uploadStatus", json!({}))]);
     assert_eq!(rows[0]["ok"], false, "the group reports the failed import");
     assert_eq!(rows[1]["result"]["uploads"][&large]["state"], "failed");
-    assert_eq!(rows[1]["result"]["uploads"][&small]["state"], "synchronized", "{rows:?}");
+    assert_eq!(rows[1]["result"]["uploads"][&small]["state"], "objectsVerified", "{rows:?}");
+    assert!(rows[1]["result"]["uploads"][&small]["error"].is_null());
+    fixture.state.lock().unwrap().embedded_error = false;
+    let (output, rows) = fixture.run(&library, &[("cloud.upload", json!({})), ("cloud.uploadStatus", json!({}))]);
+    assert!(output.status.success(), "{rows:?}");
+    assert_eq!(rows[1]["result"]["uploads"][&large]["state"], "synchronized");
+    assert_eq!(rows[1]["result"]["uploads"][&small]["state"], "synchronized");
     assert!(fixture.state.lock().unwrap().objects.contains_key("/photos/library/catalog/head.json"));
 }
 

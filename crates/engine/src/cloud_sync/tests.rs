@@ -115,6 +115,132 @@ fn each_durable_record_contains_the_change_and_outbox_and_compaction_keeps_pendi
     assert_eq!(compacted.photo(PhotoId(1)).unwrap().rating, 5);
 }
 #[test]
+fn conflict_status_cache_reuses_views_and_rejects_stale_revision_or_library_token() {
+    let (mut s, _) = session();
+    s.execute("cloud.syncStatus", &json!({})).unwrap();
+    s.cloud_conflicts_cache.as_mut().unwrap().2["reuseMarker"] = json!(true);
+    s.execute("cloud.syncStatus", &json!({})).unwrap();
+    assert_eq!(s.cloud_conflicts_cache.as_ref().unwrap().2["reuseMarker"], true);
+    s.commit("rate", Op::SetRating { id: PhotoId(1), rating: 4 }).unwrap();
+    s.execute("cloud.syncStatus", &json!({})).unwrap();
+    assert!(s.cloud_conflicts_cache.as_ref().unwrap().2.get("reuseMarker").is_none());
+    s.cloud_conflicts_cache.as_mut().unwrap().2["reuseMarker"] = json!(true);
+    s.library_identity = Arc::new(());
+    s.execute("cloud.syncStatus", &json!({})).unwrap();
+    assert!(s.cloud_conflicts_cache.as_ref().unwrap().2.get("reuseMarker").is_none());
+}
+
+#[test]
+fn folder_rearrangement_detaches_before_attaching_and_concurrent_cycles_converge() {
+    let (mut s, _) = session();
+    for (id, global) in [(AlbumId(1), "zzz-A"), (AlbumId(2), "aaa-B")] {
+        s.apply_system(Op::SetCloudIdentity { entity: format!("album:{}", id.0), id: Some(global.into()) }).unwrap();
+        let mut album = Album::new(id, global);
+        album.folder = true;
+        s.commit("folder", Op::AddAlbum { album }).unwrap();
+    }
+    s.commit("initial nesting", Op::MoveAlbum { id: AlbumId(1), parent: Some(AlbumId(2)) }).unwrap();
+    let mut remote = SyncState::new("library".into(), "remote".into(), "personal".into()).unwrap();
+    remote.merge(&s.catalog.sync_state().unwrap().portable()).unwrap();
+    let changes = [("album:zzz-A", Value::Null), ("album:aaa-B", json!("zzz-A"))]
+        .into_iter()
+        .map(|(entity, value)| Change {
+            entity: entity.into(),
+            field: "parent".into(),
+            base: remote.winning(entity, "parent").map(|(stamp, _)| stamp),
+            value,
+        })
+        .collect();
+    let mutation = remote.enqueue(changes).unwrap().unwrap();
+    let op = incoming(&s.catalog, &[mutation], &BTreeSet::new(), "a".repeat(64), 1).unwrap();
+    s.apply_received(op).unwrap();
+    assert_eq!(s.catalog.album(AlbumId(1)).unwrap().parent, None);
+    assert_eq!(s.catalog.album(AlbumId(2)).unwrap().parent, Some(AlbumId(1)));
+    s.commit("root", Op::MoveAlbum { id: AlbumId(2), parent: None }).unwrap();
+    let initial = s.catalog.clone();
+    let moves: Vec<_> = [("peer-a", "album:zzz-A", "aaa-B"), ("peer-b", "album:aaa-B", "zzz-A")]
+        .into_iter()
+        .map(|(device, entity, parent)| {
+            let mut peer = SyncState::new("library".into(), device.into(), "personal".into()).unwrap();
+            peer.merge(&initial.sync_state().unwrap().portable()).unwrap();
+            peer.enqueue(vec![Change {
+                entity: entity.into(),
+                field: "parent".into(),
+                base: peer.winning(entity, "parent").map(|(stamp, _)| stamp),
+                value: json!(parent),
+            }])
+            .unwrap()
+            .unwrap()
+        })
+        .collect();
+    let mut a = initial.clone();
+    let mut b = initial;
+    a.apply(incoming(&a, &moves, &BTreeSet::new(), "b".repeat(64), 2).unwrap()).unwrap();
+    b.apply(incoming(&b, &moves.into_iter().rev().collect::<Vec<_>>(), &BTreeSet::new(), "b".repeat(64), 2).unwrap()).unwrap();
+    for id in [AlbumId(1), AlbumId(2)] {
+        assert_eq!(a.album(id), b.album(id));
+    }
+    assert_eq!(a.album(AlbumId(1)).unwrap().parent, None);
+    assert_eq!(a.album(AlbumId(2)).unwrap().parent, Some(AlbumId(1)));
+    assert_eq!(a.sync_state().unwrap().winning("album:zzz-A", "parent").unwrap().1, &json!("aaa-B"), "conflicting proposed edge remains retained");
+    let conflict = structural_conflicts(&a);
+    assert_eq!(conflict.len(), 1);
+    a.apply(accept_structure(&a, conflict[0]["entity"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(structural_conflicts(&a).is_empty());
+    b.apply(incoming_checkpoint(&b, &a.sync_state().unwrap().portable(), &BTreeSet::new(), "c".repeat(64), 3).unwrap()).unwrap();
+    assert!(structural_conflicts(&b).is_empty());
+}
+
+#[test]
+fn stack_membership_swaps_and_cross_entity_overlap_materialize_without_uniqueness_failure() {
+    use lightcraft_catalog::{Stack, StackId};
+    let (mut s, _) = session();
+    for id in 2..=4 {
+        s.commit(
+            "photo",
+            Op::AddPhoto {
+                photo: Box::new(Photo::new(PhotoId(id), Source::Managed { asset_id: AssetId("asset".into()) }, "copy.dng", "DNG", 32, 24, "")),
+            },
+        )
+        .unwrap();
+    }
+    for (id, global, photos) in [(StackId(1), "aaa", vec![PhotoId(1), PhotoId(2)]), (StackId(2), "zzz", vec![PhotoId(3), PhotoId(4)])] {
+        s.apply_system(Op::SetCloudIdentity { entity: format!("stack:{}", id.0), id: Some(global.into()) }).unwrap();
+        s.commit("stack", Op::AddStack { stack: Stack { id, photos, collapsed: false } }).unwrap();
+    }
+    let mut remote = SyncState::new("library".into(), "remote".into(), "personal".into()).unwrap();
+    remote.merge(&s.catalog.sync_state().unwrap().portable()).unwrap();
+    for memberships in [[[1, 3], [2, 4]], [[1, 2], [2, 3]]] {
+        let changes = ["stack:aaa", "stack:zzz"]
+            .into_iter()
+            .zip(memberships)
+            .map(|(entity, ids)| Change {
+                entity: entity.into(),
+                field: "photos".into(),
+                base: remote.winning(entity, "photos").map(|(stamp, _)| stamp),
+                value: json!(ids.map(|id| s.catalog.cloud_identity(&format!("photo:{id}")).unwrap())),
+            })
+            .collect();
+        let mutation = remote.enqueue(changes).unwrap().unwrap();
+        s.apply_received(incoming(&s.catalog, &[mutation], &BTreeSet::new(), "a".repeat(64), 1).unwrap()).unwrap();
+        if memberships[0] == [1, 3] {
+            assert_eq!(s.catalog.stack(StackId(1)).unwrap().photos, vec![PhotoId(1), PhotoId(3)]);
+            assert_eq!(s.catalog.stack(StackId(2)).unwrap().photos, vec![PhotoId(2), PhotoId(4)]);
+        } else {
+            assert_eq!(s.catalog.stack(StackId(1)).unwrap().photos, vec![PhotoId(1), PhotoId(2)]);
+            assert!(s.catalog.stack(StackId(2)).is_none());
+            assert_eq!(s.catalog.sync_state().unwrap().winning("stack:zzz", "photos").unwrap().1.as_array().unwrap().len(), 2);
+            let status = s.execute("cloud.acceptStructure", &json!({"entity":"stack:zzz"})).unwrap();
+            assert!(status["structuralConflicts"].as_array().unwrap().is_empty());
+            assert_eq!(s.catalog.sync_state().unwrap().winning("stack:zzz", "photos").unwrap().1, &json!([]));
+            let before = s.catalog.to_snapshot();
+            assert!(s.execute("cloud.acceptStructure", &json!({"entity":"stack:unknown"})).is_err());
+            assert_eq!(s.catalog.to_snapshot(), before);
+        }
+    }
+}
+
+#[test]
 fn local_sources_and_working_paths_are_excluded_and_membership_changes_are_individual() {
     let (mut s, _) = session();
     let first = s.catalog.sync_state().unwrap().pending.len();
@@ -369,6 +495,32 @@ fn independent_offline_imports_keep_distinct_ids_and_replaying_them_is_idempoten
     assert_eq!(a.catalog.photos().count(), 2);
     assert_eq!(b.catalog.photos().count(), 2);
     assert_eq!(a.catalog.sync_state().unwrap().received, before);
+}
+
+#[test]
+fn more_than_device_limit_managed_imports_use_one_causal_author() {
+    let (s, _) = session();
+    let mut catalog = Catalog::new();
+    catalog
+        .apply(Op::SetAsset { id: AssetId("asset".into()), asset: Some(Box::new(s.catalog.asset(&AssetId("asset".into())).unwrap().clone())) })
+        .unwrap();
+    for id in 1..=4097 {
+        let mut photo = (**s.catalog.photo(PhotoId(1)).unwrap()).clone();
+        photo.id = PhotoId(id);
+        catalog.apply(Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+    }
+    catalog.apply(enable(&catalog, "library".into(), "one-physical-device".into(), "personal".into()).unwrap()).unwrap();
+    let state = catalog.sync_state().unwrap();
+    assert_eq!(state.documents.keys().filter(|entity| entity.starts_with("photo:")).count(), 4097);
+    assert_eq!(state.clock.len(), 1);
+    assert!(state.pending.values().all(|mutation| mutation.revision.device == "one-physical-device"));
+    let mut peer = SyncState::new("library".into(), "peer".into(), "personal".into()).unwrap();
+    for mutation in state.pending.values() {
+        peer.receive(mutation).unwrap();
+    }
+    assert_eq!(peer.documents, state.documents);
+    assert_eq!(peer.clock.len(), 1);
+    peer.portable().validate().unwrap();
 }
 
 #[test]
