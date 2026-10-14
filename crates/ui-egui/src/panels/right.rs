@@ -764,6 +764,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                         .color(t.text_dim),
                     );
                     ui.label(egui::RichText::new(format!("Library ID: {library}")).small().color(t.text_dim));
+                    super::cloud::capacity(app, ui, &status, false);
                     if let Some(report) = status["reports"].as_array().and_then(|reports| reports.last())
                         && let Some(error) = report.get("error").and_then(serde_json::Value::as_str)
                     {

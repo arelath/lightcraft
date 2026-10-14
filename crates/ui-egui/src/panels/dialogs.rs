@@ -1035,6 +1035,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                     ui.label(crate::i18n::tr("After a failed synchronization, retry from Info. Originals and pending edits stay on this device."));
                     let status = app.run("cloud.syncStatus",json!({})).unwrap_or_default();
+                    super::cloud::capacity(app, ui, &status, true);
                     if let Some(conflicts) = status.get("structuralConflicts").and_then(Value::as_array).filter(|conflicts|!conflicts.is_empty()) {
                         ui.separator();
                         ui.strong(crate::i18n::tr("Conflicting folder or stack moves"));

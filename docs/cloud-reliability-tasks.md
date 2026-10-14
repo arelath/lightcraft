@@ -10,7 +10,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.3 — Materialize valid folder rearrangements independently of entity ID order. Validate the desired graph, detach before attaching, and resolve concurrent cycles deterministically while retaining conflict choices. Test reversed ancestry and concurrent cycles; audit stack uniqueness.
 - [x] CR.4 — Bound import replica identities. Route all current imports through normal causal mutations; reject the obsolete synthetic-author format across an explicit pre-release version boundary. Test more than 4,096 managed photos without widening the device limit. The maintainer confirms there are no users or existing libraries to migrate, only disposable test data (2026-10-14).
 - [x] CR.5 — Specify and implement causal-history compaction, including retired replicas, tombstones, duplicate detection, and old offline clients. Test checkpoint maintenance restores editing capacity without losing conflict or deletion safety.
-- [ ] CR.6 — Expose synchronization-state utilization, early warnings, and accurate recovery errors before record/byte bounds.
+- [x] CR.6 — Expose synchronization-state utilization, early warnings, and accurate recovery errors before record/byte bounds.
 - [ ] CR.7 — Define and test oversized-entity bootstrap behavior, especially large album membership sets; implement streaming or an explicit actionable product limit.
 - [ ] CR.8 — Make unchanged conditional-head synchronization a genuine local no-op (no materialization, state operation, or journal write without change, acknowledgement, or progress).
 - [ ] CR.9 — Index global-to-local identities once, materialize changed entities, and persist synchronization deltas. Measure unchanged 10,000- and 50,000-photo request counts, journal growth, state size, and owner-thread latency.
@@ -125,3 +125,29 @@ Browser transport code is WASM-compiled and shared-model/ACK tested; this is not
 fresh browser/provider archive deployment or large-library request-cost benchmark.
 Archive nodes are one immutable object per leaf/branch; budgeted audit/request-count
 optimization remains CR.10. No author clocks, tombstones or remote objects are removed.
+
+
+2026-10-14 — CR.6: exact serialized SyncState byte counting avoids a duplicate state
+buffer. Revision/library-scoped cached status exposes document, full/historical receipt,
+pending, author, archive-root, entity-field and field-revision utilization. Warnings
+start at 80% and become critical at 95%; limit-specific errors distinguish recoverable
+history from retained current documents, tombstones, conflicts, pending work and clocks.
+Info/cloud popup show compact usage; Cloud Synchronization shows counts, recovery and
+an Archive receipt history action. Browser wrappers preserve the shared status fields.
+
+Catalog tests passed for Unicode canonical byte counting, warning thresholds and all
+count-bound error categories. Engine cache/overview consistency and rendered UI warning/
+maintenance-dispatch tests passed in the full workspace suite. Full gate passed all
+eight stages: `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-reliability-target/cr6-ci.log`.
+The initial focused UI compile found a private fixture API call; it was corrected to
+the public receive API before the passing full gate.
+
+Native final-source acceptance clicked the real maintenance button on both protocols,
+retained the current rating, finished with zero pending changes and historical full
+receipts, and reduced reported metadata: append 24,482 → 16,844 bytes; head 12,218 →
+8,399 bytes. All 362 signed fixture requests verified (240 append / 122 head); both
+rendered capacity screenshots were inspected. Evidence: `target/cloud-reliability/
+cr6-native-results-*.json`, `cr6-native-requests-*.json`; C: scratch
+`lightcraft-cr6-native/native-ddae4e91/` and `native-fa0fbac8/`. Early warnings use
+synthetic model/UI tests; the native libraries are deliberately small. No large-library
+performance or fresh live-provider/browser deployment claim.

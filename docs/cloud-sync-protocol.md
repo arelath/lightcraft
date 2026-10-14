@@ -300,6 +300,26 @@ state bounds still apply. Missing or conflicting archive proofs retain local wor
 merge. Receipt compaction and remote garbage collection are separate operations. Neither a
 recent timestamp nor a few devices' acknowledgements proves safe GC.
 
+### Capacity status and recovery
+
+`cloud.syncStatus` and `cloud.overview` report `utilization` and `capacityWarnings`.
+The byte count is the exact serialized local `SyncState`, including the outbox,
+measured without allocating another full state buffer and cached by catalog revision
+and library identity. It is metadata usage, not provider quota or media/cache usage.
+Limits are 64 MiB, 100,000 documents, 100,000 full receipts, 10,000 pending mutations,
+4,096 author identities, 10,000 fields per entity and 128 revisions per field.
+Warnings start at 80% of each limit and become critical at 95%.
+
+The Cloud Synchronization dialog shows counts, warning-specific recovery guidance,
+and **Archive receipt history**, which runs `cloud.sync {"checkpoint":true,"wait":false}`.
+The cloud popup and Info panel show byte usage and the first warning. Checkpoints
+can archive eligible historical receipts; finish uploads and pending synchronization
+first. They cannot remove current documents, tombstones, field/conflict heads or
+retired author clocks. Removing album members retains their membership fields.
+Pending capacity needs successful synchronization; author capacity has no supported
+safe slot-retirement mechanism. Limit failures preserve the existing catalog/outbox
+and identify the applicable recovery or unsupported limit.
+
 ### Native/browser boundaries and compatibility
 
 Local synchronization persistence selects head cursor/generation or append frontiers and

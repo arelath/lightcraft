@@ -28,6 +28,9 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
             out["error"] = report["error"].clone();
         }
     }
+    let sync = crate::cmd::cloud_sync_status(s, &Value::Null)?;
+    out["utilization"] = sync["utilization"].clone();
+    out["capacityWarnings"] = sync["capacityWarnings"].clone();
     Ok(out)
 }
 pub fn pause(s: &mut Session, _: &Value) -> Result<Value> {

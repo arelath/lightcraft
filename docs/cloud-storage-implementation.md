@@ -4,6 +4,11 @@ Last updated: 2026-10-14. Completion and acceptance checks are tracked in [../ta
 
 Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
 
+`cloud.syncStatus` / `cloud.overview` expose exact metadata bytes and count utilization,
+with warnings at 80% and critical warnings at 95%. Cloud Synchronization shows
+limit-specific recovery and an Archive receipt history action; Info and the cloud popup
+show compact usage. See [capacity status and recovery](cloud-sync-protocol.md#capacity-status-and-recovery).
+
 ## Current architecture
 
 The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–12 still load and upgrade; older builds refuse format 13. Format 10 adds associated XMP, stable identity mappings and device-local working-copy bindings. Format 11 adds durable mutation synchronization; format 12 adds explicit append/CAS protocol selection, verified append progress and restored-author ownership. Format 13 adds sync-status filter criteria; absent criteria still mean no status constraint. Shared checkpoints exclude upload intents and all device-local paths and settings.

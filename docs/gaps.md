@@ -1,6 +1,6 @@
 # Gaps: where LightCraft falls short of Lightroom
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-14 · **Change:** minor (authenticated receipt history compaction; cloud queue popup, persisted pause and sync filters; coordinated desktop/browser migration workflow; append-only B2 synchronization; CR3 entry names the EOS R7 C-RAW fix and the refused CRX variants; CI and Windows / Linux entries note the 0.6.0 riscv64 build; camera colour: tone curve from black-and-white camera JPEGs; Compare and Reference get sharp zoom windows; gap 4 shrinks; gap 14: the HDR switch is read from crs XMP; gaps 2 and 10: EOS R5 Mark II CR3 verified) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-14 · **Change:** minor (capacity usage and early warnings; authenticated receipt history compaction; cloud queue popup, persisted pause and sync filters; coordinated desktop/browser migration workflow; append-only B2 synchronization; CR3 entry names the EOS R7 C-RAW fix and the refused CRX variants; CI and Windows / Linux entries note the 0.6.0 riscv64 build; camera colour: tone curve from black-and-white camera JPEGs; Compare and Reference get sharp zoom windows; gap 4 shrinks; gap 14: the HDR switch is read from crs XMP; gaps 2 and 10: EOS R5 Mark II CR3 verified) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 Every known shortfall, one entry each, ranked by user impact (how many Lightroom users hit it, and
 how hard it blocks them), then by effort. **Agents pick work from the top** (the first entry nobody is
@@ -62,8 +62,9 @@ Beta-blocking gaps (B) total **~230–430 h**; with the stability and platform w
 Cloud storage is tracked separately in [../tasks.md](../tasks.md). The native managed-original
 reliability review is tracked in [cloud-reliability-tasks.md](cloud-reliability-tasks.md).
 Upload/sync liveness and bulk-publication corrections passed CLI and native signed-fixture
-checks on 2026-10-14; legacy-author width, retained-history growth, poll scaling and the
-remaining storage policies are still open. These corrections do not establish large-library
+checks on 2026-10-14; current imports use bounded causal identities and historical receipts
+can be archived. Poll scaling and remaining storage policies are still open.
+These corrections do not establish large-library
 or Adobe cloud-service parity. The native managed-original
 read/cache foundation and device-local retention controls are described in [cloud-storage-implementation.md](cloud-storage-implementation.md).
 Durable managed import stages originals and renditions, journals the photo and upload intent atomically,
@@ -116,3 +117,5 @@ or beta blockers above. Checkpoint receipt maintenance uses authenticated bounde
 | 2026-10-14 | minor | Record append-only B2 synchronization and live native/browser bucket acceptance; no ranked gap closes |
 
 | 2026-10-14 | minor | Implement authenticated receipt-history maintenance across native/browser transports; no ranked parity gap closes |
+
+| 2026-10-14 | minor | Expose exact synchronization capacity, early warnings and accurate recovery; cloud remains OOS, no ranked gap or summary count changes |

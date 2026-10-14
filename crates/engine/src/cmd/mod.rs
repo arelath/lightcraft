@@ -10,6 +10,7 @@ pub(crate) mod browse;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod cloud;
 mod cloud_sync;
+pub(crate) use cloud_sync::status as cloud_sync_status;
 mod color;
 pub(crate) mod convert;
 mod cull;

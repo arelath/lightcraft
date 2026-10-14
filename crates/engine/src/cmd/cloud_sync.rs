@@ -19,10 +19,12 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
                     .map(move |(field, register)| json!({"entity":entity,"field":field,"revisions":register.0.keys().collect::<Vec<_>>()}))
             })
             .collect();
+        let utilization = serde_json::to_value(state.utilization()?).map_err(|e| crate::EngineError::Other(e.to_string()))?;
         s.cloud_conflicts_cache = Some((
             token,
             s.catalog.revision,
-            json!({"conflicts":conflicts,"structuralConflicts":crate::cloud_sync::structural_conflicts(&s.catalog)}),
+            json!({"conflicts":conflicts,"structuralConflicts":crate::cloud_sync::structural_conflicts(&s.catalog),
+                "warnings":utilization.get("warnings"),"utilization":utilization}),
         ));
     }
     let conflicts = s.cloud_conflicts_cache.as_ref().map(|(_, _, value)| value);
@@ -37,6 +39,7 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
         "protocol":state.protocol,"frontiers":state.append.as_ref().map(|p|&p.frontiers),"gaps":state.append.as_ref().map(|p|&p.gaps),
         "pending":state.pending.len(),"generation":state.generation,"cursor":state.cursor,"conflicts":conflicts.and_then(|v|v.get("conflicts")),
         "structuralConflicts":conflicts.and_then(|v|v.get("structuralConflicts")),
+        "utilization":conflicts.and_then(|v|v.get("utilization")),"capacityWarnings":conflicts.and_then(|v|v.get("warnings")),
         "running":running,"reports":reports,
         "transportAvailable":cfg!(not(target_arch="wasm32"))}))
 }
@@ -107,7 +110,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "cloud.overview", "Cloud Library Status", [], None, "{}; managed file counts, known data size, queue and live publication progress", always, crate::cloud_status::overview),
         cmd!(query "cloud.pause", "Pause Syncing", [], None, "{}; persist device-local pause; stop uploads and catalog publication, retaining durable work", always, crate::cloud_status::pause),
         cmd!(query "cloud.resume", "Resume Syncing", [], None, "{}; resume durable uploads and catalog publication after paused jobs drain", always, crate::cloud_status::resume),
-        cmd!(query "cloud.syncStatus","Cloud synchronization status",[],None,"{} → protocol, pending count, cursor/frontiers, gaps and conflict revisions",always,status),
+        cmd!(query "cloud.syncStatus","Cloud synchronization status",[],None,"{} → protocol, pending count, cursor/frontiers, gaps, conflicts, exact metadata utilization and early capacity warnings",always,status),
     ];
     specs.push(cmd!(
         "cloud.restoreDeleted",

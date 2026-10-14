@@ -8,11 +8,15 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_MUTATION_BYTES: usize = 2 << 20;
-const MAX_STATE_BYTES: usize = 64 << 20;
-const MAX_DEVICES: usize = 4096;
-const MAX_RECORDS: usize = 100_000;
+pub const MAX_STATE_BYTES: usize = 64 << 20;
+pub const MAX_DEVICES: usize = 4096;
+pub const MAX_RECORDS: usize = 100_000;
+pub const MAX_PENDING: usize = 10_000;
+pub const MAX_FIELDS: usize = 10_000;
+pub const MAX_VERSIONS: usize = 128;
 mod append;
 pub mod archive;
+pub mod capacity;
 pub use append::{AppendProgress, SyncProtocol, prefixes as publication_prefixes};
 pub type Clock = BTreeMap<String, u64>;
 
@@ -71,6 +75,11 @@ pub fn entity(value: &str) -> bool {
 impl Mutation {
     pub fn validate(&self) -> Result<()> {
         self.revision.validate()?;
+        if self.context.len() > MAX_DEVICES {
+            return Err(invalid(
+                "mutation context exceeds 4,096 authors; retired clocks cannot be removed by checkpoints; safe author-slot retirement is unsupported; current library and outbox retained",
+            ));
+        }
         if self.version != 1
             || !identifier(&self.library)
             || !valid_clock(&self.context)
@@ -287,6 +296,29 @@ impl SyncState {
         Ok(state)
     }
     pub fn validate(&self) -> Result<()> {
+        if self.clock.len() > MAX_DEVICES {
+            return Err(invalid(
+                "synchronization author limit reached (4,096); retired clocks are retained and safe author-slot retirement is unsupported; current library and outbox retained",
+            ));
+        }
+        if self.documents.len() > MAX_RECORDS {
+            return Err(invalid(
+                "synchronization document limit reached (100,000); checkpoints cannot remove document identities or tombstones; current library and outbox retained",
+            ));
+        }
+        if self.received.len() > MAX_RECORDS {
+            return Err(invalid(
+                "synchronization receipt limit reached (100,000); cloud.sync with checkpoint:true archives eligible historical receipts only; finish pending synchronization and resolve conflicts; current heads and pending proofs remain retained, so a smaller separate library may be needed",
+            ));
+        }
+        if self.pending.len() > MAX_PENDING {
+            return Err(invalid(
+                "synchronization pending-change limit reached (10,000); finish uploads and synchronization before editing again; current library and outbox retained",
+            ));
+        }
+        if !matches!(self.version, 1 | 2) {
+            return Err(invalid("unsupported synchronization state version; update LightCraft on every device; current library and outbox retained"));
+        }
         if self.clock.keys().any(|device| device.starts_with("baseline_") || device.starts_with("legacy_")) {
             return Err(invalid("obsolete pre-release import state; use a fresh catalog and storage prefix; local data retained"));
         }
@@ -297,9 +329,6 @@ impl SyncState {
             || self.device.len() > 96
             || !identifier(&self.connection)
             || !valid_clock(&self.clock)
-            || self.documents.len() > MAX_RECORDS
-            || self.received.len() > MAX_RECORDS
-            || self.pending.len() > 10_000
             || self.cursor.as_ref().is_some_and(|id| id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()))
         {
             return Err(invalid("invalid or oversized synchronization state; preserved"));
@@ -347,23 +376,30 @@ impl SyncState {
             }
         }
         for (id, fields) in &self.documents {
-            if !entity(id) || fields.len() > 10_000 {
+            if fields.len() > MAX_FIELDS {
+                return Err(invalid(
+                    "synchronized entity field limit reached (10,000); avoid adding fields or membership identities; removed membership fields stay retained, so use smaller separate albums; current library and outbox retained",
+                ));
+            }
+            if !entity(id) {
                 return Err(invalid("invalid synchronized document"));
             }
             for (field, register) in fields {
+                if register.0.len() > MAX_VERSIONS {
+                    return Err(invalid(
+                        "synchronized field revision limit reached (128); resolve retained revisions or make a new causal edit to the field; current library and outbox retained",
+                    ));
+                }
                 if field.is_empty()
                     || field.len() > 1024
                     || field.chars().any(char::is_control)
-                    || register.0.len() > 128
                     || register.0.keys().any(|id| !self.received.contains_key(id))
                 {
                     return Err(invalid("invalid synchronized field register"));
                 }
             }
         }
-        if serde_json::to_vec(self).map_err(|e| invalid(&e.to_string()))?.len() > MAX_STATE_BYTES {
-            return Err(invalid("synchronization state exceeds 64 MiB; checkpoint required, local data retained"));
-        }
+        capacity::serialized_bytes(self)?;
         Ok(())
     }
     fn stamp(id: &str) -> Option<Stamp> {

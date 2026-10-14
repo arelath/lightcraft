@@ -8,6 +8,49 @@ use std::time::Duration;
 const T: Duration = Duration::from_secs(20);
 
 #[test]
+fn cloud_capacity_warning_explains_recovery_and_dispatches_checkpoint_maintenance() {
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let services = Services {
+        cloud_action: Some(Box::new(move |_, id, params| match id {
+            "cloud.connections" => Some(Ok(json!({"connections":[]}))),
+            "cloud.syncStatus" => Some(Ok(json!({
+                "utilization":{"stateBytes":53_687_091,"stateLimitBytes":67_108_864,"statePercent":80.,
+                    "documents":21,"documentLimit":100_000,"received":80_000,"receiptLimit":100_000,
+                    "pending":2,"pendingLimit":10_000,"authors":2,"authorLimit":4096,"historicalReceipts":79_979,"archiveRoots":4},
+                "capacityWarnings":[{"message":"Full synchronization receipts are nearing their limit.",
+                    "recovery":"Run checkpoint maintenance to archive historical receipts; remote objects are retained."}]
+            }))),
+            "cloud.sync" => {
+                recorded.lock().unwrap().push(params.clone());
+                Some(Ok(json!({"task":1})))
+            }
+            _ => None,
+        })),
+        ..Default::default()
+    };
+    let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::with_demo(), services), [1400., 1000.], 1.);
+    h.step();
+    let state = lightcraft_catalog::replication::SyncState::new("library".into(), "device".into(), "personal".into()).unwrap();
+    h.app.session.apply_received(lightcraft_catalog::Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+    h.app.run("dialog.cloudSync", json!({})).unwrap();
+    for _ in 0..4 {
+        h.step();
+    }
+    let text = h.view.painted_text();
+    for label in
+        ["Synchronization capacity", "80.0%", "80000 / 100000", "nearing their limit", "remote objects are retained", "Archive receipt history"]
+    {
+        assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
+    }
+    assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudCheckpoint"}), T)["ok"], true);
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(*calls.lock().unwrap(), vec![json!({"wait":false,"checkpoint":true})]);
+}
+
+#[test]
 fn cloud_setup_explains_retained_structural_conflicts() {
     let services = Services {
         cloud_action: Some(Box::new(|_, id, _| {

@@ -24,6 +24,56 @@ fn action(app: &mut LightcraftApp, ui: &mut egui::Ui, id: &str, label: &str, ena
         app.toast(ui.ctx(), e);
     }
 }
+pub(super) fn capacity(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value, detailed: bool) {
+    let Some(usage) = data.get("utilization").filter(|v| v.is_object()) else { return };
+    let t = Tokens::get(ui.ctx());
+    ui.separator();
+    ui.strong(crate::i18n::tr("Synchronization capacity"));
+    let used = usage["stateBytes"].as_u64().unwrap_or(0);
+    let limit = usage["stateLimitBytes"].as_u64().unwrap_or(64 << 20);
+    ui.label(format!(
+        "Metadata: {:.1} / {:.0} MiB ({:.1}%)",
+        used as f64 / 1_048_576.,
+        limit as f64 / 1_048_576.,
+        usage["statePercent"].as_f64().unwrap_or(0.)
+    ));
+    if detailed {
+        for (label, count, max) in [
+            ("Documents", "documents", "documentLimit"),
+            ("Full receipts", "received", "receiptLimit"),
+            ("Pending changes", "pending", "pendingLimit"),
+            ("Author identities", "authors", "authorLimit"),
+            ("Largest entity fields", "maxEntityFields", "entityFieldLimit"),
+            ("Most field revisions", "maxFieldRevisions", "fieldRevisionLimit"),
+        ] {
+            ui.label(format!("{}: {} / {}", crate::i18n::tr(label), usage[count].as_u64().unwrap_or(0), usage[max].as_u64().unwrap_or(0)));
+        }
+        ui.label(format!(
+            "{} historical full receipts · {} archive roots",
+            usage["historicalReceipts"].as_u64().unwrap_or(0),
+            usage["archiveRoots"].as_u64().unwrap_or(0)
+        ));
+    }
+    if let Some(warnings) = data.get("capacityWarnings").and_then(Value::as_array) {
+        for warning in warnings.iter().take(if detailed { 7 } else { 1 }) {
+            if let Some(message) = warning["message"].as_str() {
+                ui.label(egui::RichText::new(crate::i18n::tr(message)).color(t.caution));
+            }
+            if detailed && let Some(recovery) = warning["recovery"].as_str() {
+                ui.label(crate::i18n::tr(recovery));
+            }
+        }
+    }
+    if detailed {
+        let enabled = app.session.catalog.sync_state().is_some()
+            && data["running"] != true
+            && data["paused"] != true
+            && data["preparingMigration"] != true
+            && data["migrating"] != true;
+        action(app, ui, "button:cloudCheckpoint", "Archive receipt history", enabled, "cloud.sync", json!({"wait":false,"checkpoint":true}));
+        ui.label(crate::i18n::tr("Current edits, tombstones, author clocks and remote recovery records stay retained."));
+    }
+}
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let t = Tokens::get(ui.ctx());
     let summary = &data["summary"];
@@ -46,7 +96,11 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             "Migrating cloud library…"
         } else if paused {
             "Syncing paused"
-        } else if summary["issues"].as_u64().unwrap_or(0) > 0 || failed > 0 || data["error"].is_string() {
+        } else if summary["issues"].as_u64().unwrap_or(0) > 0
+            || failed > 0
+            || data["error"].is_string()
+            || data["capacityWarnings"].as_array().is_some_and(|w| !w.is_empty())
+        {
             "Sync needs attention"
         } else if waiting > 0 || active > 0 || summary["pendingChanges"].as_u64().unwrap_or(0) > 0 {
             "Syncing library"
@@ -69,6 +123,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     ));
     let changes = summary["pendingChanges"].as_u64().unwrap_or(0);
     ui.label(format!("{changes} library changes waiting to sync"));
+    capacity(app, ui, data, false);
     action(
         app,
         ui,

@@ -117,12 +117,17 @@ fn each_durable_record_contains_the_change_and_outbox_and_compaction_keeps_pendi
 #[test]
 fn conflict_status_cache_reuses_views_and_rejects_stale_revision_or_library_token() {
     let (mut s, _) = session();
-    s.execute("cloud.syncStatus", &json!({})).unwrap();
+    let initial = s.execute("cloud.syncStatus", &json!({})).unwrap();
+    assert_eq!(initial["utilization"]["stateBytes"], serde_json::to_vec(s.catalog.sync_state().unwrap()).unwrap().len());
+    let overview = s.execute("cloud.overview", &json!({})).unwrap();
+    assert_eq!(overview["utilization"], initial["utilization"]);
+    assert_eq!(overview["capacityWarnings"], initial["capacityWarnings"]);
     s.cloud_conflicts_cache.as_mut().unwrap().2["reuseMarker"] = json!(true);
     s.execute("cloud.syncStatus", &json!({})).unwrap();
     assert_eq!(s.cloud_conflicts_cache.as_ref().unwrap().2["reuseMarker"], true);
     s.commit("rate", Op::SetRating { id: PhotoId(1), rating: 4 }).unwrap();
-    s.execute("cloud.syncStatus", &json!({})).unwrap();
+    let changed = s.execute("cloud.syncStatus", &json!({})).unwrap();
+    assert!(changed["utilization"]["stateBytes"].as_u64().unwrap() > initial["utilization"]["stateBytes"].as_u64().unwrap());
     assert!(s.cloud_conflicts_cache.as_ref().unwrap().2.get("reuseMarker").is_none());
     s.cloud_conflicts_cache.as_mut().unwrap().2["reuseMarker"] = json!(true);
     s.library_identity = Arc::new(());
