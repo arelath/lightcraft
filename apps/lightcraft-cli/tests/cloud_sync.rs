@@ -14,6 +14,33 @@ fn configure(fixture: &Fixture) -> Value {
     json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":fixture.endpoint,"profile":"acceptance"})
 }
 #[test]
+fn unchanged_head_cli_polls_preserve_exact_catalog_files_and_only_read_the_head() {
+    let f = Fixture::new();
+    let (a, _, _) = initialize(&f);
+    // Peer enablement publishes its own causal identity receipt, even when the
+    // library identity value agrees. Receive that real progress before measuring.
+    let received = success(&f, &a, &[("cloud.sync", json!({}))]);
+    assert_eq!(received[0]["result"]["unchanged"], false);
+    let saved = ["catalog.snap", "catalog.log"].map(|name| (name, std::fs::read(a.join(name)).unwrap()));
+    let before = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap().1;
+    let requests = f.state.lock().unwrap().requests.len();
+    let rows = success(&f, &a, &[("cloud.sync", json!({})), ("cloud.sync", json!({})), ("cloud.sync", json!({}))]);
+    assert!(rows.iter().all(|r| r["result"]["unchanged"] == true), "{rows:?}");
+    for (name, bytes) in saved {
+        assert_eq!(std::fs::read(a.join(name)).unwrap(), bytes, "{name}");
+    }
+    let after = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap().1;
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.to_snapshot(), before.to_snapshot());
+    let state = f.state.lock().unwrap();
+    let new = &state.requests[requests..];
+    let marker = format!("/photos/{}", lightcraft_engine::cloud_append::manifest_key("library", &before.sync_state().unwrap().library).unwrap());
+    // One migration-marker check and one mutable-head GET per poll. No mutation,
+    // checkpoint, receipt archive, media or write requests on an unchanged head.
+    assert_eq!(new.len(), 6, "{new:?}");
+    assert!(new.iter().all(|(method, path)| method == "GET" && (path == "/photos/library/catalog/head.json" || path == &marker)), "{new:?}");
+}
+#[test]
 fn archived_ack_and_missing_or_corrupt_archive_preserve_exact_pending_on_restart() {
     let f = Fixture::new();
     let (a, b, _) = initialize(&f);

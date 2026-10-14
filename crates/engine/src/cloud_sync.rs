@@ -427,6 +427,31 @@ pub use materialize::resolve;
 pub use materialize::restore_deleted;
 pub use materialize::structural_conflicts;
 
+/// Fast owner-thread guard for an already certified conditional-head outcome.
+/// Compare every durable portable component without cloning/materializing it.
+/// Transport witnesses are temporary; acknowledgement, cursor and generation
+/// changes must still pass through the durable receive/ACK transaction.
+pub fn unchanged_head(
+    catalog: &Catalog,
+    remote: &lightcraft_catalog::replication::Portable,
+    acknowledged: &BTreeSet<String>,
+    cursor: &str,
+    generation: u64,
+) -> bool {
+    let Some(local) = catalog.sync_state() else { return false };
+    local.protocol.is_head()
+        && local.pending.is_empty()
+        && acknowledged.is_empty()
+        && local.cursor.as_deref().unwrap_or("") == cursor
+        && local.generation == generation
+        && local.version == remote.version
+        && local.library == remote.library
+        && local.clock == remote.clock
+        && local.documents == remote.documents
+        && local.received == remote.received
+        && local.archives == remote.archives
+}
+
 // Keep an entity's bootstrap fields together. Bulk migrations may span bounded mutations;
 // the containing catalog journal operation remains atomic.
 struct EntityBytes(usize);

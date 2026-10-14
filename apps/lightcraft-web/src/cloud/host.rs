@@ -525,6 +525,21 @@ impl Host {
                         *ready.borrow_mut() = Some(Ok(outcome));
                         return Ok(None);
                     }
+                    if !job.migrating
+                        && outcome.append.is_none()
+                        && lightcraft_engine::cloud_sync::unchanged_head(
+                            &app.session.catalog,
+                            &outcome.state,
+                            &outcome.acknowledged,
+                            &outcome.cursor,
+                            outcome.generation,
+                        )
+                    {
+                        // No received state or ACK to save: bypass both the catalog
+                        // transaction and browser ACK-file/flush stages entirely.
+                        return Ok(Some(json!({"unchanged":true,"protocol":app.session.catalog.sync_state().map(|s|s.protocol),
+                            "generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":0,"pending":0})));
+                    }
                     let mut binding = None;
                     let mut next = app.session.catalog.clone();
                     if job.migrating {
@@ -566,7 +581,7 @@ impl Host {
                     app.session.apply_received(op).map_err(|e| e.to_string())?;
                     app.session.persist().map_err(|e| e.to_string())?;
                     self.files.write(ACK_FILE, &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?);
-                    let value = json!({"protocol":app.session.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len()});
+                    let value = json!({"unchanged":false,"protocol":app.session.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len()});
                     job.guard.handle().detail("Saving received changes and remote acknowledgement in browser storage");
                     job.stage = Stage::Ack { receipt, result: value };
                     Ok(None)

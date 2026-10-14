@@ -12,7 +12,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.5 — Specify and implement causal-history compaction, including retired replicas, tombstones, duplicate detection, and old offline clients. Test checkpoint maintenance restores editing capacity without losing conflict or deletion safety.
 - [x] CR.6 — Expose synchronization-state utilization, early warnings, and accurate recovery errors before record/byte bounds.
 - [x] CR.7 — Define and test oversized-entity bootstrap behavior, especially large album membership sets; implement streaming or an explicit actionable product limit.
-- [ ] CR.8 — Make unchanged conditional-head synchronization a genuine local no-op (no materialization, state operation, or journal write without change, acknowledgement, or progress).
+- [x] CR.8 — Make unchanged conditional-head synchronization a genuine local no-op (no materialization, state operation, or journal write without change, acknowledgement, or progress).
 - [ ] CR.9 — Index global-to-local identities once, materialize changed entities, and persist synchronization deltas. Measure unchanged 10,000- and 50,000-photo request counts, journal growth, state size, and owner-thread latency.
 - [ ] CR.10 — Track consumed append checkpoints and avoid downloading unchanged covered history. Separate budgeted integrity audits from ordinary polls; test remote request counts.
 - [ ] CR.11 — Enforce one immutable published asset-manifest contract with device-local connection binding; test permitted/rejected descriptor changes and extract shared blob rebinding.
@@ -179,3 +179,30 @@ screenshots were inspected. Evidence: `target/cloud-reliability/cr7-native-resul
 and `cr7-native-requests-*.json`; C: scratch `lightcraft-cr7-native/native-178875aa/`
 and `native-ea443c02/`. Browser enablement/edit preparation uses the tested shared engine
 path and is WASM-compiled; no fresh browser/provider or scale acceptance is claimed.
+
+
+2026-10-14 — CR.8: a shared certified-head guard compares version, library, clocks,
+registers, receipts, archive roots, cursor and generation without cloning or materializing
+on the owner. Empty pending/ACK sets are required; migration and append progress bypass
+the guard. Native unchanged results create no catalog operation/journal record and retain
+revision-scoped cached views; existing unsaved local work still retries persistence.
+Browser completion returns before catalog and ACK-file writes or the ACK flush stage.
+
+Three engine regressions passed: repeated no-op polls under forced append failure preserve
+snapshot/revision/journal/cache; exact ACK and generation progress still save; existing
+unsaved local-file edits persist; each durable metadata component and pending work prevents
+no-op selection. The real-CLI test receives the peer's genuine setup receipt first, then
+three polls preserve exact snapshot/log bytes and revision with exactly six read requests
+(head plus scoped hashed migration marker per poll). The initial fixture assertions were
+corrected to settle peer progress and use the actual manifest-key API. Final full gate
+passed all eight stages: C: build `cr8-ci-verified.log`.
+
+Rebuilt native control-channel acceptance passed checkpoint maintenance followed by three
+explicit unchanged polls. Exact catalog snapshot/log bytes, generation, cursor, utilization
+and zero pending work were retained; eight read-only head/marker requests include resume's
+automatic poll. All 130 signed fixture requests verified; the final rendered dialog was
+inspected. Evidence: `target/cloud-reliability/cr8-native-results-conditional-head-v1.json`
+and corresponding request log; C: scratch `lightcraft-cr8-native/native-4f301fe2/`.
+Browser host is WASM-compiled and uses the tested shared guard. Its host module has no
+native runtime test runner; fresh browser ACK-file/storage-count acceptance is not claimed.
+Large-library indexing/delta persistence and append audits remain CR.9/CR.10.

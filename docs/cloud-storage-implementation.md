@@ -15,6 +15,12 @@ managed albums must be split before enablement; oversized metadata must be short
 Setup fails atomically with the entity, usage, limits and recovery in its error.
 Smaller edits can accumulate more members subject to the retained 10,000-field bound.
 
+Unchanged conditional-head polls return `unchanged:true`, preserving catalog revision,
+cached views and journal bytes when there is no earlier unsaved work. Browser owner
+completion skips both the catalog and ACK-file transaction; acknowledgements and
+changed metadata/cursor/generation continue through durable receive. Network discovery
+and append checkpoint-audit optimization are separate follow-up tasks.
+
 ## Current architecture
 
 The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing original bytes requires a new asset identity. Versions 1–12 still load and upgrade; older builds refuse format 13. Format 10 adds associated XMP, stable identity mappings and device-local working-copy bindings. Format 11 adds durable mutation synchronization; format 12 adds explicit append/CAS protocol selection, verified append progress and restored-author ownership. Format 13 adds sync-status filter criteria; absent criteria still mean no status constraint. Shared checkpoints exclude upload intents and all device-local paths and settings.

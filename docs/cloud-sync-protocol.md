@@ -302,6 +302,14 @@ recent timestamp nor a few devices' acknowledgements proves safe GC.
 
 ### Capacity status and recovery
 
+An unchanged certified conditional-head result reports `unchanged:true` and skips
+owner-side projection/materialization, catalog operations and new journal records.
+The guard compares every durable portable component plus cursor and generation;
+pending work, nonempty acknowledgements, migration and append progress use the
+normal transaction path. Browser no-op completion also bypasses ACK-file writes
+and the ACK flush stage. Native polling still retries any pre-existing unsaved
+local work; an unchanged head does not discard or strand that work.
+
 Existing-catalog enablement and each local edit keep one entity's changed fields in
 one bounded group: at most **4,000 changes and 1 MiB of serialized change-array JSON**.
 Album attributes and managed `member:<id>` entries share this budget; local-only

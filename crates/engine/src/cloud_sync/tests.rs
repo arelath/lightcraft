@@ -136,6 +136,48 @@ fn conflict_status_cache_reuses_views_and_rejects_stale_revision_or_library_toke
 }
 
 #[test]
+fn unchanged_head_requires_all_durable_metadata_and_preserves_ack_progress_and_pending_work() {
+    let (mut s, _) = session();
+    let mut local = s.catalog.sync_state().unwrap().clone();
+    let ids = local.pending.keys().cloned().collect();
+    local.acknowledge(&ids, "a".repeat(64), 1).unwrap();
+    s.apply_system(Op::SetSyncState { state: Some(Box::new(local)) }).unwrap();
+    let remote = s.catalog.sync_state().unwrap().portable();
+    let check = |remote: &lightcraft_catalog::replication::Portable, ids: &BTreeSet<String>, cursor: &str, generation| {
+        unchanged_head(&s.catalog, remote, ids, cursor, generation)
+    };
+    assert!(check(&remote, &BTreeSet::new(), &"a".repeat(64), 1));
+    assert!(!check(&remote, &BTreeSet::from(["device-a-1".into()]), &"a".repeat(64), 1));
+    assert!(!check(&remote, &BTreeSet::new(), &"b".repeat(64), 1));
+    assert!(!check(&remote, &BTreeSet::new(), &"a".repeat(64), 2));
+    let mut versions = Vec::new();
+    let mut changed = remote.clone();
+    changed.version = 1;
+    versions.push(changed);
+    let mut changed = remote.clone();
+    changed.library = "other".into();
+    versions.push(changed);
+    let mut changed = remote.clone();
+    changed.clock.insert("remote".into(), 1);
+    versions.push(changed);
+    let mut changed = remote.clone();
+    changed.documents.clear();
+    versions.push(changed);
+    let mut changed = remote.clone();
+    changed.received.clear();
+    versions.push(changed);
+    let mut changed = remote.clone();
+    changed.archives.insert("remote".into(), lightcraft_catalog::replication::archive::Prefix { through: 1, roots: vec!["b".repeat(64)] });
+    versions.push(changed);
+    for changed in versions {
+        assert!(!check(&changed, &BTreeSet::new(), &"a".repeat(64), 1));
+    }
+    s.execute("photo.rate", &json!({"ids":[1],"rating":5})).unwrap();
+    let pending = s.catalog.sync_state().unwrap().portable();
+    assert!(!unchanged_head(&s.catalog, &pending, &BTreeSet::new(), &"a".repeat(64), 1));
+}
+
+#[test]
 fn folder_rearrangement_detaches_before_attaching_and_concurrent_cycles_converge() {
     let (mut s, _) = session();
     for (id, global) in [(AlbumId(1), "zzz-A"), (AlbumId(2), "aaa-B")] {

@@ -221,6 +221,14 @@ impl Session {
             if !Arc::ptr_eq(&pending.library, &self.library_token()) || pending.connection_revision != pending.resolver.connection_revision() {
                 return Err(error("library or storage connection changed; remote result ignored and local pending work retained"));
             }
+            if pending.migration_owner.is_none() && outcome.append.is_none()
+                && crate::cloud_sync::unchanged_head(&self.catalog, &outcome.state, &outcome.acknowledged, &outcome.cursor, outcome.generation) {
+                // Retry any existing unsaved local work, but create no new catalog
+                // operation or journal entry for an unchanged synchronization poll.
+                if !self.pending_log.is_empty() { self.persist()?; }
+                return Ok(json!({"unchanged":true,"migrated":false,"legacyHistoryRetained":true,"protocol":self.catalog.sync_state().map(|s|s.protocol),
+                    "generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":0,"pending":0}));
+            }
             let mut migrated = None;
             let binding = if let Some(owner) = &pending.migration_owner {
                 let mut next = self.catalog.clone();
@@ -249,7 +257,7 @@ impl Session {
                 self.apply_received(inverse)?;
                 return Err(error);
             }
-            Ok(json!({"migrated":pending.migration_owner.is_some(),"legacyHistoryRetained":true,"protocol":self.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len(),
+            Ok(json!({"unchanged":false,"migrated":pending.migration_owner.is_some(),"legacyHistoryRetained":true,"protocol":self.catalog.sync_state().map(|s|s.protocol),"frontiers":outcome.append.as_ref().map(|p|&p.frontiers),"gaps":outcome.append.as_ref().map(|p|&p.gaps),"generation":outcome.generation,"cursor":outcome.cursor,"acknowledged":outcome.acknowledged.len(),
                 "pending":self.catalog.sync_state().map_or(0,|state|state.pending.len())}))
         });
         self.cloud_replication_jobs.paused = result.is_err() || self.cloud_replication_jobs.preparing_migration;
@@ -402,6 +410,66 @@ mod tests {
         });
         outcome.cursor.clear();
         outcome.generation = 0;
+    }
+    fn ready_same_head(s: &mut Session, generation: u64) {
+        ready(s);
+        let local = s.catalog.sync_state().unwrap();
+        let same =
+            Outcome { append: None, state: local.portable(), acknowledged: BTreeSet::new(), cursor: local.cursor.clone().unwrap(), generation };
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Ok(same));
+    }
+    #[test]
+    fn unchanged_head_poll_creates_no_operation_journal_write_or_cache_invalidation() {
+        let (mut s, files) = session();
+        ready(&mut s);
+        s.poll_cloud_replication();
+        s.execute("cloud.syncStatus", &json!({})).unwrap();
+        s.cloud_conflicts_cache.as_mut().unwrap().2["reuseMarker"] = json!(true);
+        let before = s.catalog.to_snapshot();
+        let revision = s.catalog.revision;
+        let journal = files.files.get(lightcraft_catalog::journal::LOG);
+        files.fail.store(true, Ordering::Relaxed);
+        for _ in 0..3 {
+            ready_same_head(&mut s, 1);
+            s.poll_cloud_replication();
+            let report = s.cloud_replication_jobs.reports.last().unwrap();
+            assert_eq!(report["ok"], true, "{report}");
+            assert_eq!(report["result"]["unchanged"], true);
+        }
+        assert_eq!(s.catalog.to_snapshot(), before);
+        assert_eq!(s.catalog.revision, revision);
+        assert_eq!(files.files.get(lightcraft_catalog::journal::LOG), journal);
+        assert!(s.pending_log.is_empty());
+        s.execute("cloud.syncStatus", &json!({})).unwrap();
+        assert_eq!(s.cloud_conflicts_cache.as_ref().unwrap().2["reuseMarker"], true);
+    }
+    #[test]
+    fn head_ack_and_generation_progress_still_save_and_unsaved_local_changes_are_retried() {
+        let (mut s, files) = session();
+        let initial = files.files.get(lightcraft_catalog::journal::LOG);
+        ready(&mut s);
+        let local = s.catalog.sync_state().unwrap().portable();
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready.as_mut().unwrap().as_mut().unwrap().state = local;
+        s.poll_cloud_replication(); // Exact ACK, even though portable field values agree.
+        assert!(s.catalog.sync_state().unwrap().pending.is_empty());
+        assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["result"]["unchanged"], false);
+        assert_ne!(files.files.get(lightcraft_catalog::journal::LOG), initial);
+        let revision = s.catalog.revision;
+        ready_same_head(&mut s, 2);
+        s.poll_cloud_replication();
+        assert_eq!(s.catalog.sync_state().unwrap().generation, 2);
+        assert!(s.catalog.revision > revision);
+        assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["result"]["unchanged"], false);
+        s.apply_system(Op::SetRating { id: PhotoId(1), rating: 5 }).unwrap();
+        assert!(!s.pending_log.is_empty());
+        let revision = s.catalog.revision;
+        ready_same_head(&mut s, 2);
+        s.poll_cloud_replication();
+        assert_eq!(s.catalog.revision, revision);
+        assert!(s.pending_log.is_empty());
+        assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["result"]["unchanged"], true);
+        let (_, restored, _) = Journal::open(Box::new(files.files)).unwrap();
+        assert_eq!(restored.photo(PhotoId(1)).unwrap().rating, 5);
     }
     #[test]
     fn migration_owner_retains_late_edits_and_rolls_back_mode_on_failed_save() {
