@@ -48,6 +48,8 @@ lightcraft-fetch = { workspace = true }
 hmac = "0.12"
 getrandom = "0.3.4"
 time = { version = "0.3", default-features = false, features = ["std"] }
+# MIT OR Apache-2.0, pure Rust (rustix / windows-sys): drive size and free space for Settings → Cache
+fs4 = { version = "1.1", default-features = false }
 
 [features]
 # AI masks with SAM 3 (Object / Describe). Off for the web and CLI builds.

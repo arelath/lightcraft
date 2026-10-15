@@ -1338,6 +1338,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::SamModel { .. } if sam_installed || sam_running || sam_nowhere => "",
                     Dialog::SamModel { error, .. } if error.is_some() || sam_failed => "Try Again",
                     Dialog::SamModel { .. } => "Download",
+                    // changes apply as they are made, so one button closes (Done, as in the reference)
+                    Dialog::Settings { .. } => "Done",
                     _ if informational => "Close",
                     _ => "OK",
                 };
@@ -1350,7 +1352,16 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     )
                         // smart-album rules that can't mean anything wait to be fixed
                         && !matches!(&dlg, Dialog::SmartRules { id, rules, .. } if !rules.check_for(&app.session.catalog, id.map(lightcraft_catalog::AlbumId)).is_empty());
-                let r = (!ok.is_empty()).then(|| ui.add_enabled(can_confirm, egui::Button::new(crate::i18n::tr(ok))));
+                let r = (!ok.is_empty()).then(|| {
+                    if matches!(dlg, Dialog::Settings { .. }) {
+                        // Settings closes with a filled Done at the bottom right
+                        let label = egui::RichText::new(crate::i18n::tr(ok)).font(t.semibold(13.0)).color(egui::Color32::WHITE);
+                        let done = egui::Button::new(label).fill(t.accent).corner_radius(14.0).min_size(egui::vec2(68.0, 28.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(done)).inner
+                    } else {
+                        ui.add_enabled(can_confirm, egui::Button::new(crate::i18n::tr(ok)))
+                    }
+                });
                 if let Some(r) = &r {
                     crate::widgets::register(ui.ctx(), "button:dialogOk", r.rect);
                 }

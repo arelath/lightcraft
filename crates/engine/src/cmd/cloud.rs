@@ -1,7 +1,7 @@
 //! Managed cloud asset commands shared by UI, CLI, control channel and MCP.
 
 use super::{CommandSpec, always, bad, cmd};
-use crate::assets::cache::{OfflinePin, OfflineQuality};
+use crate::assets::cache::{KeepAll, OfflinePin, OfflineQuality};
 use crate::assets::{AssetResolver, SourceRequirement, TransferManager};
 use crate::{Result, Selection, Session};
 use lightcraft_catalog::assets::{Asset, AssetId};
@@ -194,7 +194,112 @@ fn cache(s: &mut Session, p: &Value) -> Result<Value> {
         let mb = value.as_u64().filter(|v| *v <= (1 << 30)).ok_or_else(|| bad(C, "budgetMb must be between 0 and 1,073,741,824"))?;
         resolver.set_cache_budget(mb << 20).map_err(|e| bad(C, e.to_string()))?;
     }
+    if p.get("keepAllOriginals").is_some() || p.get("keepAllPreviews").is_some() {
+        let flag = |key: &str, current: bool| match p.get(key) {
+            None => Ok(current),
+            Some(value) => value.as_bool().ok_or_else(|| bad(C, format!("{key} must be true or false"))),
+        };
+        let current = resolver.keep_all();
+        let keep = KeepAll { originals: flag("keepAllOriginals", current.originals)?, previews: flag("keepAllPreviews", current.previews)? };
+        resolver.set_keep_all(keep, library_blobs(s, keep)).map_err(|e| bad(C, e.to_string()))?;
+    }
     Ok(json!(resolver.cache_status()))
+}
+
+/// The blobs "Store a copy of all originals / smart previews" covers in this catalog.
+fn library_blobs(s: &Session, keep: KeepAll) -> std::collections::BTreeMap<lightcraft_catalog::assets::BlobId, lightcraft_catalog::assets::Blob> {
+    let mut blobs = std::collections::BTreeMap::new();
+    if keep == KeepAll::default() {
+        return blobs;
+    }
+    for asset in s.catalog.assets().values() {
+        let chosen = keep.originals.then_some(&asset.original).into_iter().chain(asset.smart_preview.as_ref().filter(|_| keep.previews));
+        for blob in chosen {
+            blobs.insert(blob.id.clone(), blob.clone());
+        }
+    }
+    blobs
+}
+
+/// The catalog's managed assets changed (library opened, import, sync): keep library-wide
+/// offline copies in step with it.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn refresh_keep_all(s: &Session) {
+    if let Some(resolver) = &s.media.asset_resolver {
+        let keep = resolver.keep_all();
+        if keep != KeepAll::default() {
+            resolver.set_library_blobs(library_blobs(s, keep));
+        }
+    }
+}
+
+/// Settings → Cache: the drive the cache is on and what uses it.
+fn storage(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "cloud.storage";
+    let wait = wait_requested(p, C)?;
+    let resolver = resolver(s, C)?;
+    let status = resolver.cache_status();
+    let root = resolver.root().to_path_buf();
+    #[cfg(not(target_arch = "wasm32"))]
+    let (volume, app_data) = (
+        crate::storage_usage::volume(&root),
+        s.library.as_ref().filter(|lib| lib.on_disk).and_then(|lib| {
+            // the library's own files, without the downloads counted as the photo cache
+            crate::storage_usage::dir_size_cached(&lib.dir, vec![root.clone()], wait)
+        }),
+    );
+    #[cfg(target_arch = "wasm32")]
+    let (volume, app_data): (Option<()>, Option<u64>) = {
+        let _ = wait;
+        (None, None)
+    };
+    Ok(json!({
+        "location": root,
+        "volume": volume,
+        "appDataBytes": app_data,
+        "photoCacheBytes": status.used_bytes.saturating_sub(status.pinned_bytes),
+        "offlineBytes": status.pinned_bytes,
+        "budgetBytes": status.budget_bytes,
+        "keepAll": status.keep_all,
+        "error": status.error,
+        "stagingError": status.staging_error,
+    }))
+}
+
+fn cache_location(s: &mut Session, p: &Value) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return crate::cloud_cache_location::command(s, p);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (s, p);
+        Err(bad("cloud.cacheLocation", "the browser keeps its cache in browser storage"))
+    }
+}
+
+/// Settings → Cache → Clear cache. Desktop: a background activity task; CLI/MCP `wait`.
+fn clear_cache(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "cloud.clearCache";
+    let wait = wait_requested(p, C)?;
+    let resolver = resolver(s, C)?;
+    if let Some(error) = resolver.cache_status().error {
+        return Err(bad(C, error));
+    }
+    if wait {
+        let freed = resolver.clear_cache().map_err(|e| bad(C, e.to_string()))?;
+        return Ok(json!({"background": false, "freedBytes": freed, "status": resolver.cache_status()}));
+    }
+    let task = s.activity.start("cache", "Clear Cloud Cache", crate::activity::Cancel::No);
+    let id = task.id();
+    std::thread::Builder::new()
+        .name("cloud-clear-cache".into())
+        .spawn(move || {
+            if let Err(error) = resolver.clear_cache() {
+                log::warn!("clear cloud cache: {error}");
+            }
+            drop(task);
+        })
+        .map_err(|e| bad(C, format!("could not start cache clearing: {e}")))?;
+    Ok(json!({"background": true, "task": id}))
 }
 
 fn pin_targets(s: &Session, p: &Value, command: &str) -> Result<(Option<String>, Vec<lightcraft_catalog::PhotoId>)> {
@@ -427,7 +532,11 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "cloud.status", "Cloud Photo Status", [], None, "{ids?}; cached, downloading, remote, missing or failed state on this device", always, status),
         cmd!(query "cloud.fetch", "Download Cloud Photos", [], None, "{ids?, original?: true, wait?: false}; background download, byte progress and cancellation via activity; wait only in headless CLI/MCP", always, fetch),
         cmd!(query "cloud.reconnect", "Reconnect Cloud Storage", [], None, "{id?}; reload saved connections and external credentials, retry failed renders and offline pins", always, reconnect),
-        cmd!(query "cloud.cache", "Cloud Cache Settings", [], None, "{budgetMb?}; device-local disk budget, usage and offline pins; 0 retains only pinned or active bytes", always, cache),
+        cmd!(query "cloud.cache", "Cloud Cache Settings", [], None, "{budgetMb?, keepAllOriginals?, keepAllPreviews?}; device-local disk budget, usage and offline pins; 0 retains only pinned or active bytes; keepAll* keep every managed original / smart preview offline (downloaded in the background, new arrivals included)", always, cache),
+        cmd!(query "cloud.storage", "Cloud Cache Storage", [], None, "{wait?}; the cache's drive (label, total, free), library app data, photo cache and offline bytes, size limit and keep-all choices; app data is measured in the background unless wait (headless)", always, storage),
+        cmd!(query "cloud.cacheLocation", "Cloud Cache Location", [], None, "{path? | reset?, wait?}; where this device keeps the cloud cache; a new folder gets verified copies of every cached file and the retention settings, then the library reopens on it and the old copies are deleted; desktop returns a cancellable activity task", always, cache_location),
+        cmd!(query "cloud.clearCache",
+ "Clear Cloud Cache", [], None, "{wait?}; evict every eligible downloaded original/preview now; offline copies, files in use and staged or unsynchronized data are kept; desktop returns an activity task", always, clear_cache),
         cmd!(query "cloud.pin", "Keep Cloud Photos Offline", [], None, "{ids? or albumId?, quality?: original|preview, wait?: false}; persist pin intent and return download task; wait only headless; album pins snapshot current members", always, pin),
         cmd!(query "cloud.unpin", "Release Offline Pins", [], None, "{ids? or albumId? or owner?}; release only these owners' pins", always, unpin),
         cmd!(query "cloud.removeLocalCopy", "Remove Local Original Copy", [], None, "{ids? or albumId?, wait?}; preserve library/remote objects/previews; uploaded staging migration runs in background on desktop (headless waits); inspect completion with cloud.uploadStatus; refuse pending, pinned or in-use bytes", always, remove_local_copy),

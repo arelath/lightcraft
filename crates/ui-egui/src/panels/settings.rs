@@ -1,4 +1,5 @@
-//! The Settings dialog (⌘,): General, Import, Performance, Display, Interface, Faces, AI Denoise.
+//! The Settings dialog (⌘,): Cache, General, Import, Performance, Display, Interface, Faces,
+//! AI Denoise, chosen in a list down its left side.
 //!
 //! Changes apply immediately (no OK/Cancel). Where they are stored:
 //! - **app settings** ([`crate::state::AppSettings`]: startup view, delete confirmation, GPU,
@@ -19,6 +20,7 @@ use crate::widgets::register;
 
 /// (id, label) of the tabs, in order.
 pub const TABS: &[(&str, &str)] = &[
+    ("cache", "Cache"),
     ("general", "General"),
     ("import", "Import"),
     ("performance", "Performance"),
@@ -33,22 +35,62 @@ const CACHE_SIZES: [u32; 5] = [512, 1024, 2048, 4096, 8192];
 
 const LABEL_W: f32 = 150.0;
 
-/// The dialog body for `tab` (the tab bar switches `tab`).
+/// The dialog body for `tab`: the page list on the left switches `tab`.
 pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, tab: &mut String) {
     let t = Tokens::get(ui.ctx());
-    ui.set_width((ui.ctx().content_rect().width() - 64.0).clamp(240.0, 560.0));
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        for (id, label) in TABS {
-            if crate::widgets::text_button(ui, &format!("settingsTab-{id}"), label, tab == id).clicked() {
-                *tab = id.to_string();
+    let width = (ui.ctx().content_rect().width() - 64.0).clamp(300.0, 760.0);
+    ui.set_width(width);
+    let nav_width = (width * 0.24).clamp(96.0, 170.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let nav = ui.vertical(|ui| {
+            ui.set_width(nav_width);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(6.0);
+            for (id, label) in TABS {
+                if nav_item(ui, &t, id, label, tab == id, nav_width).clicked() {
+                    *tab = id.to_string();
+                }
             }
-        }
+        });
+        // the page list sits on its own darker strip, like the reference layout
+        let strip =
+            egui::Rect::from_min_max(nav.response.rect.min, egui::pos2(nav.response.rect.max.x, ui.max_rect().max.y.max(nav.response.rect.max.y)));
+        ui.painter().with_clip_rect(ui.clip_rect()).vline(strip.max.x, strip.y_range(), egui::Stroke::new(1.0, t.divider));
+        ui.add_space(18.0);
+        ui.vertical(|ui| {
+            ui.set_width(width - nav_width - 18.0);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.add_space(6.0);
+            page(app, ui, &t, tab);
+        });
     });
-    ui.separator();
-    ui.add_space(2.0);
-    match tab.as_str() {
+}
+
+/// One entry of the page list: the selected page has a bar at its left edge.
+fn nav_item(ui: &mut egui::Ui, t: &Tokens, id: &str, label: &str, selected: bool, width: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
+    register(ui.ctx(), format!("button:settingsTab-{id}"), rect);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, crate::i18n::tr(label)));
+    let p = ui.painter();
+    if selected {
+        p.rect_filled(rect, 0.0, t.hover);
+        p.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())), 0.0, t.text);
+    } else if resp.hovered() {
+        p.rect_filled(rect, 0.0, t.hover.gamma_multiply(0.6));
+    }
+    let color = if selected || resp.hovered() { t.text } else { t.text_label };
+    p.text(egui::pos2(rect.left() + 26.0, rect.center().y), egui::Align2::LEFT_CENTER, crate::i18n::tr(label), t.semibold(13.5), color);
+    resp
+}
+
+fn page(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tab: &str) {
+    let t = *t;
+    match tab {
+        "cache" => super::cache_settings::cache_tab(app, ui, &t),
+
         "import" => import_tab(app, ui, &t),
+
         "performance" => performance_tab(app, ui, &t),
         "display" => display_tab(app, ui, &t),
         "interface" => interface_tab(app, ui, &t),
@@ -69,7 +111,8 @@ fn row<R>(ui: &mut egui::Ui, t: &Tokens, label: &str, add: impl FnOnce(&mut egui
             ui.set_min_width(LABEL_W);
             ui.label(RichText::new(crate::i18n::tr(label)).color(t.text_label));
         });
-        add(ui)
+        // choices wrap under one another when the page is narrow (the page list takes room)
+        ui.horizontal_wrapped(|ui| add(ui)).inner
     })
     .inner
 }
@@ -451,37 +494,8 @@ fn performance_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
             let _ = app.run("library.clearPreviews", json!({}));
         }
     });
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(resolver) = &app.session.media.asset_resolver {
-        let (budget, used, pinned) = resolver.cache_usage();
-        let (policy_error, staging_error) = resolver.cache_errors();
-        heading(ui, t, crate::i18n::tr("Cloud asset cache"));
-        row(ui, t, crate::i18n::tr("Size limit"), |ui| {
-            let opts = [(0u32, "Pinned only"), (1024, "1 GB"), (5120, "5 GB"), (20480, "20 GB"), (102400, "100 GB")];
-            let mut mb = u32::try_from(budget >> 20).unwrap_or(20480);
-            if choices(ui, "settingsCloudCache", &opts, &mut mb)
-                && let Err(error) = app.run("cloud.cache", json!({"budgetMb": mb}))
-            {
-                app.toast(ui.ctx(), error);
-            }
-        });
-        row(ui, t, crate::i18n::tr("In use"), |ui| {
-            ui.label(RichText::new(format!("{:.1} MB · {:.1} MB pinned", used as f64 / 1048576.0, pinned as f64 / 1048576.0)).color(t.text));
-        });
-        for (label, error) in [("Cache policy", policy_error), ("Durable staging", staging_error)] {
-            if let Some(error) = error {
-                ui.label(RichText::new(format!("{label}: {error}")).color(t.caution));
-            }
-        }
-        hint(
-            ui,
-            t,
-            crate::i18n::tr(
-                "Offline pins and files used by active operations can exceed this limit. Removing a local original keeps its photo and remote copy.",
-            ),
-        );
-    }
     heading(ui, t, crate::i18n::tr("Local folders"));
+
     row(ui, t, crate::i18n::tr("Forget unchanged photos"), |ui| {
         let opts = [(0u32, "Never"), (7, "After 7 days"), (30, "After 30 days"), (90, "After 90 days"), (365, "After a year")];
         let mut v = app.session.forget_local_days;

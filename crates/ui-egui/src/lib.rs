@@ -1094,6 +1094,11 @@ impl LightcraftApp {
         self.renderer.poll(ctx, &mut self.session);
         #[cfg(not(target_arch = "wasm32"))]
         self.session.poll_cloud_imports();
+        // a moved cloud cache: the library reopened on the new folder
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.session.poll_cache_move() {
+            self.renderer.forget_all();
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.cloud_preparation_outcome(ctx);
         #[cfg(not(target_arch = "wasm32"))]

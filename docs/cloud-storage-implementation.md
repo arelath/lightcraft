@@ -167,7 +167,10 @@ Native commands use the shared engine registry, CLI, control channel and MCP:
 | `cloud.cleanupUploads` | `{connection, olderThanDays?: 7, apply?: false, wait?}` | Preview/retire idle recorded multipart sessions, including deleted-photo receipts. Preserve original/working bytes; defaults to background on desktop. |
 | `cloud.fetch` | `{ids?, original?: true, wait?: false}` | Download on a worker; returns a task ID. Byte progress/cancellation use `activity.list` and `activity.cancel`; headless `wait` returns after completion or error. |
 | `cloud.reconnect` | `{id?}` | Reload saved connections; retry failed renders and durable offline pins. |
-| `cloud.cache` | `{budgetMb?}` | Inspect/set the device-local asset budget; return usage, persistent offline owners and recovery errors. |
+| `cloud.cache` | `{budgetMb?, keepAllOriginals?, keepAllPreviews?}` | Inspect/set the device-local asset budget and library-wide offline copies; return usage, persistent offline owners and recovery errors. |
+| `cloud.storage` | `{wait?}` | The cache's drive (label, total, free), library app data, photo cache and offline bytes, size limit and keep-all choices (Settings → Cache). |
+| `cloud.clearCache` | `{wait?}` | Evict every eligible download now without changing the limit; desktop returns an activity task. |
+| `cloud.cacheLocation` | `{path? or reset?, wait?}` | Inspect or change the cache folder: verified copy, reopen on the new folder, then delete the old copies. Desktop returns a cancellable activity task. |
 | `cloud.pin` | `{ids? or albumId?, quality?: "original" or "preview", wait?: false}` | Persist offline intent and return a download task; headless `wait` finishes before return. Album pins retain current managed members; repeat after membership changes. |
 | `cloud.unpin` | `{ids? or albumId? or owner?}` | Release those owners' pins, preserving other photos/albums that share the blob. `owner` can release a deleted photo/album's retained pin. |
 | `cloud.removeLocalCopy` | `{ids? or albumId?, wait?}` | Remove eligible original cache bytes; preserve library records, remote objects and previews. Desktop returns a cancellable activity task; CLI/MCP wait by default. Inspect completion in `cloud.uploadStatus`. |
@@ -198,7 +201,43 @@ Then attach an uploaded original through `cloud.attach`:
 }
 ```
 
-The Info panel identifies cloud storage, reports original availability and offers Download original, original/preview offline pinning, unpinning and local-original removal. Album context menus offer offline pinning. Settings → Performance has a separate cloud asset budget. Merely uncached managed originals do not enter filesystem Missing Photos/relink detection.
+The Info panel identifies cloud storage, reports original availability and offers Download original, original/preview offline pinning, unpinning and local-original removal. Album context menus offer offline pinning. Settings → Cache manages the cloud asset cache (below). Merely uncached managed originals do not enter filesystem Missing Photos/relink detection.
+
+## Settings → Cache
+
+Settings opens on Cache, laid out like Lightroom's Preferences → Cache: a page list on the left and,
+on the right, the drive the cloud cache is on with a Learn More link to this section.
+
+- **Usage bar and legend.** As in the reference, "X GB of Y GB used" counts what LightCraft keeps
+  on the drive (the three entries below) against that plus the free space ("Z GB free"), so the
+  bar shows how much of the room left to it LightCraft takes. The legend splits what LightCraft uses: *App & user data* (the library folder
+  without the cloud cache: catalog, thumbnails, smart previews, staged imports; measured in the
+  background), *Photo cache* (downloads that can be evicted), *Stored offline* (pinned and
+  library-wide offline copies) and *Free*. Figures are GiB shown as "GB"; an unknown figure
+  (drive query failed, measurement pending) shows "—".
+- **Cache size limit.** 5 GB to 1 TB, capped at the drive size (`cloud.cache` `budgetMb`).
+  Offline copies and files in use can exceed it.
+- **Clear cache** (ⓘ explains it) evicts every eligible download at once (`cloud.clearCache`).
+  Offline copies, files in use and staged or unsynchronized originals stay.
+- **Store a copy of all Smart previews locally on "drive"** and **Store a copy of all originals**
+  keep every managed smart preview / original offline (`keepAllPreviews` / `keepAllOriginals`).
+  Covered blobs are derived from the catalog when the library opens and whenever its assets
+  change, so photos imported or synchronized later are downloaded too, by one background
+  worker ("Download Offline Copies" in Activity). A blob that fails (offline, credentials) is
+  retried at the next change or reopen. Turning a choice off deletes nothing; the copies become
+  ordinary cache entries under the size limit. The choice lives in `retention.json` (version 2,
+  which still reads version 1 files), never in the catalog.
+- **Storage location for originals: Browse…** moves the cache (`cloud.cacheLocation`): every
+  cached file is copied to the chosen folder and its SHA-256 verified there, the retention
+  settings follow, a device-local pointer (`cloud-cache-location.json` in the library's cache
+  folder) is saved, the library reopens on the new folder and only then are the old copies
+  deleted. Cancelling or a failed copy leaves the old folder in use. Folders inside the current
+  cache, `Managed/` or `Originals/`, or holding another cache, are refused. When the chosen
+  folder is unavailable at open (a disconnected drive) the library folder is used meanwhile with
+  a warning, and the choice is kept.
+
+Settings changes apply as they are made, so the dialog closes with **Done**; unlike Lightroom
+there is no Cancel that reverts them.
 
 ## Device-local retention
 
@@ -422,6 +461,7 @@ and [browser requirements](browser-cloud.md).
 | 2026-10-13 | Browser Fetch authorization, verified managed worker media, durable OPFS/IndexedDB outbox acknowledgements, cloud backups and native/browser synchronization acceptance; optional metadata backend remains deferred. |
 | 2026-10-14 | Coordinated migration dialog and asynchronous desktop cutover; operator-confirmed peer pause, cancellation/retry and local save rollback. |
 | 2026-10-14 | Cloud queue popup, indexed sync-status filters and persisted device-local pause/resume; native multipart recovery and browser OPFS/IndexedDB controls verified. |
+| 2026-10-14 | Settings → Cache: drive usage, size limit, Clear cache, library-wide offline copies and verified cache relocation. |
 
 
 ## Cloud queue UX

@@ -22,6 +22,8 @@ pub mod availability;
 pub(crate) mod camera_preview;
 pub mod camera_profiles;
 pub mod cloud_append;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cloud_cache_location;
 pub mod cloud_history;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_import;
@@ -81,6 +83,8 @@ pub mod rename;
 pub mod segment;
 pub mod sidecar;
 pub mod smart;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod storage_usage;
 pub mod sync;
 mod view;
 pub mod walk;
@@ -310,6 +314,12 @@ pub struct Session {
     pub activity: activity::Activity,
     #[cfg(not(target_arch = "wasm32"))]
     pub cloud_imports: cloud_import::Imports,
+    /// A cloud cache move whose copy is running ([`cloud_cache_location`]), and how the last
+    /// one ended.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub cache_move: Option<cloud_cache_location::PendingMove>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub cache_move_report: Option<serde_json::Value>,
     #[cfg(not(target_arch = "wasm32"))]
     pub cloud_uploads: cloud_upload::Uploads,
     #[cfg(not(target_arch = "wasm32"))]
@@ -426,6 +436,10 @@ impl Session {
             #[cfg(not(target_arch = "wasm32"))]
             cloud_imports: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
+            cache_move: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            cache_move_report: None,
+            #[cfg(not(target_arch = "wasm32"))]
             cloud_uploads: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             cloud_replication_jobs: Default::default(),
@@ -479,6 +493,7 @@ impl Session {
         if self.depth == 0 {
             self.poll_cloud_imports();
             self.poll_cloud_uploads();
+            self.poll_cache_move();
             self.poll_cloud_replication();
         }
         let log_start = self.pending_log.len();
@@ -621,6 +636,8 @@ impl Session {
             if let Some(resolver) = &self.media.asset_resolver {
                 resolver.assets_changed();
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            cmd::cloud::refresh_keep_all(self);
         }
         #[cfg(not(target_arch = "wasm32"))]
         self.notice_staging(&op);

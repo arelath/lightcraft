@@ -246,5 +246,8 @@
   "{n} added to Apple Photos": "Додано до Apple Фото: {n}",
   "{n} photos opened for editing; each is stacked with its original": "Відкрито для редагування фото: {n}; кожне об’єднано в стос з оригіналом",
   "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "Увімкнення синхронізації наявних фотографій і альбомів або редагування одного об’єкта допускає щонайбільше {limit} змінених полів і 1 MiB на об’єкт. Метадані альбому та записи про належність керованих фотографій мають спільний ліміт; розділіть великі альбоми перед налаштуванням.",
-  "Last remote check: {n} s ago": "Остання перевірка хмари: {n} с тому"
+  "Last remote check: {n} s ago": "Остання перевірка хмари: {n} с тому",
+  "{used} of {total} used": "Зайнято {used} з {total}",
+  "{free} free": "Вільно {free}",
+  "Store a copy of all Smart previews locally on “{drive}”": "Зберігати копію всіх смарт-переглядів локально на «{drive}»"
 }

@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod bottombar;
+pub mod cache_settings;
 pub mod chips;
 pub mod cloud;
 pub mod compare;

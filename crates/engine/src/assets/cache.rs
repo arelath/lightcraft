@@ -34,6 +34,20 @@ pub struct OfflinePin {
     pub blobs: Vec<BlobId>,
 }
 
+/// Library-wide offline copies (Settings → Cache: "Store a copy of all …"). Their blobs are
+/// derived from the catalog when the library opens or its assets change, never listed in the
+/// policy, so a large library cannot exceed its record limits.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct KeepAll {
+    pub originals: bool,
+    pub previews: bool,
+}
+
+/// Version 2 adds `keep_all`. Version 1 files load unchanged and are written as version 2 on
+/// the next policy change.
+const POLICY_VERSION: u32 = 2;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Policy {
@@ -41,15 +55,21 @@ struct Policy {
     budget_bytes: u64,
     pins: BTreeMap<String, OfflinePin>,
     removed: BTreeSet<BlobId>,
+    #[serde(default)]
+    keep_all: KeepAll,
 }
 impl Default for Policy {
     fn default() -> Self {
-        Self { version: 1, budget_bytes: DEFAULT_BUDGET, pins: BTreeMap::new(), removed: BTreeSet::new() }
+        Self { version: POLICY_VERSION, budget_bytes: DEFAULT_BUDGET, pins: BTreeMap::new(), removed: BTreeSet::new(), keep_all: KeepAll::default() }
     }
 }
 impl Policy {
     fn validate(&self) -> Result<()> {
-        if self.version != 1 || self.budget_bytes > (1 << 50) || self.pins.len() > MAX_RECORDS || self.removed.len() > MAX_RECORDS {
+        if !matches!(self.version, 1 | POLICY_VERSION)
+            || self.budget_bytes > (1 << 50)
+            || self.pins.len() > MAX_RECORDS
+            || self.removed.len() > MAX_RECORDS
+        {
             return Err(AssetError::Invalid("unsupported or oversized cache retention policy".into()));
         }
         let mut count = self.removed.len();
@@ -70,6 +90,12 @@ impl Policy {
         Ok(())
     }
 }
+fn recompute_pins(state: &mut State) {
+    state.pinned_ids = state.policy.pins.values().flat_map(|pin| pin.blobs.iter().cloned()).collect();
+    if state.policy.keep_all != KeepAll::default() {
+        state.pinned_ids.extend(state.library_ids.iter().cloned());
+    }
+}
 fn valid_id(id: &BlobId) -> bool {
     id.0.len() == 64 && id.0.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
@@ -82,6 +108,9 @@ pub struct CacheStatus {
     pub pinned_bytes: u64,
     pub pins: BTreeMap<String, OfflinePin>,
     pub removed: BTreeSet<BlobId>,
+    /// Library-wide offline copies, and how many blobs they currently protect.
+    pub keep_all: KeepAll,
+    pub keep_all_blobs: usize,
     pub staging_error: Option<String>,
     /// Damaged/future settings are preserved. Eviction and policy writes are disabled.
     pub error: Option<String>,
@@ -91,6 +120,8 @@ type Entries = Mutex<BTreeMap<BlobId, Arc<Entry>>>;
 struct State {
     policy: Policy,
     pinned_ids: BTreeSet<BlobId>,
+    /// Blobs protected by [`Policy::keep_all`], supplied by the session from its catalog.
+    library_ids: BTreeSet<BlobId>,
     error: Option<String>,
     access: BTreeMap<BlobId, u64>,
     tick: u64,
@@ -140,7 +171,17 @@ impl Cache {
             root,
             durable_root: Mutex::new(None),
             entries,
-            state: Mutex::new(State { policy, pinned_ids, error, access: BTreeMap::new(), tick: 0, used: 0, pinned: 0, staging_error: None }),
+            state: Mutex::new(State {
+                policy,
+                pinned_ids,
+                library_ids: BTreeSet::new(),
+                error,
+                access: BTreeMap::new(),
+                tick: 0,
+                used: 0,
+                pinned: 0,
+                staging_error: None,
+            }),
             maintenance: Mutex::new(()),
             #[cfg(not(target_arch = "wasm32"))]
             durable_io: Mutex::new(()),
@@ -194,6 +235,8 @@ impl Cache {
             pinned_bytes: state.pinned,
             pins: state.policy.pins.clone(),
             removed: state.policy.removed.clone(),
+            keep_all: state.policy.keep_all,
+            keep_all_blobs: if state.policy.keep_all == KeepAll::default() { 0 } else { state.library_ids.len() },
             staging_error: state.staging_error.clone(),
             error: state.error.clone(),
         }
@@ -224,9 +267,36 @@ impl Cache {
         }
         std::fs::create_dir_all(&self.root).map_err(disk)?;
         lightcraft_catalog::safe_file::write_atomic(&self.root.join(POLICY), &bytes).map_err(disk)?;
-        state.pinned_ids = policy.pins.values().flat_map(|pin| pin.blobs.iter().cloned()).collect();
         state.policy = policy;
+        recompute_pins(state);
         Ok(())
+    }
+    pub(super) fn keep_all(&self) -> KeepAll {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).policy.keep_all
+    }
+    /// Save the library-wide offline choice with the blobs it protects now. Turning a kind on
+    /// forgets earlier explicit local-copy removals of those blobs; turning it off deletes
+    /// nothing (the copies become ordinary cache entries, evicted under the size limit).
+    pub(super) fn set_keep_all(&self, keep: KeepAll, ids: BTreeSet<BlobId>) -> Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut policy = state.policy.clone();
+        policy.version = POLICY_VERSION;
+        policy.keep_all = keep;
+        policy.removed.retain(|id| !ids.contains(id));
+        self.save(&mut state, policy)?;
+        state.library_ids = ids;
+        recompute_pins(&mut state);
+        drop(state);
+        self.schedule_trim();
+        Ok(())
+    }
+    /// Refresh the blobs [`KeepAll`] protects (in memory only: they are derived from the catalog).
+    pub(super) fn set_library_ids(&self, ids: BTreeSet<BlobId>) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.library_ids != ids {
+            state.library_ids = ids;
+            recompute_pins(&mut state);
+        }
     }
     pub(super) fn set_budget(&self, bytes: u64) -> Result<()> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -295,6 +365,19 @@ impl Cache {
     }
 
     pub(super) fn trim(&self) -> Result<()> {
+        self.trim_to(None).map(|_| ())
+    }
+
+    /// Settings → Cache → Clear cache: evict every eligible verified download now, whatever the
+    /// size limit. Offline copies, files in use and durable or unsynchronized data are kept.
+    /// Returns the bytes freed.
+    pub(super) fn clear(&self) -> Result<u64> {
+        self.trim_to(Some(0))
+    }
+
+    /// Evict least recently used eligible blobs down to `target` (else the size limit); returns
+    /// the bytes freed.
+    fn trim_to(&self, target: Option<u64>) -> Result<u64> {
         self.validate_root()?;
         let _maintenance = self.maintenance.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(error) = &self.state.lock().unwrap_or_else(PoisonError::into_inner).error {
@@ -309,7 +392,7 @@ impl Cache {
         }
         let directory = match std::fs::read_dir(&self.root) {
             Ok(directory) => directory,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(disk(e)),
         };
         let mut candidates = Vec::new();
@@ -333,9 +416,10 @@ impl Cache {
             candidates.push((state.access.get(&id).copied().unwrap_or(0), meta.modified().ok(), id, meta.len()));
         }
         candidates.sort_unstable_by_key(|a| (a.0, a.1));
-        let Some(entries) = self.entries.upgrade() else { return Ok(()) };
+        let measured = used;
+        let Some(entries) = self.entries.upgrade() else { return Ok(0) };
         for (_, _, id, size) in candidates {
-            if used <= self.state.lock().unwrap_or_else(PoisonError::into_inner).policy.budget_bytes {
+            if used <= target.unwrap_or_else(|| self.state.lock().unwrap_or_else(PoisonError::into_inner).policy.budget_bytes) {
                 break;
             }
             // Ensure acquisitions of even a not-yet-requested on-disk blob share the same gate.
@@ -367,7 +451,7 @@ impl Cache {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.used = used;
         state.pinned = pinned;
-        Ok(())
+        Ok(measured.saturating_sub(used))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

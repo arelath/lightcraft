@@ -3590,6 +3590,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Settings → Cache drives the cloud cache commands: the size-limit menu, keep-all choices,
+    /// Clear cache and Browse… (which moves the cache and reopens the library on the new folder).
+    #[test]
+    fn settings_cache_page_sets_the_limit_keeps_copies_clears_and_moves_the_cache() {
+        let dir = std::env::temp_dir().join(format!("lc-ui-cache-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (lib, dest) = (dir.join("lib"), dir.join("Elsewhere"));
+        let mut session = lightcraft_engine::Session::new().with_fs();
+        session.open_library(&lib, false).unwrap();
+        let dest_s = dest.to_string_lossy().into_owned();
+        let services = crate::Services { png: None, pick_folder: Some(Box::new(move || Some(dest_s.clone()))), ..Default::default() };
+        let mut h = Headless::new(LightcraftApp::new(session, services), [1300.0, 900.0], 1.0);
+        let t = Duration::from_secs(10);
+        let r = h.request("engine.execute", json!({"command": "app.settings", "params": {"tab": "cache"}}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        for _ in 0..4 {
+            h.step();
+        }
+        let cache = |h: &mut Headless| h.request("engine.execute", json!({"command": "cloud.cache"}), t)["result"].clone();
+        let r = h.request("ui.clickWidget", json!({"id": "check:settingsKeepAllOriginals"}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(cache(&mut h)["keepAll"]["originals"], true);
+        h.request("ui.clickWidget", json!({"id": "dropdown:settingsCacheLimit"}), t);
+        h.step();
+        let r = h.request("ui.clickWidget", json!({"id": "button:settingsCacheLimit-50"}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(cache(&mut h)["budgetBytes"], 50u64 << 30);
+        let r = h.request("ui.clickWidget", json!({"id": "button:settingsClearCache"}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        let r = h.request("ui.clickWidget", json!({"id": "button:settingsCacheBrowse"}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        let deadline = std::time::Instant::now() + t;
+        while h.app.session.media.asset_resolver.as_ref().is_none_or(|r| r.root() != dest.as_path()) && std::time::Instant::now() < deadline {
+            h.step();
+        }
+        assert_eq!(h.app.session.media.asset_resolver.as_ref().unwrap().root(), dest.as_path(), "reopened on the chosen folder");
+        assert_eq!(cache(&mut h)["budgetBytes"], 50u64 << 30, "the settings moved with the cache");
+        assert_eq!(h.app.ui.dialog, Some(crate::state::Dialog::Settings { tab: "cache".into() }));
+        let img = h.snapshot(SETTLE);
+        assert_eq!(img.size, [1300, 900]);
+        drop(h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Settings (⌘,): tabs switch, app settings change the UI state, library settings go through
     /// the engine; the delete confirmation guards ⌫.
     #[test]
@@ -3599,7 +3643,7 @@ mod tests {
         let r = h.request("ui.key", json!({"key": ",", "cmd": true}), t);
         assert_eq!(r["ok"], true, "{r}");
         assert_eq!(h.app.ui.dialog, Some(crate::state::Dialog::Settings { tab: "general".into() }));
-        for tab in ["import", "performance", "display", "interface", "general"] {
+        for tab in ["cache", "import", "performance", "display", "interface", "general"] {
             let r = h.request("ui.clickWidget", json!({"id": format!("button:settingsTab-{tab}")}), t);
             assert_eq!(r["ok"], true, "{tab}: {r}");
             assert_eq!(h.app.ui.dialog, Some(crate::state::Dialog::Settings { tab: tab.into() }));
