@@ -120,6 +120,7 @@ pub struct State {
     pub lost_put: bool,
     pub lost_complete: bool,
     pub lost_head: bool,
+    pub stop_after_recovery_prefix: bool,
     pub embedded_error: bool,
     pub unauthorized: bool,
     pub signature_errors: usize,
@@ -469,6 +470,10 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
                 if let Some(checkpoint) = head.get("checkpoint") {
                     let object = format!("/photos/{}", checkpoint["object"]["key"].as_str().unwrap());
                     assert_eq!(hash(&state.objects[&object]), checkpoint["object"]["hash"].as_str().unwrap());
+                }
+                if state.stop_after_recovery_prefix && head.get("checkpoint").is_some_and(|checkpoint| checkpoint["covers"] != batch["parent"]) {
+                    state.stop_after_recovery_prefix = false;
+                    state.unauthorized = true;
                 }
                 lose = std::mem::take(&mut state.lost_head);
             } else {

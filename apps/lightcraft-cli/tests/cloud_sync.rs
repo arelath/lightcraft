@@ -23,6 +23,88 @@ fn copy_catalog_files(source: &Path, destination: &Path) {
 fn saved_catalog(path: &Path) -> lightcraft_catalog::Catalog {
     lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(path).unwrap())).unwrap().1
 }
+// Manufacture valid immutable marker batches without thousands of CLI launches.
+// The real reader still validates every hash, link, signature and checkpoint.
+fn extend_history(f: &Fixture, count: usize) -> Value {
+    let mut storage = f.state.lock().unwrap();
+    let key = "/photos/library/catalog/head.json";
+    let mut head: Value = serde_json::from_slice(&storage.objects[key]).unwrap();
+    for _ in 0..count {
+        let bytes = serde_json::to_vec(&json!({"version":3,"parent":head["tip"],"imports":[],"checkpointMarker":true})).unwrap();
+        let hash = support::hash(&bytes);
+        let key = format!("library/catalog/changes/{hash}.json");
+        head["tip"] = json!({"key":key,"hash":hash,"size":bytes.len()});
+        head["generation"] = json!(head["generation"].as_u64().unwrap() + 1);
+        storage.objects.insert(format!("/photos/{key}"), bytes);
+    }
+    storage.objects.insert(key.into(), serde_json::to_vec(&head).unwrap());
+    head
+}
+#[test]
+fn overlong_head_history_checkpoints_verified_prefixes_and_resumes_without_losing_pending_work() {
+    let f = Fixture::new();
+    let (a, b, library) = initialize(&f);
+    let old = extend_history(&f, 4097);
+    success(&f, &a, &[("photo.rate", json!({"ids":[1],"rating":5}))]);
+    let pending = saved_catalog(&a).sync_state().unwrap().pending.clone();
+    f.state.lock().unwrap().stop_after_recovery_prefix = true;
+    let (out, rows) = f.run(&a, &[("cloud.sync", json!({"checkpoint":true}))]);
+    assert!(!out.status.success(), "{rows:?}");
+    let prefix: Value = serde_json::from_slice(&f.state.lock().unwrap().objects["/photos/library/catalog/head.json"]).unwrap();
+    assert!(prefix["checkpoint"]["generation"].as_u64().unwrap() < old["generation"].as_u64().unwrap());
+    assert_ne!(prefix["checkpoint"]["covers"], old["tip"]);
+    assert_eq!(saved_catalog(&a).sync_state().unwrap().pending, pending);
+    {
+        let mut storage = f.state.lock().unwrap();
+        storage.unauthorized = false;
+        storage.requests.clear();
+    }
+    // Ordinary publication finishes maintenance after a process restart too.
+    success(&f, &a, &[("cloud.sync", json!({"checkpoint":true}))]);
+    assert!(saved_catalog(&a).sync_state().unwrap().pending.is_empty());
+    let storage = f.state.lock().unwrap();
+    let final_head: Value = serde_json::from_slice(&storage.objects["/photos/library/catalog/head.json"]).unwrap();
+    assert!(final_head["checkpoint"]["generation"].as_u64().unwrap() >= old["generation"].as_u64().unwrap());
+    assert!(
+        storage.requests.iter().filter(|(method, key)| method == "GET" && key.contains("/catalog/changes/")).count() < 20,
+        "completed prefix must not be traversed on retry"
+    );
+    drop(storage);
+    let fresh = f.dir.join("fresh-after-overlong");
+    success(
+        &f,
+        &fresh,
+        &[("cloud.configure", configure(&f)), ("cloud.syncEnable", json!({"connection":"personal","library":library})), ("cloud.sync", json!({}))],
+    );
+    assert_eq!(saved_catalog(&fresh).photo(lightcraft_catalog::PhotoId(1)).unwrap().rating, 5);
+    success(&f, &b, &[("photo.flag", json!({"ids":[1],"flag":"pick"})), ("cloud.sync", json!({}))]);
+    success(&f, &a, &[("cloud.sync", json!({}))]);
+    assert_eq!(saved_catalog(&a).photo(lightcraft_catalog::PhotoId(1)).unwrap().flag, lightcraft_catalog::Flag::Pick);
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+}
+#[test]
+fn an_unchanged_head_automatically_checkpoints_before_the_normal_tail_boundary() {
+    use lightcraft_catalog::{FsStore, Journal, Op};
+    let f = Fixture::new();
+    let (a, _, _) = initialize(&f);
+    let head = extend_history(&f, 1024);
+    // Marker-only history changes no document. Model an already caught-up idle
+    // device to exercise automatic maintenance through the unchanged fast path.
+    let (mut journal, mut catalog, _) = Journal::open(Box::new(FsStore::open(&a).unwrap())).unwrap();
+    let mut state = catalog.sync_state().unwrap().clone();
+    state.acknowledge(&Default::default(), head["tip"]["hash"].as_str().unwrap().into(), head["generation"].as_u64().unwrap()).unwrap();
+    let op = Op::SetSyncState { state: Some(Box::new(state)) };
+    catalog.apply(op.clone()).unwrap();
+    journal.append(&[op]).unwrap();
+    drop(journal);
+    success(&f, &a, &[("cloud.sync", json!({}))]);
+    let storage = f.state.lock().unwrap();
+    let current: Value = serde_json::from_slice(&storage.objects["/photos/library/catalog/head.json"]).unwrap();
+    assert_eq!(current["checkpoint"]["covers"], head["tip"]);
+    assert_eq!(current["checkpoint"]["generation"], head["generation"]);
+    assert_eq!(storage.signature_errors, 0);
+}
+
 #[test]
 fn shared_upload_ack_finalizes_receipts_after_restart_without_media_requests() {
     use lightcraft_catalog::uploads::UploadState;

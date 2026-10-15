@@ -741,3 +741,27 @@ projection across different local IDs, mixed local groups, concurrent proposals,
 tombstones, reverse insertion/delivery order, restart and repeated application.
 Separate properties verify preservation of private photos, filters and groups.
 No wire-format change or large-library performance claim accompanies extraction.
+
+
+### Native conditional-head history recovery (2026-10-15)
+
+Native readers stream backwards through immutable batches into a fixed 4,096-slot
+reference ring on temporary disk, then refetch and verify one batch at a time for
+oldest-first replay. The ring uses at most 16,793,600 bytes; decoded history batches
+never accumulate. Constant-space cycle detection and exact parent/hash/size checks
+remain enforced. Scratch failures report temporary-disk recovery and preserve data;
+normal completion/error/cancellation removes the current scratch file.
+
+Ordinary writers and caught-up idle polls automatically checkpoint at 1,024 tail
+batches. Histories already beyond 4,096 replay records recover through verified
+oldest-prefix checkpoints. Each prefix is installed through conditional head CAS
+before any local pending edit is applied or acknowledged. Completed prefixes survive
+restart and cancellation; retry reads the new boundary. Further windows rescan the
+remaining chain instead of requiring it all to fit in memory or scratch storage.
+Migration's read-only path uses successive windows without changing the head.
+
+This favors a bounded working set over request minimization: fresh traversal and
+replay fetch a batch twice, and very long recovery/read-only histories can require
+additional passes. Unchanged small head polls retain their existing no-write path.
+Browser history replay and measured memory/cost evidence remain tracked in CR.35;
+append checkpoint request optimization remains CR.10.

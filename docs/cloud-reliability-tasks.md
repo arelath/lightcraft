@@ -47,6 +47,22 @@ work (CR.9/CR.10) and other original unchecked tasks remain open.
 - [x] CR.32 — Replace contradictory protocol outcome combinations and sentinel cursors/generations with explicit unchanged, conditional-head, and append outcome variants. Test evidence merging, monotonic cursors, and no-op writes.
 - [x] CR.33 — Extract independently testable shared structural reconciliation. Add property tests: identical shared synchronization state yields identical shared relationships regardless of local IDs, local-only content, iteration order, or delivery order. Test local-only preservation separately.
 
+## Follow-up review: history boundaries and ordinary photo workflows
+
+Source: supplied static review of `924e9fd` against `64ac4d0`, received 2026-10-15.
+Starting commit: `5f15ad37`. These tasks take priority next; original unchecked
+CR.9-CR.21 remain separate. Preserve the verified coordinator, ownership and typed
+outcomes. Check items only after implementation and relevant acceptance.
+
+- [x] CR.34 — Make conditional-head checkpoint maintenance recover beyond the ordinary 4,096-batch replay budget. Automatically checkpoint before exhausting the normal tail, and provide bounded resumable recovery after it. Test 4,097-batch fresh bootstrap, pending local publication, maintenance and acknowledgement after boundary crossing.
+- [ ] CR.35 — Bound aggregate history-replay memory independently of final state size and per-object limits. Avoid retaining the decoded tail; use bounded references/spooling/segments with actionable temporary-storage failure and resumable progress. Measure decoded resident batches and memory across longer superseding histories, plus network costs.
+- [ ] CR.36 — Distinguish library creation from joining. Learn existing immutable identity before authoring join changes; preserve frozen mutation IDs/contexts. Test 129 fresh writers without accumulating identical initialization heads, and reject predictable append capacity failures before PUT.
+- [ ] CR.37 — Lease browser export originals through deferred command completion, sharing download admission/reservations with renderer loads. Add cache-only lookup; release reservations on cancellation/failure. Test acquisition paused between A/B while unrelated C churns the cache, export without reacquiring A, and total in-flight bounds.
+- [ ] CR.38 — Preserve supporting XMP throughout managed import and original revisions. Reuse ordinary sidecar discovery/application, durably stage packets and preserve foreign properties. Define explicit carry/transform policy for external-editor/DNG/XMP-write operations; compare local/cloud RAW+XMP import and foreign-property access after revision.
+- [ ] CR.39 — Make interrupted managed import retry idempotent through durable request/session identity and explicit duplicate policy. Recover independent candidates with per-item errors while preserving invalid manifests and prior-asset consistency. Test interruption after staging A/B, retry/recovery producing one intended set, and corrupt manifest alongside healthy imports.
+- [ ] CR.40 — Bind storage destination independently of protocol. Reject bucket/prefix/endpoint retargeting before settings/resolver changes; permit credential/profile rotation for the same destination. Share destination identity across configuration, receipts and publication evidence. Test both protocols and actionable deliberate-migration guidance.
+- [ ] CR.41 — Separate incremental archive proof planning from final merge. Batch missing hashes, verify immutable nodes once, avoid repeated state merges/forest rebuilds per node, and retain exact-proof safety. Add counters for full merges, forest construction, witness checks and archive GETs across small/large compacted histories.
+
 ## Verification log
 
 2026-10-14 — CR.1/CR.2: 11 append and 5 conditional-head real-CLI tests passed
@@ -655,3 +671,29 @@ Evidence: ignored `target/cloud-reliability/cr33-native-*.json`, C: scratch
 `lightcraft-cr33-native/native-8c0bb306/` and `native-7227b648/`. CR.33 is complete;
 CR.22-CR.33 are checked. Original CR.9-CR.21 remain open. This run adds native
 fixture acceptance, not fresh live-provider/browser runtime or scale benchmarks.
+
+
+2026-10-15 - CR.34 implementation: native history replay now separates compact
+reference traversal from one-batch replay. A fixed ring avoids another retained-tail
+limit; verified oldest-prefix checkpoints become durable through head CAS before
+local pending work participates. Automatic checkpoints begin at 1,024 records,
+including unchanged idle heads. Read-only migration replays successive windows.
+The initial 4,097-batch interruption/restart, pending preservation, fresh join and
+ordinary publication regression passed, along with five head regressions. Ring
+refinement, full CI and rebuilt native automatic-maintenance acceptance remain
+pending; CR.34 stays unchecked. CR.35 retains memory measurements/browser replay.
+
+CR.34 final fixed-ring source passed all eight CI stages (`cr34-ci.log`), including
+the interrupted 4,097-batch maintenance/restart regression, unchanged-head automatic
+checkpoint test, 100,000-reference fixed disk/cycle tests, and existing head/append
+regressions. Rebuilt desktop automatic-maintenance acceptance remains pending.
+
+Rebuilt native acceptance passed (`cr34-native-build.log`, `cr34-native.log`):
+automatic desktop polling checkpointed a 1,024-marker tail (generation 1025 to
+1026), retained the managed photo, and allowed a fresh catalog to join. The grid
+and healthy cloud popup were inspected; `ui.inspect` captured no render backlog.
+All 2,101 signed loopback requests verified. Evidence: ignored
+`target/cloud-reliability/cr34-native-results.json`, C: scratch
+`lightcraft-cr34-native/native-19b92458/`. CR.34 is complete. Browser replay and
+measured resident-memory/request costs remain CR.35; no new live-provider or
+large-library latency claim is made.
