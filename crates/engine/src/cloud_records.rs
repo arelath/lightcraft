@@ -147,3 +147,6 @@ impl Batch {
         Ok(())
     }
 }
+
+/// Shared bounded traversal primitives; they do not alter wire records.
+pub mod replay;

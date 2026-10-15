@@ -44,8 +44,8 @@ pub fn read_checkpoint(connection: &S3Connection, reference: &CheckpointRef, can
     Ok(checkpoint)
 }
 // Ordinary histories checkpoint well before the former hard reader boundary.
-const AUTO_CHECKPOINT_BATCHES: u64 = 1024;
-const RECOVERY_SEGMENT_BATCHES: u64 = 4096;
+const AUTO_CHECKPOINT_BATCHES: u64 = crate::cloud_records::replay::AUTO_CHECKPOINT_BATCHES;
+const RECOVERY_SEGMENT_BATCHES: u64 = crate::cloud_records::replay::WINDOW_BATCHES;
 mod replay;
 pub struct Remote {
     pub head: Option<(Head, String)>,
@@ -121,7 +121,7 @@ fn read_incremental(connection: &S3Connection, local: &SyncState, cancel: &Atomi
     }
     // A cursor is only a hash; discover its full reference without buffering batches.
     let mut index = replay::Index::new()?;
-    let mut seen = replay::Cycle::default();
+    let mut seen = crate::cloud_records::replay::Cycle::default();
     let mut next = Some(current.tip.clone());
     let boundary = current.checkpoint.as_ref().map(|checkpoint| &checkpoint.covers.hash);
     while let Some(reference) = next.take() {
@@ -152,7 +152,7 @@ fn read_incremental(connection: &S3Connection, local: &SyncState, cancel: &Atomi
             break;
         }
         index.push(&reference)?;
-        seen.visit(&reference.hash)?;
+        seen.visit(&reference.hash).map_err(invalid)?;
         let batch = publication::read_batch(connection, &reference, cancel)?;
         next = batch.parent;
     }

@@ -6,6 +6,7 @@ use crate::backend::Backend;
 use lightcraft_engine::assets::sha256;
 use lightcraft_engine::catalog::assets::Asset;
 use lightcraft_engine::catalog::replication::{Mutation, Portable, SyncState};
+use lightcraft_engine::cloud_records::replay::{AUTO_CHECKPOINT_BATCHES, Cycle, WINDOW_BATCHES, Window};
 use lightcraft_engine::cloud_records::{Batch, Checkpoint, CheckpointRef, Head, RecordRef};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,6 +15,8 @@ pub use lightcraft_engine::cloud_outcome::Outcome;
 struct Remote {
     head: Option<(Head, String)>,
     state: SyncState,
+    tail_records: u64,
+    recovery: Option<(RecordRef, u64)>,
 }
 fn encode(value: &impl serde::Serialize, max: usize) -> Result<Vec<u8>, String> {
     let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
@@ -29,11 +32,11 @@ async fn object(provider: &Provider, reference: &RecordRef, max: usize) -> Resul
     }
     Ok(reply.bytes)
 }
-async fn read(provider: &Provider, library: &str) -> Result<Remote, String> {
+async fn read(provider: &Provider, library: &str, segmented: bool) -> Result<Remote, String> {
     let key = format!("{}/catalog/head.json", provider.connection.prefix);
     let reply = provider.request("GET", &key, None, None, None, 16 << 10).await?;
     let state = SyncState::new(library.into(), "remote".into(), provider.connection.id.clone()).map_err(|e| e.to_string())?;
-    let mut remote = Remote { head: None, state };
+    let mut remote = Remote { head: None, state, tail_records: 0, recovery: None };
     let mut proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
     if reply.status == 404 {
         return Ok(remote);
@@ -65,45 +68,67 @@ async fn read(provider: &Provider, library: &str) -> Result<Remote, String> {
         }
         let verified = super::history::certify(provider, &remote.state, &checkpoint.state, &mut proofs).await?;
         remote.state.merge(&verified).map_err(|e| e.to_string())?;
-        boundary = Some(reference.covers.hash.clone());
+        boundary = Some(reference.covers.clone());
     }
-    let mut next = Some(head.tip.clone());
-    let mut seen = BTreeSet::new();
-    let mut batches = Vec::new();
-    let mut complete = false;
-    for _ in 0..4096 {
-        let Some(reference) = next.take() else {
-            if boundary.is_some() {
-                return Err("checkpoint boundary missing from history".into());
+    let mut first = true;
+    loop {
+        let mut next = Some(head.tip.clone());
+        let mut seen = Cycle::default();
+        let mut window = Window::default();
+        loop {
+            let Some(reference) = next.take() else {
+                if boundary.is_some() {
+                    return Err("checkpoint boundary missing from history".into());
+                }
+                break;
+            };
+            if boundary.as_ref().is_some_and(|boundary| boundary.hash == reference.hash) {
+                if boundary.as_ref() != Some(&reference) {
+                    return Err("checkpoint boundary reference changed".into());
+                }
+                break;
             }
-            complete = true;
-            break;
-        };
-        if boundary.as_ref() == Some(&reference.hash) {
-            complete = true;
+            seen.visit(&reference.hash)?;
+            window.push(&reference)?;
+            let batch: Batch = serde_json::from_slice(&object(provider, &reference, 2 << 20).await?).map_err(|_| "malformed change batch")?;
+            batch.validate_scope(&provider.connection.prefix, library)?;
+            next = batch.parent;
+        }
+        if first {
+            remote.tail_records = window.count();
+            first = false;
+        }
+        let budget = window.count().min(WINDOW_BATCHES);
+        for _ in 0..budget {
+            let reference = window.pop_oldest().ok_or("history ended before its verified prefix")?;
+            let batch: Batch = serde_json::from_slice(&object(provider, &reference, 2 << 20).await?).map_err(|_| "malformed change batch")?;
+            batch.validate_scope(&provider.connection.prefix, library)?;
+            if batch.parent != boundary {
+                return Err("history parent changed during replay".into());
+            }
+            boundary = Some(reference);
+            for mutation in batch.mutations {
+                if lightcraft_engine::catalog::replication::archive::covers(&remote.state.archives, &mutation.revision.id()) {
+                    super::history::prove(provider, &remote.state, &mutation, &mut proofs).await?;
+                } else {
+                    remote.state.receive(&mutation).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        if budget >= window.count() {
             break;
         }
-        if !seen.insert(reference.hash.clone()) {
-            return Err("catalog history contains a cycle".into());
+        if segmented {
+            let generation = head
+                .generation
+                .checked_sub(window.count() - budget)
+                .filter(|generation| *generation > 0)
+                .ok_or("history generation does not cover its recovery prefix")?;
+            remote.recovery = Some((boundary.ok_or("recovery prefix has no boundary")?, generation));
+            break;
         }
-        let batch: Batch = serde_json::from_slice(&object(provider, &reference, 2 << 20).await?).map_err(|_| "malformed change batch")?;
-        batch.validate_scope(&provider.connection.prefix, library)?;
-        next = batch.parent.clone();
-        batches.push(batch);
-    }
-    if !complete {
-        return Err("catalog tail exceeds 4096 records; checkpoint required".into());
     }
     remote.head = Some((head, etag));
-    for batch in batches.into_iter().rev() {
-        for mutation in batch.mutations {
-            if lightcraft_engine::catalog::replication::archive::covers(&remote.state.archives, &mutation.revision.id()) {
-                super::history::prove(provider, &remote.state, &mutation, &mut proofs).await?;
-            } else {
-                remote.state.receive(&mutation).map_err(|e| e.to_string())?;
-            }
-        }
-    }
     Ok(remote)
 }
 pub(super) async fn immutable(provider: &Provider, key: &str, bytes: &[u8]) -> Result<(), String> {
@@ -162,10 +187,16 @@ pub async fn synchronize(
     let mut verified = BTreeSet::new();
     let mut archive_proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
     for _ in 0..64 {
-        let mut remote = read(provider, &local.library).await?;
+        let mut remote = read(provider, &local.library, true).await?;
         if remote.head.as_ref().map_or(0, |(head, _)| head.generation) < local.generation {
             return Err("remote catalog rolled back below the acknowledged generation; local work retained".into());
         }
+        if let Some((covers, generation)) = remote.recovery.take() {
+            let checkpoint = checkpoint(provider, &mut remote.state, covers, generation).await?;
+            publish(provider, remote.head.as_ref().map(|(head, etag)| (head, etag.as_str())), Vec::new(), Some(checkpoint), &local.library).await?;
+            continue;
+        }
+        let checkpoint_needed = checkpoint_requested || remote.tail_records >= AUTO_CHECKPOINT_BATCHES;
         super::history::hydrate(provider, &mut remote.state, local, &mut archive_proofs).await?;
         let mut pending = Vec::new();
         for mutation in local.pending.values() {
@@ -178,7 +209,7 @@ pub async fn synchronize(
             }
         }
         if pending.is_empty()
-            && (!checkpoint_requested
+            && (!checkpoint_needed
                 || remote.head.as_ref().is_none_or(|(h, _)| h.checkpoint.as_ref().is_some_and(|c| c.generation.saturating_add(1) == h.generation)))
         {
             let (head, _) = remote.head.ok_or("empty remote library; initial metadata must be queued")?;
@@ -223,46 +254,65 @@ pub async fn synchronize(
         let newly_referenced: Vec<_> = chunk.iter().filter(|m| !verified.contains(&m.revision.id())).cloned().collect();
         dependencies(provider, &newly_referenced).await?;
         verified.extend(newly_referenced.iter().map(|m| m.revision.id()));
-        let mut checkpoint = remote.head.as_ref().and_then(|(h, _)| h.checkpoint.clone());
-        let parent = remote.head.as_ref().map(|(h, _)| h.tip.clone());
-        if checkpoint_requested && let Some((head, _)) = &remote.head {
-            super::history::compact(provider, &mut remote.state, false).await?;
-            let payload = Checkpoint {
-                version: 1,
-                generation: head.generation,
-                covers: head.tip.clone(),
-                state: remote.state.portable(),
-                imports: BTreeMap::new(),
-            };
-            let bytes = encode(&payload, 64 << 20)?;
-            let hash = sha256(&bytes);
-            let object =
-                RecordRef { key: format!("{}/catalog/checkpoints/{}.json", provider.connection.prefix, hash.0), size: bytes.len() as u64, hash };
-            immutable(provider, &object.key, &bytes).await?;
-            checkpoint = Some(CheckpointRef { object, covers: head.tip.clone(), generation: head.generation });
+        let mut checkpoint_ref = remote.head.as_ref().and_then(|(head, _)| head.checkpoint.clone());
+        if checkpoint_needed && let Some((head, _)) = &remote.head {
+            checkpoint_ref = Some(checkpoint(provider, &mut remote.state, head.tip.clone(), head.generation).await?);
         }
         for mutation in &chunk {
             remote.state.receive(mutation).map_err(|e| e.to_string())?;
         }
-        let checkpoint_marker = chunk.is_empty();
-        let bytes = encode(&Batch { version: 3, parent, imports: Vec::new(), mutations: chunk, checkpoint_marker }, 2 << 20)?;
-        let hash = sha256(&bytes);
-        let tip = RecordRef { key: format!("{}/catalog/changes/{}.json", provider.connection.prefix, hash.0), size: bytes.len() as u64, hash };
-        immutable(provider, &tip.key, &bytes).await?;
-        let generation = remote.head.as_ref().map_or(Ok(1), |(h, _)| h.generation.checked_add(1).ok_or("catalog generation exhausted"))?;
-        let head = Head { version: 3, generation, tip, library: Some(local.library.clone()), checkpoint };
-        let condition = remote.head.as_ref().map_or("*", |(_, etag)| etag.as_str());
-        let key = format!("{}/catalog/head.json", provider.connection.prefix);
-        let bytes = encode(&head, 16 << 10)?;
-        match provider.request("PUT", &key, None, Some(condition), Some(&bytes), 16 << 10).await {
-            Ok(reply) if matches!(reply.status, 200 | 201 | 204 | 412) => continue,
-            Err(_) => continue,
-            Ok(reply) => return Err(format!("conditional head write returned HTTP {}; pending work retained", reply.status)),
-        }
+        publish(provider, remote.head.as_ref().map(|(head, etag)| (head, etag.as_str())), chunk, checkpoint_ref, &local.library).await?;
     }
     Err("catalog busy or unreachable; pending work retained for retry".into())
 }
 
 pub(super) async fn migration_seed(provider: &Provider, library: &str) -> Result<Portable, String> {
-    Ok(read(provider, library).await?.state.portable())
+    Ok(read(provider, library, false).await?.state.portable())
+}
+
+async fn checkpoint(provider: &Provider, state: &mut SyncState, covers: RecordRef, generation: u64) -> Result<CheckpointRef, String> {
+    super::history::compact(provider, state, false).await?;
+    let payload = Checkpoint { version: 1, generation, covers: covers.clone(), state: state.portable(), imports: BTreeMap::new() };
+    let bytes = encode(&payload, 64 << 20)?;
+    let hash = sha256(&bytes);
+    let object = RecordRef { key: format!("{}/catalog/checkpoints/{}.json", provider.connection.prefix, hash.0), size: bytes.len() as u64, hash };
+    immutable(provider, &object.key, &bytes).await?;
+    Ok(CheckpointRef { object, covers, generation })
+}
+async fn publish(
+    provider: &Provider,
+    previous: Option<(&Head, &str)>,
+    mutations: Vec<Mutation>,
+    checkpoint: Option<CheckpointRef>,
+    library: &str,
+) -> Result<(), String> {
+    let batch = Batch {
+        version: 3,
+        parent: previous.map(|(head, _)| head.tip.clone()),
+        imports: Vec::new(),
+        checkpoint_marker: mutations.is_empty(),
+        mutations,
+    };
+    let bytes = encode(&batch, 2 << 20)?;
+    let hash = sha256(&bytes);
+    let tip = RecordRef { key: format!("{}/catalog/changes/{}.json", provider.connection.prefix, hash.0), size: bytes.len() as u64, hash };
+    immutable(provider, &tip.key, &bytes).await?;
+    let generation = previous.map_or(Ok(1), |(head, _)| head.generation.checked_add(1).ok_or("catalog generation exhausted"))?;
+    let head = Head { version: 3, generation, tip, library: Some(library.into()), checkpoint };
+    let bytes = encode(&head, 16 << 10)?;
+    match provider
+        .request(
+            "PUT",
+            &format!("{}/catalog/head.json", provider.connection.prefix),
+            None,
+            Some(previous.map_or("*", |(_, etag)| etag)),
+            Some(&bytes),
+            16 << 10,
+        )
+        .await
+    {
+        Ok(reply) if matches!(reply.status, 200 | 201 | 204 | 412) => Ok(()),
+        Err(_) => Ok(()),
+        Ok(reply) => Err(format!("conditional head write returned HTTP {}; pending work retained", reply.status)),
+    }
 }

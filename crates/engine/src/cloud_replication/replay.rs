@@ -6,7 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-const MAX_REFERENCE: usize = 4096;
+const MAX_REFERENCE: usize = crate::cloud_records::replay::MAX_REFERENCE_BYTES;
 const SLOT_BYTES: u64 = MAX_REFERENCE as u64 + 4;
 #[cfg(test)]
 const MAX_INDEX: u64 = RECOVERY_SEGMENT_BATCHES * SLOT_BYTES;
@@ -72,27 +72,7 @@ impl Drop for Index {
     }
 }
 
-/// Brent cycle detection needs one hash rather than a history-sized seen set.
-#[derive(Default)]
-pub(super) struct Cycle {
-    anchor: Option<lightcraft_catalog::assets::BlobId>,
-    power: u64,
-    steps: u64,
-}
-impl Cycle {
-    pub(super) fn visit(&mut self, hash: &lightcraft_catalog::assets::BlobId) -> Result<()> {
-        if self.anchor.as_ref() == Some(hash) {
-            return Err(invalid("remote catalog chain contains a cycle"));
-        }
-        self.steps = self.steps.saturating_add(1);
-        if self.anchor.is_none() || self.steps == self.power {
-            self.anchor = Some(hash.clone());
-            self.power = self.power.saturating_mul(2).max(1);
-            self.steps = 0;
-        }
-        Ok(())
-    }
-}
+use crate::cloud_records::replay::Cycle;
 
 pub(super) struct Tail {
     index: Index,
@@ -120,7 +100,7 @@ impl Tail {
             // Overwrite newer references in a fixed ring while seeking the oldest
             // prefix. No decoded batch or growing cycle set survives an iteration.
             index.push(&reference)?;
-            seen.visit(&reference.hash)?;
+            seen.visit(&reference.hash).map_err(invalid)?;
             let batch = publication::read_batch(connection, &reference, cancel)?;
             next = batch.parent;
         }

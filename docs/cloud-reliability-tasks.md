@@ -55,7 +55,7 @@ CR.9-CR.21 remain separate. Preserve the verified coordinator, ownership and typ
 outcomes. Check items only after implementation and relevant acceptance.
 
 - [x] CR.34 — Make conditional-head checkpoint maintenance recover beyond the ordinary 4,096-batch replay budget. Automatically checkpoint before exhausting the normal tail, and provide bounded resumable recovery after it. Test 4,097-batch fresh bootstrap, pending local publication, maintenance and acknowledgement after boundary crossing.
-- [ ] CR.35 — Bound aggregate history-replay memory independently of final state size and per-object limits. Avoid retaining the decoded tail; use bounded references/spooling/segments with actionable temporary-storage failure and resumable progress. Measure decoded resident batches and memory across longer superseding histories, plus network costs.
+- [x] CR.35 — Bound aggregate history-replay memory independently of final state size and per-object limits. Avoid retaining the decoded tail; use bounded references/spooling/segments with actionable temporary-storage failure and resumable progress. Measure decoded resident batches and memory across longer superseding histories, plus network costs.
 - [ ] CR.36 — Distinguish library creation from joining. Learn existing immutable identity before authoring join changes; preserve frozen mutation IDs/contexts. Test 129 fresh writers without accumulating identical initialization heads, and reject predictable append capacity failures before PUT.
 - [ ] CR.37 — Lease browser export originals through deferred command completion, sharing download admission/reservations with renderer loads. Add cache-only lookup; release reservations on cancellation/failure. Test acquisition paused between A/B while unrelated C churns the cache, export without reacquiring A, and total in-flight bounds.
 - [ ] CR.38 — Preserve supporting XMP throughout managed import and original revisions. Reuse ordinary sidecar discovery/application, durably stage packets and preserve foreign properties. Define explicit carry/transform policy for external-editor/DNG/XMP-write operations; compare local/cloud RAW+XMP import and foreign-property access after revision.
@@ -697,3 +697,49 @@ All 2,101 signed loopback requests verified. Evidence: ignored
 `lightcraft-cr34-native/native-19b92458/`. CR.34 is complete. Browser replay and
 measured resident-memory/request costs remain CR.35; no new live-provider or
 large-library latency claim is made.
+
+
+2026-10-15 - CR.35 implementation: browser head replay now retains only a bounded
+reference deque and decodes one batch at a time. It shares native window/checkpoint
+limits and cycle detection, including CAS prefix recovery and read-only migration
+windows. Native measurement on CR.34's binary used 100 versus 1,500 sequential
+256 KiB caption replacements: 26,280,901 versus 394,219,202 history bytes, final
+state 271,306 versus 271,585 bytes, peak resident 19,140,608 versus 21,688,320
+bytes, and peak commit 7,639,040 versus 10,092,544 bytes. Each large immutable batch
+had exactly two GETs (200 versus 3,000), so the memory result does not conceal the
+request tradeoff. Evidence: ignored `cr35-memory-results.json`, C: scratch
+`lightcraft-cr35-memory/native-9cc67746/`. Browser-WASM checking passed; final-source
+CI, repeated native measurement and actual browser recovery remain pending.
+CR.35 stays unchecked.
+
+The first CR.35 source gate passed all eight CI stages (`cr35-ci.log`). A checked-in
+Windows child-process memory regression and structured-argument PowerShell profiler
+are being added before final confirmation, so future runs test the historical-payload
+boundary as well as bounded references. Browser runtime acceptance is still pending.
+
+The checked-in child-memory regression passed (`cr35-memory-regression-2.log`). An
+initial fixture paused synchronization before the measured operation; removing that
+unrelated precondition allowed the intended reader path. For 100/1,500 batches,
+peak resident was 28,553,216/31,145,984 bytes and peak commit 12,341,248/14,495,744;
+final states were 270,447/270,722 bytes. All large payloads had exactly two GETs,
+with valid signatures. The test runs through a structured-argument, hidden child
+profiler and reports missing PowerShell 7 as a skip; it executed on this host.
+Browser runtime acceptance and final confirmation gate remain pending.
+
+CR.35 final source passed all eight CI stages (`cr35-ci-final.log`), including the
+checked-in child-memory regression, bounded reference/cycle tests, cloud recovery
+regressions and browser-WASM checking. Browser runtime boundary acceptance is
+still running; the task remains unchecked until that result is recorded.
+
+Rebuilt browser runtime acceptance passed under OPFS and IndexedDB
+(`cr35-web-build.log`, `cr35-browser-4.log`). Each fresh catalog recovered a
+4,097-marker tail through a prefix checkpoint, preserved both pending mutations
+through authorization loss and page reload, then published them and a later album
+that a native peer received. OPFS generations were 4098 -> prefix 4096 -> final
+4100; IndexedDB 8198 -> prefix 8195 -> final 8200. All 16,560 signed requests and
+conditional PUTs verified. The editor screenshots were inspected; `ui.inspect`
+was captured. Initial harness startup failures came from Python 3.7's WASM MIME
+mapping and an undersized fixture deadline; corrected harness runs exercised the
+application without source changes. Evidence: ignored `cr35-browser-results.json`,
+C: scratch `lightcraft-cr35-browser/browser-d10d2d95/`. CR.35 is complete. This
+adds loopback browser recovery acceptance, not live-provider or latency results.

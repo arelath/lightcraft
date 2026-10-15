@@ -765,3 +765,26 @@ replay fetch a batch twice, and very long recovery/read-only histories can requi
 additional passes. Unchanged small head polls retain their existing no-write path.
 Browser history replay and measured memory/cost evidence remain tracked in CR.35;
 append checkpoint request optimization remains CR.10.
+
+
+### Browser bounded history replay (2026-10-15)
+
+Browser head replay now uses the same 4,096-record window, 1,024-record automatic
+checkpoint interval and constant-space cycle detection as native replay. Its
+reference deque enforces a 4 KiB serialized reference limit and retains at most
+4,096 references; batches are fetched/verified again one at a time oldest-first.
+A longer tail checkpoints verified prefixes through CAS before publishing local
+mutations. Migration reads all windows without changing the head. Hash, size,
+parent, library and checkpoint-boundary checks remain mandatory in both passes.
+Neither path retains a decoded batch tail. Request minimization is a separate
+tradeoff: fresh windows need traversal and replay GETs, and very long histories
+can need additional passes; CR.9/CR.10 stay open.
+
+
+The checked-in Windows regression `apps/lightcraft-cli/tests/cloud_replay_memory.rs`
+uses `scripts/cloud-replay-memory.ps1` (PowerShell 7) to measure only the reader
+child, excluding the provider fixture's retained source objects. It compares 100
+and 1,500 superseding 256 KiB caption batches, checks small final state, resident
+and commit growth, and exactly two payload GETs per historical batch. The measurement is Windows-only; Windows without PowerShell 7 reports a skip.
+Shared/native bounded-window tests remain portable. These are catch-up working-set checks, not
+owner-thread or slider-latency benchmarks.
