@@ -56,7 +56,7 @@ outcomes. Check items only after implementation and relevant acceptance.
 
 - [x] CR.34 — Make conditional-head checkpoint maintenance recover beyond the ordinary 4,096-batch replay budget. Automatically checkpoint before exhausting the normal tail, and provide bounded resumable recovery after it. Test 4,097-batch fresh bootstrap, pending local publication, maintenance and acknowledgement after boundary crossing.
 - [x] CR.35 — Bound aggregate history-replay memory independently of final state size and per-object limits. Avoid retaining the decoded tail; use bounded references/spooling/segments with actionable temporary-storage failure and resumable progress. Measure decoded resident batches and memory across longer superseding histories, plus network costs.
-- [ ] CR.36 — Distinguish library creation from joining. Learn existing immutable identity before authoring join changes; preserve frozen mutation IDs/contexts. Test 129 fresh writers without accumulating identical initialization heads, and reject predictable append capacity failures before PUT.
+- [x] CR.36 — Distinguish library creation from joining. Learn existing immutable identity before authoring join changes; preserve frozen mutation IDs/contexts. Test 129 fresh writers without accumulating identical initialization heads, and reject predictable append capacity failures before PUT.
 - [ ] CR.37 — Lease browser export originals through deferred command completion, sharing download admission/reservations with renderer loads. Add cache-only lookup; release reservations on cancellation/failure. Test acquisition paused between A/B while unrelated C churns the cache, export without reacquiring A, and total in-flight bounds.
 - [ ] CR.38 — Preserve supporting XMP throughout managed import and original revisions. Reuse ordinary sidecar discovery/application, durably stage packets and preserve foreign properties. Define explicit carry/transform policy for external-editor/DNG/XMP-write operations; compare local/cloud RAW+XMP import and foreign-property access after revision.
 - [ ] CR.39 — Make interrupted managed import retry idempotent through durable request/session identity and explicit duplicate policy. Recover independent candidates with per-item errors while preserving invalid manifests and prior-asset consistency. Test interruption after staging A/B, retry/recovery producing one intended set, and corrupt manifest alongside healthy imports.
@@ -743,3 +743,57 @@ mapping and an undersized fixture deadline; corrected harness runs exercised the
 application without source changes. Evidence: ignored `cr35-browser-results.json`,
 C: scratch `lightcraft-cr35-browser/browser-d10d2d95/`. CR.35 is complete. This
 adds loopback browser recovery acceptance, not live-provider or latency results.
+
+2026-10-15 - CR.36 implementation: create and join are explicit enrollment paths.
+Fresh joins omit library initialization and require existing remote storage before
+publication. Native/browser append validate ready operations before PUT. Frozen
+outbox IDs remain unchanged. Real-binary 129-join, missing-destination and combined
+capacity regressions are running; full CI and rebuilt user-path checks remain
+pending. CR.36 stays unchecked.
+
+The initial three CR.36 real-binary tests passed (`cr36-focused.log`): 129 fresh
+joins in each protocol made no PUTs and preserved one initialization head/clock
+author; missing destinations preserved local work; a combined 129th revision was
+rejected before operation PUT. Source review found a browser direct-call empty-ID
+inconsistency. The first gate was deliberately stopped before editing; both hosts
+now reject an explicit empty ID before enrollment, with a fourth regression and
+browser runtime assertion. Final gate and rebuilt checks remain pending.
+
+CR.36's next gate passed fmt/clippy/HEIF, then exposed a pagination fixture that
+implicitly depended on a read-only join author. With no second operation author,
+the fixture never reached a second root-list page and never injected its late
+object. The setup now gives the second device a real album edit, retaining the
+original late-insertion and next-poll discovery assertions. Source behavior was
+unchanged; focused pagination verification and the final full gate follow.
+
+Rebuilt CR.36 desktop acceptance passed under both protocols (`cr36-native-build.log`,
+`cr36-native-{head,append}.log`). Automatic read-only joins issued no metadata PUT,
+kept one identity head, then published an actual album edit whose receipt context
+included the observed remote clock. The peer received the edit. All 61 signed
+requests verified (28 head / 33 append). Both cloud popup screenshots were inspected
+and showed healthy synchronization; `ui.inspect` recorded no render queue. Evidence:
+ignored `cr36-native-results-*.json`, C: scratch
+`lightcraft-cr36-native/native-5c374012/` and `native-556b597a/`. Browser runtime and
+final full gate remain pending; CR.36 stays unchecked.
+
+Rebuilt browser CR.36 acceptance passed in OPFS and IndexedDB (`cr36-web-build.log`,
+`cr36-browser-2.log`). The first harness run encountered the browser's intentional
+demo albums, which legitimately queued existing local entities. The corrected
+fixture removed only its disposable demo data through normal library commands,
+saved/reloaded, then tested a genuinely empty shared projection. Both joins made
+zero PUTs, rejected explicit empty IDs without partial enrollment, survived reload,
+and published later album edits received by the native peer. Identity heads stayed
+at one. All 63 signed requests/conditional PUTs verified; screenshots and
+`ui.inspect` were captured. Evidence: ignored `cr36-browser-results.json`, C: scratch
+`lightcraft-cr36-browser/browser-9ac1e593/`. The final complete gate is pending.
+
+CR.36 is complete and checked off based on the three focused create/join/capacity
+regressions, the corrected pagination regression, rebuilt desktop acceptance in
+both protocols, and OPFS/IndexedDB browser acceptance. At the user's explicit
+request, further testing was stopped and the changes committed. The final gate
+(`cr36-ci-confirm.log`) passed fmt, clippy and HEIF, but was stopped during workspace
+compilation; the complete workspace/parity/layers/assets/WASM gate did not finish.
+The added native empty-ID regression was compiled by clippy but was not executed;
+its browser equivalent passed at runtime. No all-eight-stage CR.36 CI pass is
+claimed. CR.37-CR.41 remain unchecked; no further implementation will proceed in
+this session.

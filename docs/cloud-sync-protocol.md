@@ -788,3 +788,24 @@ and 1,500 superseding 256 KiB caption batches, checks small final state, residen
 and commit growth, and exactly two payload GETs per historical batch. The measurement is Windows-only; Windows without PowerShell 7 reports a skip.
 Shared/native bounded-window tests remain portable. These are catch-up working-set checks, not
 owner-thread or slider-latency benchmarks.
+
+
+### Creating and joining libraries (2026-10-15)
+
+`cloud.syncEnable` without `library` creates a library and authors its immutable
+initialization once. Supplying an existing library ID joins it. A join adopts shared
+library settings and identity from the verified destination, without publishing
+another initialization of those fields. Local photo/album work may still be queued
+with its original mutation IDs; synchronization reads existing remote history before
+publication. A missing head/append manifest is an actionable join error, even if
+there is queued local work. The local `requireExisting` binding survives restart;
+it is excluded from portable checkpoints. Existing frozen bootstrap mutations retain
+their IDs and contexts, including those authored before this distinction existed.
+Read-only joins create no remote operations and consume no shared author clock slot.
+
+Native and browser append workers apply a ready operation to their worker-local
+projection and validate combined capacity before its immutable PUT. They return no
+acknowledgement if PUT fails; an uncertain successful PUT is recovered by exact
+content verification. This prevents a locally predictable rejected operation from
+poisoning the remote log. It does not replace validation of concurrently discovered
+remote operations or raise field/author limits.

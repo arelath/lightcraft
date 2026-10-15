@@ -56,7 +56,17 @@ pub(crate) fn synchronize_verified(
     }
     let root = root(&connection.prefix, &local.library)?;
     let bytes = manifest(&local.library)?;
-    connection.put_immutable_verified(&manifest_key(&connection.prefix, &local.library)?, &bytes, cancel)?;
+    let manifest_key = manifest_key(&connection.prefix, &local.library)?;
+    if local.require_existing {
+        let existing = connection
+            .get_small(&manifest_key, 16 << 10, cancel)?
+            .ok_or_else(|| invalid("cannot join: append library is absent; verify its destination and library ID; local work retained"))?;
+        if existing.bytes != bytes {
+            return Err(AssetError::Integrity);
+        }
+    } else {
+        connection.put_immutable_verified(&manifest_key, &bytes, cancel)?;
+    }
     let audit = audit || checkpoint || local.append.is_none();
     let mut planner = Planner::new(local, audit)?;
     let (checkpoints, _) = scan(connection, list(format!("{root}/checkpoints/"), false), cancel)?;
@@ -143,9 +153,11 @@ pub(crate) fn synchronize_verified(
                 Err(e) => return Err(e),
             }
             let key = mutation_key(&connection.prefix, mutation)?;
-            connection.put_immutable_verified(&key, &encode(mutation)?, cancel)?;
+            // Validate in this worker-local trial before exposing an immutable op.
+            // A failed PUT aborts the outcome, so none of this trial is acknowledged.
             planner.stage((*mutation).clone())?;
             planner.drain()?;
+            connection.put_immutable_verified(&key, &encode(mutation)?, cancel)?;
             changed = true;
         }
         if !changed {

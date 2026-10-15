@@ -256,13 +256,17 @@ impl Host {
                 return Err("this catalog already has a durable library identity".into());
             }
         } else {
-            let library = p.get("library").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned).map_or_else(random_identity, Ok)?;
+            let library = p.get("library").and_then(Value::as_str).map(str::to_owned).map_or_else(random_identity, Ok)?;
             if !protocol.is_head() && self.data.borrow().providers.get(connection).is_none_or(|p| p.connection.bucket_root.is_none()) {
                 return Err("append mode requires bucketRoot".into());
             }
             let owner = self.owner.clone().ok_or("persistent browser installation identity unavailable")?;
-            let op = lightcraft_engine::cloud_sync::enable_mode(&s.catalog, library, random_identity()?, connection.into(), protocol, owner)
-                .map_err(|e| e.to_string())?;
+            let enroll = if p.get("library").and_then(Value::as_str).is_some() {
+                lightcraft_engine::cloud_sync::join_mode
+            } else {
+                lightcraft_engine::cloud_sync::enable_mode
+            };
+            let op = enroll(&s.catalog, library, random_identity()?, connection.into(), protocol, owner).map_err(|e| e.to_string())?;
             s.apply_received(op).map_err(|e| e.to_string())?;
             s.persist().map_err(|e| e.to_string())?;
         }

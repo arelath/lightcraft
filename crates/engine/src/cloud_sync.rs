@@ -534,6 +534,29 @@ pub fn enable_mode(
     protocol: lightcraft_catalog::replication::SyncProtocol,
     owner: String,
 ) -> Result<Op> {
+    enroll(catalog, library, device, connection, protocol, owner, false)
+}
+/// Join existing shared state without authoring concurrent library initialization.
+/// Local entity edits retain their frozen IDs; transport must first observe the library.
+pub fn join_mode(
+    catalog: &Catalog,
+    library: String,
+    device: String,
+    connection: String,
+    protocol: lightcraft_catalog::replication::SyncProtocol,
+    owner: String,
+) -> Result<Op> {
+    enroll(catalog, library, device, connection, protocol, owner, true)
+}
+fn enroll(
+    catalog: &Catalog,
+    library: String,
+    device: String,
+    connection: String,
+    protocol: lightcraft_catalog::replication::SyncProtocol,
+    owner: String,
+    joining: bool,
+) -> Result<Op> {
     if catalog.sync_state().is_some() {
         return Err(error("synchronization is already enabled; keep its durable device identity"));
     }
@@ -541,12 +564,15 @@ pub fn enable_mode(
     let mut state = SyncState::new(library.clone(), device, connection)?;
     state.protocol = protocol;
     state.local_owner = owner;
+    state.require_existing = joining;
     let mut ops = ensure_ids(&mut next, &state, None)?;
     let identity = Op::SetCloudIdentity { entity: "library".into(), id: Some(library) };
     next.apply(identity.clone())?;
     ops.push(identity);
     let mut initial = project(&next, &next, &state, None)?;
-    if let Some(library) = initial.get_mut(&format!("library:{}", state.library)) {
+    if joining {
+        initial.remove(&format!("library:{}", state.library));
+    } else if let Some(library) = initial.get_mut(&format!("library:{}", state.library)) {
         library.retain(|_, value| !value.is_null());
         library.insert("identity".into(), json!(state.library));
     }

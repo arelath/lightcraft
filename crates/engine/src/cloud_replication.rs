@@ -237,6 +237,9 @@ pub(crate) fn synchronize_verified(
         } else {
             read_incremental(connection, local, cancel)?
         };
+        if local.require_existing && remote.head.is_none() {
+            return Err(invalid("cannot join: remote library is absent; verify its destination and library ID; local work retained"));
+        }
         if remote.head.as_ref().map_or(0, |(head, _)| head.generation) < local.generation {
             return Err(invalid("remote catalog rolled back below the acknowledged generation; local work retained"));
         }

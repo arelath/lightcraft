@@ -41,9 +41,19 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
         return Err("append mode requires a configured bucketRoot and a signer supporting list/putImmutable".into());
     }
     let root = core::root(&provider.connection.prefix, &local.library).map_err(ce)?;
-    provider
-        .put_immutable(&core::manifest_key(&provider.connection.prefix, &local.library).map_err(ce)?, &core::manifest(&local.library).map_err(ce)?)
-        .await?;
+    let manifest_key = core::manifest_key(&provider.connection.prefix, &local.library).map_err(ce)?;
+    let manifest = core::manifest(&local.library).map_err(ce)?;
+    if local.require_existing {
+        let existing = provider.request("GET", &manifest_key, None, None, None, 16 << 10).await?;
+        if existing.status == 404 {
+            return Err("cannot join: append library is absent; verify its destination and library ID; local work retained".into());
+        }
+        if existing.status != 200 || existing.bytes != manifest {
+            return Err("append manifest could not be verified; local work retained".into());
+        }
+    } else {
+        provider.put_immutable(&manifest_key, &manifest).await?;
+    }
     let audit = audit || checkpoint || local.append.is_none();
     let mut planner = core::Planner::new(local, audit).map_err(ce)?;
     let (checkpoints, _) = scan(provider, list(format!("{root}/checkpoints/"), false)).await?;
@@ -117,9 +127,10 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
                 continue;
             }
             super::protocol::dependencies(provider, std::slice::from_ref(*m)).await?;
-            provider.put_immutable(&core::mutation_key(&provider.connection.prefix, m).map_err(ce)?, &core::encode(m).map_err(ce)?).await?;
             planner.stage((*m).clone()).map_err(ce)?;
             planner.drain().map_err(ce)?;
+            // Do not expose an op that this verified remote projection cannot accept.
+            provider.put_immutable(&core::mutation_key(&provider.connection.prefix, m).map_err(ce)?, &core::encode(m).map_err(ce)?).await?;
             changed = true;
         }
         if !changed {

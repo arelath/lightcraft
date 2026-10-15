@@ -323,6 +323,9 @@ fn bulk_import_verifies_all_assets_before_publishing_shared_mutation_and_handles
 fn root_rescan_discovers_an_author_inserted_before_the_previous_page_cursor() {
     let f = Fixture::new();
     let (_, b, library) = initialize(&f);
+    // A read-only join no longer creates an author. Use an actual edit so the
+    // one-prefix pages still exercise insertion before a continuation cursor.
+    ok(&f, &b, &[("album.create", json!({"name":"Second writer"})), ("cloud.sync", json!({}))]);
     let m = Mutation {
         version: 1,
         library: library.clone(),

@@ -146,6 +146,9 @@ pub struct SyncState {
     pub previous_authors: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub migrated_from_head: bool,
+    /// A join must observe its existing destination before publishing local work.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_existing: bool,
     pub clock: Clock,
     pub cursor: Option<String>,
     pub generation: u64,
@@ -185,6 +188,7 @@ impl Portable {
             local_owner: String::new(),
             previous_authors: BTreeSet::new(),
             migrated_from_head: false,
+            require_existing: false,
             clock: self.clock.clone(),
             cursor: None,
             generation: 0,
@@ -284,6 +288,7 @@ impl SyncState {
             local_owner: String::new(),
             previous_authors: BTreeSet::new(),
             migrated_from_head: false,
+            require_existing: false,
             clock: Clock::new(),
             cursor: None,
             generation: 0,

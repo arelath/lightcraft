@@ -95,12 +95,14 @@ fn enable(s: &mut Session, p: &Value) -> Result<Value> {
         getrandom::fill(&mut bytes).map_err(|_| bad(C, "secure random identity generation failed"))?;
         Ok(crate::assets::sha256(&bytes).0)
     };
+    let joining = super::str_param(p, "library").is_some() || s.catalog.cloud_identity("library").is_some();
     let library = super::str_param(p, "library")
         .map(str::to_owned)
         .or_else(|| s.catalog.cloud_identity("library").map(str::to_owned))
         .map_or_else(identity, Ok)?;
     let owner = if lib.on_disk { crate::cloud_append::owner::identity(&lib.dir)? } else { String::new() };
-    let op = crate::cloud_sync::enable_mode(&s.catalog, library, identity()?, connection.into(), protocol, owner)?;
+    let enroll = if joining { crate::cloud_sync::join_mode } else { crate::cloud_sync::enable_mode };
+    let op = enroll(&s.catalog, library, identity()?, connection.into(), protocol, owner)?;
     s.apply_system(op)?;
     s.cloud_uploads.request_resume(true);
     status(s, p)
@@ -173,7 +175,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "Enable cloud mutation journal",
         [],
         None,
-        "{connection, library?, protocol?}; records durable offline metadata intent; protocol defaults to conditional-head-v1",
+        "{connection, library?, protocol?}; omit library to create, supply its ID to join an existing library; protocol defaults to conditional-head-v1",
         always,
         enable
     ));
@@ -193,7 +195,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "cloud.prepareMigration","Pause this device for cloud migration",[],None,"{}; stop automatic publication; Sync now resumes",always,browser_host),
         cmd!(query "cloud.migrateAppend","Migrate cloud library to append synchronization",[],None,"{writersStopped:true}; seed verified remote history; pause every old writer",always,browser_host),
         cmd!(query "cloud.connections","Cloud storage connections",[],None,"{}",always,browser_host),
-        cmd!(query "cloud.syncEnable","Enable cloud synchronization",[],None,"{connection,library?,protocol?}",always,browser_host),
+        cmd!(query "cloud.syncEnable","Enable cloud synchronization",[],None,"{connection,library?,protocol?}; omit library to create, supply its ID to join",always,browser_host),
         cmd!(query "cloud.sync","Synchronize cloud library",[],None,"{checkpoint?}; durable async synchronization",always,browser_host),
         cmd!(query "cloud.fetch","Download cloud originals",[],None,"{ids?}; verified asynchronous acquisition",always,browser_host),
         cmd!(query "cloud.reconnect","Retry cloud transfers",[],None,"{}",always,browser_host),

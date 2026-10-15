@@ -188,6 +188,9 @@ pub async fn synchronize(
     let mut archive_proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
     for _ in 0..64 {
         let mut remote = read(provider, &local.library, true).await?;
+        if local.require_existing && remote.head.is_none() {
+            return Err("cannot join: remote library is absent; verify its destination and library ID; local work retained".into());
+        }
         if remote.head.as_ref().map_or(0, |(head, _)| head.generation) < local.generation {
             return Err("remote catalog rolled back below the acknowledged generation; local work retained".into());
         }
