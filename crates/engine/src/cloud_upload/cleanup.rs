@@ -250,6 +250,7 @@ mod tests {
                 prefix: "library".into(),
                 endpoint: Some("http://127.0.0.1:9".into()),
                 profile: None,
+                keys: Default::default(),
             };
             let blob = |key: &str| Blob {
                 id: sha256(key.as_bytes()),

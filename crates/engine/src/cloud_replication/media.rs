@@ -204,6 +204,7 @@ mod tests {
             prefix: "library".into(),
             endpoint: Some("http://127.0.0.1:9".into()),
             profile: None,
+            keys: Default::default(),
         };
         let blob = Blob {
             id: BlobId("a".repeat(64)),
@@ -248,6 +249,7 @@ mod tests {
             prefix: "library".into(),
             endpoint: Some("http://127.0.0.1:9".into()),
             profile: None,
+            keys: Default::default(),
         };
         let blob = Blob {
             id: BlobId("a".repeat(64)),

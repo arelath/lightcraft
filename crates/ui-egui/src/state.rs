@@ -778,6 +778,10 @@ pub enum Dialog {
         connection: String,
         library: String,
     },
+    /// Cloud setup in steps (`crate::cloud_setup`).
+    CloudSetup {
+        setup: Box<crate::cloud_setup::Setup>,
+    },
     CloudStorage {
         id: String,
         bucket: String,

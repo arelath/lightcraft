@@ -249,5 +249,9 @@
   "Last remote check: {n} s ago": "Dernière vérification distante : il y a {n} s",
   "{used} of {total} used": "{used} utilisés sur {total}",
   "{free} free": "{free} libres",
-  "Store a copy of all Smart previews locally on “{drive}”": "Stocker une copie de tous les aperçus dynamiques en local sur « {drive} »"
+  "Store a copy of all Smart previews locally on “{drive}”": "Stocker une copie de tous les aperçus dynamiques en local sur « {drive} »",
+  "Keys are saved on this computer in the AWS credentials file, as profile “{profile}”. They are never stored in the catalog or the cloud.": "Les clés sont enregistrées sur cet ordinateur dans le fichier d’identifiants AWS, sous le profil « {profile} ». Elles ne sont jamais stockées dans le catalogue ni dans le cloud.",
+  "Connected. Found {n} libraries in this folder.": "Connecté. Bibliothèques trouvées dans ce dossier : {n}.",
+  "Connected to “{bucket}”. Choose the cloud library for this catalog.": "Connecté à « {bucket} ». Choisissez la bibliothèque cloud de ce catalogue.",
+  "Join library {id}… ({kind})": "Rejoindre la bibliothèque {id}… ({kind})"
 }

@@ -249,5 +249,9 @@
   "Last remote check: {n} s ago": "Остання перевірка хмари: {n} с тому",
   "{used} of {total} used": "Зайнято {used} з {total}",
   "{free} free": "Вільно {free}",
-  "Store a copy of all Smart previews locally on “{drive}”": "Зберігати копію всіх смарт-переглядів локально на «{drive}»"
+  "Store a copy of all Smart previews locally on “{drive}”": "Зберігати копію всіх смарт-переглядів локально на «{drive}»",
+  "Keys are saved on this computer in the AWS credentials file, as profile “{profile}”. They are never stored in the catalog or the cloud.": "Ключі зберігаються на цьому комп’ютері у файлі облікових даних AWS як профіль «{profile}». Вони ніколи не потрапляють у каталог чи хмару.",
+  "Connected. Found {n} libraries in this folder.": "Підключено. Бібліотек у цій папці: {n}.",
+  "Connected to “{bucket}”. Choose the cloud library for this catalog.": "Підключено до «{bucket}». Виберіть хмарну бібліотеку для цього каталогу.",
+  "Join library {id}… ({kind})": "Приєднатися до бібліотеки {id}… ({kind})"
 }

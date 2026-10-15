@@ -249,5 +249,9 @@
   "Last remote check: {n} s ago": "最近一次远程检查：{n} 秒前",
   "{used} of {total} used": "已用 {used}，共 {total}",
   "{free} free": "可用 {free}",
-  "Store a copy of all Smart previews locally on “{drive}”": "在“{drive}”上本地保存所有智能预览的副本"
+  "Store a copy of all Smart previews locally on “{drive}”": "在“{drive}”上本地保存所有智能预览的副本",
+  "Keys are saved on this computer in the AWS credentials file, as profile “{profile}”. They are never stored in the catalog or the cloud.": "密钥以配置文件“{profile}”保存在此电脑的 AWS 凭证文件中，绝不会存入目录或云端。",
+  "Connected. Found {n} libraries in this folder.": "已连接。在此文件夹中找到 {n} 个图库。",
+  "Connected to “{bucket}”. Choose the cloud library for this catalog.": "已连接到“{bucket}”。请为此目录选择云图库。",
+  "Join library {id}… ({kind})": "加入图库 {id}…（{kind}）"
 }

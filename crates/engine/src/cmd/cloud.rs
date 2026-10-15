@@ -38,6 +38,17 @@ fn configure(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"connections": connections}))
 }
 
+/// Read-only check of a connection before it is saved (cloud setup runs the same check on a
+/// worker thread with the keys typed into it).
+fn test_connection(_: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "cloud.testConnection";
+    let connection: crate::assets::s3::S3Connection =
+        serde_json::from_value(p.clone()).map_err(|_| bad(C, "invalid connection settings; credentials must not be supplied in parameters"))?;
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let found = crate::cloud_setup::probe(&connection, &cancel).map_err(|e| bad(C, e))?;
+    Ok(json!(found))
+}
+
 fn attach(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "cloud.attach";
     let _ = resolver(s, C)?;
@@ -529,6 +540,15 @@ pub fn specs() -> Vec<CommandSpec> {
             let connections = s.library.as_mut().ok_or_else(|| bad("cloud.connections", "open a library first"))?.cloud_connections()?;
             Ok(json!({"connections": connections}))
         }),
+        cmd!(
+            query "cloud.testConnection",
+            "Test Cloud Storage",
+            [],
+            None,
+            "{id, bucket, region, prefix?, endpoint?, profile?}; read-only check of keys, bucket and list permission → {libraries: [{id, protocol}], headTaken}",
+            always,
+            test_connection
+        ),
         cmd!(query "cloud.status", "Cloud Photo Status", [], None, "{ids?}; cached, downloading, remote, missing or failed state on this device", always, status),
         cmd!(query "cloud.fetch", "Download Cloud Photos", [], None, "{ids?, original?: true, wait?: false}; background download, byte progress and cancellation via activity; wait only in headless CLI/MCP", always, fetch),
         cmd!(query "cloud.reconnect", "Reconnect Cloud Storage", [], None, "{id?}; reload saved connections and external credentials, retry failed renders and offline pins", always, reconnect),
