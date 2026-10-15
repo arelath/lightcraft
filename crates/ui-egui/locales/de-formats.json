@@ -246,5 +246,9 @@
   "{n} added to Apple Photos": "{n} zu Apple Fotos hinzugefügt",
   "{n} photos opened for editing; each is stacked with its original": "{n} Fotos zur Bearbeitung geöffnet; jedes ist mit seinem Original gestapelt",
   "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "Beim Aktivieren der Synchronisierung vorhandener Fotos und Alben oder beim Bearbeiten eines einzelnen Objekts sind höchstens {limit} geänderte Felder und 1 MiB pro Objekt zulässig. Albummetadaten und verwaltete Mitgliedschaften teilen dieses Budget; teilen Sie große Alben vor der Einrichtung auf.",
-  "Last remote check: {n} s ago": "Letzte Cloud-Prüfung: vor {n} s"
+  "Last remote check: {n} s ago": "Letzte Cloud-Prüfung: vor {n} s",
+  "Keys are saved on this computer in the AWS credentials file, as profile “{profile}”. They are never stored in the catalog or the cloud.": "Schlüssel werden auf diesem Computer in der AWS-Anmeldedatei als Profil „{profile}“ gespeichert. Sie gelangen nie in den Katalog oder die Cloud.",
+  "Connected. Found {n} libraries in this folder.": "Verbunden. In diesem Ordner gefundene Bibliotheken: {n}.",
+  "Connected to “{bucket}”. Choose the cloud library for this catalog.": "Mit „{bucket}“ verbunden. Wählen Sie die Cloud-Bibliothek für diesen Katalog.",
+  "Join library {id}… ({kind})": "Bibliothek {id}… beitreten ({kind})"
 }

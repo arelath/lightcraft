@@ -1,7 +1,7 @@
 //! Bounded signed object writes and multipart primitives. Callers own durable receipts,
 //! remote byte verification and publication ordering; an ETag is never a checksum.
 
-use super::{Credentials, S3Connection, Signing, encode, http_error, sign_request};
+use super::{S3Connection, Signing, encode, http_error, sign_request};
 use crate::assets::{AssetError, Result, sha256};
 use lightcraft_catalog::assets::{Blob, RemoteLocation};
 use lightcraft_fetch::http::{self, Limits, Method, RequestBody, Response, Url};
@@ -62,6 +62,7 @@ fn status(response: &Response) -> Result<()> {
     match response.status {
         200..=299 => Ok(()),
         401 | 403 => Err(AssetError::Unauthorized),
+        301 | 307 | 308 => Err(AssetError::Network("the bucket answers from another region or endpoint; check the region and endpoint".into())),
         404 => Err(AssetError::Missing),
         409 | 412 => Err(AssetError::Conflict),
         501 => Err(AssetError::Unsupported("endpoint rejected this S3 operation (HTTP 501); safe catalog publication requires If-None-Match and If-Match support; staged data is retained".into())),
@@ -123,7 +124,7 @@ impl S3Connection {
     fn request(&self, request: Request<'_>, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<Response> {
         log::debug!(target:"lightcraft_cloud_requests","S3 {:?} key={} query={} if_match={} if_none_match={}",request.method,request.key,request.query.iter().map(|(k,_)|*k).collect::<Vec<_>>().join(","),request.headers.iter().any(|(k,_)|*k=="if-match"),request.headers.iter().any(|(k,_)|*k=="if-none-match"));
         let url = self.request_url(request.key, request.query)?;
-        let credentials = Credentials::load(self.profile.as_deref())?;
+        let credentials = self.credentials()?;
         let now = time::OffsetDateTime::now_utc();
         let timestamp =
             format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", now.year(), u8::from(now.month()), now.day(), now.hour(), now.minute(), now.second());

@@ -26,9 +26,56 @@ pub struct S3Connection {
     /// Explicit profile, otherwise AWS environment credentials and then the default profile.
     #[serde(default)]
     pub profile: Option<String>,
+    /// Keys typed into cloud setup, used for its connection check before they are saved.
+    /// Never serialized: connection settings stay free of secrets.
+    #[serde(skip)]
+    pub(crate) keys: TypedKeys,
 }
 
+/// Access keys typed by the person setting up storage. Like [`Credentials`], no Debug or
+/// Serialize: they reach only request signing and [`save_profile`].
+#[derive(Clone)]
+pub struct AccessKeys(Credentials);
+
+impl AccessKeys {
+    pub fn new(access: &str, secret: &str) -> Result<Self> {
+        Credentials::checked(access.trim().to_owned(), secret.trim().to_owned(), None).map(Self)
+    }
+}
+
+/// [`AccessKeys`] held by a connection under test. Two connections compare equal whatever
+/// keys they hold: keys are never part of a connection's identity or destination.
+#[derive(Clone, Default)]
+pub(crate) struct TypedKeys(Option<AccessKeys>);
+
+impl std::fmt::Debug for TypedKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "TypedKeys(redacted)" } else { "TypedKeys(None)" })
+    }
+}
+
+impl PartialEq for TypedKeys {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for TypedKeys {}
+
 impl S3Connection {
+    /// Sign this connection's requests with `keys` instead of the saved profile.
+    pub fn with_keys(mut self, keys: AccessKeys) -> Self {
+        self.keys = TypedKeys(Some(keys));
+        self
+    }
+
+    fn credentials(&self) -> Result<Credentials> {
+        match &self.keys.0 {
+            Some(keys) => Ok(keys.0.clone()),
+            None => Credentials::load(self.profile.as_deref()),
+        }
+    }
+
     /// Receipt destination binding excludes device-local credential selection.
     pub(crate) fn storage_snapshot(&self) -> Self {
         let mut storage = self.clone();
@@ -103,6 +150,7 @@ impl S3Connection {
 }
 
 /// Never derives Debug/Serialize: access keys and tokens must not enter logs or settings.
+#[derive(Clone)]
 struct Credentials {
     access: String,
     secret: String,
@@ -116,12 +164,7 @@ impl Credentials {
         {
             return Self::checked(access, secret, std::env::var("AWS_SESSION_TOKEN").ok());
         }
-        let path = std::env::var_os("AWS_SHARED_CREDENTIALS_FILE")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|p| std::path::PathBuf::from(p).join(".aws/credentials"))
-            })
-            .ok_or_else(|| AssetError::Unconfigured("set AWS temporary credentials or configure an AWS shared credentials profile".into()))?;
+        let path = credentials_path()?;
         let file = std::fs::File::open(path).map_err(|_| AssetError::Unconfigured("AWS shared credentials file could not be read".into()))?;
         if file.metadata().map_err(|_| AssetError::Unauthorized)?.len() > 1 << 20 {
             return Err(AssetError::Invalid("AWS credentials file exceeds 1 MiB".into()));
@@ -172,6 +215,86 @@ impl Credentials {
         }
         Ok(Self { access, secret, token })
     }
+}
+
+/// The AWS shared credentials file: `AWS_SHARED_CREDENTIALS_FILE`, else `~/.aws/credentials`.
+fn credentials_path() -> Result<std::path::PathBuf> {
+    std::env::var_os("AWS_SHARED_CREDENTIALS_FILE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|p| std::path::PathBuf::from(p).join(".aws/credentials"))
+        })
+        .ok_or_else(|| AssetError::Unconfigured("set AWS temporary credentials or configure an AWS shared credentials profile".into()))
+}
+
+/// Save `keys` as `profile` in the AWS shared credentials file, which the S3 resolver reads on
+/// each request (and the AWS CLI and other tools share). Other profiles and comments are kept;
+/// the file is replaced atomically and, on Unix, readable by its owner only. Returns its path.
+pub fn save_profile(profile: &str, keys: &AccessKeys) -> Result<std::path::PathBuf> {
+    if profile.is_empty() || profile.len() > 128 || !profile.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) {
+        return Err(AssetError::Invalid("invalid credentials profile name".into()));
+    }
+    let path = credentials_path()?;
+    save_profile_at(&path, profile, keys)?;
+    Ok(path)
+}
+
+fn save_profile_at(path: &std::path::Path, profile: &str, keys: &AccessKeys) -> Result<()> {
+    let old = match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > 1 << 20 => return Err(AssetError::Invalid("AWS credentials file exceeds 1 MiB".into())),
+        Ok(_) => std::fs::read_to_string(path).map_err(|e| AssetError::Disk(format!("could not read {}: {e}", path.display())))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(AssetError::Disk(format!("could not read {}: {e}", path.display()))),
+    };
+    let text = with_profile(&old, profile, &keys.0);
+    write_private(path, text.as_bytes()).map_err(|e| AssetError::Disk(format!("could not save keys to {}: {e}", path.display())))
+}
+
+/// `text` with `profile`'s section replaced by `keys` (appended last).
+fn with_profile(text: &str, profile: &str, keys: &Credentials) -> String {
+    let mut out = String::with_capacity(text.len() + 160);
+    let mut skipping = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            skipping = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')).is_some_and(|s| s.trim() == profile);
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&format!("[{profile}]\naws_access_key_id = {}\naws_secret_access_key = {}\n", keys.access, keys.secret));
+    out
+}
+
+/// Write a file only its owner can read: a new temp file next to it (mode 0600 on Unix), synced,
+/// then renamed over it.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("credentials file has no folder"))?;
+    std::fs::create_dir_all(dir)?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.lightcraft-{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let written = options.open(&tmp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 fn encode(s: &str, slash: bool) -> String {
@@ -249,7 +372,7 @@ fn sign_request(url: &Url, region: &str, credentials: &Credentials, timestamp: &
 impl BlobStore for S3Connection {
     fn download(&self, blob: &Blob, out: &mut dyn Write, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
         let url = self.url(blob)?;
-        let credentials = Credentials::load(self.profile.as_deref())?;
+        let credentials = self.credentials()?;
         let now = time::OffsetDateTime::now_utc();
         let timestamp =
             format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", now.year(), u8::from(now.month()), now.day(), now.hour(), now.minute(), now.second());
@@ -311,6 +434,7 @@ mod tests {
             prefix: "library".into(),
             endpoint: Some("http://127.0.0.1:9000".into()),
             profile: None,
+            keys: TypedKeys::default(),
         };
         let mut blob = Blob {
             id: super::super::sha256(b"x"),
@@ -332,5 +456,65 @@ mod tests {
         assert_eq!(c.access, "access");
         assert_eq!(c.token.as_deref(), Some("temporary"));
         assert!(Credentials::parse_profile(text, "absent").is_err());
+    }
+    #[test]
+    fn saving_a_profile_replaces_only_its_own_section() {
+        let keys = Credentials::checked("NEWKEY".into(), "new/secret".into(), None).unwrap();
+        let text = "# mine\n[default]\naws_access_key_id=a\naws_secret_access_key=b\n\n[lightcraft-b2]\naws_access_key_id=old\naws_secret_access_key=old\n[other]\nregion=x\n";
+        let out = with_profile(text, "lightcraft-b2", &keys);
+        assert!(out.starts_with("# mine\n[default]\naws_access_key_id=a\n"));
+        assert!(out.contains("[other]\nregion=x\n") && !out.contains("old"));
+        let saved = Credentials::parse_profile(&out, "lightcraft-b2").unwrap();
+        assert_eq!((saved.access.as_str(), saved.secret.as_str()), ("NEWKEY", "new/secret"));
+        assert_eq!(Credentials::parse_profile(&out, "default").unwrap().access, "a");
+        assert_eq!(with_profile("", "p", &keys), "[p]\naws_access_key_id = NEWKEY\naws_secret_access_key = new/secret\n");
+    }
+    #[test]
+    fn saved_keys_land_in_a_private_file_beside_other_profiles() {
+        let dir = std::env::temp_dir().join(format!("lightcraft-profile-{}", std::process::id()));
+        let path = dir.join(".aws").join("credentials");
+        let keys = AccessKeys::new("FIRST", "one").unwrap();
+        save_profile_at(&path, "lightcraft-b2", &keys).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "[mine]
+aws_access_key_id=x
+aws_secret_access_key=y
+
+{}",
+                std::fs::read_to_string(&path).unwrap()
+            ),
+        )
+        .unwrap();
+        save_profile_at(&path, "lightcraft-b2", &AccessKeys::new("SECOND", "two").unwrap()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(Credentials::parse_profile(&text, "lightcraft-b2").unwrap().access, "SECOND");
+        assert_eq!(Credentials::parse_profile(&text, "mine").unwrap().secret, "y");
+        assert!(!text.contains("FIRST"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1, "no temp file left");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn typed_keys_sign_requests_and_never_print() {
+        let connection = S3Connection {
+            id: "t".into(),
+            bucket: "photos".into(),
+            region: "us-east-1".into(),
+            prefix: String::new(),
+            endpoint: None,
+            profile: Some("absent-profile".into()),
+            keys: TypedKeys::default(),
+        }
+        .with_keys(AccessKeys::new(" AKID ", "SECRET").unwrap());
+        assert_eq!(connection.credentials().unwrap().access, "AKID");
+        assert!(!format!("{connection:?}").contains("SECRET"));
+        assert!(!serde_json::to_string(&connection).unwrap().contains("SECRET"));
+        assert!(AccessKeys::new("a\nb", "s").is_err());
     }
 }

@@ -1300,6 +1300,11 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             let path = p.get("path").and_then(Value::as_str)?;
             crate::import::browse(app, path, p.get("subfolders").and_then(Value::as_bool))
         }
+        // the desktop app sets storage up in steps (`cloud_setup`); the browser connects through
+        // its authorization service
+        #[cfg(not(target_arch = "wasm32"))]
+        "dialog.cloudStorage" => crate::cloud_setup::open(app, p.get("id").and_then(Value::as_str), true),
+        #[cfg(target_arch = "wasm32")]
         "dialog.cloudStorage" => {
             let configured = match app.run("cloud.connections", json!({})) {
                 Ok(value) => value,
@@ -1326,6 +1331,11 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.dialog = Some(Dialog::CloudMigration { writers_stopped: false });
             Value::Null
         }),
+        // a library that doesn't sync yet: the setup in steps (storage, then the library)
+        #[cfg(not(target_arch = "wasm32"))]
+        "dialog.cloudSync" if app.session.catalog.sync_state().is_none() => {
+            crate::cloud_setup::open(app, p.get("connection").and_then(Value::as_str), false)
+        }
         "dialog.cloudSync" => {
             let configured = match app.run("cloud.connections", json!({})) {
                 Ok(value) => value,

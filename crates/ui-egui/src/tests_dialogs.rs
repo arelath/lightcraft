@@ -159,6 +159,9 @@ fn cloud_setup_explains_retained_structural_conflicts() {
     };
     let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::with_demo(), services), [1400., 1000.], 1.);
     h.step(); // Finish initial library/UI setup before opening a dialog.
+    // conflicts come from synchronization: an unsynchronized library opens cloud setup instead
+    let state = lightcraft_catalog::replication::SyncState::new("library".into(), "device".into(), "personal".into()).unwrap();
+    h.app.session.apply_received(lightcraft_catalog::Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
     h.app.run("dialog.cloudSync", json!({})).unwrap();
     for _ in 0..4 {
         h.step();

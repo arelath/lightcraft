@@ -246,5 +246,9 @@
   "{n} added to Apple Photos": "已将 {n} 个添加到 Apple 照片",
   "{n} photos opened for editing; each is stacked with its original": "已打开 {n} 张照片进行编辑；每张都与其原片堆叠在一起",
   "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "为现有照片和相册启用同步，或编辑单个实体时，每个实体最多允许更改 {limit} 个字段，序列化大小上限为 1 MiB。相册元数据和受管理照片的成员关系共用此额度；请在设置前拆分大型相册。",
-  "Last remote check: {n} s ago": "最近一次远程检查：{n} 秒前"
+  "Last remote check: {n} s ago": "最近一次远程检查：{n} 秒前",
+  "Keys are saved on this computer in the AWS credentials file, as profile “{profile}”. They are never stored in the catalog or the cloud.": "密钥以配置文件“{profile}”保存在此电脑的 AWS 凭证文件中，绝不会存入目录或云端。",
+  "Connected. Found {n} libraries in this folder.": "已连接。在此文件夹中找到 {n} 个图库。",
+  "Connected to “{bucket}”. Choose the cloud library for this catalog.": "已连接到“{bucket}”。请为此目录选择云图库。",
+  "Join library {id}… ({kind})": "加入图库 {id}…（{kind}）"
 }

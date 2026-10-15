@@ -9,6 +9,7 @@
 pub mod album_picker;
 pub mod brush_live;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod cloud_setup;
 mod cloud_tasks;
 pub mod control;
 pub mod credits;
@@ -49,6 +50,8 @@ mod tests_album_picker;
 mod tests_appearance;
 #[cfg(test)]
 mod tests_before_after;
+#[cfg(test)]
+mod tests_cloud_setup;
 #[cfg(test)]
 mod tests_compare;
 #[cfg(test)]
@@ -358,6 +361,8 @@ pub struct LightcraftApp {
     pub import: Option<import::ImportTask>,
     /// A folder scan in progress (feeds the import review).
     pub scan: Option<import::ScanTask>,
+    /// Cloud setup's connection check in progress (feeds its dialog).
+    pub cloud_check: Option<cloud_setup::CheckTask>,
     /// A Synchronize Folder scan in progress (feeds its dialog).
     pub sync: Option<sync::SyncTask>,
     /// `session.folder_changes` came from the Synchronize Folder dialog (and goes with it).
@@ -453,6 +458,7 @@ impl LightcraftApp {
             merge: merge::MergeState::default(),
             import: None,
             scan: None,
+            cloud_check: None,
             sync: None,
             sync_owns_changes: false,
             sync_run: None,
@@ -1108,6 +1114,7 @@ impl LightcraftApp {
         self.session.resume_cloud_replication();
         merge::poll(self, ctx);
         import::poll_scan(self, ctx);
+        cloud_setup::poll(self, ctx);
         sync::poll(self, ctx);
         sync::poll_run(self, ctx);
         import::tick(self, ctx);
