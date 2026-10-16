@@ -58,7 +58,7 @@ outcomes. Check items only after implementation and relevant acceptance.
 - [x] CR.35 — Bound aggregate history-replay memory independently of final state size and per-object limits. Avoid retaining the decoded tail; use bounded references/spooling/segments with actionable temporary-storage failure and resumable progress. Measure decoded resident batches and memory across longer superseding histories, plus network costs.
 - [x] CR.36 — Distinguish library creation from joining. Learn existing immutable identity before authoring join changes; preserve frozen mutation IDs/contexts. Test 129 fresh writers without accumulating identical initialization heads, and reject predictable append capacity failures before PUT.
 - [x] CR.37 — Lease browser export originals through deferred command completion, sharing download admission/reservations with renderer loads. Add cache-only lookup; release reservations on cancellation/failure. Test acquisition paused between A/B while unrelated C churns the cache, export without reacquiring A, and total in-flight bounds.
-- [ ] CR.38 — Preserve supporting XMP throughout managed import and original revisions. Reuse ordinary sidecar discovery/application, durably stage packets and preserve foreign properties. Define explicit carry/transform policy for external-editor/DNG/XMP-write operations; compare local/cloud RAW+XMP import and foreign-property access after revision.
+- [x] CR.38 — Preserve supporting XMP throughout managed import and original revisions. Reuse ordinary sidecar discovery/application, durably stage packets and preserve foreign properties. Define explicit carry/transform policy for external-editor/DNG/XMP-write operations; compare local/cloud RAW+XMP import and foreign-property access after revision.
 - [ ] CR.39 — Make interrupted managed import retry idempotent through durable request/session identity and explicit duplicate policy. Recover independent candidates with per-item errors while preserving invalid manifests and prior-asset consistency. Test interruption after staging A/B, retry/recovery producing one intended set, and corrupt manifest alongside healthy imports.
 - [ ] CR.40 — Bind storage destination independently of protocol. Reject bucket/prefix/endpoint retargeting before settings/resolver changes; permit credential/profile rotation for the same destination. Share destination identity across configuration, receipts and publication evidence. Test both protocols and actionable deliberate-migration guidance.
 - [ ] CR.41 — Separate incremental archive proof planning from final merge. Batch missing hashes, verify immutable nodes once, avoid repeated state merges/forest rebuilds per node, and retain exact-proof safety. Add counters for full merges, forest construction, witness checks and archive GETs across small/large compacted histories.
@@ -843,3 +843,44 @@ Clippy required retaining an explicit `cfg(test)` attribute separately from the
 native-platform guard so existing test-only unwraps remain recognized as tests.
 This does not change the accepted browser runtime. The task is complete and
 checked off. CR.38-CR.41 and the separate scale backlog remain open.
+
+
+2026-10-16 - CR.38 implementation: managed import discovers ordinary preferred/
+alternate/uppercase sidecars with raw embedded-XMP fallback, stages the exact
+packet, and freezes defaults plus sidecar interpretation in the manifest. Bounded
+supporting documents survive XMP writes, DNG embedding and editor revisions.
+Fresh owned packets on rendered derivatives use neutral settings so a later read
+cannot apply already-rendered source edits again. Foreign properties/history and
+other associated documents are carried and staged. Focused RAW/local parity,
+embedded, revision-chain, malformed-input and fresh-device CLI regressions are
+being added/run. Full CI and native user-path acceptance remain pending; CR.38
+stays unchecked.
+
+
+CR.38 focused verification passed: all 19 managed-import unit regressions
+(`cr38-focused.log`) and the real-binary supporting-packet/fresh-peer regression
+under both protocols (`cr38-cli.log`). The latter checks remote foreign-property
+bytes and an actual GET of the associated object on the new device, followed by
+neutral recipe readback and full export. The shared S3 fixture module carries the
+same test-only dead-code allowance used by other focused integration tests.
+
+Rebuilt desktop acceptance passed in conditional-head and append modes
+(`cr38-native-build.log`, `cr38-native-head-2.log`, `cr38-native-append.log`).
+Control-channel import showed the sidecar's title/rating/flag and +0.75 exposure;
+source removal, automatic publication, external-render preparation, fresh-peer
+XMP read and export succeeded. Screenshots of the imported photo and neutral
+0.00-exposure derivative were inspected. All 129 signed requests verified
+(68 head / 61 append). An initial harness assertion used the full-photo metadata
+shape against the compact query summary; correcting the harness to its documented
+`title` field allowed the intended acceptance without source changes. Evidence:
+ignored `cr38-native-results-*.json`, C: scratch
+`lightcraft-cr38-native/native-2332c36e/` and `native-e01769cf/`. The test prepares
+durable editor files through the engine; it does not launch an external editor.
+Full repository CI remains pending; CR.38 stays unchecked.
+
+
+CR.38 final source passed all eight repository CI stages (`cr38-ci.log`): fmt,
+clippy, HEIF, workspace tests (including the new two-protocol fresh-device XMP
+regression), parity references, layers, assets and WASM. The item is complete and
+checked off. Browser original import remains unsupported; no new live-provider
+or large-library performance result is claimed.

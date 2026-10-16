@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 
 const MAX_BYTES: u64 = 512 << 20;
+const MAX_DOCUMENT_BYTES: u64 = 16 << 20;
 const MAX_MANIFEST_BYTES: u64 = 2 << 20;
 
 fn error(message: impl Into<String>) -> EngineError {
@@ -204,6 +205,8 @@ struct Job {
     defaults: crate::import::ImportDefaults,
     presets: Vec<lightcraft_develop::Preset>,
     metadata_presets: Vec<crate::cmd::metadata::MetadataPreset>,
+    naming: crate::sidecar::SidecarNaming,
+    labels: lightcraft_catalog::Catalog,
     recover: bool,
     known: std::collections::BTreeSet<String>,
     selected: Option<std::collections::BTreeSet<String>>,
@@ -215,6 +218,8 @@ struct EditPlan {
     export: crate::export::PreparedExport,
     parent: PhotoId,
     base_asset: AssetId,
+    asset: Asset,
+    packet: String,
 }
 
 enum RevisionWork {
@@ -234,6 +239,86 @@ fn working_name(path: &str) -> bool {
 }
 
 impl Job {
+    fn document(&self, name: &str, bytes: &[u8]) -> Result<Blob> {
+        if bytes.is_empty() || bytes.len() as u64 > MAX_DOCUMENT_BYTES {
+            return Err(error("supporting document is empty or exceeds the 16 MiB safety limit; source preserved"));
+        }
+        let key =
+            keys::in_library(&self.connection.prefix, &format!("associated/{name}/{}.xmp", sha256(bytes).0)).map_err(|e| error(e.to_string()))?;
+        Ok(make_blob(bytes, &self.connection.id, key))
+    }
+
+    fn describe(&self, manifest: &Manifest, info: crate::media::ProbeInfo, packet: Option<&[u8]>) -> Result<Photo> {
+        if info.kind == lightcraft_catalog::MediaKind::Video || info.preview_only.is_some() {
+            return Err(error("managed import requires a decodable photo original"));
+        }
+        let sidecar = packet
+            .map(|packet| {
+                let packet = std::str::from_utf8(packet).map_err(|e| error(format!("supporting XMP is unreadable; source preserved: {e}")))?;
+                let target = crate::crs::Target::for_file(info.kind, &info.format, info.preview_only.is_some(), &info.meta.camera);
+                crate::sidecar::parse_sidecar(packet, target)
+                    .map(|data| data.resolve_label(&self.labels))
+                    .map_err(|e| error(format!("supporting XMP could not be applied; source preserved: {e}")))
+            })
+            .transpose()?;
+        let mut photo = Photo::new(
+            PhotoId(1),
+            Source::Managed { asset_id: manifest.asset_id.clone() },
+            &manifest.file_name,
+            &info.format,
+            info.width,
+            info.height,
+            &self.now,
+        );
+        photo.kind = info.kind;
+        photo.file_size = info.file_size;
+        photo.captured = info.captured;
+        photo.meta = info.meta;
+        photo.as_shot_wb = info.as_shot_wb;
+        photo.content_hash = info.content_hash;
+        photo.embedded_lens = info.embedded_lens;
+        if manifest.working.is_none() {
+            let mut defaults = Session::new();
+            defaults.import_defaults = self.defaults.clone();
+            defaults.presets = self.presets.clone();
+            defaults.metadata_presets = self.metadata_presets.clone();
+            crate::import::apply_import_defaults(&defaults, &mut photo);
+        }
+        if let Some(sidecar) = sidecar {
+            crate::sidecar::merge_into(&mut photo, &sidecar, &self.now);
+        }
+        Ok(photo)
+    }
+
+    /// Read all supporting documents while the previous asset is still reachable.
+    /// New revisions carry them into staging even on a freshly joined device.
+    fn supporting(&self, asset: &Asset, cancel: &AtomicBool) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+        asset
+            .associated
+            .iter()
+            .map(|(name, blob)| {
+                let lease = self.resolver.acquire(blob, cancel).map_err(|e| error(e.to_string()))?;
+                let bytes = read_bounded(lease.path(), MAX_DOCUMENT_BYTES)?;
+                Ok((name.clone(), bytes))
+            })
+            .collect()
+    }
+
+    fn merge_packet(documents: &std::collections::BTreeMap<String, Vec<u8>>, fresh: &str) -> Result<String> {
+        match documents.get("xmp") {
+            Some(old) => crate::sidecar::merge_managed_packet(old, fresh).map_err(error),
+            None => Ok(fresh.into()),
+        }
+    }
+
+    fn stage_documents(&self, manifest: &Manifest, documents: &std::collections::BTreeMap<String, Vec<u8>>, cancel: &AtomicBool) -> Result<()> {
+        for (name, bytes) in documents {
+            let blob = manifest.asset.associated.get(name).ok_or_else(|| error("supporting document description is missing"))?;
+            self.stage(blob, bytes, cancel)?;
+        }
+        Ok(())
+    }
+
     fn new(s: &mut Session, p: &Value, recover: bool) -> Result<Self> {
         let connection_id = p.get("connection").and_then(Value::as_str).ok_or_else(|| error("choose a configured storage connection"))?;
         let connection = s
@@ -283,6 +368,14 @@ impl Job {
         if crate::originals::paths_overlap(&root, resolver.root()).map_err(error)? {
             return Err(error("managed staging overlaps the disposable cache"));
         }
+        // Sidecar interpretation needs only the five label names, not a clone of
+        // the library's photos/documents. Freeze them with the import defaults.
+        let mut labels = lightcraft_catalog::Catalog::new();
+        for label in lightcraft_catalog::ColorLabel::ALL {
+            if let Some(name) = s.catalog.custom_label_name(label) {
+                labels.apply(Op::SetLabelName { label, name: Some(name.into()) })?;
+            }
+        }
         Ok(Self {
             paths,
             root,
@@ -292,6 +385,8 @@ impl Job {
             defaults: s.import_defaults.clone(),
             presets: s.presets.clone(),
             metadata_presets: s.metadata_presets.clone(),
+            naming: s.xmp.naming,
+            labels,
             recover,
             known: s.catalog.upload_intents().keys().cloned().collect(),
             selected,
@@ -322,6 +417,12 @@ impl Job {
                 return Err(error("cloud import cancelled; original source preserved"));
             }
             let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| error("original filename must be valid UTF-8"))?.to_owned();
+            let info = crate::files::probe_bytes(&file_name, &bytes).map_err(error)?;
+            let packet = if let Some(sidecar) = crate::sidecar::find_sidecar(&path.to_string_lossy(), self.naming) {
+                Some(read_bounded(&sidecar, MAX_DOCUMENT_BYTES)?)
+            } else {
+                info.xmp.clone().filter(|_| info.kind == lightcraft_catalog::MediaKind::Raw).map(String::into_bytes)
+            };
             let source = sha256(&bytes);
             let mut random = [0u8; 32];
             getrandom::fill(&mut random).map_err(|e| error(format!("could not create an import identity: {e}")))?;
@@ -345,10 +446,21 @@ impl Job {
                 stack_with: None,
                 origin_asset: None,
             };
+            if let Some(packet) = &packet {
+                manifest.asset.associated.insert("xmp".into(), self.document("xmp", packet)?);
+            }
+            // Freeze defaults and sidecar interpretation before publishing the
+            // manifest. Recovery never rereads a changed neighboring sidecar.
+            manifest.photo = Some(Box::new(self.describe(&manifest, info, packet.as_deref())?));
             // The identity and intended original precede its immutable copy. A crash here
             // preserves the user's source; recovery reports a missing staged copy.
             self.write_manifest(&manifest, cancel)?;
             self.stage(&manifest.asset.original, &bytes, cancel)?;
+            if let Some(packet) = &packet
+                && let Some(blob) = manifest.asset.associated.get("xmp")
+            {
+                self.stage(blob, packet, cancel)?;
+            }
             drop(bytes);
             self.finish(&mut manifest, cancel)?;
             prepared.push(manifest);
@@ -376,23 +488,20 @@ impl Job {
             if matches!(work, RevisionWork::Returned(_)) && sha256(&bytes) == asset.original.id {
                 continue;
             }
-            let (bytes, name, xmp) = match work {
-                RevisionWork::Dng(packet) => (
-                    crate::cmd::convert::encode_dng(&bytes, packet.clone()).map_err(error)?,
-                    Path::new(&photo.file_name).with_extension("dng").to_string_lossy().to_string(),
-                    None,
-                ),
-                RevisionWork::Xmp { packet, .. } => {
-                    let merged = if let Some(previous) = asset.associated.get("xmp") {
-                        let lease = self.resolver.acquire(previous, cancel).map_err(|e| error(e.to_string()))?;
-                        let old = read_bounded(lease.path(), 16 << 20)?;
-                        crate::sidecar::merge_managed_packet(&old, packet).map_err(error)?
-                    } else {
-                        packet.clone()
-                    };
-                    (bytes, photo.file_name.clone(), Some(merged.into_bytes()))
+            let mut documents = self.supporting(asset, cancel)?;
+            let (bytes, name, packet) = match work {
+                RevisionWork::Dng(packet) => {
+                    let merged = Self::merge_packet(&documents, packet)?;
+                    (
+                        crate::cmd::convert::encode_dng(&bytes, merged.clone()).map_err(error)?,
+                        Path::new(&photo.file_name).with_extension("dng").to_string_lossy().to_string(),
+                        merged,
+                    )
                 }
-                RevisionWork::Returned(_) => (bytes, photo.file_name.clone(), None),
+                RevisionWork::Xmp { packet, .. } => (bytes, photo.file_name.clone(), Self::merge_packet(&documents, packet)?),
+                RevisionWork::Returned(_) => {
+                    (bytes, photo.file_name.clone(), Self::merge_packet(&documents, &crate::sidecar::sidecar_packet(photo, &self.labels))?)
+                }
             };
             let id = new_identity()?;
             let original = make_blob(
@@ -414,7 +523,7 @@ impl Job {
                 version: 2,
                 id: id.clone(),
                 asset_id: AssetId(id),
-                asset: Asset { original, smart_preview: None, thumbnail: None, associated: Default::default() },
+                asset: Asset { original, smart_preview: None, thumbnail: None, associated: asset.associated.clone() },
                 file_name: name,
                 photo: Some(Box::new(updated)),
                 prepared: false,
@@ -427,18 +536,12 @@ impl Job {
                 stack_with: None,
                 origin_asset: None,
             };
-            if let Some(xmp) = &xmp {
-                let key =
-                    keys::in_library(&self.connection.prefix, &format!("associated/xmp/{}.xmp", sha256(xmp).0)).map_err(|e| error(e.to_string()))?;
-                manifest.asset.associated.insert("xmp".into(), make_blob(xmp, &self.connection.id, key));
-            }
+            let xmp = packet.into_bytes();
+            manifest.asset.associated.insert("xmp".into(), self.document("xmp", &xmp)?);
+            documents.insert("xmp".into(), xmp);
             self.write_manifest(&manifest, cancel)?;
             self.stage(&manifest.asset.original, &bytes, cancel)?;
-            if let Some(xmp) = &xmp
-                && let Some(blob) = manifest.asset.associated.get("xmp")
-            {
-                self.stage(blob, xmp, cancel)?;
-            }
+            self.stage_documents(&manifest, &documents, cancel)?;
             self.finish(&mut manifest, cancel)?;
             prepared.push(manifest);
             progress.progress(index as u64 + 1, self.revisions.len() as u64);
@@ -452,7 +555,7 @@ impl Job {
             if cancel.load(Ordering::Relaxed) {
                 return Err(error("external edit cancelled; durable data preserved"));
             }
-            let EditPlan { export, parent, base_asset } = edit
+            let EditPlan { export, parent, base_asset, asset, packet } = edit
                 .lock()
                 .map_err(|_| error("external export state unavailable"))?
                 .take()
@@ -470,11 +573,13 @@ impl Job {
                 keys::in_library(&self.connection.prefix, &keys::original(&sha256(&output.bytes)).map_err(|e| error(e.to_string()))?)
                     .map_err(|e| error(e.to_string()))?,
             );
+            let mut documents = self.supporting(&asset, cancel)?;
+            let packet = Self::merge_packet(&documents, &packet)?.into_bytes();
             let mut manifest = Manifest {
                 version: 2,
                 id: id.clone(),
                 asset_id: AssetId(id.clone()),
-                asset: Asset { original, smart_preview: None, thumbnail: None, associated: Default::default() },
+                asset: Asset { original, smart_preview: None, thumbnail: None, associated: asset.associated },
                 file_name: name.clone(),
                 photo: None,
                 prepared: false,
@@ -483,8 +588,11 @@ impl Job {
                 stack_with: Some(parent),
                 origin_asset: Some(base_asset),
             };
+            manifest.asset.associated.insert("xmp".into(), self.document("xmp", &packet)?);
+            documents.insert("xmp".into(), packet);
             self.write_manifest(&manifest, cancel)?;
             self.stage(&manifest.asset.original, &output.bytes, cancel)?;
+            self.stage_documents(&manifest, &documents, cancel)?;
             self.finish(&mut manifest, cancel)?;
             prepared.push(manifest);
             progress.progress(index as u64 + 1, self.edits.len() as u64);
@@ -547,10 +655,14 @@ impl Job {
         if sha256(&bytes) != manifest.asset.original.id || bytes.len() as u64 != manifest.asset.original.size {
             return Err(error("durable original failed verification"));
         }
-        for blob in manifest.asset.associated.values() {
-            let document = read_bounded(&self.root.join("blobs").join(&blob.id.0), 16 << 20)?;
+        let mut packet = None;
+        for (name, blob) in &manifest.asset.associated {
+            let document = read_bounded(&self.root.join("blobs").join(&blob.id.0), MAX_DOCUMENT_BYTES)?;
             if sha256(&document) != blob.id || document.len() as u64 != blob.size {
                 return Err(error("associated document failed verification"));
+            }
+            if name == "xmp" {
+                packet = Some(document);
             }
         }
         let mut shadow = Session::new().with_fs();
@@ -561,29 +673,7 @@ impl Job {
             (**photo).clone()
         } else {
             let info = crate::files::probe_bytes(&manifest.file_name, &bytes).map_err(error)?;
-            if info.kind == lightcraft_catalog::MediaKind::Video || info.preview_only.is_some() {
-                return Err(error("managed import requires a decodable photo original"));
-            }
-            let mut photo = Photo::new(
-                PhotoId(1),
-                Source::Managed { asset_id: manifest.asset_id.clone() },
-                &manifest.file_name,
-                &info.format,
-                info.width,
-                info.height,
-                &self.now,
-            );
-            photo.kind = info.kind;
-            photo.file_size = info.file_size;
-            photo.captured = info.captured;
-            photo.meta = info.meta;
-            photo.as_shot_wb = info.as_shot_wb;
-            photo.content_hash = info.content_hash;
-            photo.embedded_lens = info.embedded_lens;
-            if manifest.working.is_none() {
-                crate::import::apply_import_defaults(&shadow, &mut photo);
-            }
-            photo
+            self.describe(manifest, info, packet.as_deref())?
         };
         photo.id = PhotoId(1);
         manifest.photo = Some(Box::new(photo.clone()));
@@ -909,8 +999,15 @@ pub(crate) fn edit_external(s: &mut Session, ids: &[PhotoId], options: &crate::e
             job = Some(Job::new(s, &json!({"connection":connection}), true)?);
         }
         let export = crate::export::prepare_export(s, *id, options, index + 1).map_err(error)?;
+        let source = s.catalog.photo(*id).ok_or_else(|| error("external edit source disappeared"))?;
+        let mut rendered = (**source).clone();
+        // Develop edits are already baked into the exported pixels. Fresh owned
+        // XMP must describe the rendered derivative, while foreign data survives.
+        rendered.develop = Arc::new(Default::default());
+        let packet = crate::sidecar::sidecar_packet(&rendered, &s.catalog);
+        let asset = s.catalog.asset(&base_asset).ok_or_else(|| error("external edit asset disappeared"))?.clone();
         if let Some(job) = &mut job {
-            job.edits.push(std::sync::Mutex::new(Some(EditPlan { export, parent: *id, base_asset })));
+            job.edits.push(std::sync::Mutex::new(Some(EditPlan { export, parent: *id, base_asset, asset, packet })));
             job.recover = false;
         }
     }
@@ -1056,6 +1153,164 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn supporting_packet(catalog: &lightcraft_catalog::Catalog) -> String {
+        let mut photo = Photo::new(PhotoId(1), Source::File { path: "source.raw".into() }, "source.raw", "RAW", 32, 24, "");
+        photo.rating = 4;
+        photo.flag = lightcraft_catalog::Flag::Pick;
+        photo.label = Some(lightcraft_catalog::ColorLabel::Red);
+        photo.meta.title = "Harbour".into();
+        photo.meta.caption = "Supporting packet".into();
+        photo.meta.keywords = vec!["boats".into()];
+        photo.captured = Some("2020-02-03T04:05:06".into());
+        Arc::make_mut(&mut photo.develop).light.exposure = 0.75;
+        let foreign = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:foreign="urn:lightcraft:test:foreign" xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/" foreign:note="keep-exact-value"><xmpMM:History><rdf:Seq><rdf:li rdf:parseType="Resource"><foreign:event>before-import</foreign:event></rdf:li></rdf:Seq></xmpMM:History></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        crate::sidecar::merge_managed_packet(foreign.as_bytes(), &crate::sidecar::sidecar_packet(&photo, catalog)).unwrap()
+    }
+
+    fn packet_for(session: &Session, id: PhotoId) -> Vec<u8> {
+        let Source::Managed { asset_id } = &session.catalog.photo(id).unwrap().source else { panic!("managed") };
+        let blob = session.catalog.asset(asset_id).unwrap().associated.get("xmp").unwrap();
+        let root = session.media.asset_resolver.as_ref().unwrap().durable_root().unwrap();
+        let bytes = std::fs::read(root.join("blobs").join(&blob.id.0)).unwrap();
+        assert_eq!(sha256(&bytes), blob.id);
+        bytes
+    }
+
+    fn assert_foreign(packet: &[u8]) {
+        let text = std::str::from_utf8(packet).unwrap();
+        assert!(text.contains("keep-exact-value"), "{text}");
+        assert!(text.contains("before-import"), "{text}");
+        assert!(text.contains("xmpMM:History"), "{text}");
+    }
+
+    #[test]
+    fn managed_raw_import_matches_ordinary_sidecar_application_and_preserves_exact_packet() {
+        for naming in [crate::sidecar::SidecarNaming::Stem, crate::sidecar::SidecarNaming::Full] {
+            let fixture = Fixture::new();
+            let raw = fixture.root.join("source.raw");
+            std::fs::write(&raw, crate::tests_xmp::synthetic_dng_with(None, Default::default())).unwrap();
+            let mut managed = fixture.session();
+            managed.xmp.naming = naming;
+            managed.import_defaults.creator = "Import default".into();
+            managed.commit("Label names", Op::SetLabelName { label: lightcraft_catalog::ColorLabel::Red, name: Some("Client".into()) }).unwrap();
+            let packet = supporting_packet(&managed.catalog);
+            let preferred = crate::sidecar::sidecar_path(raw.to_str().unwrap(), naming).with_extension("XMP");
+            std::fs::write(&preferred, &packet).unwrap();
+            let other =
+                if naming == crate::sidecar::SidecarNaming::Stem { crate::sidecar::SidecarNaming::Full } else { crate::sidecar::SidecarNaming::Stem };
+            std::fs::write(
+                crate::sidecar::sidecar_path(raw.to_str().unwrap(), other),
+                crate::sidecar::sidecar_packet(
+                    &Photo::new(PhotoId(1), Source::File { path: "other".into() }, "other", "RAW", 32, 24, ""),
+                    &managed.catalog,
+                ),
+            )
+            .unwrap();
+            let mut ordinary = Session::new().with_fs();
+            ordinary.xmp.naming = naming;
+            ordinary.import_defaults = managed.import_defaults.clone();
+            ordinary.commit("Label names", Op::SetLabelName { label: lightcraft_catalog::ColorLabel::Red, name: Some("Client".into()) }).unwrap();
+            ordinary.execute("library.import", &json!({"paths":[raw]})).unwrap();
+            let id = PhotoId(managed.execute("cloud.import", &json!({"connection":"personal","paths":[raw]})).unwrap()["ids"][0].as_u64().unwrap());
+            let a = ordinary.catalog.photos().next().unwrap();
+            let b = managed.catalog.photo(id).unwrap();
+            assert_eq!((b.rating, b.flag, b.label), (4, lightcraft_catalog::Flag::Pick, Some(lightcraft_catalog::ColorLabel::Red)));
+            assert_eq!((a.rating, a.flag, a.label), (b.rating, b.flag, b.label));
+            assert_eq!(a.meta, b.meta);
+            assert_eq!(a.captured, b.captured);
+            assert_eq!(a.develop, b.develop);
+            assert_eq!(b.develop.light.exposure, 0.75);
+            assert_eq!(packet_for(&managed, id), packet.as_bytes());
+            std::fs::remove_file(&preferred).unwrap();
+            std::fs::remove_file(&raw).unwrap();
+            managed.close_library().unwrap();
+            drop(managed);
+            assert_eq!(packet_for(&fixture.session(), id), packet.as_bytes());
+        }
+    }
+
+    #[test]
+    fn managed_raw_embedded_xmp_is_retained_when_no_sidecar_exists() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let packet = supporting_packet(&session.catalog);
+        let raw = fixture.root.join("embedded.dng");
+        std::fs::write(&raw, crate::tests_xmp::synthetic_dng_with(Some(&packet), Default::default())).unwrap();
+        let id = PhotoId(session.execute("cloud.import", &json!({"connection":"personal","paths":[raw]})).unwrap()["ids"][0].as_u64().unwrap());
+        assert_eq!(session.catalog.photo(id).unwrap().rating, 4);
+        assert_eq!(session.catalog.photo(id).unwrap().develop.light.exposure, 0.75);
+        assert_eq!(packet_for(&session, id), packet.as_bytes());
+    }
+
+    #[test]
+    fn supporting_xmp_survives_dng_xmp_write_external_render_and_returned_original_revisions() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let raw = fixture.root.join("source.raw");
+        let packet = supporting_packet(&session.catalog);
+        std::fs::write(&raw, crate::tests_xmp::synthetic_dng_with(None, Default::default())).unwrap();
+        std::fs::write(raw.with_extension("xmp"), &packet).unwrap();
+        let id = PhotoId(session.execute("cloud.import", &json!({"connection":"personal","paths":[raw]})).unwrap()["ids"][0].as_u64().unwrap());
+        let original_packet = packet_for(&session, id);
+        let source = session.catalog.photo(id).unwrap().source.clone();
+        session.commit("Synthetic raw", Op::Relink { id, source, file_name: "source.raw".into(), format: Some("RAW".into()) }).unwrap();
+        std::fs::remove_file(raw.with_extension("xmp")).unwrap();
+        std::fs::remove_file(raw).unwrap();
+        session.execute("photo.convertToDng", &json!({"ids":[id.0]})).unwrap();
+        let converted = packet_for(&session, id);
+        assert_foreign(&converted);
+        let Source::Managed { asset_id } = &session.catalog.photo(id).unwrap().source else { panic!("managed") };
+        let blob = &session.catalog.asset(asset_id).unwrap().original;
+        let root = session.media.asset_resolver.as_ref().unwrap().durable_root().unwrap();
+        let dng = std::fs::read(root.join("blobs").join(&blob.id.0)).unwrap();
+        assert_foreign(lightcraft_meta::embedded(&dng).xmp.unwrap().as_bytes());
+        session.execute("photo.rate", &json!({"id":id.0,"rating":2})).unwrap();
+        session.execute("photo.saveMetadataToFile", &json!({"ids":[id.0]})).unwrap();
+        let saved = packet_for(&session, id);
+        assert_foreign(&saved);
+        assert_eq!(lightcraft_meta::parse_xmp(std::str::from_utf8(&saved).unwrap()).unwrap().metadata.rating, Some(2));
+        let edit = session.execute("photo.editExternal", &json!({"ids":[id.0]})).unwrap();
+        let derived = PhotoId(edit["id"].as_u64().unwrap());
+        let working = PathBuf::from(edit["path"].as_str().unwrap());
+        assert_eq!(session.catalog.photo(derived).unwrap().develop.light.exposure, 0.0, "rendered pixels already contain source exposure");
+        let derived_packet = packet_for(&session, derived);
+        assert_foreign(&derived_packet);
+        session.execute("photo.readMetadataFromFile", &json!({"ids":[derived.0]})).unwrap();
+        assert_eq!(session.catalog.photo(derived).unwrap().develop.light.exposure, 0.0);
+        let returned = lightcraft_codecs::encode_png(
+            &lightcraft_codecs::EncodeImage::rgba8(&lightcraft_raster::Rgba8::from_fn(11, 9, |_, _| [60, 100, 180, 255])),
+            &Default::default(),
+        )
+        .unwrap();
+        std::fs::write(&working, returned).unwrap();
+        session.execute("photo.reload", &json!({"ids":[derived.0]})).unwrap();
+        let returned_packet = packet_for(&session, derived);
+        assert_foreign(&returned_packet);
+        assert_eq!(session.catalog.photo(derived).unwrap().develop.light.exposure, 0.0);
+        // Earlier immutable supporting bytes remain available to old revisions.
+        let root = session.media.asset_resolver.as_ref().unwrap().durable_root().unwrap();
+        assert_eq!(std::fs::read(root.join("blobs").join(sha256(&original_packet).0)).unwrap(), original_packet);
+        session.close_library().unwrap();
+        drop(session);
+        let mut reopened = fixture.session();
+        assert_eq!(packet_for(&reopened, derived), returned_packet);
+        reopened.execute("photo.readMetadataFromFile", &json!({"ids":[derived.0]})).unwrap();
+        assert_eq!(reopened.catalog.photo(derived).unwrap().develop.light.exposure, 0.0);
+    }
+
+    #[test]
+    fn malformed_supporting_xmp_reports_an_error_without_losing_source_files() {
+        let fixture = Fixture::new();
+        let sidecar = fixture.original.with_extension("xmp");
+        std::fs::write(&sidecar, b"\xffinvalid packet").unwrap();
+        let original = std::fs::read(&fixture.original).unwrap();
+        let mut session = fixture.session();
+        assert!(session.execute("cloud.import", &fixture.params()).unwrap_err().to_string().contains("supporting XMP"));
+        assert_eq!(std::fs::read(&fixture.original).unwrap(), original);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"\xffinvalid packet");
+        assert_eq!(session.catalog.photos().count(), 0);
     }
 
     #[test]
@@ -1254,7 +1509,11 @@ mod tests {
         job.recover = false;
         let options = crate::export::ExportOptions { format: crate::export::ExportFormat::Tiff, naming: "{name}-Edit".into(), ..Default::default() };
         let export = crate::export::prepare_export(&mut session, id, &options, 1).unwrap();
-        job.edits.push(std::sync::Mutex::new(Some(EditPlan { export, parent: id, base_asset: asset_id })));
+        let asset = session.catalog.asset(&asset_id).unwrap().clone();
+        let mut rendered = (**session.catalog.photo(id).unwrap()).clone();
+        rendered.develop = Arc::new(Default::default());
+        let packet = crate::sidecar::sidecar_packet(&rendered, &session.catalog);
+        job.edits.push(std::sync::Mutex::new(Some(EditPlan { export, parent: id, base_asset: asset_id, asset, packet })));
         let task = session.activity.start("import", "External test", crate::activity::Cancel::Yes);
         let manifests = job.prepare(&AtomicBool::new(false), &task.handle()).unwrap();
         let working = job.root.join(manifests[0].working.as_ref().unwrap());

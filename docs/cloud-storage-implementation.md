@@ -1,6 +1,6 @@
 # Cloud storage implementation
 
-Last updated: 2026-10-15. Completion and acceptance checks are tracked in [../tasks.md](../tasks.md). The proposal is [cloud-storage.md](cloud-storage.md).
+Last updated: 2026-10-16. Completion and acceptance checks are tracked in [../tasks.md](../tasks.md). The proposal is [cloud-storage.md](cloud-storage.md).
 
 Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
 
@@ -477,6 +477,7 @@ and [browser requirements](browser-cloud.md).
 | 2026-10-14 | Coordinated migration dialog and asynchronous desktop cutover; operator-confirmed peer pause, cancellation/retry and local save rollback. |
 | 2026-10-14 | Cloud queue popup, indexed sync-status filters and persisted device-local pause/resume; native multipart recovery and browser OPFS/IndexedDB controls verified. |
 | 2026-10-14 | Settings → Cache: drive usage, size limit, Clear cache, library-wide offline copies and verified cache relocation. |
+| 2026-10-16 | Preserve and apply supporting XMP on managed import; retain foreign properties through XMP, DNG and external-editor revisions with explicit rendered-recipe semantics. |
 
 
 ## Cloud queue UX
@@ -510,3 +511,29 @@ screenshots inspected (`target/cloud-ux-acceptance`). Native release and browser
 (`target/cloud-ux-native-final.log`, `target/cloud-ux-web-final.log`); all eight full CI stages
 passed (`target/cloud-ux-ci.log`). This UX acceptance does not add a fresh live-B2 or large-library
 performance claim.
+
+
+## Supporting XMP in managed imports and revisions
+
+Managed import uses the ordinary preferred/alternate sidecar naming rules,
+including uppercase `.XMP`, with raw embedded XMP as the fallback when there is no
+sidecar. It stages the exact packet as an immutable associated object, applies
+import defaults and then the sidecar's metadata/develop values, and freezes that
+interpretation before publishing the manifest. A later recovery does not reread a
+changed neighboring file. Supporting documents are limited to 16 MiB; unreadable
+or malformed XMP reports an actionable import error while preserving source files.
+
+Revision policy:
+
+- An XMP write merges fresh owned metadata/settings into the previous packet,
+  preserving foreign namespaces and history.
+- DNG conversion embeds that merged packet and retains it as associated XMP.
+- An external-editor render carries foreign supporting data, with fresh owned
+  metadata and neutral develop settings because source edits are already rendered
+  into its pixels. Reading that packet cannot reapply the original recipe.
+- An editor's returned original retains the derived photo's current catalog recipe
+  and refreshes its owned packet; existing supporting documents remain associated.
+
+Every carried document is staged and verified before a revision becomes ready,
+including when the previous bytes must first be acquired on a new device. Earlier
+immutable assets and their packets remain available to retained revisions.
