@@ -18,7 +18,7 @@ mod append;
 pub mod archive;
 pub mod capacity;
 pub mod delta;
-pub use append::{AppendProgress, SyncProtocol, prefixes as publication_prefixes};
+pub use append::{AppendAudit, AppendProgress, AppendScan, SyncProtocol, prefixes as publication_prefixes};
 pub type Clock = BTreeMap<String, u64>;
 
 fn invalid(message: &str) -> CatalogError {

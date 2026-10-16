@@ -137,7 +137,7 @@ mod tests {
         let first = local.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(1) }]).unwrap().unwrap();
         let second =
             local.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(5) }]).unwrap().unwrap();
-        let mut planner = Planner::new(&local, true).unwrap();
+        let mut planner = Planner::new(&local).unwrap();
         planner.stage(first.clone()).unwrap();
         planner.stage(second.clone()).unwrap();
         planner.drain().unwrap();
@@ -187,7 +187,7 @@ mod tests {
         let mut s = SyncState::new("library".into(), "browser".into(), "connection".into()).unwrap();
         s.protocol = SyncProtocol::AppendLog;
         let m = s.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(4) }]).unwrap().unwrap();
-        let mut planner = Planner::new(&s, true).unwrap();
+        let mut planner = Planner::new(&s).unwrap();
         planner.stage(m.clone()).unwrap();
         let p = planner.progress().unwrap();
         let receipt = AckReceipt::new_append(&s, &BTreeSet::from([m.revision.id()]), &p).unwrap();

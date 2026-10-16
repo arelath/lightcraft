@@ -770,6 +770,7 @@ fn self_publication(s: &mut Session, generation: u64) {
             manifest: "a".repeat(64),
             frontiers: lightcraft_catalog::replication::publication_prefixes(&remote).unwrap(),
             remote,
+            scan: Default::default(),
             gaps: BTreeSet::new(),
         };
         incoming_append(&s.catalog, progress, &ids).unwrap()

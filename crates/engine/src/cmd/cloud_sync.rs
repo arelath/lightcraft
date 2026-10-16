@@ -42,6 +42,8 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
         "preparingMigration":preparing_migration(s),
         "migrating":migrating(s),
         "protocol":state.protocol,"frontiers":state.append.as_ref().map(|p|&p.frontiers),"gaps":state.append.as_ref().map(|p|&p.gaps),
+        "appendAudit":state.append.as_ref().map(|p|&p.scan.audit),
+        "consumedCheckpoints":state.append.as_ref().map(|p|p.scan.checkpoints.len()),
         "pending":state.pending.len(),"generation":state.generation,"cursor":state.cursor,"conflicts":conflicts.and_then(|v|v.get("conflicts")),
         "structuralConflicts":conflicts.and_then(|v|v.get("structuralConflicts")),
         "utilization":conflicts.and_then(|v|v.get("utilization")),"capacityWarnings":conflicts.and_then(|v|v.get("warnings")),

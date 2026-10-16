@@ -580,6 +580,7 @@ mod tests {
                 manifest: crate::assets::sha256(&crate::cloud_append::manifest("library").unwrap()).0,
                 frontiers: lightcraft_catalog::replication::publication_prefixes(outcome.state()).unwrap(),
                 remote: outcome.state().clone(),
+                scan: Default::default(),
                 gaps: Default::default(),
             },
             BTreeSet::new(),
@@ -949,6 +950,7 @@ mod tests {
                 manifest: crate::assets::sha256(&crate::cloud_append::manifest("library").unwrap()).0,
                 frontiers: lightcraft_catalog::replication::publication_prefixes(outcome.state()).unwrap(),
                 remote: outcome.state().clone(),
+                scan: Default::default(),
                 gaps: Default::default(),
             };
             *outcome = Outcome::append(p, outcome.acknowledged().clone());

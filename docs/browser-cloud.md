@@ -287,3 +287,18 @@ images, workers and transport/storage copies incur additional costs. Status expo
 Preview selection uses a cache-only original lookup; choosing a smart preview does
 not incidentally schedule an original download. Full-original export still requires
 verified original bytes.
+
+
+Append polling uses the shared CR.10 consumed-checkpoint and resumable historical-audit policy
+specified in [cloud-sync-protocol.md](cloud-sync-protocol.md#cr10-append-discovery-and-historical-audit-budgets).
+Ordinary polls discover new checkpoint keys and author tails; historical integrity work runs in
+bounded slices and its device-local cursor is saved in OPFS/IndexedDB with append progress.
+`cloud.syncStatus.appendAudit` distinguishes a partial audit from a completed round.
+
+
+2026-10-16 CR.10 acceptance: actual Chromium OPFS and IndexedDB resumed the same historical-audit
+round after reload (64 then 35 record GETs after the first 64-record slice of a 162-operation history).
+Three subsequent automatic polls per backend made 12 manifest/LIST requests and no covered operation,
+checkpoint or receipt-node GETs. All fixture requests were signed; no page errors occurred. See the
+[dated reliability evidence](cloud-reliability-tasks.md). This is loopback acceptance, not a live B2
+or large-photo-library performance result.

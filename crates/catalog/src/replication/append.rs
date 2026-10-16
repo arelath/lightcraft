@@ -29,6 +29,73 @@ pub struct AppendProgress {
     pub remote: Portable,
     #[serde(default)]
     pub gaps: BTreeSet<String>,
+    /// Device-local discovery evidence. Never adopted from a remote checkpoint.
+    #[serde(default, skip_serializing_if = "AppendScan::is_empty")]
+    pub scan: AppendScan,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppendScan {
+    pub checkpoints: BTreeSet<String>,
+    pub audit: AppendAudit,
+}
+impl AppendScan {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+    fn validate(&self) -> Result<()> {
+        if self.checkpoints.len() > super::MAX_RECORDS
+            || self.checkpoints.iter().any(|key| !scan_key(key, "checkpoints"))
+            || self.audit.after.as_ref().is_some_and(|key| !scan_key(key, "checkpoints") && !scan_key(key, "ops"))
+            || (self.audit.round == 0 && self.audit != AppendAudit::default())
+        {
+            return Err(invalid("invalid append discovery evidence; local work retained"));
+        }
+        Ok(())
+    }
+    fn merge(&self, incoming: &Self) -> Result<Self> {
+        let mut checkpoints = self.checkpoints.clone();
+        checkpoints.extend(incoming.checkpoints.iter().cloned());
+        let audit = std::cmp::max(&self.audit, &incoming.audit).clone();
+        let merged = Self { checkpoints, audit };
+        merged.validate()?;
+        Ok(merged)
+    }
+}
+fn scan_key(key: &str, namespace: &str) -> bool {
+    if key.len() > 256 {
+        return false;
+    }
+    let parts: Vec<_> = key.split('/').collect();
+    match parts.as_slice() {
+        [kind, author, name] if *kind == namespace && identifier(author) && author.len() <= 96 => {
+            let Some(name) = name.strip_suffix(".json") else { return false };
+            if namespace == "checkpoints" {
+                hash(name)
+            } else {
+                name.split_once('-').is_some_and(|(sequence, digest)| {
+                    sequence.len() == 20
+                        && sequence.bytes().all(|b| b.is_ascii_digit())
+                        && sequence.parse::<u64>().is_ok_and(|n| n > 0)
+                        && hash(digest)
+                })
+            }
+        }
+        _ => false,
+    }
+}
+/// Ordered so a late completion cannot move an audit backward.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppendAudit {
+    pub round: u64,
+    pub complete: bool,
+    pub after: Option<String>,
+}
+impl Default for AppendAudit {
+    fn default() -> Self {
+        Self { round: 0, complete: true, after: None }
+    }
 }
 pub fn hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
@@ -84,11 +151,19 @@ impl AppendProgress {
         let mut gaps = self.gaps.clone();
         gaps.extend(incoming.gaps.iter().cloned());
         gaps.retain(|id| !stamp(id).is_ok_and(|s| frontiers.get(&s.device).copied().unwrap_or(0) >= s.sequence));
-        let merged = Self { version: 1, manifest: self.manifest.clone(), frontiers, remote, gaps: gaps.into_iter().take(1000).collect() };
+        let merged = Self {
+            version: 1,
+            manifest: self.manifest.clone(),
+            frontiers,
+            remote,
+            gaps: gaps.into_iter().take(1000).collect(),
+            scan: self.scan.merge(&incoming.scan)?,
+        };
         merged.validate(&merged.remote.library)?;
         Ok(merged)
     }
     pub fn validate(&self, library: &str) -> Result<()> {
+        self.scan.validate()?;
         if self.version != 1
             || !hash(&self.manifest)
             || self.remote.library != library
@@ -107,6 +182,7 @@ impl AppendProgress {
         self.validate(&self.remote.library)?;
         let mut durable = self.clone();
         durable.remote.proofs.clear();
+        durable.scan = AppendScan::default();
         let bytes = serde_json::to_vec(&durable).map_err(|e| invalid(&e.to_string()))?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
@@ -120,10 +196,41 @@ mod tests {
 
     fn progress(state: &SyncState) -> AppendProgress {
         let remote = state.portable();
-        AppendProgress { version: 1, manifest: "a".repeat(64), frontiers: prefixes(&remote).unwrap(), remote, gaps: BTreeSet::new() }
+        AppendProgress {
+            version: 1,
+            manifest: "a".repeat(64),
+            frontiers: prefixes(&remote).unwrap(),
+            remote,
+            scan: Default::default(),
+            gaps: BTreeSet::new(),
+        }
     }
     fn edit(state: &mut SyncState, field: &str, value: u8) {
         state.enqueue(vec![Change { entity: "photo:one".into(), field: field.into(), base: None, value: json!(value) }]).unwrap();
+    }
+    #[test]
+    fn discovery_progress_is_monotonic_local_and_not_part_of_publication_identity() {
+        let state = SyncState::new("library".into(), "a".into(), "storage".into()).unwrap();
+        let old = progress(&state);
+        let mut newer = old.clone();
+        newer.scan.checkpoints.insert(format!("checkpoints/a/{}.json", "b".repeat(64)));
+        newer.scan.audit = AppendAudit { round: 1, complete: false, after: newer.scan.checkpoints.first().cloned() };
+        assert_eq!(newer.digest().unwrap(), old.digest().unwrap());
+        assert_eq!(old.merge(&newer).unwrap(), newer.merge(&old).unwrap());
+        let mut complete = newer.clone();
+        complete.scan.audit.complete = true;
+        assert_eq!(complete.merge(&newer).unwrap().scan, complete.scan);
+        let mut next = newer.clone();
+        next.scan.audit = AppendAudit { round: 2, complete: false, after: None };
+        assert_eq!(complete.merge(&next).unwrap().scan.audit, next.scan.audit);
+        let mut invalid = old.clone();
+        invalid.scan.checkpoints.insert("checkpoints/a/../evil".into());
+        assert!(invalid.validate("library").is_err());
+        let bytes = serde_json::to_vec(&old).unwrap();
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap().get("scan").is_none(),
+            "legacy checkpoint wire representation stays unchanged"
+        );
     }
     #[test]
     fn completion_order_cannot_regress_frontiers_remote_effects_or_resolved_gaps() {

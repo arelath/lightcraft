@@ -213,8 +213,8 @@ fn op_variants_are_versioned() {
             Op::SetAsset { .. } => 8,
             Op::SetUploadIntent { .. } => 17,
             Op::SetCloudIdentity { .. } | Op::SetWorkingCopy { .. } => 10,
-            Op::SetSyncState { .. } | Op::SetAlbumRules { .. } | Op::AddAlbum { .. } => 15,
-            Op::PatchSyncState { .. } => 18,
+            Op::SetAlbumRules { .. } | Op::AddAlbum { .. } => 15,
+            Op::SetSyncState { .. } | Op::PatchSyncState { .. } => 19,
         }
     }
     let state = replication::SyncState::new("library".into(), "author".into(), "connection".into()).unwrap();

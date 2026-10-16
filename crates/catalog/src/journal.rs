@@ -61,6 +61,7 @@
 //! | 16 | Durable receipt finalization | Device-local exact proof queue committed with shared upload acknowledgements |
 //! | 17 | Blocked upload preparation | Durable per-import reasons and verification retry mode without revoking ACKs |
 //! | 18 | Synchronization deltas | Atomic field/register, receipt, outbox and append-publication journal patches |
+//! | 19 | Append discovery | Device-local consumed checkpoints and resumable bounded identity audits |
 //!
 //! Rules:
 //! - **Bump [`VERSION`]** (and add a row above) in the change that adds an [`Op`] variant or a
@@ -85,7 +86,7 @@ pub const LOG: &str = "catalog.log";
 const FORMAT: &str = "lightcraft-catalog";
 /// The catalog format this build writes (and the newest it reads). See the module docs →
 /// *Format versions*; bump it whenever an [`Op`] variant or a serialized field is added.
-pub const VERSION: u32 = 18;
+pub const VERSION: u32 = 19;
 
 /// When [`Journal::wants_snapshot`] says it's time to compact the log.
 #[derive(Clone, Copy, Debug)]

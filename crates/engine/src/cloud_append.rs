@@ -112,19 +112,27 @@ pub fn immutable_blob(blob: &Blob) -> Result<()> {
 pub struct Planner {
     pub remote: SyncState,
     pub proofs: lightcraft_catalog::replication::archive::Witness,
+    pub scan: lightcraft_catalog::replication::AppendScan,
     staged: BTreeMap<String, Mutation>,
     staged_bytes: usize,
     manifest: String,
 }
 impl Planner {
-    pub fn new(local: &SyncState, audit: bool) -> Result<Self> {
+    pub fn new(local: &SyncState) -> Result<Self> {
         local.validate().map_err(ce)?;
         let mut remote = SyncState::new(local.library.clone(), "remote".into(), local.connection.clone()).map_err(ce)?;
-        if !audit && let Some(progress) = &local.append {
+        if let Some(progress) = &local.append {
             progress.validate(&local.library).map_err(ce)?;
             remote = SyncState::restore_durable(&progress.remote, "remote".into(), local.connection.clone()).map_err(ce)?;
         }
-        Ok(Self { remote, proofs: BTreeMap::new(), staged: BTreeMap::new(), staged_bytes: 0, manifest: sha256(&manifest(&local.library)?).0 })
+        Ok(Self {
+            remote,
+            proofs: BTreeMap::new(),
+            scan: local.append.as_ref().map(|p| p.scan.clone()).unwrap_or_default(),
+            staged: BTreeMap::new(),
+            staged_bytes: 0,
+            manifest: sha256(&manifest(&local.library)?).0,
+        })
     }
     pub fn checkpoint(&mut self, bytes: &[u8]) -> Result<()> {
         if bytes.len() > MAX_OBJECT {
@@ -193,6 +201,7 @@ impl Planner {
             frontiers: publication_prefixes(&self.remote.portable()).map_err(ce)?,
             remote: self.remote.portable(),
             gaps: self.staged.keys().take(1000).cloned().collect(),
+            scan: self.scan.clone(),
         };
         p.validate(&self.remote.library).map_err(ce)?;
         Ok(p)
@@ -213,6 +222,7 @@ impl Planner {
     }
 }
 
+pub mod discovery;
 pub mod listing;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod migration;
@@ -242,7 +252,7 @@ mod tests {
         let mut b = state("b");
         b.receive(&second).unwrap();
         let dependent = edit(&mut b, 3);
-        let mut planner = Planner::new(&a, true).unwrap();
+        let mut planner = Planner::new(&a).unwrap();
         planner.stage(second.clone()).unwrap();
         planner.stage(dependent).unwrap();
         let incomplete = planner.progress().unwrap();
@@ -266,7 +276,7 @@ mod tests {
     fn remote_only_checkpoint_and_exact_ack_preserve_unsent_work_and_restored_ids() {
         let mut a = state("a");
         let first = edit(&mut a, 1);
-        let mut planner = Planner::new(&a, true).unwrap();
+        let mut planner = Planner::new(&a).unwrap();
         planner.stage(first.clone()).unwrap();
         let p = planner.progress().unwrap();
         let second = edit(&mut a, 2);
@@ -304,16 +314,16 @@ mod tests {
         let mut b = state("b");
         let first = edit(&mut a, 1);
         let second = edit(&mut b, 3);
-        let mut pa = Planner::new(&a, true).unwrap();
+        let mut pa = Planner::new(&a).unwrap();
         pa.stage(first).unwrap();
         let ca = pa.progress().unwrap();
-        let mut pb = Planner::new(&b, true).unwrap();
+        let mut pb = Planner::new(&b).unwrap();
         pb.stage(second).unwrap();
         let cb = pb.progress().unwrap();
         let mut local = state("third");
         local.merge(&ca.remote).unwrap();
         let unsent = edit(&mut local, 5);
-        let mut p = Planner::new(&local, true).unwrap();
+        let mut p = Planner::new(&local).unwrap();
         p.checkpoint(&encode(&ca).unwrap()).unwrap();
         p.checkpoint(&encode(&cb).unwrap()).unwrap();
         let merged = p.progress().unwrap();

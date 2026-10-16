@@ -95,6 +95,8 @@ impl Outcome {
                 value["outcome"] = json!("append");
                 value["frontiers"] = json!(&progress.frontiers);
                 value["gaps"] = json!(&progress.gaps);
+                value["consumedCheckpoints"] = json!(progress.scan.checkpoints.len());
+                value["audit"] = json!(&progress.scan.audit);
             }
         }
         if let Some(position) = self.head_position() {
@@ -136,6 +138,7 @@ mod tests {
             manifest: "b".repeat(64),
             frontiers: Default::default(),
             remote: state.portable(),
+            scan: Default::default(),
             gaps: Default::default(),
         };
         let append = Outcome::append(progress, BTreeSet::new());

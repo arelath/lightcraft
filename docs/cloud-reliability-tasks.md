@@ -14,7 +14,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.7 — Define and test oversized-entity bootstrap behavior, especially large album membership sets; implement streaming or an explicit actionable product limit.
 - [x] CR.8 — Make unchanged conditional-head synchronization a genuine local no-op (no materialization, state operation, or journal write without change, acknowledgement, or progress).
 - [x] CR.9 — Index global-to-local identities once, materialize changed entities, and persist synchronization deltas. Measure unchanged 10,000- and 50,000-photo request counts, journal growth, state size, and owner-thread latency.
-- [ ] CR.10 — Track consumed append checkpoints and avoid downloading unchanged covered history. Separate budgeted integrity audits from ordinary polls; test remote request counts.
+- [x] CR.10 — Track consumed append checkpoints and avoid downloading unchanged covered history. Separate budgeted integrity audits from ordinary polls; test remote request counts.
 - [ ] CR.11 — Enforce one immutable published asset-manifest contract with device-local connection binding; test permitted/rejected descriptor changes and extract shared blob rebinding.
 - [ ] CR.12 — Replace subtractive catalog JSON projection/materialization with explicit portable photo, content, album, and reference types and typed boundary conversions; retain wire compatibility tests.
 - [ ] CR.13 — Extract testable upload readiness, transfer, verification, dependency waiting, publication, acknowledgement, and failure transitions; test deletion/restart behavior.
@@ -1089,3 +1089,65 @@ run was stopped to correct the held-result test setup; it is superseded by this
 complete final-source run. CR.9 is complete and checked off. CR.10-CR.21 remain
 open; the measured startup/changed-result costs and scale limitations above remain
 explicit, rather than claiming general large-library responsiveness.
+
+
+2026-10-16 — CR.10 implementation and focused verification:
+
+Append progress now retains only locally verified checkpoint keys and a resumable historical
+identity-audit round/key cursor. Ordinary discovery still rescans all checkpoint pages and author
+roots, then reads unseen checkpoints and operation tails strictly beyond certified publication
+frontiers. Audit/checkpoint requests retain the previously verified remote projection instead of
+rebuilding it from zero. Old identities, including forks below the tail boundary, are verified in
+separate slices. Native and browser share the same 64-record, 16-list-page and 8 MiB payload-stop
+policy. A single object may exceed the byte target up to its existing object bound, and authenticated
+archive nodes retain their separate path/cache bounds. New data/bootstrap is outside this historical
+budget. No remote records are removed or receipt protections relaxed.
+
+Audit progress is durable and monotonic under late completions. Consumption hints from remote
+checkpoints are ignored and local hints are excluded from published checkpoints and publication
+proof hashes. Local format 19 protects older readers; journal patches record new checkpoint keys
+and cursor changes without copying the consumed-key set. Status and sync reports expose audit
+round/cursor/completion and consumed checkpoint counts.
+
+The 17 real-CLI append regressions passed (`target/cloud-reliability/cr10-cli-accepted.log`). At 16
+and 256 seeded historical mutations, one complete audit plus three idle polls fetched each operation
+and checkpoint exactly once across the whole sequence. A 160-record audit resumed across separate
+CLI processes with at most 64 history GETs per slice. A later old-identity fork and corruption of an
+already-consumed checkpoint failed without changing durable progress or pending work. Existing
+causal gaps, paginated author discovery, immutable publication, lost responses, retained deleted
+imports, shared bulk ACKs and restored-author regressions also passed. The old root-rescan test
+allowed audit discovery in the same scan, while retaining its next-scan convergence assertion.
+The 31 catalog replication tests passed, including monotonic audit merge, legacy wire compatibility
+and bounded journal delta/replay/inverse checks (`target/cloud-reliability/cr10-catalog-final.log`).
+All 238 catalog tests also passed (one explicit benchmark ignored; `target/cloud-reliability/cr10-catalog-all.log`).
+A real-CLI late-checkpoint fixture reproduced stranded staged-operation gaps before the correction.
+Audit now defers an unseen checkpoint to the next discovery pass, which merges it before staging
+operation tails. The regression passes after the correction. A preliminary full CI run passed all
+eight gates before this final race correction; final-source CI and browser acceptance are pending.
+CR.10 remains unchecked until both finish.
+
+
+Final-source browser acceptance passed in actual Chromium on OPFS and IndexedDB, using the native
+signed fixture with a 162-operation compacted album history (`target/cloud-reliability/cr10-browser-pass.log`,
+`cr10-browser-results.json`; scratch `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr10-browser/browser-7afbe3eb/`).
+Each browser stopped at sequence 63, reloaded, resumed the same audit round with 64 then 35 history
+GETs, and completed at sequence 162. No operation/checkpoint was downloaded twice across those
+resumed slices. Three subsequent automatic polls in each backend used 12 requests total (manifest
+and discovery LISTs) and zero operation, checkpoint or receipt-node GETs. All 2,269 fixture requests
+were signed; no browser page errors occurred. Rendered app states were inspected (`opfs-audit.png`,
+`idb-audit.png`), including the paused cloud popup. The harness was corrected to observe the automatic
+poll started by Resume rather than racing it with a second explicit Sync. The final-source optimized
+WASM bundle built successfully (`cr10-web-final.log`). Final-source full CI remains the last gate.
+
+Limitations: checkpoint/root/author listings and state merges remain bounded linear work. A completed
+poll does not claim a completed history audit; the round/cursor/completion status is explicit. Requests
+for new data/bootstrap and archive-witness fetches have their separate existing bounds. This acceptance
+uses loopback storage and a small metadata fixture; it is not live-provider or 50,000-photo performance
+evidence. Remote retention/reclamation policy is unchanged.
+
+
+Final CR.10 gate: `cargo +1.95.0 xtask ci` passed all eight steps on the final source
+(fmt, clippy, heif, workspace tests, parity, layers, assets, wasm;
+`target/cloud-reliability/cr10-ci-verified.log`). This supersedes the earlier preliminary/stopped
+runs. No source changes followed this passing run. CR.10 is complete and checked off;
+CR.11–CR.21 remain unchecked and will be handled separately.

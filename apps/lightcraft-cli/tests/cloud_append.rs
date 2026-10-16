@@ -19,6 +19,146 @@ fn config(f: &Fixture) -> Value {
 fn catalog(p: &Path) -> lightcraft_engine::catalog::Catalog {
     Journal::open(Box::new(FsStore::open(p).unwrap())).unwrap().1
 }
+/// The fixture stores real immutable records; only their remote arrival is synthetic.
+fn seed_checkpoint(f: &Fixture, path: &Path, count: usize) -> (Mutation, usize) {
+    use lightcraft_engine::{
+        catalog::replication::{AppendProgress, SyncState},
+        cloud_append as append,
+    };
+    let catalog = catalog(path);
+    let local = catalog.sync_state().unwrap();
+    let mut remote = SyncState::restore_durable(&local.append.as_ref().unwrap().remote, "000-history".into(), "personal".into()).unwrap();
+    let mut first = None;
+    let mut objects = Vec::new();
+    for n in 0..count {
+        let m = remote
+            .enqueue(vec![Change {
+                entity: format!("library:{}", local.library),
+                field: "label.Red".into(),
+                base: None,
+                value: json!(format!("history {n}")),
+            }])
+            .unwrap()
+            .unwrap();
+        first.get_or_insert_with(|| m.clone());
+        objects.push((format!("/photos/{}", append::mutation_key("library", &m).unwrap()), append::encode(&m).unwrap()));
+    }
+    let progress = AppendProgress {
+        version: 1,
+        manifest: local.append.as_ref().unwrap().manifest.clone(),
+        frontiers: remote.clock.clone(),
+        remote: remote.portable(),
+        gaps: Default::default(),
+        scan: Default::default(),
+    };
+    let bytes = append::discovery::checkpoint_bytes(&progress).unwrap();
+    let key = format!(
+        "/photos/{}/checkpoints/000-history/{}.json",
+        append::root("library", &local.library).unwrap(),
+        lightcraft_engine::assets::sha256(&bytes).0
+    );
+    let mut state = f.state.lock().unwrap();
+    state.list_page_size = 17;
+    state.objects.extend(objects);
+    state.objects.insert(key, bytes);
+    let operations = state.objects.keys().filter(|key| key.contains("/ops/")).count();
+    state.requests.clear();
+    (first.unwrap(), operations)
+}
+fn history_gets(f: &Fixture) -> Vec<String> {
+    f.state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|(method, key)| method == "GET" && !key.contains('?') && (key.contains("/ops/") || key.contains("/checkpoints/")))
+        .map(|(_, key)| key.clone())
+        .collect()
+}
+#[test]
+fn consumed_checkpoints_and_covered_history_are_not_downloaded_by_ordinary_polls() {
+    for count in [16, 256] {
+        let f = Fixture::new();
+        let (_, b, _) = initialize(&f);
+        let (_, operations) = seed_checkpoint(&f, &b, count);
+        // One requested audit, enough slices to finish it, then three idle polls.
+        let mut commands = vec![("cloud.sync", json!({"audit":true}))];
+        commands.extend((0..(operations / 64 + 4)).map(|_| ("cloud.sync", json!({"audit":false}))));
+        let rows = ok(&f, &b, &commands);
+        let progress = catalog(&b).sync_state().unwrap().append.clone().unwrap();
+        assert!(progress.scan.audit.complete);
+        assert_eq!(progress.scan.audit.round, 2);
+        assert_eq!(progress.scan.checkpoints.len(), 1);
+        let gets = history_gets(&f);
+        assert_eq!(gets.len(), operations + 1, "history size {count}: {gets:?}");
+        assert_eq!(gets.iter().collect::<std::collections::BTreeSet<_>>().len(), gets.len(), "no repeated history GET within an audit pass");
+        assert!(rows.iter().all(|row| row["result"]["audit"]["round"] == 2), "{rows:?}");
+        assert!(rows.iter().rev().take(3).all(|row| row["result"]["audit"]["complete"] == true));
+        assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+        let before = catalog(&b).sync_state().unwrap().clone();
+        {
+            let mut remote = f.state.lock().unwrap();
+            let checkpoint = remote.objects.keys().find(|key| key.contains("/checkpoints/")).unwrap().clone();
+            remote.objects.insert(checkpoint, b"corrupt consumed checkpoint".to_vec());
+        }
+        let (out, _) = f.run(&b, &[("cloud.sync", json!({"audit":true}))]);
+        assert!(!out.status.success(), "deliberate later verification still detects corruption");
+        assert_eq!(catalog(&b).sync_state().unwrap(), &before);
+    }
+}
+#[test]
+fn bounded_audit_resumes_after_restart_and_rejects_an_old_identity_fork() {
+    let f = Fixture::new();
+    let (_, b, _) = initialize(&f);
+    let (mut first, operations) = seed_checkpoint(&f, &b, 160);
+    let mut cursor = None;
+    for slice in 0..8 {
+        let before = history_gets(&f).len();
+        ok(&f, &b, &[("cloud.sync", json!({"audit":true}))]);
+        let loaded = catalog(&b);
+        let progress = loaded.sync_state().unwrap().append.as_ref().unwrap();
+        assert_eq!(progress.scan.audit.round, 2);
+        assert!(history_gets(&f).len() - before <= 64);
+        assert!(progress.scan.audit.after > cursor);
+        cursor = progress.scan.audit.after.clone();
+        if progress.scan.audit.complete {
+            assert!(slice > 0);
+            break;
+        }
+    }
+    let loaded = catalog(&b);
+    assert!(loaded.sync_state().unwrap().append.as_ref().unwrap().scan.audit.complete);
+    let gets = history_gets(&f);
+    assert_eq!(gets.len(), operations + 1);
+    assert_eq!(gets.iter().collect::<std::collections::BTreeSet<_>>().len(), gets.len());
+    first.changes[0].value = json!("old author fork");
+    let fork_key = format!("/photos/{}", lightcraft_engine::cloud_append::mutation_key("library", &first).unwrap());
+    f.state.lock().unwrap().objects.insert(fork_key, lightcraft_engine::cloud_append::encode(&first).unwrap());
+    let before = loaded.sync_state().unwrap().clone();
+    let (out, rows) = f.run(&b, &[("cloud.sync", json!({"audit":true}))]);
+    assert!(!out.status.success());
+    assert!(rows[0]["error"].to_string().contains("collision"), "{rows:?}");
+    assert_eq!(catalog(&b).sync_state().unwrap(), &before, "failed audit never saves its cursor or discards local work");
+}
+#[test]
+fn checkpoint_arriving_between_discovery_and_audit_waits_for_the_next_discovery_scan() {
+    let f = Fixture::new();
+    let (_, b, _) = initialize(&f);
+    seed_checkpoint(&f, &b, 16);
+    {
+        let mut remote = f.state.lock().unwrap();
+        let key = remote.objects.keys().find(|key| key.contains("/checkpoints/")).unwrap().clone();
+        let bytes = remote.objects.remove(&key).unwrap();
+        remote.late_object = Some((key, bytes));
+        remote.list_page_size = 1;
+    }
+    let rows = ok(&f, &b, &[("cloud.sync", json!({"audit":true})), ("cloud.sync", json!({"audit":false}))]);
+    assert_eq!(rows[0]["result"]["gaps"], json!([]), "a late checkpoint must not strand the already downloaded operation tail");
+    assert_eq!(rows[0]["result"]["consumedCheckpoints"], 0, "audit does not consume newly discovered checkpoints between tail staging and draining");
+    assert_eq!(rows[1]["result"]["gaps"], json!([]));
+    assert_eq!(rows[1]["result"]["consumedCheckpoints"], 1);
+    assert!(f.state.lock().unwrap().late_object.is_none());
+}
 #[test]
 fn archive_checkpoint_acknowledges_old_pending_and_rejects_a_late_fork_without_losing_work() {
     let f = Fixture::new();
@@ -336,7 +476,8 @@ fn root_rescan_discovers_an_author_inserted_before_the_previous_page_cursor() {
     let key = format!("/photos/{}", lightcraft_engine::cloud_append::mutation_key("library", &m).unwrap());
     f.state.lock().unwrap().late_object = Some((key, serde_json::to_vec(&m).unwrap()));
     ok(&f, &b, &[("cloud.sync", json!({}))]);
-    assert!(!catalog(&b).sync_state().unwrap().append.as_ref().unwrap().frontiers.contains_key("000-late"));
+    // The independent history-audit listing may discover this insertion in the
+    // same scan. Either way, the next root scan must include the earlier author.
     ok(&f, &b, &[("cloud.sync", json!({}))]);
     assert_eq!(catalog(&b).sync_state().unwrap().append.as_ref().unwrap().frontiers.get("000-late"), Some(&1));
     assert_eq!(catalog(&b).custom_label_name(lightcraft_engine::catalog::ColorLabel::Green), Some("Late author"));

@@ -160,6 +160,7 @@ mod tests {
             manifest: "a".repeat(64),
             frontiers: local.clock.clone(),
             remote: local.portable(),
+            scan: Default::default(),
             gaps: Default::default(),
         };
         local.acknowledge_append(&local.pending.keys().cloned().collect(), old).unwrap();
@@ -178,8 +179,14 @@ mod tests {
         let result = session.finish().unwrap();
         assert_eq!(result.stats.witness_checks, 0, "no remote archive fetch is needed");
         assert!(!result.remote.proofs.is_empty(), "generated paths must survive the certification session");
-        let incoming =
-            AppendProgress { version: 1, manifest: "a".repeat(64), frontiers: remote.clock.clone(), remote: result.remote, gaps: Default::default() };
+        let incoming = AppendProgress {
+            version: 1,
+            manifest: "a".repeat(64),
+            frontiers: remote.clock.clone(),
+            remote: result.remote,
+            scan: Default::default(),
+            gaps: Default::default(),
+        };
         local.merge(&incoming.remote).unwrap();
         local.acknowledge_append(&ids, incoming).unwrap();
         assert!(local.pending.is_empty());
@@ -206,6 +213,7 @@ mod tests {
             manifest: "a".repeat(64),
             frontiers: old.clock.clone(),
             remote: old.portable(),
+            scan: Default::default(),
             gaps: Default::default(),
         }));
         local.validate().unwrap();
@@ -220,8 +228,14 @@ mod tests {
         assert_eq!(result.stats.forest_builds, 3);
         assert_eq!(result.stats.witness_checks, 1);
         assert_eq!(result.stats.state_merges, 2);
-        let incoming =
-            AppendProgress { version: 1, manifest: "a".repeat(64), frontiers: remote.clock.clone(), remote: result.remote, gaps: Default::default() };
+        let incoming = AppendProgress {
+            version: 1,
+            manifest: "a".repeat(64),
+            frontiers: remote.clock.clone(),
+            remote: result.remote,
+            scan: Default::default(),
+            gaps: Default::default(),
+        };
         local.acknowledge_append(&Default::default(), incoming).unwrap();
         assert_eq!(local.append.as_ref().unwrap().frontiers.get("author"), Some(&2));
     }

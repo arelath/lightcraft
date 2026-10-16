@@ -89,9 +89,10 @@ bounded by the existing library/causal limits, rather than a new time-based poli
 Archive writes are one immutable object per leaf/branch (roughly two per newly
 archived receipt). Initial maintenance can therefore make many provider requests;
 it runs in the synchronization worker. Operation audit pages stream with a bounded
-proof cache rather than accumulating all archived history in memory. Audits still
-read covered operations, and unchanged checkpoints are still fetched: request-count
-optimization and budgeted audits remain CR.10. Large-library/provider performance
+proof cache rather than accumulating all archived history in memory. CR.10 separates budgeted resumable integrity audits from ordinary discovery.
+Consumed checkpoint keys are retained locally; idle polls skip their GETs and
+covered operation bodies. Audits revisit them with durable round/key cursors;
+see the [protocol budgets](cloud-sync-protocol.md#cr10-append-discovery-and-historical-audit-budgets). Large-library/provider performance
 has not been established by small fixture acceptance.
 
 Remote reclamation remains separate and disabled. Retain checkpoints, archive nodes,

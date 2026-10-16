@@ -2,7 +2,7 @@
 use super::{Provider, protocol::Outcome};
 use core::listing::ListRequest;
 use lightcraft_engine::{assets::sha256, catalog::replication::SyncState, cloud_append as core};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 fn ce(e: lightcraft_engine::assets::AssetError) -> String {
     e.to_string()
 }
@@ -54,19 +54,14 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
     } else {
         provider.put_immutable(&manifest_key, &manifest).await?;
     }
-    let audit = audit || checkpoint || local.append.is_none();
-    let mut planner = core::Planner::new(local, audit).map_err(ce)?;
+    let mut planner = core::Planner::new(local).map_err(ce)?;
+    let mut fetched = BTreeMap::new();
     let (checkpoints, _) = scan(provider, list(format!("{root}/checkpoints/"), false)).await?;
     for key in checkpoints {
-        let bytes = get(provider, &key, core::MAX_OBJECT).await?;
-        core::immutable_metadata(&key, &bytes).map_err(ce)?;
-        let p: lightcraft_engine::catalog::replication::AppendProgress = serde_json::from_slice(&bytes).map_err(|_| "malformed append checkpoint")?;
-        p.validate(&local.library).map_err(|e| e.to_string())?;
-        if p.manifest != sha256(&core::manifest(&local.library).map_err(ce)?).0 || !p.gaps.is_empty() {
-            return Err("incomplete append checkpoint".into());
+        if !core::discovery::consumed(&planner, &root, &key).map_err(ce)? {
+            let size = read_checkpoint(provider, &mut planner, &root, &key).await?;
+            fetched.insert(key, size);
         }
-        let remote = super::history::certify(provider, &planner.remote, &p.remote, &mut planner.proofs).await?;
-        planner.remote.merge(&remote).map_err(|e| e.to_string())?;
     }
     let (_, authors) = scan(provider, list(format!("{root}/ops/"), true)).await?;
     if authors.len() > 4096 {
@@ -78,11 +73,9 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
             return Err("invalid append author".into());
         }
         let mut request = list(prefix.clone(), false);
-        if !audit {
-            let frontier = planner.remote.clock.get(author).copied().unwrap_or(0);
-            if frontier > 0 {
-                request.start_after = Some(format!("{prefix}{frontier:020}-"));
-            }
+        let frontier = planner.remote.clock.get(author).copied().unwrap_or(0);
+        if frontier > 0 {
+            request.start_after = Some(format!("{prefix}{frontier:020}."));
         }
         let mut tokens = BTreeSet::new();
         let mut complete = false;
@@ -92,15 +85,8 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
                 return Err("unexpected append operation prefixes".into());
             }
             for key in page.keys {
-                let bytes = get(provider, &key, lightcraft_engine::catalog::replication::MAX_MUTATION_BYTES).await?;
-                let m = core::decode_mutation(&provider.connection.prefix, &local.library, &key, &bytes).map_err(ce)?;
-                if lightcraft_engine::catalog::replication::archive::covers(&planner.remote.archives, &m.revision.id()) {
-                    super::history::prove(provider, &planner.remote, &m, &mut planner.proofs).await?;
-                }
-                planner.stage(m).map_err(ce)?;
-                if planner.proofs.len() > 8192 {
-                    planner.proofs.clear();
-                }
+                let size = read_operation(provider, &mut planner, &key).await?;
+                fetched.insert(key, size);
             }
             let Some(next) = page.next else {
                 complete = true;
@@ -116,6 +102,7 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
             return Err("too many append listing pages".into());
         }
     }
+    audit_history(provider, &mut planner, &root, audit || checkpoint || local.append.is_none(), &fetched).await?;
     planner.drain().map_err(ce)?;
     super::history::hydrate(provider, &mut planner.remote, local, &mut planner.proofs).await?;
     let mut pending: Vec<_> = local.pending.values().collect();
@@ -143,8 +130,11 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
     super::history::hydrate(provider, &mut planner.remote, local, &mut planner.proofs).await?;
     let mut p = planner.progress().map_err(ce)?;
     if checkpoint && p.gaps.is_empty() {
-        let bytes = core::encode(&p).map_err(ce)?;
-        provider.put_immutable(&format!("{root}/checkpoints/{}/{}.json", local.device, sha256(&bytes).0), &bytes).await?;
+        let bytes = core::discovery::checkpoint_bytes(&p).map_err(ce)?;
+        let key = format!("{root}/checkpoints/{}/{}.json", local.device, sha256(&bytes).0);
+        provider.put_immutable(&key, &bytes).await?;
+        core::discovery::consume(&mut planner, &root, &key).map_err(ce)?;
+        p.scan = planner.scan.clone();
     }
     p.remote = super::history::certify(provider, local, &p.remote, &mut planner.proofs).await?;
     Ok(Outcome::append(p, planner.acknowledged(local).map_err(ce)?))
@@ -154,7 +144,7 @@ pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, 
     if provider.connection.bucket_root.is_none() {
         return Err("migration requires bucketRoot and an append-capable signer".into());
     }
-    let mut planner = core::Planner::new(local, true).map_err(ce)?;
+    let mut planner = core::Planner::new(local).map_err(ce)?;
     let seed = super::protocol::migration_seed(provider, &local.library, &mut planner.proofs).await?;
     let seed = super::history::certify(provider, &planner.remote, &seed, &mut planner.proofs).await?;
     planner.remote.merge(&seed).map_err(|e| e.to_string())?;
@@ -162,9 +152,102 @@ pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, 
     provider
         .put_immutable(&core::manifest_key(&provider.connection.prefix, &local.library).map_err(ce)?, &core::manifest(&local.library).map_err(ce)?)
         .await?;
-    let bytes = core::encode(&p).map_err(ce)?;
+    let bytes = core::discovery::checkpoint_bytes(&p).map_err(ce)?;
     let root = core::root(&provider.connection.prefix, &local.library).map_err(ce)?;
-    provider.put_immutable(&format!("{root}/checkpoints/{}/{}.json", local.device, sha256(&bytes).0), &bytes).await?;
+    let key = format!("{root}/checkpoints/{}/{}.json", local.device, sha256(&bytes).0);
+    provider.put_immutable(&key, &bytes).await?;
+    core::discovery::consume(&mut planner, &root, &key).map_err(ce)?;
+    p.scan = planner.scan.clone();
     p.remote = super::history::certify(provider, local, &p.remote, &mut planner.proofs).await?;
     Ok(Outcome::append(p, Default::default()))
+}
+
+async fn read_checkpoint(provider: &Provider, planner: &mut core::Planner, root: &str, key: &str) -> Result<usize, String> {
+    let bytes = get(provider, key, core::MAX_OBJECT).await?;
+    core::immutable_metadata(key, &bytes).map_err(ce)?;
+    let p: lightcraft_engine::catalog::replication::AppendProgress = serde_json::from_slice(&bytes).map_err(|_| "malformed append checkpoint")?;
+    p.validate(&planner.remote.library).map_err(|e| e.to_string())?;
+    if p.manifest != sha256(&core::manifest(&planner.remote.library).map_err(ce)?).0 || !p.gaps.is_empty() {
+        return Err("incomplete append checkpoint".into());
+    }
+    let remote = super::history::certify(provider, &planner.remote, &p.remote, &mut planner.proofs).await?;
+    planner.remote.merge(&remote).map_err(|e| e.to_string())?;
+    core::discovery::consume(planner, root, key).map_err(ce)?;
+    Ok(bytes.len())
+}
+async fn read_operation(provider: &Provider, planner: &mut core::Planner, key: &str) -> Result<usize, String> {
+    let bytes = get(provider, key, lightcraft_engine::catalog::replication::MAX_MUTATION_BYTES).await?;
+    let mutation = core::decode_mutation(&provider.connection.prefix, &planner.remote.library, key, &bytes).map_err(ce)?;
+    if lightcraft_engine::catalog::replication::archive::covers(&planner.remote.archives, &mutation.revision.id()) {
+        super::history::prove(provider, &planner.remote, &mutation, &mut planner.proofs).await?;
+    }
+    planner.stage(mutation).map_err(ce)?;
+    if planner.proofs.len() > 8192 {
+        planner.proofs.clear();
+    }
+    Ok(bytes.len())
+}
+async fn audit_history(
+    provider: &Provider,
+    planner: &mut core::Planner,
+    root: &str,
+    requested: bool,
+    fetched: &BTreeMap<String, usize>,
+) -> Result<(), String> {
+    let mut audit = core::discovery::Audit::new(&planner.scan, requested).map_err(ce)?;
+    for namespace in ["checkpoints", "ops"] {
+        let Some(mut request) = audit.request(root, namespace) else { continue };
+        let mut tokens = BTreeSet::new();
+        let mut complete = false;
+        for _ in 0..core::MAX_RECORDS {
+            if !audit.start_page().map_err(ce)? {
+                audit.save(&mut planner.scan);
+                return Ok(());
+            }
+            let page = provider.list(&request).await?;
+            if !page.prefixes.is_empty() {
+                return Err("unexpected append audit prefixes".into());
+            }
+            for key in page.keys {
+                if !audit.available() {
+                    audit.save(&mut planner.scan);
+                    return Ok(());
+                }
+                // Only reverify consumed checkpoints here. A newly arriving
+                // checkpoint belongs to the next discovery pass, before tail
+                // staging; merging it now could strand covered staged records.
+                if namespace == "checkpoints" && !core::discovery::consumed(planner, root, &key).map_err(ce)? {
+                    audit.save(&mut planner.scan);
+                    return Ok(());
+                }
+                let size = if let Some(size) = fetched.get(&key) {
+                    *size
+                } else if namespace == "checkpoints" {
+                    read_checkpoint(provider, planner, root, &key).await?
+                } else {
+                    read_operation(provider, planner, &key).await?
+                };
+                audit.verified(root, &key, size).map_err(ce)?;
+            }
+            let Some(next) = page.next else {
+                audit.finished(namespace);
+                complete = true;
+                break;
+            };
+            if !audit.available() {
+                audit.save(&mut planner.scan);
+                return Ok(());
+            }
+            if !tokens.insert(next.clone()) {
+                return Err("repeated continuation token".into());
+            }
+            request.continuation = Some(next);
+            request.start_after = None;
+        }
+        if !complete {
+            return Err("too many append audit pages".into());
+        }
+    }
+    audit.save(&mut planner.scan);
+    Ok(())
 }

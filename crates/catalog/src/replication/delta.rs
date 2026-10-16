@@ -190,24 +190,43 @@ struct AppendHeader {
     manifest: String,
     frontiers: Clock,
     gaps: BTreeSet<String>,
+    #[serde(default)]
+    audit: AppendAudit,
 }
 impl From<&AppendProgress> for AppendHeader {
     fn from(value: &AppendProgress) -> Self {
-        Self { version: value.version, manifest: value.manifest.clone(), frontiers: value.frontiers.clone(), gaps: value.gaps.clone() }
+        Self {
+            version: value.version,
+            manifest: value.manifest.clone(),
+            frontiers: value.frontiers.clone(),
+            gaps: value.gaps.clone(),
+            audit: value.scan.audit.clone(),
+        }
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum AppendDelta {
-    Replace { value: Edit<Option<Box<AppendProgress>>> },
-    Patch { header: Edit<AppendHeader>, remote: Box<PortableDelta> },
+    Replace {
+        value: Edit<Option<Box<AppendProgress>>>,
+    },
+    Patch {
+        header: Box<Edit<AppendHeader>>,
+        remote: Box<PortableDelta>,
+        #[serde(default)]
+        checkpoints: MapDelta<bool>,
+    },
+}
+fn checkpoint_map(progress: &AppendProgress) -> BTreeMap<String, bool> {
+    progress.scan.checkpoints.iter().cloned().map(|key| (key, true)).collect()
 }
 impl AppendDelta {
     fn between(before: &Option<Box<AppendProgress>>, after: &Option<Box<AppendProgress>>) -> Self {
         match (before.as_deref(), after.as_deref()) {
             (Some(before), Some(after)) => Self::Patch {
-                header: Edit { before: before.into(), after: after.into() },
+                header: Box::new(Edit { before: before.into(), after: after.into() }),
                 remote: Box::new(PortableDelta::between(&before.remote, &after.remote)),
+                checkpoints: difference(&checkpoint_map(before), &checkpoint_map(after)),
             },
             _ => Self::Replace { value: Edit { before: before.clone(), after: after.clone() } },
         }
@@ -215,17 +234,24 @@ impl AppendDelta {
     fn updated(&self, base: &Option<Box<AppendProgress>>) -> Result<Option<Box<AppendProgress>>> {
         match self {
             Self::Replace { value } if base == &value.before => Ok(value.after.clone()),
-            Self::Patch { header, remote } => {
+            Self::Patch { header, remote, checkpoints } => {
                 let base = base
                     .as_deref()
                     .filter(|base| AppendHeader::from(*base) == header.before)
                     .ok_or_else(|| invalid("append delta has no matching base"))?;
                 let next = &header.after;
+                let mut consumed = checkpoint_map(base);
+                check(&consumed, checkpoints)?;
+                if checkpoints.values().any(|edit| edit.after == Some(false)) {
+                    return Err(invalid("invalid consumed checkpoint delta"));
+                }
+                apply(&mut consumed, checkpoints);
                 Ok(Some(Box::new(AppendProgress {
                     version: next.version,
                     manifest: next.manifest.clone(),
                     frontiers: next.frontiers.clone(),
                     gaps: next.gaps.clone(),
+                    scan: AppendScan { checkpoints: consumed.into_keys().collect(), audit: next.audit.clone() },
                     remote: remote.updated(&base.remote)?,
                 })))
             }
@@ -235,7 +261,9 @@ impl AppendDelta {
     fn inverse(&self) -> Self {
         match self {
             Self::Replace { value } => Self::Replace { value: value.inverse() },
-            Self::Patch { header, remote } => Self::Patch { header: header.inverse(), remote: Box::new(remote.inverse()) },
+            Self::Patch { header, remote, checkpoints } => {
+                Self::Patch { header: Box::new(header.inverse()), remote: Box::new(remote.inverse()), checkpoints: inverse(checkpoints) }
+            }
         }
     }
 }

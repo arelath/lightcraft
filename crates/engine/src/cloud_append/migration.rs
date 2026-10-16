@@ -23,6 +23,7 @@ pub(crate) fn seed(
         manifest: crate::assets::sha256(&super::manifest(&state.library).map_err(|e| error(e.to_string()))?).0,
         frontiers: publication_prefixes(&portable)?,
         remote: portable,
+        scan: Default::default(),
         gaps: Default::default(),
     };
     progress.validate(&state.library)?;
@@ -32,7 +33,7 @@ pub(crate) fn seed(
         cancel,
     )
     .map_err(|e| error(e.to_string()))?;
-    let bytes = super::encode(&progress).map_err(|e| error(e.to_string()))?;
+    let bytes = super::discovery::checkpoint_bytes(&progress).map_err(|e| error(e.to_string()))?;
     let key = format!(
         "{}/checkpoints/{}/{}.json",
         super::root(&conn.prefix, &state.library).map_err(|e| error(e.to_string()))?,
@@ -40,6 +41,8 @@ pub(crate) fn seed(
         crate::assets::sha256(&bytes).0
     );
     conn.put_immutable_verified(&key, &bytes, cancel).map_err(|e| error(e.to_string()))?;
+    let root = super::root(&conn.prefix, &state.library).map_err(|e| error(e.to_string()))?;
+    progress.scan.checkpoints.insert(super::discovery::relative(&root, &key).map_err(|e| error(e.to_string()))?.into());
     progress.remote = crate::cloud_history::native::certify(conn, state, &progress.remote, &mut proofs, cancel).map_err(|e| error(e.to_string()))?;
     Ok(crate::cloud_replication::Outcome::append(progress, Default::default()))
 }

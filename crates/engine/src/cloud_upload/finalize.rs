@@ -334,6 +334,7 @@ mod tests {
                 manifest: "a".repeat(64),
                 frontiers: lightcraft_catalog::replication::publication_prefixes(&remote).unwrap(),
                 remote,
+                scan: Default::default(),
                 gaps: BTreeSet::new(),
             };
             crate::cloud_sync::incoming_append(&s.catalog, progress, &ids).unwrap()

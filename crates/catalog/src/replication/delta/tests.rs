@@ -123,11 +123,18 @@ fn append_publication_remote_uses_field_deltas_and_preserves_proofs() {
         manifest: "a".repeat(64),
         frontiers: before.clock.clone(),
         remote: before.portable(),
+        scan: Default::default(),
         gaps: BTreeSet::new(),
     }));
     let mut after = edit(&before);
-    let progress =
-        AppendProgress { version: 1, manifest: "a".repeat(64), frontiers: after.clock.clone(), remote: after.portable(), gaps: BTreeSet::new() };
+    let progress = AppendProgress {
+        version: 1,
+        manifest: "a".repeat(64),
+        frontiers: after.clock.clone(),
+        remote: after.portable(),
+        scan: Default::default(),
+        gaps: BTreeSet::new(),
+    };
     after.acknowledge_append(&after.pending.keys().cloned().collect(), progress).unwrap();
     let proofs = after.archive_plan().unwrap().objects;
     assert!(!proofs.is_empty());
@@ -197,7 +204,7 @@ fn version_17_snapshot_upgrades_before_new_delta_records_are_written() {
     let (mut journal, mut loaded, report) = Journal::open(Box::new(store.clone())).unwrap();
     assert_eq!(report.upgraded_from, Some(17));
     let snapshot: serde_json::Value = serde_json::from_slice(&store.get(crate::journal::SNAPSHOT).unwrap()).unwrap();
-    assert_eq!(snapshot["version"], 18);
+    assert_eq!(snapshot["version"], 19);
     let op = Op::PatchSyncState { delta: Box::new(SyncDelta::between(&before, &after)) };
     loaded.apply(op.clone()).unwrap();
     journal.append(&[op]).unwrap();
@@ -205,4 +212,31 @@ fn version_17_snapshot_upgrades_before_new_delta_records_are_written() {
     let (_, reopened, report) = Journal::open(Box::new(store)).unwrap();
     assert_eq!(report.replayed, 1);
     assert_eq!(reopened.sync_state(), Some(&after));
+}
+
+#[test]
+fn append_scan_delta_only_records_new_checkpoint_keys_and_audit_cursor() {
+    let mut before = state();
+    before.protocol = SyncProtocol::AppendLog;
+    before.cursor = None;
+    before.generation = 0;
+    before.append = Some(Box::new(AppendProgress {
+        version: 1,
+        manifest: "a".repeat(64),
+        frontiers: before.clock.clone(),
+        remote: before.portable(),
+        gaps: BTreeSet::new(),
+        scan: Default::default(),
+    }));
+    for n in 0..1000 {
+        before.append.as_mut().unwrap().scan.checkpoints.insert(format!("checkpoints/a/{n:064x}.json"));
+    }
+    let mut after = before.clone();
+    let scan = &mut after.append.as_mut().unwrap().scan;
+    scan.checkpoints.insert(format!("checkpoints/b/{}.json", "b".repeat(64)));
+    scan.audit = AppendAudit { round: 1, complete: false, after: Some(format!("ops/a/{:020}-{}.json", 1, "c".repeat(64))) };
+    let delta = SyncDelta::between(&before, &after);
+    assert!(serde_json::to_vec(&delta).unwrap().len() < 4000);
+    assert_eq!(delta.updated(&before).unwrap(), after);
+    assert_eq!(delta.inverse().updated(&after).unwrap(), before);
 }

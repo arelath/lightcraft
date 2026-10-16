@@ -347,11 +347,12 @@ editing and export still work while publication is unavailable.
 ### Discovery, gaps and durable progress
 
 Use `ListObjectsV2` with the exact library `ops/` prefix and delimiter `/` to discover authors.
-For each author, list the suffix beginning at its last contiguous remotely verified sequence
-(inclusive), then fetch unknown records. Follow every continuation page. Restart discovery
+For each author, list the suffix strictly after its last contiguous remotely verified sequence,
+then fetch unknown records. Previously verified identities are checked separately by resumable audits. Follow every continuation page. Restart discovery
 from the root on later scans so an author inserted alphabetically before an earlier page
-cursor is still found. Run a complete identity audit at startup, explicit Sync now and
-periodically to detect an older duplicate/fork below an incremental boundary.
+cursor is still found. Start or continue a budgeted identity audit at startup, explicit Sync now and
+periodically to detect an older duplicate/fork below an incremental boundary. An individual
+Sync now completes one slice; it does not promise a complete historical audit.
 
 Maintain separate concepts:
 
@@ -518,11 +519,16 @@ For a new B2 library, configure native storage, then enable synchronization **be
 import: `cloud.syncEnable {"connection":"personal","protocol":"append-log-v1"}`. Join other
 catalogs with the same prefix, library ID and protocol. The shared setup dialog offers
 Append-only (Backblaze B2). Status reports author frontiers, gaps, pending work and conflicts;
-there is no append generation or shared-head cursor. Sync now performs a full identity audit;
-automatic polling uses inclusive author tails and audits again every five minutes and on startup.
+there is no append generation or shared-head cursor. Sync now requests an identity-audit slice;
+automatic polling uses exclusive verified author tails and starts audits every five minutes and on startup.
+An unfinished audit continues on subsequent polls without restarting its durable key cursor.
 The next automatic scan starts five seconds after completion, leaving time for explicit retry
 even when a remote scan lasts longer than the interval.
-All checkpoint pages are verified and merged; no listing-page snapshot guarantee is assumed.
+All checkpoint pages are discovered; unseen immutable checkpoints are hash-verified, causally certified
+and merged once per device before their exact keys are saved with remote progress. Their device-local
+consumption set and audit cursor are never adopted from remote checkpoints, transmitted in checkpoints
+or included in publication-proof identity. Later audits reverify consumed checkpoints. No listing-page
+snapshot guarantee is assumed. New keys inserted before an audit cursor are found in a later round.
 Staged dependencies are capped at 64 MiB, and up to 1,000 gap IDs are shown. Pending dependencies
 still exist in the retained log and are rediscovered on the next scan.
 
@@ -885,3 +891,26 @@ dispatch wall time separately. These are not end-to-end UI latency measurements.
 container clones and snapshots can still scale with retained state. See CR.9
 acceptance for exact fixture sizes, request counts, journal growth and timings;
 append checkpoint consumption/audits remain CR.10.
+
+
+### CR.10: append discovery and historical audit budgets
+
+Local catalog format 19 retains consumed checkpoint keys and a monotonic audit round/key cursor.
+The reader keeps its durable verified remote state during audits instead of reconstructing it from
+zero. Ordinary discovery still rescans author roots and every checkpoint listing page, but downloads
+only new checkpoints and operation tails beyond certified frontiers. Gaps never advance those
+frontiers. Audit slices share the same policy on native and browser transports: at most 64 history
+records, 16 audit listing pages and a stop after 8 MiB of record payload. A single valid object may cross that byte target
+(up to the existing 64 MiB checkpoint limit); Merkle witness fetches have their separate existing
+node/path/cache bounds. Bootstrap and newly arriving data are independent of this historical budget.
+Objects already fetched by discovery in the same scan are reused by the audit. A checkpoint first
+seen during an audit waits for the next ordinary discovery pass, before operation-tail staging;
+it cannot strand already downloaded records by changing their causal base midway through a scan.
+
+`cloud.syncStatus.appendAudit` and completed sync reports expose round, cursor and completion;
+`consumedCheckpoints` exposes the local consumption count. Audit cursors advance only with successful
+verified owner persistence and resume after restart. Late completions merge consumed keys and keep
+newer audit positions. A failed audit retains the prior durable cursor and pending work. An idle
+poll after an audit completes performs no covered-operation, checkpoint or archive GETs, though
+manifest reads and LIST discovery remain. Checkpoint listings, state validation/merging and discovery
+of many authors are still bounded linear work; this is not a general large-library latency claim.
