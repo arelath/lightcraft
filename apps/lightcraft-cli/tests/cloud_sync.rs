@@ -752,3 +752,98 @@ fn acknowledged_device_reads_only_new_batches_and_rebootstraps_when_cursor_expir
     let (_, catalog, _) = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&b).unwrap())).unwrap();
     assert_eq!(catalog.photo(lightcraft_catalog::PhotoId(1)).unwrap().rating, 4);
 }
+#[test]
+fn compacted_history_bootstrap_fetches_each_archive_node_once_at_small_and_large_sizes() {
+    use lightcraft_catalog::replication::{Change, Mutation, Register, Stamp, SyncState};
+    use std::collections::BTreeSet;
+    let mut counts = Vec::new();
+    for count in [64u64, 4096] {
+        let f = Fixture::new();
+        let (a, _, library) = initialize(&f);
+        success(&f, &a, &[("cloud.sync", json!({"checkpoint":true}))]);
+        {
+            let mut storage = f.state.lock().unwrap();
+            let mut head: Value = serde_json::from_slice(&storage.objects["/photos/library/catalog/head.json"]).unwrap();
+            let path = format!("/photos/{}", head["checkpoint"]["object"]["key"].as_str().unwrap());
+            let mut checkpoint: Value = serde_json::from_slice(&storage.objects[&path]).unwrap();
+            let portable = serde_json::from_value(checkpoint["state"].clone()).unwrap();
+            let mut state = SyncState::restore_durable(&portable, "remote".into(), "personal".into()).unwrap();
+            let context = state.clock.clone();
+            let entity = state.documents.keys().find(|entity| entity.starts_with("photo:")).unwrap().clone();
+            let mut mutations = Vec::new();
+            for sequence in 1..=count {
+                let mut context = context.clone();
+                if sequence > 1 {
+                    context.insert("scale".into(), sequence - 1);
+                }
+                let mutation = Mutation {
+                    version: 2,
+                    library: library.clone(),
+                    revision: Stamp { device: "scale".into(), sequence },
+                    context,
+                    changes: vec![Change { entity: entity.clone(), field: "rating".into(), base: None, value: json!(4) }],
+                };
+                mutation.validate().unwrap();
+                let receipt = lightcraft_engine::cloud_history::receipt(&mutation).unwrap();
+                let id = mutation.revision.id();
+                state.received.insert(id.clone(), receipt);
+                state.documents.get_mut(&entity).unwrap().insert("rating".into(), Register(BTreeMap::from([(id, json!(4))])));
+                mutations.push(mutation);
+            }
+            state.clock.insert("scale".into(), count);
+            state.validate().unwrap();
+            let plan = state.archive_plan().unwrap();
+            state.compact_receipts(&plan).unwrap();
+            for (hash, node) in plan.objects {
+                let key = lightcraft_engine::cloud_history::key("library", &library, &hash).unwrap();
+                storage.objects.insert(format!("/photos/{key}"), serde_json::to_vec(&node).unwrap());
+            }
+            let mut covers = head["tip"].clone();
+            let mut generation = head["generation"].as_u64().unwrap();
+            for chunk in mutations.chunks(128) {
+                let bytes = serde_json::to_vec(&json!({"version":3,"parent":covers,"imports":[],"mutations":chunk})).unwrap();
+                assert!(bytes.len() <= 2 << 20);
+                let hash = support::hash(&bytes);
+                covers = json!({"key":format!("library/catalog/changes/{hash}.json"),"hash":hash,"size":bytes.len()});
+                storage.objects.insert(format!("/photos/{}", covers["key"].as_str().unwrap()), bytes);
+                generation += 1;
+            }
+            checkpoint["state"] = serde_json::to_value(state.portable()).unwrap();
+            checkpoint["generation"] = json!(generation);
+            checkpoint["covers"] = covers.clone();
+            let bytes = serde_json::to_vec(&checkpoint).unwrap();
+            let hash = support::hash(&bytes);
+            let object = json!({"key":format!("library/catalog/checkpoints/{hash}.json"),"hash":hash,"size":bytes.len()});
+            storage.objects.insert(format!("/photos/{}", object["key"].as_str().unwrap()), bytes);
+            head["checkpoint"] = json!({"generation":generation,"covers":covers,"object":object});
+            let marker = serde_json::to_vec(&json!({"version":3,"parent":covers,"imports":[],"checkpointMarker":true})).unwrap();
+            let hash = support::hash(&marker);
+            let tip = json!({"key":format!("library/catalog/changes/{hash}.json"),"hash":hash,"size":marker.len()});
+            storage.objects.insert(format!("/photos/{}", tip["key"].as_str().unwrap()), marker);
+            head["tip"] = tip;
+            head["generation"] = json!(generation + 1);
+            storage.objects.insert("/photos/library/catalog/head.json".into(), serde_json::to_vec(&head).unwrap());
+            storage.requests.clear();
+        }
+        let fresh = f.dir.join("fresh-scale");
+        success(
+            &f,
+            &fresh,
+            &[
+                ("cloud.configure", configure(&f)),
+                ("cloud.syncEnable", json!({"connection":"personal","library":library})),
+                ("cloud.sync", json!({})),
+            ],
+        );
+        assert_eq!(saved_catalog(&fresh).photo(lightcraft_catalog::PhotoId(1)).unwrap().rating, 4);
+        let storage = f.state.lock().unwrap();
+        let gets: Vec<_> =
+            storage.requests.iter().filter(|(method, path)| method == "GET" && path.contains("/receipts/")).map(|(_, path)| path).collect();
+        assert!(!gets.is_empty());
+        assert_eq!(gets.len(), gets.iter().copied().collect::<BTreeSet<_>>().len(), "{gets:?}");
+        assert!(gets.len() <= count.ilog2() as usize + 16, "{gets:?}");
+        println!("compacted_receipts={count} unique_archive_GETs={}", gets.len());
+        counts.push(gets.len());
+    }
+    assert_eq!(counts[1] - counts[0], 6, "proof traffic grows with tree depth, not history length");
+}

@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod merging;
+pub use merging::{MergeResult, MergeSession, MergeStats};
+
 pub type Archives = BTreeMap<String, Prefix>;
 pub type Witness = BTreeMap<String, Node>;
 pub const MAX_NODE_BYTES: usize = 1024;
@@ -195,10 +198,13 @@ pub struct Plan {
 }
 /// Build only the new contiguous suffix, merging equal-size trees like binary addition.
 fn plan(state: &Portable) -> Result<Plan> {
-    let mut archives = state.archives.clone();
+    plan_parts(&state.library, &state.archives, &state.received)
+}
+fn plan_parts(library: &str, archives: &Archives, received: &BTreeMap<String, Receipt>) -> Result<Plan> {
+    let mut archives = archives.clone();
     let mut objects = Witness::new();
     let mut ordered: BTreeMap<String, BTreeMap<u64, &Receipt>> = BTreeMap::new();
-    for (id, receipt) in &state.received {
+    for (id, receipt) in received {
         let stamp = super::append::stamp(id)?;
         ordered.entry(stamp.device).or_default().insert(stamp.sequence, receipt);
     }
@@ -216,7 +222,7 @@ fn plan(state: &Portable) -> Result<Plan> {
             let Some(receipt) = receipts.get(&sequence) else { break };
             let leaf = Node {
                 version: 1,
-                library: state.library.clone(),
+                library: library.into(),
                 author: author.clone(),
                 first: sequence,
                 count: 1,
@@ -229,7 +235,7 @@ fn plan(state: &Portable) -> Result<Plan> {
                 let count = current.1.checked_mul(2).ok_or_else(|| invalid("archive tree overflow"))?;
                 let node = Node {
                     version: 1,
-                    library: state.library.clone(),
+                    library: library.into(),
                     author: author.clone(),
                     first: left.0,
                     count,
@@ -246,64 +252,6 @@ fn plan(state: &Portable) -> Result<Plan> {
         }
     }
     Ok(Plan { archives, objects })
-}
-/// Validate prefix compatibility even for incomparable checkpoints and cloned authors.
-/// Locally reconstructable full-history trees avoid fetching one proof per historical ID.
-pub(super) fn merge(local: &SyncState, remote: &Portable) -> Result<Archives> {
-    validate_witness(&remote.proofs)?;
-    if local.archives.is_empty() && remote.archives.is_empty() {
-        return Ok(Archives::new());
-    }
-    let lp = plan(&local.portable())?;
-    let rp = plan(remote)?;
-    let mut proofs = remote.proofs.clone();
-    proofs.extend(lp.objects);
-    proofs.extend(rp.objects);
-    // A newly claimed prefix must at least have a verified root in its exact scope.
-    // Existing local commitments are already durable authority and need no refetch.
-    for (author, prefix) in &remote.archives {
-        let known = local.archives.get(author).map(ranges).transpose()?.unwrap_or_default();
-        for (first, count, root) in ranges(prefix)? {
-            if known.contains(&(first, count, root)) {
-                continue;
-            }
-            let node = proofs.get(root).ok_or_else(|| required(root))?;
-            if node.digest()? != root || node.library != local.library || node.author != *author || node.first != first || node.count != count {
-                return Err(invalid("receipt archive root scope/coverage mismatch"));
-            }
-        }
-    }
-    for (author, left) in &lp.archives {
-        if let Some(right) = rp.archives.get(author) {
-            let (smaller, larger) = if left.through <= right.through { (left, right) } else { (right, left) };
-            for (first, count, root) in ranges(smaller)? {
-                if subtree(&local.library, author, larger, first, count, &proofs)? != root {
-                    return Err(invalid("receipt archive prefix collision; both histories retained"));
-                }
-            }
-        }
-    }
-    let mut result = local.archives.clone();
-    for (author, prefix) in &remote.archives {
-        if result.get(author).is_none_or(|old| old.through < prefix.through) {
-            result.insert(author.clone(), prefix.clone());
-        }
-    }
-    // Check sparse receipts and retained heads against the chosen authenticated coverage.
-    for (id, receipt) in &local.received {
-        let stamp = super::append::stamp(id)?;
-        if covers(&remote.archives, id) && lp.archives.get(&stamp.device).is_none_or(|p| stamp.sequence > p.through) {
-            verify_receipt(&local.library, &remote.archives, id, receipt, &proofs)?;
-        }
-    }
-    for (id, receipt) in &remote.received {
-        let stamp = super::append::stamp(id)?;
-        let known = local.received.get(id) == Some(receipt) && lp.archives.get(&stamp.device).is_some_and(|p| stamp.sequence <= p.through);
-        if covers(&result, id) && !known {
-            verify_receipt(&local.library, &result, id, receipt, &proofs)?;
-        }
-    }
-    Ok(result)
 }
 impl SyncState {
     pub fn archive_plan(&self) -> Result<Plan> {

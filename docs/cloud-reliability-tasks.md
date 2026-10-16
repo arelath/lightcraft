@@ -61,7 +61,7 @@ outcomes. Check items only after implementation and relevant acceptance.
 - [x] CR.38 — Preserve supporting XMP throughout managed import and original revisions. Reuse ordinary sidecar discovery/application, durably stage packets and preserve foreign properties. Define explicit carry/transform policy for external-editor/DNG/XMP-write operations; compare local/cloud RAW+XMP import and foreign-property access after revision.
 - [x] CR.39 — Make interrupted managed import retry idempotent through durable request/session identity and explicit duplicate policy. Recover independent candidates with per-item errors while preserving invalid manifests and prior-asset consistency. Test interruption after staging A/B, retry/recovery producing one intended set, and corrupt manifest alongside healthy imports.
 - [x] CR.40 — Bind storage destination independently of protocol. Reject bucket/prefix/endpoint retargeting before settings/resolver changes; permit credential/profile rotation for the same destination. Share destination identity across configuration, receipts and publication evidence. Test both protocols and actionable deliberate-migration guidance.
-- [ ] CR.41 — Separate incremental archive proof planning from final merge. Batch missing hashes, verify immutable nodes once, avoid repeated state merges/forest rebuilds per node, and retain exact-proof safety. Add counters for full merges, forest construction, witness checks and archive GETs across small/large compacted histories.
+- [x] CR.41 — Separate incremental archive proof planning from final merge. Batch missing hashes, verify immutable nodes once, avoid repeated state merges/forest rebuilds per node, and retain exact-proof safety. Add counters for full merges, forest construction, witness checks and archive GETs across small/large compacted histories.
 
 ## Verification log
 
@@ -968,3 +968,56 @@ inspected. Evidence: ignored `cr40-*-results*.json`; native scratch `native-399b
 and `native-702ad363`, browser scratch `browser-f8f455d0`. CR.40 is complete and checked
 off. This verifies configuration workflows, not protection against manual settings-file
 tampering, live-provider acceptance, or a storage-migration tool.
+2026-10-16 - CR.41 implementation: an opaque archive merge session freezes the
+certified snapshots, constructs receipt forests once, shares immutable nodes between
+main and append-publication targets, and resumes blocked paths by hash. Transports
+fetch deduplicated frontiers before the final document merge; conditional-head
+checkpoint/replay/migration caches now survive through final certification. Exact
+root scope, prefix and receipt/context checks remain required, and a path failure
+poisons its session. Wire formats and bounds are unchanged. Small/large model and
+real-CLI GET regressions, append-progress coverage, browser archive acceptance and
+full repository CI remain pending; CR.41 stays unchecked.
+CR.41 focused checks passed: nine archive model regressions (`cr41-model.log`),
+workspace clippy (`cr41-clippy-final.log`), the retained append-publication regression
+(`cr41-publication.log`) and real-CLI small/large bootstrap (`cr41-get-counts-final.log`).
+The first CLI fixture was rejected because its checkpoint generation equalled its
+head; it now constructs actual bounded mutation batches and a following marker.
+
+For two authors and two certification targets, model histories of 128/8,192 total
+receipts both built three forests and performed two final state merges; unique
+witness checks/fetches were 12/24, in 6/12 rounds. Counts describe one proof session;
+independent owner/durability checks still validate their current snapshots. Native
+fresh-head bootstrap used 7/13 archive GETs for 64/4,096 added archived mutations,
+with every requested node unique across checkpoint read and final certification.
+No wall-clock, owner-thread or overall large-library performance claim is added.
+Browser acceptance and full final-source CI remain pending; CR.41 is unchecked.
+Browser archive acceptance caught a CR.41 proof-emission gap during native append
+seed setup: certification could share locally generated nodes across both targets,
+but omitted them from the returned evidence. The independent owner publication merge
+then requested an unavailable witness. Full CI was stopped before source edits.
+The session now retains every used path node in its returned evidence, including
+locally reconstructed nodes, within the same witness budget. A 64-pending-edit
+checkpoint regression covers both owner merges and final acknowledgement with no
+remote node fetch. The final model rerun passed all nine tests; remaining focused,
+browser and full CI reruns are pending. CR.41 remains unchecked.
+
+CR.41 final source passed all eight repository CI stages (`cr41-ci-final.log`):
+fmt, clippy, HEIF, workspace tests, parity references, layers, assets and WASM.
+The final focused runs passed nine archive tests (`cr41-model-final.log`), both
+publication-target/generated-evidence regressions (`cr41-publication-final.log`),
+workspace clippy, and native 64/4,096-mutation bootstrap with 7/13 unique archive GETs
+(`cr41-get-counts-accepted.log`). The browser bundle rebuilt successfully.
+
+Chromium acceptance passed all six OPFS/IndexedDB cases after publishing the complete
+64-rename tail before checkpointing (`cr41-browser-complete.log`). Conditional-head
+joins used seven unique archive GETs; append joins used 64 during their existing
+history audit, with no repeated node GETs within the measured join. Reload,
+authorization rotation and native-peer convergence passed; all 3,012 requests were
+independently signature-verified. Screenshots/status evidence were inspected.
+Evidence: ignored `cr41-browser-results.json`, scratch
+`lightcraft-cr41-browser/browser-2069a956/`. The earlier browser run covered only
+the initial head prefix and is superseded by this stronger run.
+
+CR.41 is complete and checked off. CR.34-CR.41 from the latest review are now complete;
+the separate CR.9-CR.21 backlog remains unchecked. This does not establish a live-provider,
+large-library latency/memory, append checkpoint-consumption or remote-reclamation result.

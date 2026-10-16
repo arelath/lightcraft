@@ -178,6 +178,9 @@ pub struct Portable {
 impl Portable {
     pub fn validate(&self) -> Result<()> {
         archive::validate_witness(&self.proofs)?;
+        self.validate_structure()
+    }
+    pub(super) fn validate_structure(&self) -> Result<()> {
         let state = SyncState {
             version: self.version,
             library: self.library.clone(),
@@ -227,13 +230,15 @@ impl SyncState {
     }
     /// Merge a verified checkpoint without replacing local identities, pending work or cursor.
     pub fn merge(&mut self, remote: &Portable) -> Result<()> {
-        remote.validate()?;
-        if remote.library != self.library {
-            return Err(invalid("checkpoint belongs to another library"));
-        }
-        let mut next = self.clone();
+        let result = archive::MergeSession::new(self, remote)?.finish()?;
+        *self = result.states.into_iter().next().ok_or_else(|| invalid("missing certified merge target"))?;
+        Ok(())
+    }
+    // Only the archive session can supply this private authenticated result.
+    fn merged_verified(self, remote: &Portable, archives: archive::Archives) -> Result<Self> {
+        let mut next = self;
         next.version = next.version.max(remote.version);
-        next.archives = archive::merge(self, remote)?;
+        next.archives = archives;
         for (id, receipt) in &remote.received {
             if next.received.get(id).is_some_and(|old| old != receipt) {
                 return Err(invalid("checkpoint mutation receipt collision; local work retained"));
@@ -274,8 +279,7 @@ impl SyncState {
         }
         next.prune_archived_receipts();
         next.validate()?;
-        *self = next;
-        Ok(())
+        Ok(next)
     }
     pub fn new(library: String, device: String, connection: String) -> Result<Self> {
         let state = Self {

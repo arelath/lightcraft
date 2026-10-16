@@ -61,20 +61,33 @@ fn tail_length(head: &Head) -> u64 {
 /// Read a verified checkpoint plus its tail with one decoded batch resident.
 /// Migration reads the full history; synchronization can checkpoint bounded prefixes.
 pub fn read(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result<Remote> {
-    read_window(connection, library, None, cancel)
+    read_with_witness(connection, library, &mut Default::default(), cancel)
 }
-fn read_window(connection: &S3Connection, library: &str, segment: Option<u64>, cancel: &AtomicBool) -> Result<Remote> {
+pub(crate) fn read_with_witness(
+    connection: &S3Connection,
+    library: &str,
+    proofs: &mut lightcraft_catalog::replication::archive::Witness,
+    cancel: &AtomicBool,
+) -> Result<Remote> {
+    read_window(connection, library, None, proofs, cancel)
+}
+fn read_window(
+    connection: &S3Connection,
+    library: &str,
+    segment: Option<u64>,
+    archive_proofs: &mut lightcraft_catalog::replication::archive::Witness,
+    cancel: &AtomicBool,
+) -> Result<Remote> {
     let head = publication::read_head(connection, cancel)?;
     if head.as_ref().is_some_and(|(head, _)| head.library.as_ref().is_some_and(|id| id != library)) {
         return Err(invalid("storage contains another library; join using its library identity before synchronization"));
     }
     let state = SyncState::new(library.into(), "remote".into(), connection.id.clone()).map_err(catalog_error)?;
     let mut remote = Remote { head, state, tail_records: 0, recovery: None };
-    let mut archive_proofs = lightcraft_catalog::replication::archive::Witness::new();
     let Some((head, _)) = &remote.head else { return Ok(remote) };
     if let Some(reference) = &head.checkpoint {
         let checkpoint = read_checkpoint(connection, reference, cancel)?;
-        let verified = crate::cloud_history::native::certify(connection, &remote.state, &checkpoint.state, &mut archive_proofs, cancel)?;
+        let verified = crate::cloud_history::native::certify(connection, &remote.state, &checkpoint.state, archive_proofs, cancel)?;
         remote.state.merge(&verified).map_err(catalog_error)?;
     }
     let mut boundary = head.checkpoint.as_ref().map(|reference| reference.covers.clone());
@@ -89,7 +102,7 @@ fn read_window(connection: &S3Connection, library: &str, segment: Option<u64>, c
         for _ in 0..budget {
             let (_, batch) = tail.next(connection, cancel)?.ok_or_else(|| invalid("history replay ended before its verified prefix"))?;
             for mutation in batch.mutations {
-                crate::cloud_history::native::receive(connection, &mut remote.state, &mutation, &mut archive_proofs, cancel)?;
+                crate::cloud_history::native::receive(connection, &mut remote.state, &mutation, archive_proofs, cancel)?;
             }
         }
         if budget >= tail.count() {
@@ -110,12 +123,17 @@ fn read_window(connection: &S3Connection, library: &str, segment: Option<u64>, c
     Ok(remote)
 }
 /// Durable cursors seed only acknowledged state. Pending local revisions never seed reads.
-fn read_incremental(connection: &S3Connection, local: &SyncState, cancel: &AtomicBool) -> Result<Remote> {
+fn read_incremental(
+    connection: &S3Connection,
+    local: &SyncState,
+    archive_proofs: &mut lightcraft_catalog::replication::archive::Witness,
+    cancel: &AtomicBool,
+) -> Result<Remote> {
     if !local.pending.is_empty() || local.cursor.is_none() {
-        return read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), cancel);
+        return read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), archive_proofs, cancel);
     }
     let head = publication::read_head(connection, cancel)?;
-    let Some((current, _)) = &head else { return read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), cancel) };
+    let Some((current, _)) = &head else { return read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), archive_proofs, cancel) };
     if current.library.as_deref() != Some(local.library.as_str()) || current.generation < local.generation {
         return Err(invalid("remote library or generation changed inconsistently"));
     }
@@ -128,13 +146,12 @@ fn read_incremental(connection: &S3Connection, local: &SyncState, cancel: &Atomi
         canceled(cancel)?;
         if local.cursor.as_deref() == Some(reference.hash.0.as_str()) {
             if index.count > RECOVERY_SEGMENT_BATCHES {
-                return read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), cancel);
+                return read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), archive_proofs, cancel);
             }
             let state = SyncState::restore_durable(&local.portable(), "remote".into(), connection.id.clone()).map_err(catalog_error)?;
             let tail_records = tail_length(current);
             let mut remote = Remote { head, state, tail_records, recovery: None };
             let mut parent = Some(reference);
-            let mut archive_proofs = lightcraft_catalog::replication::archive::Witness::new();
             while let Some(reference) = index.pop()? {
                 canceled(cancel)?;
                 let batch = publication::read_batch(connection, &reference, cancel)?;
@@ -143,7 +160,7 @@ fn read_incremental(connection: &S3Connection, local: &SyncState, cancel: &Atomi
                 }
                 parent = Some(reference);
                 for mutation in batch.mutations {
-                    crate::cloud_history::native::receive(connection, &mut remote.state, &mutation, &mut archive_proofs, cancel)?;
+                    crate::cloud_history::native::receive(connection, &mut remote.state, &mutation, archive_proofs, cancel)?;
                 }
             }
             return Ok(remote);
@@ -156,7 +173,7 @@ fn read_incremental(connection: &S3Connection, local: &SyncState, cancel: &Atomi
         let batch = publication::read_batch(connection, &reference, cancel)?;
         next = batch.parent;
     }
-    read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), cancel)
+    read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), archive_proofs, cancel)
 }
 fn immutable(connection: &S3Connection, key: &str, bytes: &[u8], cancel: &AtomicBool, max: usize) -> Result<()> {
     match connection.put_small(key, bytes, PutCondition::Absent, cancel) {
@@ -233,9 +250,9 @@ pub(crate) fn synchronize_verified(
     for _ in 0..64 {
         canceled(cancel)?;
         let mut remote = if checkpoint_requested {
-            read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), cancel)?
+            read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), &mut archive_proofs, cancel)?
         } else {
-            read_incremental(connection, local, cancel)?
+            read_incremental(connection, local, &mut archive_proofs, cancel)?
         };
         if local.require_existing && remote.head.is_none() {
             return Err(invalid("cannot join: remote library is absent; verify its destination and library ID; local work retained"));

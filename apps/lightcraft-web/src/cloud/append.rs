@@ -154,8 +154,8 @@ pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, 
     if provider.connection.bucket_root.is_none() {
         return Err("migration requires bucketRoot and an append-capable signer".into());
     }
-    let seed = super::protocol::migration_seed(provider, &local.library).await?;
     let mut planner = core::Planner::new(local, true).map_err(ce)?;
+    let seed = super::protocol::migration_seed(provider, &local.library, &mut planner.proofs).await?;
     let seed = super::history::certify(provider, &planner.remote, &seed, &mut planner.proofs).await?;
     planner.remote.merge(&seed).map_err(|e| e.to_string())?;
     let mut p = planner.progress().map_err(ce)?;

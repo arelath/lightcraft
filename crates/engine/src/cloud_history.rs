@@ -30,19 +30,14 @@ pub fn insert(witness: &mut Witness, hash: &str, bytes: &[u8]) -> Result<()> {
 pub fn ce(error: CatalogError) -> AssetError {
     AssetError::Invalid(error.to_string())
 }
-pub fn merge_request(local: &SyncState, remote: &Portable, witness: &Witness) -> std::result::Result<Portable, CatalogError> {
-    let mut remote = remote.clone();
-    remote.proofs.extend(witness.clone());
-    let mut test = local.clone();
-    test.merge(&remote)?;
+/// Plan exact proofs once for both the main catalog and retained append ACKs.
+pub fn merge_session(local: &SyncState, remote: &Portable) -> std::result::Result<archive::MergeSession, CatalogError> {
+    let mut session = archive::MergeSession::new(local, remote)?;
     if let Some(progress) = &local.append {
-        // Publication progress can retain promoted ACK receipts that the main
-        // catalog has already demoted. Certify their archive paths as well, so
-        // owner-side monotonic progress merging never needs to fetch proofs.
-        let mut published = SyncState::restore_durable(&progress.remote, "publication".into(), "remote".into())?;
-        published.merge(&remote)?;
+        let published = SyncState::restore_durable(&progress.remote, "publication".into(), "remote".into())?;
+        session.include(&published)?;
     }
-    Ok(remote)
+    Ok(session)
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native {
@@ -56,21 +51,21 @@ pub mod native {
         insert(witness, hash, &object.bytes)
     }
     pub fn certify(connection: &S3Connection, local: &SyncState, remote: &Portable, witness: &mut Witness, cancel: &AtomicBool) -> Result<Portable> {
-        let mut needed = remote.proofs.clone();
-        for _ in 0..=archive::MAX_WITNESS_NODES {
-            match merge_request(local, remote, &needed) {
-                Ok(remote) => return Ok(remote),
-                Err(CatalogError::ArchiveRequired(hash)) => {
-                    if !witness.contains_key(&hash) {
-                        fetch(connection, &local.library, &hash, witness, cancel)?;
-                    }
-                    let node = witness.get(&hash).ok_or(AssetError::Integrity)?;
-                    needed.insert(hash, node.clone());
+        let mut session = merge_session(local, remote).map_err(ce)?;
+        for _ in 0..=64 {
+            let missing = session.missing().map_err(ce)?;
+            if missing.is_empty() {
+                return Ok(session.finish().map_err(ce)?.remote);
+            }
+            for hash in missing {
+                if !witness.contains_key(&hash) {
+                    fetch(connection, &local.library, &hash, witness, cancel)?;
                 }
-                Err(error) => return Err(ce(error)),
+                let node = witness.get(&hash).ok_or(AssetError::Integrity)?;
+                session.provide(&hash, node.clone()).map_err(ce)?;
             }
         }
-        Err(AssetError::Invalid("receipt proof budget exceeded; local work retained".into()))
+        Err(AssetError::Invalid("receipt proof depth exceeded; local work retained".into()))
     }
     pub fn prove(connection: &S3Connection, state: &SyncState, m: &Mutation, witness: &mut Witness, cancel: &AtomicBool) -> Result<()> {
         let receipt = receipt(m).map_err(ce)?;
@@ -146,5 +141,88 @@ pub mod native {
         }
         // Witnesses are fetched on demand; keeping all historical nodes would defeat compaction.
         remote.compact_receipts(&plan).map_err(ce)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lightcraft_catalog::replication::{AppendProgress, Change, SyncProtocol};
+    use serde_json::json;
+    #[test]
+    fn generated_paths_are_carried_to_owner_ack_after_a_checkpoint_covers_many_pending_edits() {
+        let mut local = SyncState::new("library".into(), "author".into(), "storage".into()).unwrap();
+        local.protocol = SyncProtocol::AppendLog;
+        let change = |value| vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(value) }];
+        local.enqueue(change(1)).unwrap();
+        local.enqueue(change(2)).unwrap();
+        let old = AppendProgress {
+            version: 1,
+            manifest: "a".repeat(64),
+            frontiers: local.clock.clone(),
+            remote: local.portable(),
+            gaps: Default::default(),
+        };
+        local.acknowledge_append(&local.pending.keys().cloned().collect(), old).unwrap();
+        for value in 0..64 {
+            local.enqueue(change(value % 6)).unwrap();
+        }
+        let ids = local.pending.keys().cloned().collect();
+        let mut remote = SyncState::restore_durable(&local.portable(), "remote".into(), "storage".into()).unwrap();
+        let plan = remote.archive_plan().unwrap();
+        remote.compact_receipts(&plan).unwrap();
+        for mutation in local.pending.values() {
+            remote.prove_archived(&mutation.revision.id(), receipt(mutation).unwrap(), &plan.objects).unwrap();
+        }
+        let mut session = merge_session(&local, &remote.portable()).unwrap();
+        assert!(session.missing().unwrap().is_empty(), "all paths can be reconstructed locally");
+        let result = session.finish().unwrap();
+        assert_eq!(result.stats.witness_checks, 0, "no remote archive fetch is needed");
+        assert!(!result.remote.proofs.is_empty(), "generated paths must survive the certification session");
+        let incoming =
+            AppendProgress { version: 1, manifest: "a".repeat(64), frontiers: remote.clock.clone(), remote: result.remote, gaps: Default::default() };
+        local.merge(&incoming.remote).unwrap();
+        local.acknowledge_append(&ids, incoming).unwrap();
+        assert!(local.pending.is_empty());
+        assert_eq!(local.append.as_ref().unwrap().frontiers.get("author"), Some(&66));
+    }
+    #[test]
+    fn certification_includes_older_append_publication_progress_with_a_shared_witness_cache() {
+        let state = |author: &str| SyncState::new("library".into(), author.into(), "storage".into()).unwrap();
+        let mut author = state("author");
+        let change = |value| vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(value) }];
+        let first = author.enqueue(change(1)).unwrap().unwrap();
+        let second = author.enqueue(change(5)).unwrap().unwrap();
+        let mut old = state("publication");
+        old.receive(&first).unwrap();
+        let mut remote = old.clone();
+        remote.receive(&second).unwrap();
+        let plan = remote.archive_plan().unwrap();
+        remote.compact_receipts(&plan).unwrap();
+        let mut local = remote.clone();
+        local.device = "peer".into();
+        local.protocol = SyncProtocol::AppendLog;
+        local.append = Some(Box::new(AppendProgress {
+            version: 1,
+            manifest: "a".repeat(64),
+            frontiers: old.clock.clone(),
+            remote: old.portable(),
+            gaps: Default::default(),
+        }));
+        local.validate().unwrap();
+        assert!(archive::MergeSession::new(&local, &remote.portable()).unwrap().missing().unwrap().is_empty());
+        let mut session = merge_session(&local, &remote.portable()).unwrap();
+        let missing = session.missing().unwrap();
+        assert_eq!(missing.len(), 1, "the retained publication state requires an additional exact prefix proof");
+        for hash in missing {
+            session.provide(&hash, plan.objects[&hash].clone()).unwrap();
+        }
+        let result = session.finish().unwrap();
+        assert_eq!(result.stats.forest_builds, 3);
+        assert_eq!(result.stats.witness_checks, 1);
+        assert_eq!(result.stats.state_merges, 2);
+        let incoming =
+            AppendProgress { version: 1, manifest: "a".repeat(64), frontiers: remote.clock.clone(), remote: result.remote, gaps: Default::default() };
+        local.acknowledge_append(&Default::default(), incoming).unwrap();
+        assert_eq!(local.append.as_ref().unwrap().frontiers.get("author"), Some(&2));
     }
 }

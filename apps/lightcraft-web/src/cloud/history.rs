@@ -20,21 +20,21 @@ async fn fetch(provider: &Provider, library: &str, hash: &str, witness: &mut Wit
     core::insert(witness, hash, &reply.bytes).map_err(|e| e.to_string())
 }
 pub async fn certify(provider: &Provider, local: &SyncState, remote: &Portable, witness: &mut Witness) -> Result<Portable, String> {
-    let mut needed = remote.proofs.clone();
-    for _ in 0..=archive::MAX_WITNESS_NODES {
-        match core::merge_request(local, remote, &needed) {
-            Ok(remote) => return Ok(remote),
-            Err(CatalogError::ArchiveRequired(hash)) => {
-                if !witness.contains_key(&hash) {
-                    fetch(provider, &local.library, &hash, witness).await?;
-                }
-                let node = witness.get(&hash).ok_or("missing verified receipt witness")?;
-                needed.insert(hash, node.clone());
+    let mut session = core::merge_session(local, remote).map_err(|e| e.to_string())?;
+    for _ in 0..=64 {
+        let missing = session.missing().map_err(|e| e.to_string())?;
+        if missing.is_empty() {
+            return Ok(session.finish().map_err(|e| e.to_string())?.remote);
+        }
+        for hash in missing {
+            if !witness.contains_key(&hash) {
+                fetch(provider, &local.library, &hash, witness).await?;
             }
-            Err(error) => return Err(error.to_string()),
+            let node = witness.get(&hash).ok_or("missing verified receipt witness")?;
+            session.provide(&hash, node.clone()).map_err(|e| e.to_string())?;
         }
     }
-    Err("receipt proof budget exceeded; local work retained".into())
+    Err("receipt proof depth exceeded; local work retained".into())
 }
 pub async fn prove(provider: &Provider, state: &SyncState, m: &Mutation, witness: &mut Witness) -> Result<(), String> {
     let receipt = core::receipt(m).map_err(|e| e.to_string())?;

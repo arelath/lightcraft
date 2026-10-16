@@ -32,12 +32,16 @@ async fn object(provider: &Provider, reference: &RecordRef, max: usize) -> Resul
     }
     Ok(reply.bytes)
 }
-async fn read(provider: &Provider, library: &str, segmented: bool) -> Result<Remote, String> {
+async fn read(
+    provider: &Provider,
+    library: &str,
+    segmented: bool,
+    proofs: &mut lightcraft_engine::catalog::replication::archive::Witness,
+) -> Result<Remote, String> {
     let key = format!("{}/catalog/head.json", provider.connection.prefix);
     let reply = provider.request("GET", &key, None, None, None, 16 << 10).await?;
     let state = SyncState::new(library.into(), "remote".into(), provider.connection.id.clone()).map_err(|e| e.to_string())?;
     let mut remote = Remote { head: None, state, tail_records: 0, recovery: None };
-    let mut proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
     if reply.status == 404 {
         return Ok(remote);
     }
@@ -66,7 +70,7 @@ async fn read(provider: &Provider, library: &str, segmented: bool) -> Result<Rem
         if !checkpoint.imports.is_empty() {
             return Err("obsolete pre-release import checkpoint; use a fresh catalog and storage prefix; local data retained".into());
         }
-        let verified = super::history::certify(provider, &remote.state, &checkpoint.state, &mut proofs).await?;
+        let verified = super::history::certify(provider, &remote.state, &checkpoint.state, proofs).await?;
         remote.state.merge(&verified).map_err(|e| e.to_string())?;
         boundary = Some(reference.covers.clone());
     }
@@ -109,7 +113,7 @@ async fn read(provider: &Provider, library: &str, segmented: bool) -> Result<Rem
             boundary = Some(reference);
             for mutation in batch.mutations {
                 if lightcraft_engine::catalog::replication::archive::covers(&remote.state.archives, &mutation.revision.id()) {
-                    super::history::prove(provider, &remote.state, &mutation, &mut proofs).await?;
+                    super::history::prove(provider, &remote.state, &mutation, proofs).await?;
                 } else {
                     remote.state.receive(&mutation).map_err(|e| e.to_string())?;
                 }
@@ -187,7 +191,7 @@ pub async fn synchronize(
     let mut verified = BTreeSet::new();
     let mut archive_proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
     for _ in 0..64 {
-        let mut remote = read(provider, &local.library, true).await?;
+        let mut remote = read(provider, &local.library, true, &mut archive_proofs).await?;
         if local.require_existing && remote.head.is_none() {
             return Err("cannot join: remote library is absent; verify its destination and library ID; local work retained".into());
         }
@@ -269,8 +273,12 @@ pub async fn synchronize(
     Err("catalog busy or unreachable; pending work retained for retry".into())
 }
 
-pub(super) async fn migration_seed(provider: &Provider, library: &str) -> Result<Portable, String> {
-    Ok(read(provider, library, false).await?.state.portable())
+pub(super) async fn migration_seed(
+    provider: &Provider,
+    library: &str,
+    proofs: &mut lightcraft_engine::catalog::replication::archive::Witness,
+) -> Result<Portable, String> {
+    Ok(read(provider, library, false, proofs).await?.state.portable())
 }
 
 async fn checkpoint(provider: &Provider, state: &mut SyncState, covers: RecordRef, generation: u64) -> Result<CheckpointRef, String> {

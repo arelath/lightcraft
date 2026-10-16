@@ -15,7 +15,8 @@ pub(crate) fn seed(
     state: &lightcraft_catalog::replication::SyncState,
     cancel: &AtomicBool,
 ) -> Result<crate::cloud_replication::Outcome> {
-    let remote = crate::cloud_replication::read(conn, &state.library, cancel).map_err(|e| error(e.to_string()))?;
+    let mut proofs = Default::default();
+    let remote = crate::cloud_replication::read_with_witness(conn, &state.library, &mut proofs, cancel).map_err(|e| error(e.to_string()))?;
     let portable = remote.state.portable();
     let mut progress = AppendProgress {
         version: 1,
@@ -39,7 +40,6 @@ pub(crate) fn seed(
         crate::assets::sha256(&bytes).0
     );
     conn.put_immutable_verified(&key, &bytes, cancel).map_err(|e| error(e.to_string()))?;
-    progress.remote =
-        crate::cloud_history::native::certify(conn, state, &progress.remote, &mut Default::default(), cancel).map_err(|e| error(e.to_string()))?;
+    progress.remote = crate::cloud_history::native::certify(conn, state, &progress.remote, &mut proofs, cancel).map_err(|e| error(e.to_string()))?;
     Ok(crate::cloud_replication::Outcome::append(progress, Default::default()))
 }

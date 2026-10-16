@@ -173,6 +173,27 @@ archives historical receipt proofs with bounded Merkle roots while retaining ful
 tombstone and pending contexts. The implemented contract and remaining author/entity limits
 are recorded in [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
 
+Archive certification uses an incremental proof session. It validates the incoming
+document structure once and builds the remote receipt forest once, plus one forest
+for each local target. The main catalog and retained append publication progress
+share the same immutable-node cache. Missing paths produce a deduplicated frontier;
+supplying a node resumes only the paths waiting for that hash. Nodes are hash-checked
+once within the session, with exact library/author/range checks on every path.
+Prefix commitments and leaf mutation/context commitments remain mandatory. A failed
+path poisons the session, so ignoring an error cannot permit later application.
+Used path nodes are returned as evidence even when reconstructed locally: the later
+owner and publication-progress merges have independent forests. Unused generated
+nodes stay out of that evidence; the existing witness budget still applies.
+
+Only completed proof planning permits the final document merge, once per target.
+The owner still merges against its current catalog before acknowledging work.
+Native and browser conditional-head readers retain one bounded witness cache through
+checkpoint loading, replay, hydration and final certification; migration retains it
+too. Fetches remain bounded individual GETs, processed by frontier rather than a
+whole-state retry per object. Append audits retain their existing bounded cache
+policy and can refetch after eviction. This changes no wire formats or proof limits
+and does not remove the separate large-library/materialization backlog.
+
 Album moves are projected from the desired graph and detached before reattachment. For a
 cross-entity parent cycle, the album with the greatest global identity in that cycle is shown
 at the root. Proposed edges remain in the causal registers. Stacks resolve disputed ownership in increasing global stack identity order using only
