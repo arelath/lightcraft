@@ -298,22 +298,12 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
         let values = fields(state, entity);
         let content = values.get("content").and_then(Value::as_object).ok_or_else(|| error("cloud photo has no immutable content description"))?;
         let asset_id: AssetId = decoded(content.get("assetId").cloned().ok_or_else(|| error("cloud photo has no asset identity"))?)?;
-        let mut asset: Asset = decoded(content.get("asset").cloned().ok_or_else(|| error("cloud photo has no asset record"))?)?;
-        asset.original.remote.connection = state.connection.clone();
-        if let Some(proxy) = &mut asset.smart_preview {
-            proxy.remote.connection = state.connection.clone();
-        }
-        if let Some(thumbnail) = &mut asset.thumbnail {
-            thumbnail.remote.connection = state.connection.clone();
-        }
-        for associated in asset.associated.values_mut() {
-            associated.remote.connection = state.connection.clone();
-        }
-        asset.validate().map_err(error)?;
-        if next.asset(&asset_id).is_some_and(|old| old != &asset) {
+        let asset: Asset = decoded(content.get("asset").cloned().ok_or_else(|| error("cloud photo has no asset record"))?)?;
+        let asset = asset.rebound(&state.connection).map_err(error)?;
+        if next.asset(&asset_id).is_some_and(|old| !old.same_manifest(&asset)) {
             return Err(error("remote immutable asset identity describes different data; local data retained"));
         }
-        if next.asset(&asset_id).is_none() {
+        if next.asset(&asset_id) != Some(&asset) {
             apply(&mut next, &mut ops, Op::SetAsset { id: asset_id.clone(), asset: Some(Box::new(asset)) })?;
         }
         let seed = next

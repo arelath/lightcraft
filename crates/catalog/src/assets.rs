@@ -77,6 +77,34 @@ impl Blob {
 }
 
 impl Asset {
+    /// Connection identities belong to the device; every other manifest field is immutable.
+    pub fn same_manifest(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.bind_connection("library");
+        right.bind_connection("library");
+        left == right
+    }
+
+    /// Bind every shared blob, including supporting documents, to a local connection.
+    pub fn rebound(&self, connection: &str) -> Result<Self, String> {
+        self.validate()?;
+        let mut asset = self.clone();
+        asset.bind_connection(connection);
+        asset.validate()?;
+        Ok(asset)
+    }
+
+    fn bind_connection(&mut self, connection: &str) {
+        for blob in std::iter::once(&mut self.original)
+            .chain(self.smart_preview.iter_mut())
+            .chain(self.thumbnail.iter_mut())
+            .chain(self.associated.values_mut())
+        {
+            blob.remote.connection = connection.into();
+        }
+    }
+
     pub fn blobs(&self) -> impl Iterator<Item = &Blob> {
         std::iter::once(&self.original).chain(self.smart_preview.iter()).chain(self.thumbnail.iter()).chain(self.associated.values())
     }
@@ -128,6 +156,100 @@ mod tests {
         bad = blob();
         bad.size = u64::MAX;
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn complete_manifests_are_immutable_except_for_device_connection_bindings() {
+        use crate::{Catalog, Journal, MemStore, Op};
+        let asset = Asset {
+            original: blob(),
+            smart_preview: Some(Blob { remote: RemoteLocation { key: "preview".into(), ..blob().remote }, ..blob() }),
+            thumbnail: Some(Blob { remote: RemoteLocation { key: "thumbnail".into(), ..blob().remote }, ..blob() }),
+            associated: BTreeMap::from([("xmp".into(), Blob { remote: RemoteLocation { key: "sidecar".into(), ..blob().remote }, ..blob() })]),
+        };
+        let id = AssetId("manifest".into());
+        let mut catalog = Catalog::new();
+        let first = Op::SetAsset { id: id.clone(), asset: Some(Box::new(asset.clone())) };
+        catalog.apply(first.clone()).unwrap();
+        let mut rejected = Vec::new();
+        // Every blob's bytes, length, key and optional version are part of the contract.
+        for index in 0..4 {
+            for field in 0..4 {
+                let mut changed = asset.clone();
+                let mut blobs = std::iter::once(&mut changed.original)
+                    .chain(changed.smart_preview.iter_mut())
+                    .chain(changed.thumbnail.iter_mut())
+                    .chain(changed.associated.values_mut());
+                let blob = blobs.nth(index).unwrap();
+                match field {
+                    0 => blob.id = BlobId("b".repeat(64)),
+                    1 => blob.size += 1,
+                    2 => blob.remote.key.push_str("-changed"),
+                    _ => blob.remote.version = Some("new-version".into()),
+                }
+                rejected.push(changed);
+            }
+        }
+        let mut changed = asset.clone();
+        changed.smart_preview = None;
+        rejected.push(changed);
+        let mut changed = asset.clone();
+        changed.thumbnail = None;
+        rejected.push(changed);
+        let mut changed = asset.clone();
+        changed.associated.clear();
+        rejected.push(changed);
+        for changed in rejected {
+            let before = serde_json::to_value(&catalog).unwrap();
+            assert!(catalog.apply(Op::SetAsset { id: id.clone(), asset: Some(Box::new(changed.clone())) }).is_err());
+            assert_eq!(serde_json::to_value(&catalog).unwrap(), before);
+            // A new identity can describe the replacement without changing the old one.
+            let mut replacement = catalog.clone();
+            replacement.apply(Op::SetAsset { id: AssetId("replacement".into()), asset: Some(Box::new(changed)) }).unwrap();
+            assert_eq!(replacement.asset(&id), Some(&asset));
+        }
+        // Addition is also a manifest change, even if the original is untouched.
+        let mut original_only = Catalog::new();
+        original_only
+            .apply(Op::SetAsset {
+                id: id.clone(),
+                asset: Some(Box::new(Asset { original: blob(), smart_preview: None, thumbnail: None, associated: BTreeMap::new() })),
+            })
+            .unwrap();
+        assert!(original_only.apply(first.clone()).is_err());
+        let rebound = asset.rebound("second-device").unwrap();
+        assert!(asset.same_manifest(&rebound));
+        assert!(rebound.blobs().all(|b| b.remote.connection == "second-device"));
+        assert!(asset.rebound("../invalid").is_err());
+        let working = crate::managed::WorkingCopy {
+            connection: "personal".into(),
+            path: "Managed/working/photo.raw".into(),
+            asset_id: id.clone(),
+            ingested: asset.original.id.clone(),
+        };
+        let working_op = Op::SetWorkingCopy { id: crate::PhotoId(1), working: Some(Box::new(working.clone())) };
+        catalog.apply(working_op.clone()).unwrap();
+        let binding = Op::SetAsset { id: id.clone(), asset: Some(Box::new(rebound.clone())) };
+        let inverse = catalog.apply(binding.clone()).unwrap();
+        let rebound_working = catalog.working_copies().get(&crate::PhotoId(1)).unwrap().clone();
+        assert_eq!(rebound_working.connection, "second-device");
+        catalog.apply(Op::SetWorkingCopy { id: crate::PhotoId(1), working: Some(Box::new(rebound_working)) }).unwrap();
+        catalog.apply(inverse).unwrap();
+        assert_eq!(catalog.asset(&id), Some(&asset));
+        assert_eq!(catalog.working_copies().get(&crate::PhotoId(1)), Some(&working));
+        catalog.apply(binding.clone()).unwrap();
+        // Same manifest/binding is idempotent, and rebinding survives journal replay and compaction.
+        catalog.apply(binding.clone()).unwrap();
+        let store = MemStore::default();
+        let (mut journal, _, _) = Journal::open(Box::new(store.clone())).unwrap();
+        journal.append(&[first, working_op, binding]).unwrap();
+        let (_, replayed, _) = Journal::open(Box::new(store.clone())).unwrap();
+        assert_eq!(replayed.asset(&id), Some(&rebound));
+        assert_eq!(replayed.working_copies(), catalog.working_copies());
+        journal.snapshot(&catalog).unwrap();
+        let (_, compacted, _) = Journal::open(Box::new(store)).unwrap();
+        assert_eq!(compacted.asset(&id), Some(&rebound));
+        assert_eq!(compacted.working_copies(), catalog.working_copies());
     }
 
     #[test]

@@ -82,19 +82,27 @@ fn supporting_packets_follow_revisions_and_are_readable_after_fresh_join_in_both
             assert_eq!(support::hash(bytes), associated.id.0);
             assert!(std::str::from_utf8(bytes).unwrap().contains("retained-on-new-device"));
         }
+        let mut peer_config = config;
+        peer_config["id"] = json!("workstation");
         run(
             &f,
             &peer,
             &[
-                ("cloud.configure", config),
+                ("cloud.configure", peer_config),
                 (
                     "cloud.syncEnable",
-                    json!({"connection":"personal","library":library,"protocol":if append {"append-log-v1"} else {"conditional-head-v1"}}),
+                    json!({"connection":"workstation","library":library,"protocol":if append {"append-log-v1"} else {"conditional-head-v1"}}),
                 ),
                 ("cloud.sync", json!({})),
             ],
         );
         let peer_id = catalog(&peer).photos().find(|p| p.file_name == derived_photo.file_name).unwrap().id;
+        assert!(catalog(&peer).assets().values().flat_map(|asset| asset.blobs()).all(|blob| blob.remote.connection == "workstation"));
+        run(&f, &peer, &[("photo.virtualCopy", json!({"ids":[peer_id.0]})), ("cloud.sync", json!({}))]);
+        run(&f, &creator, &[("cloud.sync", json!({}))]);
+        let converged = catalog(&creator);
+        assert_eq!(converged.photos().filter(|p| p.copy_of == Some(PhotoId(derived))).count(), 1);
+        assert!(converged.assets().values().flat_map(|asset| asset.blobs()).all(|blob| blob.remote.connection == "personal"));
         let start = f.state.lock().unwrap().requests.len();
         run(
             &f,

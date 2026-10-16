@@ -222,17 +222,7 @@ fn project(catalog: &Catalog, ids: &Catalog, state: &SyncState, scope: Option<&S
         map.remove("source");
         let mut content = serde_json::Map::new();
         content.insert("assetId".into(), encode(asset_id)?);
-        let mut portable_asset = asset.clone();
-        portable_asset.original.remote.connection = "library".into();
-        if let Some(proxy) = &mut portable_asset.smart_preview {
-            proxy.remote.connection = "library".into();
-        }
-        if let Some(thumbnail) = &mut portable_asset.thumbnail {
-            thumbnail.remote.connection = "library".into();
-        }
-        for document in portable_asset.associated.values_mut() {
-            document.remote.connection = "library".into();
-        }
+        let portable_asset = asset.rebound("library").map_err(error)?;
         content.insert("asset".into(), encode(&portable_asset)?);
         for key in ["format", "kind", "width", "height", "file_size", "content_hash", "preview_only", "embedded_lens", "as_shot_wb", "duration"] {
             if let Some(value) = map.remove(key) {

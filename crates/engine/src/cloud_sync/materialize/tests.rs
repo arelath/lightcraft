@@ -64,6 +64,31 @@ fn fixture(count: usize) -> Catalog {
     Catalog::from_snapshot(&value.to_string()).unwrap()
 }
 #[test]
+fn shared_manifest_rebinds_locally_and_rejects_changed_renditions_atomically() {
+    let catalog = fixture(1);
+    let mut state = catalog.sync_state().unwrap().clone();
+    state.connection = "browser-device".into();
+    let (base, content) = state.winning("photo:p000000", "content").unwrap();
+    let mut content = content.clone();
+    let asset = catalog.asset(&AssetId("asset".into())).unwrap();
+    content["asset"] = encode(&asset.rebound("library").unwrap()).unwrap();
+    state.enqueue(vec![Change { entity: "photo:p000000".into(), field: "content".into(), base: Some(base), value: content.clone() }]).unwrap();
+    let mut rebound = catalog.clone();
+    rebound.apply(Op::Batch { ops: install(&catalog, &state).unwrap() }).unwrap();
+    assert_eq!(rebound.asset(&AssetId("asset".into())).unwrap(), &asset.rebound("browser-device").unwrap());
+    for field in ["smartPreview", "thumbnail", "associated"] {
+        let mut changed = state.clone();
+        let mut content = content.clone();
+        content["asset"][field] = if field == "associated" { json!({"xmp":asset.original}) } else { json!(asset.original) };
+        let base = changed.winning("photo:p000000", "content").unwrap().0;
+        changed.enqueue(vec![Change { entity: "photo:p000000".into(), field: "content".into(), base: Some(base), value: content }]).unwrap();
+        let before = catalog.to_snapshot();
+        assert!(install(&catalog, &changed).is_err());
+        assert_eq!(catalog.to_snapshot(), before);
+    }
+}
+
+#[test]
 fn metadata_edit_projects_one_photo_and_receipt_only_progress_projects_none() {
     let catalog = fixture(25);
     let mut state = catalog.sync_state().unwrap().clone();

@@ -15,7 +15,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.8 — Make unchanged conditional-head synchronization a genuine local no-op (no materialization, state operation, or journal write without change, acknowledgement, or progress).
 - [x] CR.9 — Index global-to-local identities once, materialize changed entities, and persist synchronization deltas. Measure unchanged 10,000- and 50,000-photo request counts, journal growth, state size, and owner-thread latency.
 - [x] CR.10 — Track consumed append checkpoints and avoid downloading unchanged covered history. Separate budgeted integrity audits from ordinary polls; test remote request counts.
-- [ ] CR.11 — Enforce one immutable published asset-manifest contract with device-local connection binding; test permitted/rejected descriptor changes and extract shared blob rebinding.
+- [x] CR.11 — Enforce one immutable published asset-manifest contract with device-local connection binding; test permitted/rejected descriptor changes and extract shared blob rebinding.
 - [ ] CR.12 — Replace subtractive catalog JSON projection/materialization with explicit portable photo, content, album, and reference types and typed boundary conversions; retain wire compatibility tests.
 - [ ] CR.13 — Extract testable upload readiness, transfer, verification, dependency waiting, publication, acknowledgement, and failure transitions; test deletion/restart behavior.
 - [ ] CR.14 — Consolidate current behavior/limitations, protocol specification, and dated acceptance evidence. Remove obsolete current-status claims and distinguish historical verification.
@@ -1151,3 +1151,52 @@ Final CR.10 gate: `cargo +1.95.0 xtask ci` passed all eight steps on the final s
 `target/cloud-reliability/cr10-ci-verified.log`). This supersedes the earlier preliminary/stopped
 runs. No source changes followed this passing run. CR.10 is complete and checked off;
 CR.11–CR.21 remain unchecked and will be handled separately.
+
+
+2026-10-16 — CR.11 implementation and focused verification (completion pending):
+`Asset::same_manifest` defines the immutable original/rendition/supporting-document
+contract independently of device connection names. `SetAsset` rejects changes to
+bytes, sizes, keys, object versions or optional manifest members under an existing
+identity. Changed renditions use a new asset identity. Manifests freeze at first
+catalog commit; production import/revision preparation already completes them before
+that commit. `Asset::rebound` validates and binds every blob, and is shared by
+portable projection, incoming materialization and native/browser dependency checks.
+This corrects browser publication leaving XMP bound to the portable connection.
+The wire/catalog layout is unchanged.
+
+Five catalog tests passed, including a descriptor-change matrix, rejected-operation
+atomicity, new-identity replacements, idempotence, connection-only inverse/replay and
+compaction (`target/cloud-reliability/cr11-catalog.log`). Focused engine tests passed
+75 with one explicit scale benchmark ignored (`cr11-engine.log`), covering incoming
+manifest rejection/rebinding and cache invalidation when a photo adopts a new
+rendition manifest. The real-CLI XMP revision/fresh-join test passed in both protocols
+using different local connection names and publication of a virtual copy back to
+the creator (`cr11-cli-xmp.log`). The previous browser bundle reproduced the reported
+failure in actual Chromium: publishing a fresh-device virtual copy failed with
+"associated documents must use the original's connection" (`cr11-browser-before.log`).
+Final-source browser acceptance and full repository CI remain pending; CR.11 is
+still unchecked until they pass.
+
+
+CR.11 follow-up before the final gate: connection-only rebinding now updates the
+same asset's device-local working-copy connections atomically. Its inverse restores
+them, and the catalog regression verifies a subsequent working-copy operation,
+journal replay and compaction. This prevents a latent binding mismatch on future
+local edits. The preliminary CI run was stopped before changing this source;
+`cr11-ci-final.log` is the final-source gate.
+
+
+CR.11 final acceptance: `cargo +1.95.0 xtask ci` passed all eight gates on the
+final source (fmt, clippy, heif, workspace tests, parity, layers, assets, wasm;
+`target/cloud-reliability/cr11-ci-final.log`). The final optimized WASM bundle also
+built (`cr11-web.log`). Actual Chromium passed both protocols on both OPFS and
+IndexedDB, with native and browser connection names deliberately different
+(`cr11-browser-final.log`, `cr11-browser-results.json`). Every virtual-copy publication
+verified original, smart preview, thumbnail and supporting XMP; reload retained the
+copy and the native creator received it. All 175 fixture requests were signed and
+there were no browser page errors. Rendered OPFS/head and IndexedDB/append app states
+were inspected in scratch
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr11-browser-final/browser-2b18f6bc/`.
+This is loopback-provider correctness acceptance, not a live-provider or scale claim.
+No source changes followed the passing CI run. CR.11 is complete and checked off;
+CR.12–CR.21 remain open.

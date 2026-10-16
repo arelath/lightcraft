@@ -802,7 +802,20 @@ fn managed_thumbnail_browses_without_original_and_is_not_reused_after_an_edit() 
     session
         .commit(
             "Publish thumbnail",
-            lightcraft_catalog::Op::SetAsset { id: lightcraft_catalog::assets::AssetId("thumbnail".into()), asset: Some(Box::new(asset.clone())) },
+            lightcraft_catalog::Op::Batch {
+                ops: vec![
+                    lightcraft_catalog::Op::SetAsset {
+                        id: lightcraft_catalog::assets::AssetId("thumbnail-complete".into()),
+                        asset: Some(Box::new(asset.clone())),
+                    },
+                    lightcraft_catalog::Op::Relink {
+                        id,
+                        file_name: "cloud.png".into(),
+                        source: lightcraft_catalog::Source::Managed { asset_id: lightcraft_catalog::assets::AssetId("thumbnail-complete".into()) },
+                        format: None,
+                    },
+                ],
+            },
         )
         .unwrap();
     let job = session.thumb_job(id, 384).unwrap();
@@ -827,7 +840,7 @@ fn managed_thumbnail_browses_without_original_and_is_not_reused_after_an_edit() 
 }
 
 #[test]
-fn adding_a_rendition_invalidates_queued_sources_and_quick_render_keys() {
+fn replacing_a_manifest_invalidates_queued_sources_and_quick_render_keys() {
     let scratch = Scratch::new();
     let mut session = crate::Session::new().with_fs();
     session.open_library(&scratch.0, false).unwrap();
@@ -852,7 +865,20 @@ fn adding_a_rendition_invalidates_queued_sources_and_quick_render_keys() {
     session
         .commit(
             "Add rendition",
-            lightcraft_catalog::Op::SetAsset { id: lightcraft_catalog::assets::AssetId("updated".into()), asset: Some(Box::new(asset)) },
+            lightcraft_catalog::Op::Batch {
+                ops: vec![
+                    lightcraft_catalog::Op::SetAsset {
+                        id: lightcraft_catalog::assets::AssetId("updated-complete".into()),
+                        asset: Some(Box::new(asset)),
+                    },
+                    lightcraft_catalog::Op::Relink {
+                        id,
+                        file_name: "cloud.raw".into(),
+                        source: lightcraft_catalog::Source::Managed { asset_id: lightcraft_catalog::assets::AssetId("updated-complete".into()) },
+                        format: None,
+                    },
+                ],
+            },
         )
         .unwrap();
     assert!(resolver.generation() > generation);

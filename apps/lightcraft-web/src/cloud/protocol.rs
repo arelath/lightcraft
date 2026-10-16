@@ -149,10 +149,9 @@ pub(super) async fn immutable(provider: &Provider, key: &str, bytes: &[u8]) -> R
 pub(super) async fn dependencies(provider: &Provider, mutations: &[Mutation]) -> Result<(), String> {
     let mut seen = BTreeSet::new();
     for change in mutations.iter().flat_map(|m| &m.changes).filter(|c| c.field == "content") {
-        let mut asset: Asset = serde_json::from_value(change.value.get("asset").cloned().ok_or("missing immutable asset description")?)
+        let asset: Asset = serde_json::from_value(change.value.get("asset").cloned().ok_or("missing immutable asset description")?)
             .map_err(|_| "invalid immutable asset")?;
-        asset.original.remote.connection = provider.connection.id.clone();
-        asset.validate()?;
+        let asset = asset.rebound(&provider.connection.id)?;
         for blob in asset.blobs() {
             if !seen.insert((blob.id.clone(), blob.remote.key.clone(), blob.remote.version.clone())) {
                 continue;

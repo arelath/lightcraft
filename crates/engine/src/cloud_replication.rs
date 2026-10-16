@@ -187,19 +187,9 @@ fn immutable(connection: &S3Connection, key: &str, bytes: &[u8], cancel: &Atomic
 }
 pub(crate) fn dependencies_verified(connection: &S3Connection, mutations: &[Mutation], cancel: &AtomicBool, media: &mut VerifiedMedia) -> Result<()> {
     for change in mutations.iter().flat_map(|mutation| &mutation.changes).filter(|change| change.field == "content") {
-        let mut asset: Asset = serde_json::from_value(change.value.get("asset").cloned().ok_or_else(|| invalid("mutation content has no asset"))?)
+        let asset: Asset = serde_json::from_value(change.value.get("asset").cloned().ok_or_else(|| invalid("mutation content has no asset"))?)
             .map_err(|_| invalid("invalid mutation asset description"))?;
-        asset.original.remote.connection = connection.id.clone();
-        if let Some(proxy) = &mut asset.smart_preview {
-            proxy.remote.connection = connection.id.clone();
-        }
-        if let Some(thumbnail) = &mut asset.thumbnail {
-            thumbnail.remote.connection = connection.id.clone();
-        }
-        for associated in asset.associated.values_mut() {
-            associated.remote.connection = connection.id.clone();
-        }
-        asset.validate().map_err(invalid)?;
+        let asset = asset.rebound(&connection.id).map_err(invalid)?;
         for blob in asset.blobs() {
             if !media.verify(connection, blob, cancel, &mut |_| {})? {
                 return Err(AssetError::Missing);

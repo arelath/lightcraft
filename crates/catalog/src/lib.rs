@@ -691,8 +691,17 @@ impl Catalog {
                 }
                 let old = if let Some(asset) = asset {
                     asset.validate().map_err(CatalogError::Invalid)?;
-                    if self.assets.get(&id).is_some_and(|old| old.original.id != asset.original.id || old.original.size != asset.original.size) {
-                        return Err(CatalogError::Invalid("an asset's original is immutable; create a new asset identity for changed bytes".into()));
+                    if self.assets.get(&id).is_some_and(|old| !old.same_manifest(&asset)) {
+                        return Err(CatalogError::Invalid(
+                            "an asset manifest is immutable; create a new asset identity for changed bytes, renditions or object locations".into(),
+                        ));
+                    }
+                    if self.assets.get(&id).is_some_and(|old| old.original.remote.connection != asset.original.remote.connection) {
+                        // Working paths are local, but their connection follows the asset's
+                        // local binding. The inverse SetAsset restores this binding as well.
+                        for working in self.working_copies.values_mut().filter(|working| working.asset_id == id) {
+                            working.connection.clone_from(&asset.original.remote.connection);
+                        }
                     }
                     self.assets.insert(id.clone(), *asset)
                 } else {
