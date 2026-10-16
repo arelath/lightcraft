@@ -1,6 +1,6 @@
 # Cloud storage milestones and tasks
 
-Based on [docs/cloud-storage.md](docs/cloud-storage.md). Checkboxes reflect verified work; milestone acceptance remains separate. Evidence: [docs/cloud-storage-implementation.md](docs/cloud-storage-implementation.md). Complete the four core milestones in order. Browser support is an additional adapter, and a managed metadata backend is optional follow-up work.
+Based on [docs/cloud-storage.md](docs/cloud-storage.md). Checkboxes reflect verified work; milestone acceptance remains separate. Current behavior: [docs/cloud-storage-implementation.md](docs/cloud-storage-implementation.md). Dated evidence: [docs/cloud-acceptance-history.md](docs/cloud-acceptance-history.md). The five scoped milestones cover native cloud storage/synchronization and the browser adapter; Milestone 6 is deferred.
 
 The supplied reliability review is tracked separately in
 [docs/cloud-reliability-tasks.md](docs/cloud-reliability-tasks.md), in execution order.

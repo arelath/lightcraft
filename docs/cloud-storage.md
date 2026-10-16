@@ -1,3 +1,12 @@
+# Historical cloud storage proposal
+
+This pre-implementation proposal is retained as design history. Its source observations
+and future-work statements describe that earlier snapshot. For current behavior and
+limits use [cloud-storage-implementation.md](cloud-storage-implementation.md); for the
+implemented wire contract use [cloud-sync-protocol.md](cloud-sync-protocol.md).
+The [reliability checklist](cloud-reliability-tasks.md) records remaining work and
+[cloud-acceptance-history.md](cloud-acceptance-history.md) preserves dated verification.
+
 **Yes. S3 would be a good backing store, but making it feel seamless means adding an asset cache and background synchronization layer inside LightCraft.** The editor should request a photo at the quality it needs, and the storage layer should find it locally or download it automatically.
 
 Assuming you mean [`storytold/lightcraft`](https://github.com/storytold/lightcraft), I reviewed its current source. It already has several useful pieces: injectable image loaders, a local catalog journal, thumbnail caching, and smart previews for editing while originals are unavailable. Those provide a reasonable foundation. [GitHub](https://github.com/storytold/lightcraft?utm_source=chatgpt.com)

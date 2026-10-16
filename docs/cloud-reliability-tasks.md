@@ -18,7 +18,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.11 — Enforce one immutable published asset-manifest contract with device-local connection binding; test permitted/rejected descriptor changes and extract shared blob rebinding.
 - [x] CR.12 — Replace subtractive catalog JSON projection/materialization with explicit portable photo, content, album, and reference types and typed boundary conversions; retain wire compatibility tests.
 - [x] CR.13 — Extract testable upload readiness, transfer, verification, dependency waiting, publication, acknowledgement, and failure transitions; test deletion/restart behavior.
-- [ ] CR.14 — Consolidate current behavior/limitations, protocol specification, and dated acceptance evidence. Remove obsolete current-status claims and distinguish historical verification.
+- [x] CR.14 — Consolidate current behavior/limitations, protocol specification, and dated acceptance evidence. Remove obsolete current-status claims and distinguish historical verification.
 - [ ] CR.15 — Persist live offline owner-plus-quality policy, derive dependencies after membership/content changes, and allow empty albums to be pinned. Test new members and asset revisions.
 - [ ] CR.16 — Add a command to move existing local photos into managed cloud storage while preserving photo IDs, virtual copies, edits, albums, and history. Test identity/history preservation and restart.
 - [ ] CR.17 — Handle browser cache exhaustion with safe verified-blob eviction, catalog/outbox space reservation, and temporary viewing versus guaranteed offline retention. Test quota failures and pinned data preservation.
@@ -64,6 +64,10 @@ outcomes. Check items only after implementation and relevant acceptance.
 - [x] CR.41 — Separate incremental archive proof planning from final merge. Batch missing hashes, verify immutable nodes once, avoid repeated state merges/forest rebuilds per node, and retain exact-proof safety. Add counters for full merges, forest construction, witness checks and archive GETs across small/large compacted histories.
 
 ## Verification log
+
+This is chronological evidence. Earlier statements that a task is pending or open
+describe that run; the checkboxes above are the current completion state. Historical
+provider and milestone reports are collected in [cloud-acceptance-history.md](cloud-acceptance-history.md).
 
 2026-10-14 — CR.1/CR.2: 11 append and 5 conditional-head real-CLI tests passed
 (`target/cloud-reliability-tests.log`). Regressions cover soft/permanent deletion before
@@ -1264,3 +1268,18 @@ repository CI then passed all eight gates on the final source (`target/cloud-rel
 including real CLI bulk request/byte assertions, deletion and process-restart recovery.
 CR.13 is complete and checked off. CR.14–CR.21 remain open. This is fixture acceptance;
 no fresh live-provider or large-library claim is made.
+
+
+2026-10-17 — CR.14 implementation: current behavior and explicit remaining limits now
+live in cloud-storage-implementation.md, normative synchronization rules in
+cloud-sync-protocol.md, and browser authorization/storage rules in browser-cloud.md.
+cloud-acceptance-history.md preserves the dated native, browser, B2 and migration
+reports with their provider/account and fixture limitations. The original milestone
+index and reliability checkbox list have distinct roles. Removed superseded current
+claims about import-only publication, missing edit sync/compaction/external-editor
+ingestion, future CatalogSync, completed CR.9/CR.10/CR.31 work and local format versions.
+Links and current claims reviewed, including the historical proposal banner. Local
+Markdown file and heading targets resolve. Full repository CI passed all eight gates
+(`target/cloud-reliability/cr14-ci.log`); no executable source changed. CR.14 is
+complete and checked off. CR.15–CR.21 remain open. This documentation consolidation
+adds no provider, camera or scale acceptance claim.

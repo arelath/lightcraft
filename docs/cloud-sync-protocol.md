@@ -1,6 +1,13 @@
 # Direct bucket synchronization
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
+
+This is the current normative metadata protocol and owner-durability contract.
+[Current behavior and limits](cloud-storage-implementation.md), the
+[browser authorization/storage contract](browser-cloud.md), and
+[dated acceptance](cloud-acceptance-history.md) have separate roles. Exact receipt
+archive and capacity rules are maintained in [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
+The [reliability checklist](cloud-reliability-tasks.md) tracks implementation and verification.
 
 Configure the same bucket and library prefix on each computer. In File → Cloud Synchronization,
 the first computer leaves Library ID blank; subsequent computers enter the first computer's
@@ -66,7 +73,7 @@ Filter chips clear the marker; legacy `only:[]` command patches still clear the
 restriction unless they explicitly set the marker. Empty similarity results remain
 constrained rather than showing the whole library.
 
-Upgrade all devices before using these semantics. New local snapshots use format 18 (15 introduced the smart-selection barrier),
+Upgrade all devices before using these semantics. Current local snapshots use format 19 (15 introduced the smart-selection barrier),
 new mutations version 2, and new synchronization/checkpoint states version 3. Older
 builds reject these required versions before applying an empty allowed set. New
 readers accept legacy mutation/state versions and retain their exact identities and
@@ -491,16 +498,7 @@ does not yet have a mutation journal, enable the default conditional-head journa
 existing connection first, then migrate with every old writer stopped. This explicitly rebinds
 legacy upload receipts; selecting append mode alone does not silently change those receipts.
 
-### Implementation order and acceptance
-
-1. Add explicit protocol configuration, immutable-write/readback and bounded listing adapters.
-   Verify ordinary small/multipart uploads and prefix/pagination behavior on live B2.
-2. Add append records, exact-ID publication proofs, durable progress and author-rotation
-   recovery. Preserve the current CAS mode and all local staging/ownership protections.
-3. Add gap-aware discovery, causal application and checkpoint bootstrap; initially keep remote
-   history and current core bounds. Reuse existing field, conflict, deletion and undo tests.
-4. Extend the browser signer contract, Fetch adapter and durable acknowledgement receipt;
-   inspect the shared setup/status/retry workflows on OPFS and IndexedDB.
+### Protocol acceptance requirements
 
 Required acceptance includes simultaneous writers to the same field; independent fields and
 album additions; same-object upload races; lost PUT/multipart/acknowledgement responses;
@@ -511,7 +509,7 @@ checkpoints; no publication of unsent checkpoint effects; offline delete-versus-
 quota failures; expired listing/upload URLs; malformed/out-of-prefix responses; and native/
 browser/live-B2 convergence. Verify that append mode never writes a shared head or sends the
 unsupported conditional-write headers, while CAS-mode regressions continue to pass. Full CI
-and actual UI inspection are separate verification gates recorded in `tasks.md`.
+and actual UI inspection are separate verification gates recorded in [../tasks.md](../tasks.md).
 
 ### Setup, cutover and retention
 
@@ -570,47 +568,11 @@ transport now drains at that boundary. No conditional operation is retried uncon
 
 ### Verification evidence
 
-Nine real CLI tests cover concurrent writers, lost PUT/multipart completion responses, one-entry listing pages, late author
-insertion before a page cursor, missing predecessors, failed pages, cloned-author collisions,
-checkpoint bootstrap, historical pending recovery, migration, binary revisions and explicit
-delete-versus-offline-edit recovery. Pure tests
-cover cross-author dependencies, incomparable checkpoints, remote-only snapshots and exact
-acknowledgements. A failed owner-side journal save rolls back incoming fields, append progress
-and pending acknowledgement together. The original CAS tests remain enabled.
+Dated provider and fixture runs are in [cloud-acceptance-history.md](cloud-acceptance-history.md).
+The current [reliability checklist](cloud-reliability-tasks.md) records subsequent changes and
+final-source CI. Neither an old acceptance run nor a completed feature implies current live-provider acceptance.
 
-Live B2 evidence is in `target/cloud-acceptance/b2-append-live-results.json` and
-`b2-revision-live-results.json`: small/9 MiB multipart originals, independent/concurrent native
-edits, checkpoints/rebootstrap, DNG/XMP revisions and peer convergence. The append run recorded
-132 native S3 requests with no conditional-write headers or shared-head publication. This is
-procedural acceptance against the supplied bucket, not live AWS or large-library benchmarking.
-Browser results and final CI are recorded separately in [browser-cloud.md](browser-cloud.md)
-and `tasks.md`. Acceptance objects use owned prefixes; no existing library objects are removed.
-
-All eight final CI stages passed (`target/b2-ci-verified.log`). Desktop and browser Info Sync now
-completed live B2 reconciliation; append setup/status screenshots were inspected. The temporary
-browser CORS rule was removed and the original absent configuration verified.
-
-An extra post-build recheck later hit B2's download bandwidth/Class B cap (object GET 403,
-scoped LIST 200). Complete live acceptance passed before that limit. See
-`target/cloud-acceptance/b2-final-access-probe.json`; account caps were not changed.
-
-
-Coordinated workflow acceptance (2026-10-14) passed on the native release and Chromium OPFS/
-IndexedDB adapters against an independently signed loopback S3 fixture. It exercised disabled
-peer confirmation, cancelled preparation/explicit resume, cancellation after remote marker
-publication, retry, preserved pending edits, append convergence and browser reload. Native
-and browser Activity/Info progress and completion were visually inspected. Evidence:
-`target/cloud-acceptance/migration-native-results.json`, `migration-browser-results.json`
-and `migration-*.png`. A fresh B2 GET still returned 403 `AccessDenied` with an explicit download/
-Class B cap-exceeded response (`migration-b2-access-probe.json`); the new live workflow recheck
-remains pending. No account caps or billing settings were changed.
-
-All eight final CI stages passed (`target/migration-ci-final.log`), including the owner-worker
-rollback/cancellation/library-switch regressions and the shared modal confirmation test. Native
-release and web builds passed; fixture/static helpers were stopped after acceptance.
-
-
-### Publication completion ordering (2026-10-14)
+### Publication completion ordering
 
 Native uploads and ordinary synchronization share one metadata publication gate per
 open library. A worker holds it from remote reconciliation through durable owner
@@ -633,10 +595,10 @@ shared acknowledgement. Explicit verification started on an already synchronized
 import can invalidate it when it confirms missing or corrupt remote bytes and
 cannot repair them; connectivity or old publication failures do not revoke proof.
 Receipt finalization after another worker acknowledges publication is durable (CR.27);
-transfer/publication stage extraction and request-cost assertions remain CR.31.
+stage decisions and bulk request/byte invariants are verified in CR.13/CR.31.
 
 
-### Writer identity and catalog restores (2026-10-14)
+### Writer identity and catalog restores
 
 Writer ownership belongs to shared synchronization rather than the append protocol.
 Native setup/open and the local mutation boundary protect both modes. Browser setup
@@ -671,7 +633,7 @@ causal readiness. Retired author clocks remain retained; author-slot retirement
 is still unsupported.
 
 
-### Cloud subsystem health (2026-10-15)
+### Cloud subsystem health
 
 `cloud.syncStatus.health` and `cloud.overview.health.sync` report the actual polling
 scheduler: disabled, unverified, checking, healthy, userPaused, migrationPaused,
@@ -694,7 +656,7 @@ download failures are resource-specific and its host reports the same scheduler
 health model.
 
 
-### Logical undo and redo (2026-10-15)
+### Logical undo and redo
 
 Undo history records the metadata keys and individual album memberships changed
 by each action. Before applying an inverse it combines saved values for those
@@ -714,7 +676,7 @@ the history entry available for explicit conflict-aware recovery. Independent
 remote fields do not become accidental targets of a whole-metadata inverse.
 
 
-### Native upload stages and transfer evidence (2026-10-15)
+### Native upload stages and transfer evidence
 
 A native upload task prepares each selected import's media once, reconciles one
 ready metadata batch through the per-library owner gate, then finalizes covered
@@ -748,7 +710,7 @@ cannot clear a verification failure. Typed maintenance purposes prevent user
 connection names from colliding with receipt-worker routing/reservations.
 
 
-### Typed transport outcomes (2026-10-15)
+### Typed transport outcomes
 
 Native and browser transports share `cloud_outcome::Outcome`: an unchanged certified
 head scan, a conditional-head result, or append progress with exact acknowledgements.
@@ -769,11 +731,11 @@ are unchanged by this refactoring.
 `cloud.sync` completion reports include `outcome` (`unchanged`, `conditionalHead`,
 or `append`). Only a published head includes `cursor` and `generation`; an empty
 head reports `head: "empty"`, and append reports `frontiers`/`gaps`. Poll status still
-exposes the saved catalog's protocol-specific state. Existing append checkpoint
-request-cost/large-library work stays open in CR.9/CR.10.
+exposes the saved catalog's protocol-specific state. Append request-cost and owner-application bounds are specified below;
+remaining state-sized work is recorded in the current implementation limits.
 
 
-### Shared structural projection (2026-10-15)
+### Shared structural projection
 
 Folder-parent resolution and shared stack ownership live in
 `cloud_sync::shared_projection`. They take only shared synchronization state,
@@ -791,7 +753,7 @@ Separate properties verify preservation of private photos, filters and groups.
 No wire-format change or large-library performance claim accompanies extraction.
 
 
-### Native conditional-head history recovery (2026-10-15)
+### Native conditional-head history recovery
 
 Native readers stream backwards through immutable batches into a fixed 4,096-slot
 reference ring on temporary disk, then refetch and verify one batch at a time for
@@ -811,11 +773,11 @@ Migration's read-only path uses successive windows without changing the head.
 This favors a bounded working set over request minimization: fresh traversal and
 replay fetch a batch twice, and very long recovery/read-only histories can require
 additional passes. Unchanged small head polls retain their existing no-write path.
-Browser history replay and measured memory/cost evidence remain tracked in CR.35;
-append checkpoint request optimization remains CR.10.
+Browser replay shares these windows, as specified below. CR.35 records measured
+native memory/cost evidence; append checkpoint consumption and audit bounds follow below.
 
 
-### Browser bounded history replay (2026-10-15)
+### Browser bounded history replay
 
 Browser head replay now uses the same 4,096-record window, 1,024-record automatic
 checkpoint interval and constant-space cycle detection as native replay. Its
@@ -826,7 +788,7 @@ mutations. Migration reads all windows without changing the head. Hash, size,
 parent, library and checkpoint-boundary checks remain mandatory in both passes.
 Neither path retains a decoded batch tail. Request minimization is a separate
 tradeoff: fresh windows need traversal and replay GETs, and very long histories
-can need additional passes; CR.9/CR.10 stay open.
+can need additional passes. Local materialization and append request bounds are specified below.
 
 
 The checked-in Windows regression `apps/lightcraft-cli/tests/cloud_replay_memory.rs`
@@ -838,7 +800,7 @@ Shared/native bounded-window tests remain portable. These are catch-up working-s
 owner-thread or slider-latency benchmarks.
 
 
-### Creating and joining libraries (2026-10-15)
+### Creating and joining libraries
 
 `cloud.syncEnable` without `library` creates a library and authors its immutable
 initialization once. Supplying an existing library ID joins it. A join adopts shared
@@ -859,7 +821,7 @@ poisoning the remote log. It does not replace validation of concurrently discove
 remote operations or raise field/author limits.
 
 
-### Local materialization and journal deltas (2026-10-16)
+### Local materialization and journal deltas
 
 The catalog rebuilds a nonserialized reverse identity index once after loading and
 maintains it with identity operations. Received metadata edits decode changed photos;
@@ -868,7 +830,7 @@ memberships. Folder and overlapping-stack changes keep deterministic global grap
 resolution, followed by device-local overlays. Receipt/cursor-only progress does not
 materialize unchanged documents.
 
-Local catalog format 18 adds `patchSyncState`. After writer reservation, shared native
+Local catalog format 18 introduced `patchSyncState` (current format: 19). After writer reservation, shared native
 and browser session code replaces full synchronization-state updates with typed
 field/register, receipt, archive and outbox deltas. Append publication snapshots use
 nested portable deltas too. Each edited value records its expected predecessor;
@@ -890,7 +852,7 @@ and startup snapshot/ownership work. The scale fixture measures nonwaiting start
 dispatch wall time separately. These are not end-to-end UI latency measurements. Full logical merges, state validation, catalog
 container clones and snapshots can still scale with retained state. See CR.9
 acceptance for exact fixture sizes, request counts, journal growth and timings;
-append checkpoint consumption/audits remain CR.10.
+append checkpoint consumption and audit budgets follow below.
 
 
 ### CR.10: append discovery and historical audit budgets
@@ -916,7 +878,7 @@ manifest reads and LIST discovery remain. Checkpoint listings, state validation/
 of many authors are still bounded linear work; this is not a general large-library latency claim.
 
 
-### Explicit metadata schema boundary (2026-10-16, CR.12)
+### Explicit metadata schema boundary
 
 `crates/engine/src/cloud_sync/portable.rs` and its filter codec explicitly define
 shared photo, immutable content, descriptive metadata, album, stack and global

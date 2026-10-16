@@ -1,6 +1,11 @@
 # Browser cloud adapter
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
+
+This document specifies the current browser adapter. The shared wire contract is
+[cloud-sync-protocol.md](cloud-sync-protocol.md); operational gaps are indexed in
+[current limits](cloud-storage-implementation.md#current-limits-and-remaining-work).
+Verification is dated separately in [cloud-acceptance-history.md](cloud-acceptance-history.md).
 
 The browser uses Fetch and authorized object URLs. Native AWS profiles and long-lived keys
 are not available to this adapter. A user-controlled, stateless authorization endpoint signs
@@ -137,24 +142,10 @@ Exports larger than the transfer/memory budget require smaller batches or the de
 
 ## Verification and limits
 
-Chromium acceptance passed on both OPFS and IndexedDB with two real render workers:
-browse/edit/export, offline preview operation, pending edits and cache across reload,
-reauthorization, URL expiry, lost head response/checkpoint recovery, native/browser convergence,
-quota failure/retry and original reacquisition. All 205 signed-fixture requests verified;
-every write was conditional. A separate failure after remote publication retained pending IDs
-until the acknowledgement receipt actually saved; reload then finished acknowledgement without
-network access. Cloud backup entries verified against their SHA-256 keys and excluded session
-tokens/signed URLs. Info's Sync now button recovered from a rejected login. All eight stages of
-`cargo +1.95.0 xtask ci` passed (`target/browser-cloud-ci.log`). Screenshots and results are in
-`target/cloud-acceptance/browser-acceptance-results.json`; focused native web tests also cover
-source replacement, corrupt bytes, acknowledgement recovery and backup path/hash validation.
-
-These are procedural tests of a development bundle. They do not establish live AWS/provider
-interoperability or large-library performance. The provided B2 bucket returns
-HTTP 501 for conditional writes; use explicit append mode below. See
-[the native compatibility evidence](cloud-storage-implementation.md). No unconditional fallback
-is enabled. Bucket CORS and a user-controlled signer must be configured for a live deployment.
-The optional managed metadata backend remains deferred.
+See [current limits](cloud-storage-implementation.md#current-limits-and-remaining-work)
+and [dated acceptance](cloud-acceptance-history.md) for distinct implementation and
+verification scope. A live deployment requires bucket CORS, a signer and login; a
+maintained deployment recipe remains CR.20. The optional metadata backend is deferred.
 
 ## Append mode and signer extension
 
@@ -218,41 +209,6 @@ the explicit OPFS/IndexedDB cache. Existing expiry refresh, cancellation and quo
 Received changes/progress and an exact-ID acknowledgement receipt must actually finish saving
 before pending IDs drop. Reload can finish a saved acknowledgement, including historical authors.
 
-Live append acceptance (2026-10-14) passed on OPFS and IndexedDB through a scoped stateless
-signer and the actual B2 endpoint. It covered offline preview editing/export, pending work
-across reload, expired URLs, a lost committed PUT response, quota failure/no eviction/retry,
-original reacquisition/export and native-peer convergence. IndexedDB migrated its historical
-pending CAS outbox. Both finished with no pending work or gaps and two real render workers;
-195 B2 responses were recorded. Results and screenshots live in
-`target/cloud-acceptance/b2-browser-live-results.json` and `b2-browser-*.png`. Final UI updates
-were 1–2 ms, with startup/update maxima of 12.1–13.9 seconds. This is procedural acceptance of
-a development bundle, not a large-library performance measurement. Test origins receive
-temporary CORS rules; the original absent configuration was restored and verified after testing.
-Desktop and browser Info Sync now completed live B2 reconciliation, with append setup/status
-screenshots inspected. All eight final CI stages passed (`target/b2-ci-verified.log`). The optional metadata backend remains
-out of scope; a live browser deployment still needs its own signer, login and bucket CORS.
-
-After acceptance completed, an extra B2 object GET returned 403 because the account download
-bandwidth/Class B cap had been reached; scoped listing still worked. The native adapter
-currently labels a 403 as rejected credentials, so check B2 Caps & Alerts as well as key
-permissions. Further live download rechecks await a cap reset or an owner-approved cap change.
-The complete earlier acceptance results remain recorded; account caps were not changed.
-
-
-The coordinated migration dialog was additionally verified on 2026-10-14 in Chromium with
-both OPFS and IndexedDB against the independently signed loopback fixture. Preparation pause,
-confirmation, reconnect without resuming, cancellation after seed publication, retry, pending
-retention, native-peer convergence and durable completed-mode reload passed. Visible Activity/
-Info migration progress and confirmation/completion were inspected. Results:
-`target/cloud-acceptance/migration-browser-results.json` and `migration-browser-*.png`.
-The account cap above still blocks a fresh live-B2 workflow test; this fixture evidence is
-separate from the earlier completed live append tests.
-
-The final native release and browser bundle built successfully; all eight CI stages passed
-(`target/migration-native-final.log`, `target/migration-web-final.log`, `target/migration-ci-final.log`).
-Owned fixture/static helpers were stopped after acceptance.
-
-
 ## Cloud status popup and pause
 
 The upper-right cloud icon now opens a shared status popup with managed-data totals, pending
@@ -264,10 +220,7 @@ catalog, not the provider's storage capacity. `cloud.overview` exposes the same 
 pending work. Reload/reconnect/sign-in changes keep the pause. `cloud.resume` waits for jobs to
 stop, saves the resumed preference, then schedules synchronization after durable saves finish.
 Acquisition/downloads remain available. Native original uploads can be paused/resumed from the
-same popup; browser original upload/import is still unsupported. OPFS and IndexedDB popup/
-filter/pause-reload/native-peer checks passed against the signed loopback fixture:
-`target/cloud-ux-acceptance/browser-results.json` and `browser-*.png`.
-
+same popup; browser original upload/import is still unsupported. Dated popup/filter/reload acceptance is preserved in the [archive](cloud-acceptance-history.md).
 
 ## Browser source acquisition lifetime
 
@@ -294,11 +247,3 @@ specified in [cloud-sync-protocol.md](cloud-sync-protocol.md#cr10-append-discove
 Ordinary polls discover new checkpoint keys and author tails; historical integrity work runs in
 bounded slices and its device-local cursor is saved in OPFS/IndexedDB with append progress.
 `cloud.syncStatus.appendAudit` distinguishes a partial audit from a completed round.
-
-
-2026-10-16 CR.10 acceptance: actual Chromium OPFS and IndexedDB resumed the same historical-audit
-round after reload (64 then 35 record GETs after the first 64-record slice of a 162-operation history).
-Three subsequent automatic polls per backend made 12 manifest/LIST requests and no covered operation,
-checkpoint or receipt-node GETs. All fixture requests were signed; no page errors occurred. See the
-[dated reliability evidence](cloud-reliability-tasks.md). This is loopback acceptance, not a live B2
-or large-photo-library performance result.

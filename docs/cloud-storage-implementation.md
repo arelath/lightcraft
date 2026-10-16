@@ -1,6 +1,13 @@
 # Cloud storage implementation
 
-Last updated: 2026-10-16. Completion and acceptance checks are tracked in [../tasks.md](../tasks.md). The proposal is [cloud-storage.md](cloud-storage.md).
+Last updated: 2026-10-17. This document describes current behavior and operational limits. The normative wire and
+durability contract is [cloud-sync-protocol.md](cloud-sync-protocol.md); its receipt-history
+contract is [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
+[browser-cloud.md](browser-cloud.md) defines the browser adapter contract.
+[cloud-acceptance-history.md](cloud-acceptance-history.md) preserves dated acceptance;
+[cloud-reliability-tasks.md](cloud-reliability-tasks.md) is the authoritative remaining-work
+checklist. [../tasks.md](../tasks.md) indexes the original milestones. The initial
+[proposal](cloud-storage.md) is historical, not the implemented specification.
 
 Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
 
@@ -19,15 +26,74 @@ Unchanged conditional-head polls return `unchanged:true`, preserving catalog rev
 cached views and journal bytes when there is no earlier unsaved work. Browser owner
 completion skips both the catalog and ACK-file transaction; acknowledgements and
 changed metadata/cursor/generation continue through durable receive. Network discovery
-and append checkpoint-audit optimization are separate follow-up tasks.
+uses durable consumed-checkpoint hints and bounded resumable historical audits
+in append mode. LIST discovery and full state validation still have linear costs.
+
+## Current limits and remaining work
+
+- Native local files stay local until managed import; adopting existing photo records
+  is CR.16. Native album offline pins currently snapshot members (CR.15).
+- Browser original import/upload is unsupported. Its verified persistent cache has
+  quota failure recovery, but automatic eviction/reserved catalog capacity and a
+  guaranteed offline-retention policy remain CR.17. A maintained signer deployment
+  and explicit capability matrix remain CR.20.
+- Deletion retains complete objects, revisions, tombstones and receipt archives.
+  Safe previewable reclamation remains CR.18. Multipart cleanup only retires incomplete
+  uploads. Never expire history or supporting objects independently of this protocol.
+- Native managed import is bounded to 512 MiB per input; browser source admission
+  has a 512 MiB aggregate payload/reservation budget. Other decode/dimension limits differ. Unified limit reporting and representative
+  large Hasselblad validation remain CR.19.
+- A synchronization failure halts automatic polling until explicit retry. Transient
+  classification/backoff remains CR.21. Resource-specific errors and last successful
+  remote scan are exposed separately from user pause and pending publication.
+- Checkpoints archive exact old receipts while retaining current/pending contexts.
+  Author clocks and remote history remain retained. State validation, snapshot cloning,
+  author/checkpoint listing and some structural reconciliation still scale with state;
+  the measured CR.9/CR.10 bounds are not a general large-library latency guarantee.
+- Conditional-head publication requires working conditional writes; the tested B2
+  endpoint rejected those headers. Explicit append mode passed dated B2 acceptance.
+  Live AWS, a fresh post-change B2 run and arbitrary providers remain unverified.
+  The optional managed metadata backend is deferred.
+
+The checklist above describes this revision; use the [task checkboxes](cloud-reliability-tasks.md)
+for later completion state. Verification details and provider/account caveats belong
+to the dated archive, not to current feature claims.
+
+## Managed revisions and owner-thread I/O
+
+DNG conversion, associated XMP saves and external-editor return ingestion prepare
+immutable revisions on workers and retain photo identity, virtual copies and earlier
+assets for undo/recovery. Conversion verifies decoded samples. Staging manifest v2
+binds a revision to its target and base asset so recovery relinks rather than duplicates.
+External working files and merge outputs remain durable local files outside eviction.
+The supporting-XMP section below specifies recipe and foreign-property handling.
+
+Native UI dispatch uses cached sources. Metadata, foreground exports, external edits
+and control renders acquire missing originals on workers, hold leases and resume on
+the owner only while the library/source binding remains current. Cancellation leaves
+recoverable local state. Output guards protect managed originals, cache paths and
+bound working files, including directory-link aliases.
 
 ## Current architecture
 
-The catalog remains a local journal and snapshot. Format 8 adds `Source::Managed { asset_id }`, a shared asset table and `Op::SetAsset`; format 9 adds device-local upload intents journaled with imports. Photo IDs identify recipes and library records, asset IDs identify originals, and blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record. Changing bytes, object keys or versions, rendition membership, or supporting documents requires a new asset identity. The complete manifest is frozen at its first catalog commit, including manually attached assets; prepare renditions before committing. Only per-device connection IDs can be rebound. `Asset::same_manifest` and `Asset::rebound` define the shared comparison and binding contract for catalog edits, native/browser publication and incoming materialization. Rebinding includes originals, previews, thumbnails and XMP; the catalog atomically follows the new local connection in working-copy records, including undo/replay. The receiver rejects conflicting existing identities atomically. Versions 1–12 still load and upgrade; older builds refuse format 13. Format 10 adds associated XMP, stable identity mappings and device-local working-copy bindings. Format 11 adds durable mutation synchronization; format 12 adds explicit append/CAS protocol selection, verified append progress and restored-author ownership. Format 13 adds sync-status filter criteria; absent criteria still mean no status constraint. Shared checkpoints exclude upload intents and all device-local paths and settings.
+The catalog remains a local journal and snapshot, currently format 19. The
+[journal version table](../crates/catalog/src/journal.rs) specifies upgrades and
+older-reader rejection; local format numbers are independent of remote wire versions.
+Photo IDs identify recipes and library records, asset IDs identify originals, and
+blob IDs are SHA-256 digests of immutable bytes. Virtual copies share an asset record.
+Changing bytes, object keys or versions, rendition membership, or supporting documents
+requires a new asset identity. The complete manifest is frozen at its first catalog
+commit, including manually attached assets; prepare renditions before committing.
+Only device-local connection IDs can be rebound. `Asset::same_manifest` and
+`Asset::rebound` define that comparison/binding for catalog edits, publication and
+materialization, including originals, previews, thumbnails and XMP. Working-copy
+bindings follow atomically, including undo/replay. Conflicting existing identities
+are rejected atomically. Shared checkpoints exclude device-local paths, upload
+intents, working-copy bindings, cache state and preferences.
 
 `crates/catalog/src/assets.rs` describes originals and optional smart-preview/thumbnail blobs, with connection IDs, object keys and optional object versions. Device cache paths, transfer state and connection settings are excluded from the catalog. Existing SipHash duplicate-detection and cache hashes retain their semantics.
 
-`crates/engine/src/assets.rs` separates `BlobStore` (transport), `TransferManager` (verified acquisition and availability), and `CatalogSync` (a future conditional metadata-publication interface). Catalog synchronization uses the durable mutation protocols described in [cloud-sync-protocol.md](cloud-sync-protocol.md).
+`crates/engine/src/assets.rs` separates `BlobStore` (transport), `TransferManager` (verified acquisition and availability), and `CatalogSync` (the conditional metadata-publication interface). Catalog synchronization uses the durable mutation protocols described in [cloud-sync-protocol.md](cloud-sync-protocol.md).
 
 The resolver streams to an atomic-write temporary file, checks the declared size and SHA-256, then publishes it. Failed, cancelled, interrupted or corrupt transfers never become valid cached files. Reopening verifies cached content before use. Per-blob locks deduplicate simultaneous downloads; leases protect files during use. Errors distinguish confirmed missing objects, rejected credentials and temporary failures.
 
@@ -59,7 +125,7 @@ Decoded proxies are bypassed when an original becomes cached, including direct/h
 
 The import completes locally without storage connectivity or credentials. It reports **Saved locally / upload pending**. The desktop subsequently schedules background upload; one-shot CLI/MCP callers explicitly run `cloud.upload`. Cancelling, abandoning a worker result, switching libraries or failing a catalog save preserves the manifest and original. `cloud.recoverImports` explicitly scans validated manifests for the selected connection, regenerates missing renditions from the staged original and commits unrecorded imports. Already journaled identities are skipped, preventing duplicate recovery. It never rereads arbitrary source paths from a manifest. A failed journal append keeps the in-memory pending save; repair the error and retry the save before recovery in another process.
 
-Resolver acquisition prefers durable staged bytes and verifies them before decoding or exporting. Cache trimming and remove-local-copy cannot remove them; output guards prevent overwriting the immutable blob namespace. Invalid overlapping cache/managed directory mappings disable trimming and staging until repaired. `Managed/working` is reserved for durable external-edit revisions and excluded from cache maintenance; the external-editor ingestion workflow remains open.
+Resolver acquisition prefers durable staged bytes and verifies them before decoding or exporting. Cache trimming and remove-local-copy cannot remove them; output guards prevent overwriting the immutable blob namespace. Invalid overlapping cache/managed directory mappings disable trimming and staging until repaired. `Managed/working` holds durable external-edit revisions and is excluded from cache maintenance. The managed revision workflow is described below.
 
 ## Durable upload and initial remote publication
 
@@ -103,21 +169,11 @@ and retry creates a new session. See AWS's [lifecycle configuration](https://doc
 
 AWS documents the [conditional-write retry rules and incomplete-upload lifecycle option](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html). The implementation also checks the response body because [multipart completion can report an error inside HTTP 200](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html).
 
-Historical initial import publication used a bounded version-1 protocol (superseded by
-the causal protocol in [cloud-sync-protocol.md](cloud-sync-protocol.md)):
-
-| Object | Role |
-|---|---|
-| `<prefix>/originals/<sha256>` | Immutable original bytes |
-| Versioned preview/thumbnail keys from `assets::keys` | Immutable supporting renditions |
-| `<prefix>/catalog/changes/<sha256>.json` | Immutable import batch with its parent batch reference |
-| `<prefix>/catalog/head.json` | Small head containing protocol version, generation and content-addressed tip |
-
-The publisher reads the head and its ETag, reconciles an already published import identity, creates a batch with `If-None-Match: *`, and creates or advances the head with `If-None-Match: *` or `If-Match`. A failed condition reloads and rebases against the new head; there is no unconditional head write. A lost head response is resolved by finding the same mutation and exact immutable snapshot in the verified chain. Unsupported/malformed heads and mismatched identities stop publication without replacing remote data. Batch size is capped at 2 MiB, publication retries at 16, and history traversal at 4,096 batches. Checkpoints and history compaction remain future work.
-
 Worker phases are acknowledged on the session owner only after the local journal append succeeds. Local save failure restores the prior displayed state and leaves queued operations for save retry. A process crash after remote publication but before local acknowledgement rereads the remote chain and acknowledges without another import publication. Library switching cancels the old queue; library, asset and connection revisions are checked before owner events can change another catalog or acknowledge work against replaced connection settings.
 
-Original synchronized means the original, supporting objects and initial import reference are safely published. Later edits remain in the local catalog; multi-device edit/album synchronization is not implemented. Staged bytes remain protected even after synchronization in this slice. Moving safely uploaded staging into the disposable cache, associated XMP and external-editor ingestion remain open tasks.
+Original synchronized means verified media and its exact causal publication are
+acknowledged. Later edits use the same synchronization protocols. Durable receipt
+finalization must also finish before staging can be promoted to disposable cache.
 
 ## Transfer scheduling and recovery
 
@@ -266,7 +322,7 @@ Physical folder moves reject managed photos and direct the user to albums and lo
 
 A bounded maintenance worker evicts least recently used eligible flat SHA-256 cache files. Acquisitions and eviction share per-blob gates; decoded-source clones retain an `Arc<AssetLease>` throughout their memory-cache/job lifetime. Downloads, decoding and exports therefore keep their source bytes protected. Cache bytes are verified downloads or verified copies of safely uploaded staging data.
 
-Staging migration requires an fsynced synchronized catalog acknowledgement, a matching version-2 receipt,
+Staging migration requires an fsynced synchronized catalog acknowledgement, a compatible exact publication receipt,
 verified remote objects, no unfinished multipart sessions, and the receipt's matching storage destination.
 Every other pending catalog intent, import manifest and upload receipt protects its referenced blobs,
 including shared bytes destined for another bucket. Missing, malformed, redirected, future or legacy
@@ -291,160 +347,30 @@ asset reference. Emptying Recently Deleted removes local photo records and membe
 asset/upload records and staged or working data for recovery. Neither deletion command issues an object
 DELETE. Immutable image objects, catalog history and deleted-photo receipts are retained indefinitely
 in this implementation; there is no automatic remote garbage collector. Explicit multipart retention
-only aborts incomplete uploads and preserves these objects. Multi-device tombstones and conflict
-recovery are separate synchronization work and are not yet provided by local library deletion.
+only aborts incomplete uploads and preserves these objects. Enabled libraries publish deletion tombstones through synchronization; explicit
+conflict recovery retains alternate edits. Neither mechanism reclaims remote bytes.
 
 Malformed, oversized or future retention settings are preserved and reported. Policy writes and eviction are disabled until repaired; verified local bytes remain usable. Atomic-save failures preserve the previous policy. Settings and staging files, subdirectories and symbolic links are never eviction candidates.
 
-## Verification and remaining work
+## Verification
 
-Live Backblaze B2 acceptance on 2026-10-12 used a private bucket at the
-`s3.us-east-005.backblazeb2.com` endpoint and a dedicated random test prefix. Download,
-develop, full-quality export, explicit preview export, local-original removal and original
-reacquisition passed with the generated RAW. Credentials were supplied only through process
-environment variables and were not stored in the library, app settings or test evidence.
-The endpoint returned HTTP 501 `NotImplemented` for both `If-None-Match: *` and `If-Match`.
-Conditional-head catalog publication therefore remains unavailable on this B2 endpoint. LightCraft
-reports unsupported conditional writes and retains staged bytes and multipart receipts;
-it never falls back to an unconditional catalog overwrite. Live AWS remains unverified.
-Sanitized results are `target/cloud-acceptance/live-b2-results.json` and
-`live-b2-read-results.json`. Only the dedicated procedural test objects were written;
-existing objects and bucket policies were left untouched. Provider setup follows the
-[Backblaze S3 API documentation](https://www.backblaze.com/apidocs/introduction-to-the-s3-compatible-api);
-the conditional-write limitation above was observed directly in the live test.
-
-Explicit append-only B2 synchronization passed live native and browser acceptance on
-2026-10-14. Immutable operations, checkpoints and verified small/multipart media use ordinary
-requests and no shared head. Existing CAS libraries require coordinated migration; mode never
-changes automatically after a 501. See [cloud-sync-protocol.md](cloud-sync-protocol.md) and
-[browser-cloud.md](browser-cloud.md) for setup, migration, durable recovery and evidence.
-The temporary browser acceptance CORS rule was restored to the original absent configuration.
-
-Catalog tests cover malformed references, shared originals/virtual copies, journal replay and compaction, format-7 upgrade and legacy file sources. A synthetic regression rejects `PhotoId(u64::MAX)` as an error instead of overflowing.
-
-Engine tests cover a cloud-only synthetic Bayer DNG opening, developing, exporting and reopening from verified cache; concurrent requests; lease protection; corrupt/interrupted/cancelled/auth-failed transfers; injected failed writes; and path traversal rejection. A proxy-only render cannot satisfy a managed export's original requirement. A UI regression verifies retry after download completion without a catalog edit.
-
-`apps/lightcraft-cli/tests/cloud.rs` drives the real CLI and MCP binaries against a loopback S3-shaped server with generated RAW bytes and fake credentials. This test passed on Windows with Rust 1.95.0. Set `LIGHTCRAFT_CLOUD_ACCEPTANCE_DIR` during the test to save its generated DNG for a separate desktop acceptance run.
-
-The native desktop acceptance also passed on 2026-10-12 using control port 18837 and a separate loopback server that independently checked SigV4 with Python's HMAC implementation. It attached the remote-only RAW, applied +0.75 exposure, reached a completed native render, saved its catalog and exported a 32×24 PNG. One verified request acquired the original; the export reused it. The inspected native screenshot and results are in gitignored `target/cloud-acceptance/`. The final inspected frame measured 0.82 ms for UI update and 6.29 ms for the last render, with no queued or in-flight renders. These measurements use a tiny synthetic fixture and are not a large-library performance benchmark. This does not establish live AWS interoperability. Per-task completion and actual validation results are recorded in `tasks.md`.
-
-Synchronization/conflicts and browser adapters are implemented and verified, as described below. The optional backend is deferred at the user's request. Durable local import, recovery, verified uploads, staging/cache migration, explicit idle multipart retention and conditional publication are implemented; unsynchronized originals and external working files are protected from cache eviction. Browser workers accept verified managed original/preview bytes; the separate acceptance evidence below establishes synchronization behavior.
-
-Managed DNG conversion, XMP saves and external-edit return ingestion use the durable preparation worker.
-They create new asset and upload identities while retaining the photo's stable cloud identity. DNG
-conversion verifies decoded samples before relinking the photo and its virtual copies. Existing
-originals and revisions are retained for undo and recovery. Managed XMP uses
-`associated/xmp/<sha256>.xmp` under the library prefix, preserves foreign properties, and is verified
-and uploaded with the image dependencies before catalog publication. An unreadable associated packet
-is retained with an error. Automatic neighboring-file XMP writing remains specific to local files;
-managed XMP is explicitly saved through the shared metadata command.
-
-External edit copies are rendered into durable `Managed/working/<identity>/<name>` files, staged as
-managed photos, and stacked with their sources in one journal record. The native host launches the
-editor after successful preparation. On focus return, Reload stages changed bytes as an immutable
-revision with the same photo identity; unchanged bytes create no additional upload. Working paths
-and ingested-byte baselines remain device-local. Cache eviction never visits this working namespace,
-even after upload; ordinary exports cannot overwrite a bound working file. Merge results from managed
-inputs are durable local DNG files in `Managed/working/merges`, acquired through the original resolver
-and imported normally; they can subsequently be imported into cloud storage. Denoise continues to
-acquire original bytes through the resolver on its worker.
-
-Catalog format 10 adds associated assets, global identity mappings and working-copy bindings while
-preserving older catalogs. Staging manifest version 2 identifies a revision's target and base asset,
-so recovery relinks the existing photo rather than duplicating it. Publication batch version 2 records
-the base asset explicitly and accepts legacy version-1 imports; a previously pending binary revision
-uses its retained immutable description when a newer revision has replaced it locally. This binary
-publication support does not synchronize later ratings or develop edits between devices.
-
-`cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF checks, workspace tests, parity references, layering, asset attribution and WASM on Windows. The required Rust 1.95 toolchain exposed older Clippy suggestions and Unix-specific test assumptions, which were corrected. Recovery tests also exposed duplicate Windows `.xmp`/`.XMP` alias moves: sidecar operations now deduplicate physical aliases, preserve actual filename spelling and retain distinct packets on sensitive volumes. Synthetic and native regressions cover these cases.
-
-Native UI dispatch is cached-only: it cannot start a transfer or wait for another download's lock. Metadata, external-edit and foreground export/control-render requests acquire remote content on a worker, then resume on the owner thread with leases held. Pending actions retain their initial target IDs and are rejected after a library/source change. Control clients receive their ordinary result after acquisition; GUI commands expose an activity task, including cancellation. Normal view rendering, merge, denoise and background exports already acquire on workers. Private original-reader handles include a NUL separator so valid local filenames cannot collide with them.
-
-User-output guards protect managed originals and renditions, and reject writes anywhere inside the managed cache, including prospective filenames and paths through existing directory links. Internal verified-cache writers retain their own publication path.
-
-A second native acceptance used a 2.5-second server delay. Concurrent metadata and `ui.render` requests completed after one independently verified download while another connection's `ui.inspect` answered in 26 ms. It returned 31 metadata rows, rendered 32×24, exported at original dimensions and rejected a render output pointed at the original cache file; its SHA-256 remained intact. The inspected screenshot is `target/cloud-acceptance/native-deferred.png`; results are `native-deferred-results.json`. Final UI update time was 0.73 ms with empty render queues. These are small-fixture responsiveness checks.
-
-Native retention acceptance passed on 2026-10-12 through control port 18837. Clicking Info → Keep original offline persisted the pin; Settings → Performance displayed the separate budget and its pinned-only option. After the local S3-compatible server stopped, reopening retained the pin and a zero-byte budget, and an adjusted RAW exported at 32×24. Pinned removal was refused. Unpinning and explicit removal deleted the cached original while preserving the photo, its remote reference and an empty Missing Photos result; browsing did not recreate the removed original. Screenshots (`native-cache-info.png`, `native-cache-settings.png`, `native-cache-removed.png`) and results are in gitignored `target/cloud-acceptance/`. Final native update time was 7.79 ms with no queued/in-flight renders; this tiny fixture is not a large-library benchmark. Engine tests additionally verify editable preview pins across restart, separate album/photo ownership, corruption recovery and atomic-save failures. CLI/MCP retention acceptance passed too.
-
-Native preview acceptance passed on 2026-10-12 with a 2.5-second proxy delay: a verified thumbnail appeared first, then an editable `.lcsp` render. Browsing fetched one thumbnail and one proxy and never requested the original. The maximum observed control-inspection response during the transfer was 56 ms; the final native update was 0.40 ms with empty render queues. +0.5 exposure rendered from the proxy. Full export reported an HTTP 503 while the original was unavailable, explicit proxy export succeeded at 32×24, and enabling/downloading the original refreshed the view and allowed full export. The decoded proxy/full export channels differed by at most one 8-bit level on this procedural fixture; `.lcsp` is a reduced-quality editing proxy. Screenshots and request/result logs are in gitignored `target/cloud-acceptance/native-preview-*` and `preview-server-requests.json`. This is not a large-library performance or real-camera fidelity benchmark.
-
-Native transfer acceptance passed on 2026-10-12 through port 18847 against a signed loopback server that sent an original in delayed chunks. The Info panel displayed partial byte progress and cached-preview availability. Cancelling the activity left the original uncached and editing from the proxy succeeded. Clicking Reconnect and retry acquired the original, restored cached availability and allowed 32×24 full export. All HTTP requests passed independent SigV4 verification. Screenshots and results are `target/cloud-acceptance/native-transfer-*`; maximum observed inspection latency was 36 ms and the final native UI update was 1.18 ms with empty render queues. These measurements use a tiny procedural fixture, not a large-library benchmark. Focused tests also cover the four-download limit, priority ordering and duplicate promotion, cancellation while waiting for a shared blob or network slot, preview use during an original transfer, render-driven activity cancellation/reconnect, and one-shot CLI wait completion. Live AWS remains unverified.
-
-Native staging acceptance passed on 2026-10-12 through port 18857 with storage unavailable. A background RAW import produced durable original/proxy/thumbnail bytes and a saved local upload intent. After removing its private source copy, the photo accepted develop changes and exported at 32×24, survived restart with a zero-byte cache budget, and exported again. Local-copy removal was refused; explicit recovery skipped the recorded import without duplication. Inspected screenshots and results are `target/cloud-acceptance/native-import-*`. The restarted app's final UI update was 0.71 ms with empty render queues; this tiny procedural fixture does not measure large-library or camera fidelity. CLI/MCP staging and export acceptance also passed without HTTP requests. Regression tests cover abandoned prepared results, journal-append failure, immutable output protection, overlapping directory mappings, durable working-directory preservation, and library switching during background preparation.
-
-Native upload acceptance passed on 2026-10-12 through port 18867 against an independently signed S3-compatible loopback fixture. The connection and import dialogs, byte-progress activity, failure text, Retry upload and Original synchronized state were visually inspected. A generated RAW padded to 9 MiB was saved locally, edited and exported at 32×24 after its private source was deleted, while multipart upload was still pending. A deliberately lost part response retained the original and refused local-copy removal. Clicking Retry upload resumed the same upload ID, verified all three object keys and published one catalog head. All requests passed independent Python HMAC/SigV4 checks. Results/screenshots are in gitignored `target/cloud-acceptance/native-upload-*`; maximum observed inspection latency was 43 ms and the final UI update was 0.50 ms with empty render queues. This procedural fixture is not a large-library performance or real-camera fidelity benchmark; live AWS remains unverified.
-
-Six real CLI/MCP upload tests cover response loss, restart after remote publication, embedded HTTP-200 completion errors, explicit abort, rejected credentials, independent queued work and byte-progress/ping/cancellation. Owner-event tests cover failed local acknowledgement and retry, old-library events and changed connection settings. Staging/cache promotion and managed path-dependent flows subsequently passed their own acceptance checks below.
-
-Native organization acceptance passed on 2026-10-12 through control port 18867 with storage offline.
-The renamed `Trip-12.dng` appeared under Cloud archive → Trip, retained its synchronized original and
-asset identity, and exported at 32×24. All staged bytes stayed identical. The inspected screenshot is
-`target/cloud-acceptance/native-cloud-organization.png`, with results in `native-organization-results.json`.
-The last render took 14.04 ms; the captured UI update took 33.37 ms with empty render queues. These
-measurements use a tiny procedural fixture. Regression tests additionally cover mixed local/cloud
-rename, undo/redo, folder membership across restart and overflow rejection before any name or path changes.
-
-Native multipart retention acceptance passed on 2026-10-12 through control port 18867 against an independently
-signed loopback fixture. A generated RAW remained editable/exportable after a deliberately failed completion.
-After its catalog photo was permanently removed, preview found its eight-day-old receipt without changing it.
-Clicking the activity Cancel control retained an uncertain abort receipt. Retry confirmed a still-present part,
-repeated abort, then removed the recorded session. All staged blobs and a pending working file stayed byte-identical;
-no catalog head was published. The inspected progress screenshot and results are in gitignored
-`target/cloud-acceptance/native-cleanup-*`. Maximum observed inspection latency was 47 ms; final UI update
-was 7.01 ms with empty render queues. These are tiny procedural fixtures; live AWS remains unverified.
-
-CLI/MCP regressions cover deleted-photo cleanup, preview/young-session preservation, repeated abort confirmation,
-rejected credentials/destination changes, ping/cancellation and uncertain-response recovery. Engine checks cover
-future timestamps, corrupt/future/legacy/misnamed receipts, connection reservations and failed retirement writes.
-
-## Staging migration and deletion acceptance
-
-Staging/cache and deletion acceptance passed on 2026-10-12 through native control port 18867.
-The generated 9 MiB RAW was editable while upload credentials were rejected. Pending and pinned
-removals were refused; the Info button displayed the actual refusal and later successful removal.
-Proxy export succeeded without original access, full-quality export reacquired the original, and
-permanent library deletion left every remote object and a durable working file unchanged. A corrupt
-ownership record appeared as a staging error in Performance settings and was preserved until repaired.
-Screenshots were inspected: `native-managed-retention-pinned-refusal.png`,
-`native-managed-retention-removed.png` and `native-managed-retention-staging-error.png`.
-Results and independently verified signed requests are in `target/cloud-acceptance/`.
-Maximum inspection latency was 48 ms; final UI update was 18.74 ms with empty render queues.
-These are tiny procedural images, not real-camera or large-library benchmarks. Live B2 read/export acceptance passed; B2 conditional publication is unsupported as recorded above. Engine regressions cover six durability, ownership, cancellation, corruption and
-restart scenarios; real CLI/MCP upload coverage includes legacy proof upgrade and retention/reacquisition.
-
-## Managed revision acceptance
-
-Managed revision acceptance (2026-10-13): all eight CI stages passed in `target/cloud-managed-revisions-ci-final.log`. Fifteen focused preparation/recovery tests and real CLI/MCP revision tests cover partial rendition recovery, source changes, protected hard-link aliases and immutable upload descriptions. Native control-channel checks converted a procedural RAW to DNG, saved/read associated XMP, launched an actual test editor, ingested its returned 16×12 TIFF under the same derived photo ID, exported at full dimensions and removed eligible cache data while retaining the working file. All 54 fixture requests passed independent signing checks. Screenshots `native-revisions-dng.png` and `native-revisions-external.png` were inspected; results are in `target/cloud-acceptance/native-revisions-results.json`. Maximum inspection latency was 59 ms on this tiny fixture.
-
-DNG encoding verifies decoded sample identity before publication. XMP is a bounded associated immutable blob; explicit reads and writes use managed storage, while automatic neighboring-file sidecar writes remain local-file-only. External working copies are durable device data, never disposable cache. Recovery refuses changed source bindings and keeps staged originals. Full-resolution merges acquire originals on workers and produce durable local outputs. These checks do not establish synchronization of subsequent edits between devices.
+See the [dated acceptance archive](cloud-acceptance-history.md) for the exact releases,
+fixtures, provider results and limitations. Newer reliability verification is recorded
+in [cloud-reliability-tasks.md](cloud-reliability-tasks.md#verification-log). Historical
+acceptance is not a claim that the current checkout or another provider was tested.
 
 ## Multi-device synchronization
 
-Catalog format 11 adds the provider-independent, bounded causal mutation model, durable outbox and cursor. Shared engine capture covers commands, system operations, undo/redo and finalized slider groups, excluding device-local storage and preferences. Native conditional publication, incremental polling, checkpoints, deterministic field reconciliation, explicit conflict resolution and retained-tombstone recovery are described in [cloud-sync-protocol.md](cloud-sync-protocol.md).
-
-Verified core evidence is in `target/cloud-sync-engine-tests.log`, `target/cloud-sync-owner-tests.log`, `target/cloud-sync-cli-tests.log` and `target/cloud-sync-ci-final.log`. Eleven shared-engine scenarios, two owner/persistence tests and four real CLI scenarios complement five catalog reconciliation tests. They cover independent offline imports, metadata/membership convergence, competing recipes, deletion recovery, revision-aware undo, bounded migration, compaction, atomic failure/retry, conditional races/response loss, incremental downloads and checkpoint rebootstrap with pending work. Browser acceptance and its authorization/storage contract are described in [browser-cloud.md](browser-cloud.md).
-
-Native synchronization acceptance (2026-10-13) passed through control port 18877 with a signed loopback S3 fixture. Two catalogs converged after independent metadata/develop edits; the Info conflict controls opened Versions and explicitly resolved a recipe while preserving its alternative. Permanent deletion followed by an offline peer edit did not recreate the photo; clicking Recover restored the retained five-star edit, then both catalogs synchronized. Cancellation retained pending work, rejected credentials produced actionable Info text, and clicking Sync now completed retry. Setup, progress, failure, conflict, versions and recovery screenshots were inspected. All 140 scenario requests passed independent signing checks; every write was conditional. Results are in `target/cloud-acceptance/native-sync-results.json`. The isolated delayed-head check recorded 61 inspection samples with a maximum of 52 ms; the complete feedback flow recorded a 493 ms outlier around screenshot/control interaction. Final UI update time was 8.87 ms with empty render queues. These tiny procedural checks do not establish large-library performance or live AWS compatibility. All eight CI stages passed in `target/cloud-sync-ci-final.log`.
+The catalog retains a provider-independent bounded causal mutation model, durable outbox and protocol-specific progress. Shared engine capture covers commands, system operations, undo/redo and finalized slider groups, excluding device-local storage and preferences. Native conditional publication, incremental polling, checkpoints, deterministic field reconciliation, explicit conflict resolution and retained-tombstone recovery are described in [cloud-sync-protocol.md](cloud-sync-protocol.md).
 
 ## Browser support
 
 [The browser adapter](browser-cloud.md) shares wire records, causal reconciliation and source
-requirements with the engine. Fetch uses scoped authorized URLs with conditional writes,
+requirements with the engine. Fetch uses scoped authorized URLs with conditional writes in head mode or immutable readback in append mode,
 expiration refresh and cancellation/deadlines. OPFS/IndexedDB retain verified blobs and pending
 work. The owner-thread scheduler waits for actual storage completion of catalog/cursor and
 acknowledgement proof before removing pending IDs. Worker/foreground readers use smart previews
 only where explicitly allowed, and source-generation changes reject stale results.
-
-Both browser stores passed Chromium browse/edit/export, offline preview, pending reload,
-reauthorization, expired URL, lost response, checkpoint, native-peer convergence, quota retention
-and original reacquisition checks. All 205 fixture requests verified and every write was
-conditional. Results: `target/cloud-acceptance/browser-acceptance-results.json`. The development
-bundle's final UI updates were 2 ms; initial/update maxima were 6.8–7.2 seconds with procedural
-thumbnail work in flight. No live provider or large-library performance claim follows. All eight CI stages passed in
-`target/browser-cloud-ci.log`. Browser Info retry and the rebuilt desktop Info synchronization
-button passed; a deliberately failed post-publication acknowledgement retained pending work,
-then recovered its saved proof on reload. Backup inspection verified cloud hashes and excluded
-session login tokens and signed URLs.
 
 ## Coordinated migration workflow
 
@@ -478,7 +404,7 @@ and [browser requirements](browser-cloud.md).
 | 2026-10-14 | Cloud queue popup, indexed sync-status filters and persisted device-local pause/resume; native multipart recovery and browser OPFS/IndexedDB controls verified. |
 | 2026-10-14 | Settings → Cache: drive usage, size limit, Clear cache, library-wide offline copies and verified cache relocation. |
 | 2026-10-16 | Preserve and apply supporting XMP on managed import; retain foreign properties through XMP, DNG and external-editor revisions with explicit rendered-recipe semantics. |
-
+| 2026-10-17 | Separate current behavior/limits, normative protocol and dated acceptance; remove superseded current claims (CR.14). |
 
 ## Cloud queue UX
 
@@ -504,14 +430,6 @@ conflicts. Local files stay Local only until explicitly imported to cloud storag
 OPFS/IndexedDB supports the same popup/filter and persisted metadata pause; browser original
 upload/import remains unsupported. The shared status index is invalidated by sync/source/
 collection changes, rather than rebuilt for unrelated metadata edits on each frame.
-
-Verification (2026-10-14): native six-file queue/multipart pause-resume and browser OPFS/IndexedDB
-popup/filter/reload/native-peer workflows passed against the signed loopback fixture, with
-screenshots inspected (`target/cloud-ux-acceptance`). Native release and browser builds passed
-(`target/cloud-ux-native-final.log`, `target/cloud-ux-web-final.log`); all eight full CI stages
-passed (`target/cloud-ux-ci.log`). This UX acceptance does not add a fresh live-B2 or large-library
-performance claim.
-
 
 ## Supporting XMP in managed imports and revisions
 
