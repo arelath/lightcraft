@@ -1,3 +1,5 @@
+#[path = "support/cloud_scale.rs"]
+mod scale;
 #[path = "support/cloud_upload.rs"]
 mod support;
 use lightcraft_engine::catalog as lightcraft_catalog;
@@ -512,6 +514,61 @@ fn unchanged_head_cli_polls_preserve_exact_catalog_files_and_only_read_the_head(
     // checkpoint, receipt archive, media or write requests on an unchanged head.
     assert_eq!(new.len(), 6, "{new:?}");
     assert!(new.iter().all(|(method, path)| method == "GET" && (path == "/photos/library/catalog/head.json" || path == &marker)), "{new:?}");
+}
+#[test]
+#[ignore = "explicit CR9 signed-provider 10k/50k scale acceptance"]
+fn scale_unchanged_head_requests_journal_bytes_and_owner_latency() {
+    for count in [10_000, 50_000] {
+        let f = Fixture::new();
+        let (a, _, _) = initialize(&f);
+        let base = scale::seed(&f, &a, count);
+        let state_bytes = serde_json::to_vec(base.sync_state().unwrap()).unwrap().len();
+        let saved = ["catalog.snap", "catalog.log"].map(|name| (name, std::fs::read(a.join(name)).unwrap()));
+        let request_start = f.state.lock().unwrap().requests.len();
+        let rows = success(&f, &a, &[("cloud.sync", json!({})), ("cloud.sync", json!({})), ("cloud.sync", json!({}))]);
+        assert!(rows.iter().all(|row| row["result"]["unchanged"] == true), "{rows:?}");
+        let owner: Vec<_> = rows.iter().map(|row| row["result"]["ownerApplyMs"].as_f64().unwrap()).collect();
+        for (name, bytes) in &saved {
+            assert_eq!(std::fs::read(a.join(name)).unwrap(), *bytes, "{name}");
+        }
+        let (request_count, response_bytes) = {
+            let storage = f.state.lock().unwrap();
+            let requests = &storage.requests[request_start..];
+            let marker =
+                format!("/photos/{}", lightcraft_engine::cloud_append::manifest_key("library", &base.sync_state().unwrap().library).unwrap());
+            assert_eq!(requests.len(), 6, "{requests:?}");
+            assert!(
+                requests.iter().all(|(method, path)| method == "GET" && (path.ends_with("/catalog/head.json") || path == &marker)),
+                "{requests:?}"
+            );
+            assert_eq!(storage.signature_errors, 0);
+            let response_bytes: u64 = storage.traffic[request_start..].iter().map(|request| request.response_bytes).sum();
+            assert!(response_bytes < 16 << 10, "unchanged polls fetched {response_bytes} bytes");
+            (requests.len(), response_bytes)
+        };
+        // Nonwaiting dispatch measures owner startup (snapshot/ownership/local
+        // persistence and spawn) separately from network and result application.
+        // Closing this read-only CLI session cancels its background poll safely.
+        let startup = success(&f, &a, &[("cloud.sync", json!({"wait":false}))]);
+        assert_eq!(startup[0]["result"]["background"], true);
+        let startup_ms = startup[0]["ms"].as_f64().unwrap();
+        let before_bytes = std::fs::metadata(a.join("catalog.log")).unwrap().len();
+        let changed = success(&f, &a, &[("photo.rate", json!({"ids":[2],"rating":4})), ("cloud.sync", json!({})), ("library.info", json!({}))]);
+        // The CLI compacts on close. Observe bytes in library.info before that
+        // final snapshot, rather than mistaking a reset log for a zero-byte edit.
+        let growth = changed[2]["result"]["logBytes"].as_u64().unwrap() - before_bytes;
+        assert!(growth > 0 && growth < 40_000, "{count} photos wrote {growth} bytes");
+        let restored = saved_catalog(&a);
+        assert_eq!(restored.photo(lightcraft_catalog::PhotoId(2)).unwrap().rating, 4);
+        assert!(restored.sync_state().unwrap().pending.is_empty());
+        assert_eq!(restored.photos().count(), count);
+        println!(
+            "CR9 native photos={count} state_bytes={state_bytes} catalog_snapshot_bytes={} polls=3 GETs={request_count} response_bytes={response_bytes} unchanged_journal_growth=0 startup_dispatch_wall_ms={startup_ms} unchanged_owner_apply_ms={owner:?} edit_plus_ack_journal_bytes={growth} changed_owner_ms={} persistence={}",
+            saved[0].1.len(),
+            changed[1]["result"]["ownerApplyMs"],
+            changed[2]["result"]["persistence"]
+        );
+    }
 }
 #[test]
 fn archived_ack_and_missing_or_corrupt_archive_preserve_exact_pending_on_restart() {

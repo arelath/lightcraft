@@ -308,7 +308,7 @@ impl Op {
             | Op::SetCloudIdentity { .. }
             | Op::SetWorkingCopy { .. }
             | Op::SetUploadIntent { .. } => {}
-            Op::SetSyncState { .. } => {}
+            Op::SetSyncState { .. } | Op::PatchSyncState { .. } => {}
         }
     }
 }

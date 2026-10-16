@@ -28,7 +28,7 @@ fn timestamp_ms() -> Option<u64> {
 }
 enum Stage {
     SaveThenSync { checkpoint: bool, audit: bool },
-    Network(Rc<RefCell<Option<Result<Outcome, String>>>>),
+    Network { ready: Rc<RefCell<Option<Result<Outcome, String>>>>, revision: u64, connection: String },
     Ack { receipt: AckReceipt, result: Value },
     Received { result: Value },
     Acquire { command: String, params: Value, sources: Vec<(PhotoId, Source)>, lease: ByteLease },
@@ -168,7 +168,7 @@ impl Host {
             "cloud.pause" => Some({
                 let result = lightcraft_engine::cloud_status::pause(s, p).map_err(|e| e.to_string());
                 for job in &self.data.borrow().jobs {
-                    if matches!(job.stage, Stage::SaveThenSync { .. } | Stage::Network(_))
+                    if matches!(job.stage, Stage::SaveThenSync { .. } | Stage::Network { .. })
                         && let Some(cancel) = job.guard.cancel_flag()
                     {
                         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -385,7 +385,7 @@ impl Host {
         data.preparing_migration = true;
         data.paused = true;
         for job in &data.jobs {
-            if matches!(job.stage, Stage::SaveThenSync { .. } | Stage::Network(_))
+            if matches!(job.stage, Stage::SaveThenSync { .. } | Stage::Network { .. })
                 && let Some(cancel) = job.guard.cancel_flag()
             {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -456,7 +456,7 @@ impl Host {
             match result {
                 None => remaining.push(job),
                 Some(result) => {
-                    let sync = matches!(&job.stage, Stage::SaveThenSync { .. } | Stage::Network(_) | Stage::Ack { .. } | Stage::Received { .. });
+                    let sync = matches!(&job.stage, Stage::SaveThenSync { .. } | Stage::Network { .. } | Stage::Ack { .. } | Stage::Received { .. });
                     let mut data = self.data.borrow_mut();
                     if sync {
                         data.sync_running = false;
@@ -538,6 +538,8 @@ impl Host {
                         return Ok(None);
                     }
                     let local = app.session.catalog.sync_state().cloned().ok_or("synchronization identity is unavailable")?;
+                    let revision = app.session.catalog.revision;
+                    let connection = local.connection.clone();
                     let provider = self.data.borrow().providers.get(&local.connection).cloned().ok_or("browser connection is unavailable")?;
                     let provider = provider.with_cancel(job.guard.cancel_flag().ok_or("cancellation is unavailable")?);
                     let backend = self.backend.clone().ok_or("browser storage is unavailable")?;
@@ -559,10 +561,10 @@ impl Host {
                         });
                         crate::web::request_repaint();
                     });
-                    job.stage = Stage::Network(ready);
+                    job.stage = Stage::Network { ready, revision, connection };
                     Ok(None)
                 }
-                Stage::Network(ready) => {
+                Stage::Network { ready, revision, connection } => {
                     let Some(outcome) = ready.borrow_mut().take() else { return Ok(None) };
                     let outcome = outcome?;
                     if job.guard.is_cancelled() {
@@ -572,7 +574,11 @@ impl Host {
                         *ready.borrow_mut() = Some(Ok(outcome));
                         return Ok(None);
                     }
-                    if !job.migrating && lightcraft_engine::cloud_sync::unchanged_outcome(&app.session.catalog, &outcome) {
+                    let same_snapshot = matches!(&outcome, Outcome::Unchanged { state, position } if app.session.catalog.revision == *revision
+                        && app.session.catalog.sync_state().is_some_and(|current| current.protocol.is_head() && current.pending.is_empty()
+                            && current.connection == *connection && current.library == state.library && current.version == state.version
+                            && current.clock == state.clock && current.cursor.as_deref() == Some(position.cursor()) && current.generation == position.generation()));
+                    if !job.migrating && (same_snapshot || lightcraft_engine::cloud_sync::unchanged_outcome(&app.session.catalog, &outcome)) {
                         let mut value = outcome.report();
                         value["unchanged"] = json!(true);
                         value["protocol"] = json!(app.session.catalog.sync_state().map(|s| s.protocol));

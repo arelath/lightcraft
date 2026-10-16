@@ -27,8 +27,10 @@ impl Coordinator {
 }
 
 struct Pending {
-    owner_done: Option<mpsc::SyncSender<()>>,
+    owner_done: Option<mpsc::SyncSender<Option<Outcome>>>,
     started_generation: u64,
+    started_revision: u64,
+    connection: String,
     migration_owner: Option<String>,
     receiver: mpsc::Receiver<crate::Result<Outcome>>,
     library: Arc<()>,
@@ -41,10 +43,27 @@ struct Pending {
 impl Drop for Pending {
     fn drop(&mut self) {
         if let Some(done) = self.owner_done.take() {
-            let _ = done.send(());
+            let _ = done.send(None);
         }
         self.cancel.store(true, Ordering::Relaxed);
     }
+}
+// Call only after library/resolver binding checks. A transport Unchanged carries
+// its captured portable state; an unchanged owner revision proves that exact
+// snapshot is still current. Any intervening operation uses full comparison.
+fn unchanged_snapshot(catalog: &lightcraft_catalog::Catalog, outcome: &Outcome, pending: &Pending) -> bool {
+    let Outcome::Unchanged { state, position } = outcome else { return false };
+    catalog.revision == pending.started_revision
+        && catalog.sync_state().is_some_and(|current| {
+            current.protocol.is_head()
+                && current.pending.is_empty()
+                && current.connection == pending.connection
+                && current.library == state.library
+                && current.version == state.version
+                && current.clock == state.clock
+                && current.cursor.as_deref() == Some(position.cursor())
+                && current.generation == position.generation()
+        })
 }
 #[derive(Default)]
 pub struct Jobs {
@@ -147,6 +166,8 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
     }
     s.persist()?;
     let state = s.catalog.sync_state().cloned().ok_or_else(|| error("enable synchronization first using cloud.syncEnable"))?;
+    let started_revision = s.catalog.revision;
+    let snapshot_connection = state.connection.clone();
     let lib = s.library.as_mut().ok_or_else(|| error("open a persistent library first"))?;
     let connection = lib
         .cloud_connections()?
@@ -163,7 +184,7 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
     let worker_cancel = cancel.clone();
     let started_generation = state.generation;
     let (sender, receiver) = mpsc::sync_channel(1);
-    let (owner_done, applied) = mpsc::sync_channel(1);
+    let (owner_done, applied) = mpsc::sync_channel::<Option<Outcome>>(1);
     let coordinator = s.cloud_replication_jobs.coordinator.clone();
     let revision = resolver.connection_revision();
     coordinator.media.prepare(revision, &connection, !state.pending.is_empty());
@@ -198,7 +219,13 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
             if sender.send(result).is_ok() {
                 loop {
                     match applied.recv_timeout(std::time::Duration::from_millis(20)) {
-                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Ok(retired) => {
+                            // Large verified snapshots are released on this existing
+                            // worker, after the owner has finished its durable ACK.
+                            drop(retired);
+                            break;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(_) if worker_cancel.load(Ordering::Relaxed) => break,
                         Err(_) => {}
                     }
@@ -209,6 +236,8 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
     s.cloud_replication_jobs.pending = Some(Pending {
         owner_done: Some(owner_done),
         started_generation,
+        started_revision,
+        connection: snapshot_connection,
         migration_owner,
         receiver,
         library: s.library_token(),
@@ -282,14 +311,18 @@ impl Session {
         let id = pending.guard.id();
         let current_owner =
             Arc::ptr_eq(&pending.library, &self.library_token()) && pending.connection_revision == pending.resolver.connection_revision();
+        let owner_started = web_time::Instant::now();
+        let mut retired = None;
         let result = result.and_then(|outcome| {
+            let result = (|| {
             if pending.guard.is_cancelled() {
                 return Err(error("synchronization cancelled; pending work and prior protocol retained"));
             }
             if !Arc::ptr_eq(&pending.library, &self.library_token()) || pending.connection_revision != pending.resolver.connection_revision() {
                 return Err(error("library or storage connection changed; remote result ignored and local pending work retained"));
             }
-            if pending.migration_owner.is_none() && crate::cloud_sync::unchanged_outcome(&self.catalog, &outcome) {
+            if pending.migration_owner.is_none()
+                && (unchanged_snapshot(&self.catalog, &outcome, &pending) || crate::cloud_sync::unchanged_outcome(&self.catalog, &outcome)) {
                 if !self.pending_log.is_empty() {
                     self.persist()?;
                 }
@@ -349,6 +382,16 @@ impl Session {
             value["protocol"] = json!(self.catalog.sync_state().map(|s| s.protocol));
             value["pending"] = json!(self.catalog.sync_state().map_or(0, |state| state.pending.len()));
             Ok(value)
+            })();
+            retired = Some(outcome);
+            result
+        });
+        if let Some(done) = pending.owner_done.take() {
+            let _ = done.send(retired);
+        }
+        let result = result.map(|mut value| {
+            value["ownerApplyMs"] = json!(owner_started.elapsed().as_secs_f64() * 1000.0);
+            value
         });
         if current_owner {
             self.cloud_replication_jobs.paused = result.is_err() || self.cloud_replication_jobs.preparing_migration;
@@ -448,6 +491,8 @@ mod tests {
         s.cloud_replication_jobs.pending = Some(Pending {
             owner_done: None,
             started_generation: local.generation,
+            started_revision: s.catalog.revision,
+            connection: local.connection.clone(),
             migration_owner: None,
             receiver,
             library: s.library_token(),
@@ -547,6 +592,34 @@ mod tests {
         s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Ok(same));
     }
     #[test]
+    fn snapshot_shortcut_requires_exact_owner_revision_and_transport_unchanged() {
+        let (mut s, _) = session();
+        ready(&mut s);
+        s.poll_cloud_replication();
+        ready_same_head(&mut s, 1);
+        {
+            let pending = s.cloud_replication_jobs.pending.as_ref().unwrap();
+            let outcome = pending.ready.as_ref().unwrap().as_ref().unwrap();
+            assert!(unchanged_snapshot(&s.catalog, outcome, pending));
+            let progress = Outcome::head(outcome.state().clone(), outcome.head_position().unwrap().clone(), BTreeSet::new());
+            assert!(!unchanged_snapshot(&s.catalog, &progress, pending));
+        }
+        // Keep the ready completion held while committing the owner edit.
+        // execute() itself polls ready jobs before dispatching the command.
+        s.commit("shared label", Op::SetLabelName { label: lightcraft_catalog::ColorLabel::Green, name: Some("Local green".into()) }).unwrap();
+        {
+            let pending = s.cloud_replication_jobs.pending.as_ref().unwrap();
+            let outcome = pending.ready.as_ref().unwrap().as_ref().unwrap();
+            assert!(!unchanged_snapshot(&s.catalog, outcome, pending));
+            assert!(!crate::cloud_sync::unchanged_outcome(&s.catalog, outcome));
+        }
+        let pending = s.catalog.sync_state().unwrap().pending.clone();
+        s.poll_cloud_replication();
+        assert_eq!(s.catalog.sync_state().unwrap().pending, pending);
+        assert_eq!(s.catalog.custom_label_name(lightcraft_catalog::ColorLabel::Green), Some("Local green"));
+        assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["result"]["unchanged"], false);
+    }
+    #[test]
     fn unchanged_head_poll_creates_no_operation_journal_write_or_cache_invalidation() {
         let (mut s, files) = session();
         ready(&mut s);
@@ -607,14 +680,17 @@ mod tests {
         let coordinator = s.cloud_replication_jobs.coordinator.clone();
         let outcome = s.cloud_replication_jobs.pending.as_mut().unwrap().ready.take().unwrap();
         let (sender, receiver) = mpsc::sync_channel(1);
-        let (owner_done, applied) = mpsc::sync_channel(1);
+        let (owner_done, applied) = mpsc::sync_channel::<Option<Outcome>>(1);
         let (held, holding) = mpsc::sync_channel(1);
         let worker_gate = coordinator.clone();
         let worker = std::thread::spawn(move || {
             let _permit = worker_gate.acquire(&AtomicBool::new(false)).unwrap();
             sender.send(outcome).unwrap();
             held.send(()).unwrap();
-            applied.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            assert!(
+                applied.recv_timeout(std::time::Duration::from_secs(5)).unwrap().is_some(),
+                "return the snapshot for worker-side retirement only after saving"
+            );
         });
         let pending = s.cloud_replication_jobs.pending.as_mut().unwrap();
         pending.receiver = receiver;

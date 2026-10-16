@@ -182,7 +182,15 @@ mod tests {
             }])
             .unwrap()
             .unwrap();
-        s.apply_received(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+        // A captured local edit commits its logical effect with the outbox. A raw
+        // state replacement alone would be an unmaterialized test fixture.
+        s.apply_received(Op::Batch {
+            ops: vec![
+                Op::SetLabelName { label: crate::catalog::ColorLabel::Green, name: Some("Local green".into()) },
+                Op::SetSyncState { state: Some(Box::new(state)) },
+            ],
+        })
+        .unwrap();
         assert!(!crate::cloud_sync::unchanged_outcome(&s.catalog, &outcome));
         let op = crate::cloud_sync::completed_outcome(&s.catalog, &outcome, outcome.acknowledged(), 11).unwrap();
         s.apply_received(op).unwrap();

@@ -16,6 +16,7 @@
 pub mod assets;
 pub mod dates;
 pub mod folders;
+mod identity_index;
 pub mod journal;
 pub mod keywords;
 pub mod local;
@@ -83,6 +84,9 @@ pub const HISTORY_LIMIT: usize = 200;
 pub enum Op {
     SetSyncState {
         state: Option<Box<replication::SyncState>>,
+    },
+    PatchSyncState {
+        delta: Box<replication::delta::SyncDelta>,
     },
     SetCloudIdentity {
         entity: String,
@@ -284,6 +288,8 @@ pub struct Catalog {
     sync_state: Option<Box<replication::SyncState>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     cloud_identities: BTreeMap<String, String>,
+    #[serde(skip)]
+    cloud_identity_index: identity_index::Index,
     /// Device-local paths and return-detection baselines, excluded from cloud metadata.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     working_copies: BTreeMap<PhotoId, managed::WorkingCopy>,
@@ -326,6 +332,10 @@ impl Catalog {
     }
     pub fn cloud_identities(&self) -> &BTreeMap<String, String> {
         &self.cloud_identities
+    }
+    /// Reverse mapping, indexed once after load and maintained with identity operations.
+    pub fn cloud_local_identity(&self, global: &str) -> Option<&str> {
+        self.cloud_identity_index.get(&self.cloud_identities).get(global).map(String::as_str)
     }
     pub fn working_copy(&self, id: PhotoId) -> Option<&managed::WorkingCopy> {
         self.working_copies.get(&id)
@@ -579,6 +589,7 @@ impl Catalog {
         let affects_sync = matches!(
             &op,
             Op::SetSyncState { .. }
+                | Op::PatchSyncState { .. }
                 | Op::SetCloudIdentity { .. }
                 | Op::SetUploadIntent { .. }
                 | Op::SetAsset { .. }
@@ -599,6 +610,12 @@ impl Catalog {
                 let old = std::mem::replace(&mut self.sync_state, state);
                 Op::SetSyncState { state: old }
             }
+            Op::PatchSyncState { delta } => {
+                let current = self.sync_state.as_ref().ok_or_else(|| CatalogError::Invalid("synchronization delta has no base state".into()))?;
+                let next = delta.updated(current)?;
+                self.sync_state = Some(Box::new(next));
+                Op::PatchSyncState { delta: Box::new(delta.inverse()) }
+            }
             Op::SetCloudIdentity { entity, id } => {
                 if !managed::entity_key(&entity) {
                     return Err(CatalogError::Invalid("invalid cloud entity identity key".into()));
@@ -606,7 +623,8 @@ impl Catalog {
                 let old = if let Some(id) = id {
                     if !assets::identifier(&id)
                         || self.cloud_identities.get(&entity).is_some_and(|old| old != &id)
-                        || self.cloud_identities.iter().any(|(key, value)| key != &entity && value == &id)
+                        || self.cloud_local_identity(&id).is_some_and(|key| key != entity)
+                        || self.cloud_identity_index.get(&self.cloud_identities).len() != self.cloud_identities.len()
                         || (!self.cloud_identities.contains_key(&entity) && self.cloud_identities.len() >= 100_000)
                     {
                         return Err(CatalogError::Invalid("cloud identities must be unique and stable".into()));
@@ -618,9 +636,13 @@ impl Catalog {
                         self.next_album =
                             self.next_album.max(local.checked_add(1).ok_or_else(|| CatalogError::Invalid("album identity exhausted".into()))?);
                     }
-                    self.cloud_identities.insert(entity.clone(), id)
+                    let old = self.cloud_identities.insert(entity.clone(), id.clone());
+                    self.cloud_identity_index.update(&entity, old.as_deref(), Some(&id));
+                    old
                 } else {
-                    self.cloud_identities.remove(&entity)
+                    let old = self.cloud_identities.remove(&entity);
+                    self.cloud_identity_index.update(&entity, old.as_deref(), None);
+                    old
                 };
                 Op::SetCloudIdentity { entity, id: old }
             }

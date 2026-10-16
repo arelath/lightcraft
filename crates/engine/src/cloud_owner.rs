@@ -132,7 +132,7 @@ pub(crate) fn reserve(s: &Session, op: &Op) -> Result<()> {
         }
     }
     // A failed catalog append cannot reuse this sequence after a crash or backup restore.
-    remember(&owner, state)
+    remember(&owner, &state)
 }
 impl Session {
     pub(crate) fn claim_cloud_owner(&mut self) -> Result<()> {

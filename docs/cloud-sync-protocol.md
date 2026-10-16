@@ -66,7 +66,7 @@ Filter chips clear the marker; legacy `only:[]` command patches still clear the
 restriction unless they explicitly set the marker. Empty similarity results remain
 constrained rather than showing the whole library.
 
-Upgrade all devices before using these semantics. New local snapshots use format 17 (15 introduced the smart-selection barrier),
+Upgrade all devices before using these semantics. New local snapshots use format 18 (15 introduced the smart-selection barrier),
 new mutations version 2, and new synchronization/checkpoint states version 3. Older
 builds reject these required versions before applying an empty allowed set. New
 readers accept legacy mutation/state versions and retain their exact identities and
@@ -851,3 +851,37 @@ acknowledgement if PUT fails; an uncertain successful PUT is recovered by exact
 content verification. This prevents a locally predictable rejected operation from
 poisoning the remote log. It does not replace validation of concurrently discovered
 remote operations or raise field/author limits.
+
+
+### Local materialization and journal deltas (2026-10-16)
+
+The catalog rebuilds a nonserialized reverse identity index once after loading and
+maintains it with identity operations. Received metadata edits decode changed photos;
+photo arrival/content/deletion also refresh dependent copies, selections, covers and
+memberships. Folder and overlapping-stack changes keep deterministic global graph
+resolution, followed by device-local overlays. Receipt/cursor-only progress does not
+materialize unchanged documents.
+
+Local catalog format 18 adds `patchSyncState`. After writer reservation, shared native
+and browser session code replaces full synchronization-state updates with typed
+field/register, receipt, archive and outbox deltas. Append publication snapshots use
+nested portable deltas too. Each edited value records its expected predecessor;
+failed preconditions or full-state validation preserve the base. Inverses participate
+in atomic batch rollback. Initial enable/disable still uses `setSyncState`. Remote
+mutation/checkpoint formats and capacity limits are unchanged. Older local formats
+upgrade before any new journal append; older builds refuse format 18.
+
+Schedulers capture the exact catalog revision and connection with their saved
+worker snapshot. A transport `Unchanged` result can skip full document comparison
+only while that revision and the library/provider bindings are still current;
+any owner edit/progress uses the full evidence comparison and reconciliation path.
+Native workers receive their large result snapshots back for destruction after
+owner persistence, retaining the publication permit through durable acknowledgement.
+
+Native `cloud.sync` results include `ownerApplyMs`: owner result comparison,
+reconciliation, application and persistence time. It excludes network-worker time
+and startup snapshot/ownership work. The scale fixture measures nonwaiting startup
+dispatch wall time separately. These are not end-to-end UI latency measurements. Full logical merges, state validation, catalog
+container clones and snapshots can still scale with retained state. See CR.9
+acceptance for exact fixture sizes, request counts, journal growth and timings;
+append checkpoint consumption/audits remain CR.10.

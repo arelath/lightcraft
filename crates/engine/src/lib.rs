@@ -606,11 +606,13 @@ impl Session {
             let prepared = cloud_sync::prepare(&self.catalog, op)?;
             #[cfg(not(target_arch = "wasm32"))]
             cloud_owner::reserve(self, &prepared.0)?;
-            self.catalog.apply(prepared.0.clone())?;
-            prepared
+            let op = self.catalog.compact_sync_op(prepared.0)?;
+            self.catalog.apply(op.clone())?;
+            (op, prepared.1)
         } else {
             #[cfg(not(target_arch = "wasm32"))]
             cloud_owner::reserve(self, &op)?;
+            let op = self.catalog.compact_sync_op(op)?;
             let inv = self.catalog.apply(op.clone())?;
             (op, inv)
         };

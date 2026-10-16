@@ -13,7 +13,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.6 — Expose synchronization-state utilization, early warnings, and accurate recovery errors before record/byte bounds.
 - [x] CR.7 — Define and test oversized-entity bootstrap behavior, especially large album membership sets; implement streaming or an explicit actionable product limit.
 - [x] CR.8 — Make unchanged conditional-head synchronization a genuine local no-op (no materialization, state operation, or journal write without change, acknowledgement, or progress).
-- [ ] CR.9 — Index global-to-local identities once, materialize changed entities, and persist synchronization deltas. Measure unchanged 10,000- and 50,000-photo request counts, journal growth, state size, and owner-thread latency.
+- [x] CR.9 — Index global-to-local identities once, materialize changed entities, and persist synchronization deltas. Measure unchanged 10,000- and 50,000-photo request counts, journal growth, state size, and owner-thread latency.
 - [ ] CR.10 — Track consumed append checkpoints and avoid downloading unchanged covered history. Separate budgeted integrity audits from ordinary polls; test remote request counts.
 - [ ] CR.11 — Enforce one immutable published asset-manifest contract with device-local connection binding; test permitted/rejected descriptor changes and extract shared blob rebinding.
 - [ ] CR.12 — Replace subtractive catalog JSON projection/materialization with explicit portable photo, content, album, and reference types and typed boundary conversions; retain wire compatibility tests.
@@ -1021,3 +1021,71 @@ the initial head prefix and is superseded by this stronger run.
 CR.41 is complete and checked off. CR.34-CR.41 from the latest review are now complete;
 the separate CR.9-CR.21 backlog remains unchecked. This does not establish a live-provider,
 large-library latency/memory, append checkpoint-consumption or remote-reclamation result.
+
+
+2026-10-16 - CR.9 implementation: derived reverse identity indexing replaces
+repeated scans (including identity uniqueness checks); incoming projection selects
+changed photos, reference dependencies and deterministic structural reconciliation.
+The shared native/browser session boundary preserves writer reservation before
+compacting full producer states into local-format-18 synchronization deltas.
+Field/register, receipt, archive, pending and nested append-publication changes
+carry predecessor checks, atomic final validation and inverses for batch rollback.
+Remote formats/capacity limits are unchanged. Focused verification and explicit
+10k/50k measurements are underway; full repository CI remains pending and CR.9
+stays unchecked.
+
+CR.9 focused acceptance: all 134 cloud engine checks passed
+(`cr9-focused-accepted.log`), including exact-snapshot invalidation after a held
+result, durable publication-permit handoff, copied/restored authors, smart rules,
+structural convergence and upload finalization. The existing CR.32 test now commits
+the logical local label with its outbox instead of constructing an unmaterialized
+state-only fixture. The new held-result test commits shared metadata directly: the
+command entry point polls ready jobs, and its local-only photo does not replicate.
+
+Explicit Windows scale runs passed on the final product source. These are minimal
+valid managed-metadata fixtures with bounded real mutations and a shared original
+blob, not 50,000 distinct media uploads or fully populated recipes/history. Native
+requests use the independently checked SigV4 fixture. Request/response counts below
+cover three completed unchanged conditional-head polls, excluding setup, the separate
+nonwaiting startup measurement and publication. Exact catalog snapshot/log bytes stay
+unchanged. Native evidence: `cr9-scale-native-accepted.log`.
+
+| Photos | Sync-state bytes | Catalog snapshot bytes | GETs / response bytes, 3 polls | Unchanged journal growth | Startup dispatch ms after open | Owner result application ms, range | Local rating + ACK journal bytes | Changed result application ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10,000 | 4,294,569 | 36,713,527 | 6 / 2,220 | 0 | 85.6 | 0.0125-0.0349 | 4,031 | 315.9 |
+| 50,000 | 21,574,169 | 183,793,127 | 6 / 2,223 | 0 | 394.7 | 0.0126-0.1011 | 4,032 | 1,818.8 |
+
+Startup is nonwaiting command dispatch after catalog open, including ownership,
+local save checks, snapshot preparation and worker spawn; closing that read-only
+CLI session cancels its background poll. `ownerApplyMs` measures result comparison,
+reconciliation, application, journal persistence and handoff; it excludes startup,
+network/worker time, library opening and subsequent UI work. Native result snapshots
+are freed by the existing worker after durable owner acknowledgement. Journal bytes
+are observed through `library.info` before CLI-close compaction; measuring only the
+post-close file would incorrectly report zero for the changed operation.
+
+The shared-engine MemStore fixture (`cr9-scale-engine-accepted.log`) projected
+one photo for a received rating change at both sizes and wrote 4,223 framed journal
+bytes, versus full operation payloads of 3,322,824 / 16,730,024 bytes. Its state
+sizes were 3,319,400 / 16,726,600 bytes; changed-result times were 360.9 / 1,876.2 ms.
+The strict full-state unchanged comparison fallback took median 6.723 / 36.329 ms.
+Reference-arrival coverage refreshes unchanged memberships, covers, copies, smart
+selections and stacks; unaffected photos retain their existing Arc objects.
+
+These measurements expose remaining linear full-state merge, validation, snapshot
+preparation/container-copy and snapshot-writing costs; they do not establish an
+interactive-latency budget or larger populated-library capacity. The 64 MiB state
+limit remains unchanged. Append checkpoint/audit request scaling remains CR.10.
+Shared browser code compiles for WASM; this run adds no browser scale or live-provider
+latency claim. Full repository CI is the remaining gate; CR.9 remains unchecked.
+
+CR.9 final verification: all eight full repository CI stages passed
+(`cr9-ci-accepted.log`: fmt, clippy, HEIF, workspace tests, parity, layers, assets,
+WASM). All eight catalog delta regressions passed with nonempty retained append
+proofs, format-17 upgrade, field-sized album membership updates, journal replay,
+base mismatch rejection and atomic rollback (`cr9-delta-accepted.log`). The 134
+focused cloud checks and both explicit scale runs above passed. The initial CI
+run was stopped to correct the held-result test setup; it is superseded by this
+complete final-source run. CR.9 is complete and checked off. CR.10-CR.21 remain
+open; the measured startup/changed-result costs and scale limitations above remain
+explicit, rather than claiming general large-library responsiveness.

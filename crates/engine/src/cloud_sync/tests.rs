@@ -147,7 +147,7 @@ fn each_durable_record_contains_the_change_and_outbox_and_compaction_keeps_pendi
     s.execute("photo.rate", &json!({"ids":[1],"rating":5})).unwrap();
     let bytes = store.get(lightcraft_catalog::journal::LOG).unwrap();
     let last = String::from_utf8(bytes).unwrap().lines().last().unwrap().to_owned();
-    assert!(last.contains("setRating") && last.contains("setSyncState"));
+    assert!(last.contains("setRating") && last.contains("patchSyncState"));
     let value: Value = serde_json::from_str(&last).unwrap();
     assert_eq!(value["op"]["op"], json!("batch"));
     let (mut journal, loaded, _) = Journal::open(Box::new(store.clone())).unwrap();

@@ -387,13 +387,19 @@ pub(crate) fn prepare(catalog: &Catalog, op: Op) -> Result<(Op, Op)> {
 
 /// The final local state carrying newly authored IDs, including explicit conflict
 /// resolutions that already contain their mutations and therefore bypass capture.
-pub(crate) fn authored_state<'a>(catalog: &Catalog, op: &'a Op) -> Option<&'a SyncState> {
+pub(crate) fn authored_state<'a>(catalog: &'a Catalog, op: &'a Op) -> Option<std::borrow::Cow<'a, SyncState>> {
+    use std::borrow::Cow;
     let mut pending = vec![op];
     let mut last = None;
     while let Some(op) = pending.pop() {
         match op {
             Op::Batch { ops } => pending.extend(ops.iter().rev()),
-            Op::SetSyncState { state: Some(state) } => last = Some(state.as_ref()),
+            Op::SetSyncState { state: Some(state) } => last = Some(Cow::Borrowed(state.as_ref())),
+            Op::SetSyncState { state: None } => last = None,
+            Op::PatchSyncState { delta } => {
+                let base = last.as_deref().or_else(|| catalog.sync_state())?;
+                last = Some(Cow::Owned(delta.updated(base).ok()?));
+            }
             _ => {}
         }
     }
@@ -450,7 +456,7 @@ pub fn publication_order(
 
 fn user_inverse(op: Op) -> Op {
     match op {
-        Op::SetCloudIdentity { .. } | Op::SetSyncState { .. } => Op::Batch { ops: Vec::new() },
+        Op::SetCloudIdentity { .. } | Op::SetSyncState { .. } | Op::PatchSyncState { .. } => Op::Batch { ops: Vec::new() },
         Op::Batch { ops } => Op::Batch { ops: ops.into_iter().map(user_inverse).collect() },
         op => op,
     }
