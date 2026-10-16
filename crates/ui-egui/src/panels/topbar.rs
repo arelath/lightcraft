@@ -166,6 +166,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             let attention = super::cloud::needs_attention(&cloud);
             let cloud_text = if cloud["paused"] == true {
                 "Cloud library — syncing paused".to_owned()
+            } else if let Some(retry) = super::cloud::retry_text(&cloud["health"]["sync"]) {
+                retry
             } else if attention {
                 crate::i18n::tr("Cloud library — synchronization needs attention").to_owned()
             } else if cloud["syncEnabled"] == true && !cloud["health"]["sync"]["lastSuccessfulRemoteScan"].is_object() {

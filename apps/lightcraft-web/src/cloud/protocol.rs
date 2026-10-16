@@ -8,6 +8,7 @@ use lightcraft_engine::catalog::assets::Asset;
 use lightcraft_engine::catalog::replication::{Mutation, Portable, SyncState};
 use lightcraft_engine::cloud_records::replay::{AUTO_CHECKPOINT_BATCHES, Cycle, WINDOW_BATCHES, Window};
 use lightcraft_engine::cloud_records::{Batch, Checkpoint, CheckpointRef, Head, RecordRef};
+use lightcraft_engine::cloud_status::{CloudFailure, FailureKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 use lightcraft_engine::cloud_outcome::HeadPosition;
@@ -18,17 +19,20 @@ struct Remote {
     tail_records: u64,
     recovery: Option<(RecordRef, u64)>,
 }
-fn encode(value: &impl serde::Serialize, max: usize) -> Result<Vec<u8>, String> {
-    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+fn encode(value: &impl serde::Serialize, max: usize) -> Result<Vec<u8>, CloudFailure> {
+    let bytes = serde_json::to_vec(value).map_err(CloudFailure::from)?;
     if bytes.len() > max {
         return Err("catalog object exceeds its bounded size; pending work retained".into());
     }
     Ok(bytes)
 }
-async fn object(provider: &Provider, reference: &RecordRef, max: usize) -> Result<Vec<u8>, String> {
+async fn object(provider: &Provider, reference: &RecordRef, max: usize) -> Result<Vec<u8>, CloudFailure> {
     let reply = provider.request("GET", &reference.key, None, None, None, max).await?;
-    if reply.status != 200 || reply.bytes.len() as u64 != reference.size || sha256(&reply.bytes) != reference.hash {
-        return Err("remote catalog object is absent or failed SHA-256/length verification".into());
+    if reply.status != 200 {
+        return Err(CloudFailure::http("catalog object", reply.status));
+    }
+    if reply.bytes.len() as u64 != reference.size || sha256(&reply.bytes) != reference.hash {
+        return Err(CloudFailure::integrity("remote catalog object failed SHA-256/length verification"));
     }
     Ok(reply.bytes)
 }
@@ -37,16 +41,16 @@ async fn read(
     library: &str,
     segmented: bool,
     proofs: &mut lightcraft_engine::catalog::replication::archive::Witness,
-) -> Result<Remote, String> {
+) -> Result<Remote, CloudFailure> {
     let key = format!("{}/catalog/head.json", provider.connection.prefix);
     let reply = provider.request("GET", &key, None, None, None, 16 << 10).await?;
-    let state = SyncState::new(library.into(), "remote".into(), provider.connection.id.clone()).map_err(|e| e.to_string())?;
+    let state = SyncState::new(library.into(), "remote".into(), provider.connection.id.clone()).map_err(CloudFailure::from)?;
     let mut remote = Remote { head: None, state, tail_records: 0, recovery: None };
     if reply.status == 404 {
         return Ok(remote);
     }
     if reply.status != 200 {
-        return Err(format!("catalog head returned HTTP {}; conditional writes required", reply.status));
+        return Err(CloudFailure::http("catalog head", reply.status));
     }
     let etag = reply.etag.ok_or("catalog head has no exposed ETag; check bucket CORS")?;
     let head: Head = serde_json::from_slice(&reply.bytes).map_err(|_| "malformed catalog head")?;
@@ -71,7 +75,7 @@ async fn read(
             return Err("obsolete pre-release import checkpoint; use a fresh catalog and storage prefix; local data retained".into());
         }
         let verified = super::history::certify(provider, &remote.state, &checkpoint.state, proofs).await?;
-        remote.state.merge(&verified).map_err(|e| e.to_string())?;
+        remote.state.merge(&verified).map_err(CloudFailure::from)?;
         boundary = Some(reference.covers.clone());
     }
     let mut first = true;
@@ -115,7 +119,7 @@ async fn read(
                 if lightcraft_engine::catalog::replication::archive::covers(&remote.state.archives, &mutation.revision.id()) {
                     super::history::prove(provider, &remote.state, &mutation, proofs).await?;
                 } else {
-                    remote.state.receive(&mutation).map_err(|e| e.to_string())?;
+                    remote.state.receive(&mutation).map_err(CloudFailure::from)?;
                 }
             }
         }
@@ -135,18 +139,25 @@ async fn read(
     remote.head = Some((head, etag));
     Ok(remote)
 }
-pub(super) async fn immutable(provider: &Provider, key: &str, bytes: &[u8]) -> Result<(), String> {
+pub(super) async fn immutable(provider: &Provider, key: &str, bytes: &[u8]) -> Result<(), CloudFailure> {
     let outcome = provider.request("PUT", key, None, Some("*"), Some(bytes), 16 << 10).await;
     match outcome {
         Ok(reply) if matches!(reply.status, 200 | 201 | 204) => Ok(()),
-        Ok(reply) if reply.status != 412 => Err(format!("conditional object write returned HTTP {}; pending work retained", reply.status)),
+        Ok(reply) if reply.status != 412 => Err(CloudFailure::http("conditional object write", reply.status)),
+        Err(error) if !error.retryable() => Err(error),
         result => {
             let read = provider.request("GET", key, None, None, None, bytes.len()).await?;
-            if read.status == 200 && read.bytes == bytes { Ok(()) } else { Err(result.err().unwrap_or_else(|| "immutable object collision".into())) }
+            if read.status == 200 && read.bytes == bytes {
+                Ok(())
+            } else if read.status == 200 {
+                Err(CloudFailure::integrity("immutable object collision"))
+            } else {
+                Err(result.err().unwrap_or_else(|| CloudFailure::http("immutable object readback", read.status)))
+            }
         }
     }
 }
-pub(super) async fn dependencies(provider: &Provider, mutations: &[Mutation]) -> Result<(), String> {
+pub(super) async fn dependencies(provider: &Provider, mutations: &[Mutation]) -> Result<(), CloudFailure> {
     let mut seen = BTreeSet::new();
     for change in mutations.iter().flat_map(|m| &m.changes).filter(|c| c.field == "content") {
         let asset: Asset = serde_json::from_value(change.value.get("asset").cloned().ok_or("missing immutable asset description")?)
@@ -163,7 +174,7 @@ pub(super) async fn dependencies(provider: &Provider, mutations: &[Mutation]) ->
             if reply.status != 200 {
                 return Err("required cloud dependency is not stored; upload it before publishing metadata".into());
             }
-            verify_blob(blob, &reply.bytes)?;
+            verify_blob(blob, &reply.bytes).map_err(CloudFailure::integrity)?;
         }
     }
     Ok(())
@@ -174,11 +185,11 @@ pub async fn synchronize(
     local: &SyncState,
     checkpoint_requested: bool,
     audit: bool,
-) -> Result<Outcome, String> {
+) -> Result<Outcome, CloudFailure> {
     if !local.protocol.is_head() {
         return super::append::synchronize(provider, local, checkpoint_requested, audit).await;
     }
-    let marker = lightcraft_engine::cloud_append::manifest_key(&provider.connection.prefix, &local.library).map_err(|e| e.to_string())?;
+    let marker = lightcraft_engine::cloud_append::manifest_key(&provider.connection.prefix, &local.library).map_err(CloudFailure::from)?;
     let existing = provider.request("GET", &marker, None, None, None, 16 << 10).await?;
     if existing.status == 200 {
         return Err("this library uses append mode; coordinate migration before continuing".into());
@@ -186,7 +197,7 @@ pub async fn synchronize(
     if existing.status != 404 {
         return Err("could not verify protocol compatibility; pending work retained".into());
     }
-    local.validate().map_err(|e| e.to_string())?;
+    local.validate().map_err(CloudFailure::from)?;
     let mut verified = BTreeSet::new();
     let mut archive_proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
     for _ in 0..64 {
@@ -207,7 +218,7 @@ pub async fn synchronize(
         let mut pending = Vec::new();
         for mutation in local.pending.values() {
             if let Some(receipt) = remote.state.received.get(&mutation.revision.id()) {
-                if receipt.digest != mutation.digest().map_err(|e| e.to_string())? {
+                if receipt.digest != mutation.digest().map_err(CloudFailure::from)? {
                     return Err("remote mutation identity collision".into());
                 }
             } else {
@@ -234,7 +245,7 @@ pub async fn synchronize(
             );
         }
         let count = pending.len();
-        let pending = lightcraft_engine::cloud_sync::publication_order(pending, &remote.state.clock).map_err(|e| e.to_string())?;
+        let pending = lightcraft_engine::cloud_sync::publication_order(pending, &remote.state.clock).map_err(CloudFailure::from)?;
         let mut chunk = Vec::new();
         for mutation in pending.into_iter().take(256) {
             chunk.push(mutation);
@@ -265,22 +276,22 @@ pub async fn synchronize(
             checkpoint_ref = Some(checkpoint(provider, &mut remote.state, head.tip.clone(), head.generation).await?);
         }
         for mutation in &chunk {
-            remote.state.receive(mutation).map_err(|e| e.to_string())?;
+            remote.state.receive(mutation).map_err(CloudFailure::from)?;
         }
         publish(provider, remote.head.as_ref().map(|(head, etag)| (head, etag.as_str())), chunk, checkpoint_ref, &local.library).await?;
     }
-    Err("catalog busy or unreachable; pending work retained for retry".into())
+    Err(CloudFailure::new(FailureKind::Contention, "catalog busy or unreachable; pending work retained for retry"))
 }
 
 pub(super) async fn migration_seed(
     provider: &Provider,
     library: &str,
     proofs: &mut lightcraft_engine::catalog::replication::archive::Witness,
-) -> Result<Portable, String> {
+) -> Result<Portable, CloudFailure> {
     Ok(read(provider, library, false, proofs).await?.state.portable())
 }
 
-async fn checkpoint(provider: &Provider, state: &mut SyncState, covers: RecordRef, generation: u64) -> Result<CheckpointRef, String> {
+async fn checkpoint(provider: &Provider, state: &mut SyncState, covers: RecordRef, generation: u64) -> Result<CheckpointRef, CloudFailure> {
     super::history::compact(provider, state, false).await?;
     let payload = Checkpoint { version: 1, generation, covers: covers.clone(), state: state.portable(), imports: BTreeMap::new() };
     let bytes = encode(&payload, 64 << 20)?;
@@ -295,7 +306,7 @@ async fn publish(
     mutations: Vec<Mutation>,
     checkpoint: Option<CheckpointRef>,
     library: &str,
-) -> Result<(), String> {
+) -> Result<(), CloudFailure> {
     let batch = Batch {
         version: 3,
         parent: previous.map(|(head, _)| head.tip.clone()),
@@ -322,7 +333,8 @@ async fn publish(
         .await
     {
         Ok(reply) if matches!(reply.status, 200 | 201 | 204 | 412) => Ok(()),
-        Err(_) => Ok(()),
-        Ok(reply) => Err(format!("conditional head write returned HTTP {}; pending work retained", reply.status)),
+        Err(error) if error.retryable() => Ok(()),
+        Err(error) => Err(error),
+        Ok(reply) => Err(CloudFailure::http("conditional head write", reply.status)),
     }
 }

@@ -55,7 +55,7 @@ fn identifier(id: &str) -> Result<()> {
 
 fn etag(value: &str) -> Result<String> {
     if value.is_empty() || value == "*" || value.len() > 512 || value.chars().any(char::is_control) {
-        return Err(AssetError::Network("storage returned an invalid concurrency token".into()));
+        return Err(AssetError::Unsupported("storage returned an invalid concurrency token".into()));
     }
     Ok(value.into())
 }
@@ -71,18 +71,18 @@ fn status(response: &Response) -> Result<()> {
     match response.status {
         200..=299 => Ok(()),
         401 | 403 => Err(AssetError::Unauthorized),
-        301 | 307 | 308 => Err(AssetError::Network("the bucket answers from another region or endpoint; check the region and endpoint".into())),
+        301 | 307 | 308 => Err(AssetError::Unsupported("the bucket answers from another region or endpoint; check the region and endpoint".into())),
         404 => Err(AssetError::Missing),
         409 | 412 => Err(AssetError::Conflict),
         501 => Err(AssetError::Unsupported("endpoint rejected this S3 operation (HTTP 501); safe catalog publication requires If-None-Match and If-Match support; staged data is retained".into())),
-        code => Err(AssetError::Network(format!("S3 returned HTTP {code}; check permissions, endpoint and region"))),
+        code => Err(AssetError::Http(code)),
     }
 }
 
 fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result<ObjectReply> {
     status(&response)?;
     if max > MAX_CHECKPOINT || response.content_length().is_some_and(|size| size > max as u64) {
-        return Err(AssetError::Network("S3 response exceeds its safety limit".into()));
+        return Err(AssetError::Invalid("S3 response exceeds its safety limit".into()));
     }
     let etag = response.header("etag").map(etag).transpose()?;
     let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
@@ -94,9 +94,9 @@ fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result
             break;
         }
         if bytes.len().saturating_add(n) > max {
-            return Err(AssetError::Network("S3 response exceeds its safety limit".into()));
+            return Err(AssetError::Invalid("S3 response exceeds its safety limit".into()));
         }
-        bytes.try_reserve(n).map_err(|_| AssetError::Network("not enough memory for the S3 response".into()))?;
+        bytes.try_reserve(n).map_err(|_| AssetError::Disk("not enough memory for the S3 response".into()))?;
         bytes.extend_from_slice(buffer.get(..n).ok_or(AssetError::Integrity)?);
     }
     Ok(ObjectReply { bytes, etag })
@@ -228,7 +228,7 @@ impl S3Connection {
             &mut |_| {},
         )?;
         let reply = read_reply(response, MAX_REPLY, cancel)?;
-        reply.etag.ok_or_else(|| AssetError::Network("storage did not return an ETag; conditional publication is unavailable".into()))
+        reply.etag.ok_or_else(|| AssetError::Unsupported("storage did not return an ETag; conditional publication is unavailable".into()))
     }
 
     /// Only content-addressed append records may be written without preconditions.
@@ -253,9 +253,13 @@ impl S3Connection {
                     &mut |_| {},
                 )
                 .and_then(|response| read_reply(response, MAX_REPLY, cancel));
+            let result = match result {
+                Err(error) if !error.uncertain_write() => return Err(error),
+                result => result,
+            };
             match self.get_small(key, MAX_CHECKPOINT, cancel) {
                 Ok(Some(reply)) => return if reply.bytes == bytes { Ok(()) } else { Err(AssetError::Integrity) },
-                Ok(None) if attempt == 0 && matches!(result, Ok(_) | Err(AssetError::Network(_))) => continue,
+                Ok(None) if attempt == 0 && (result.is_ok() || result.as_ref().is_err_and(AssetError::uncertain_write)) => continue,
                 Err(e) => return Err(e),
                 _ => {
                     return result
@@ -339,7 +343,7 @@ impl S3Connection {
         )?;
         let reply = read_reply(response, MAX_REPLY, cancel)?;
         let xml = parse_xml(&reply.bytes, "InitiateMultipartUploadResult")?;
-        let id = xml.get("UploadId").ok_or_else(|| AssetError::Network("multipart response has no upload identity".into()))?;
+        let id = xml.get("UploadId").ok_or_else(|| AssetError::Invalid("multipart response has no upload identity".into()))?;
         identifier(id)?;
         Ok(id.clone())
     }
@@ -375,7 +379,7 @@ impl S3Connection {
             progress,
         )?;
         let reply = read_reply(response, MAX_REPLY, cancel)?;
-        reply.etag.ok_or_else(|| AssetError::Network("multipart response has no part ETag".into()))
+        reply.etag.ok_or_else(|| AssetError::Invalid("multipart response has no part ETag".into()))
     }
 
     pub fn complete_multipart(&self, blob: &Blob, upload_id: &str, parts: &[(u16, String)], cancel: &AtomicBool) -> Result<()> {
@@ -417,7 +421,7 @@ impl S3Connection {
         let reply = read_reply(response, MAX_REPLY, cancel)?;
         // S3 may return HTTP 200 before deciding that completion failed.
         let fields = parse_xml(&reply.bytes, "CompleteMultipartUploadResult")?;
-        etag(fields.get("ETag").ok_or_else(|| AssetError::Network("completion response has no ETag".into()))?)?;
+        etag(fields.get("ETag").ok_or_else(|| AssetError::Invalid("completion response has no ETag".into()))?)?;
         Ok(())
     }
 
@@ -469,7 +473,7 @@ impl S3Connection {
                 || fields.get("Bucket") != Some(&self.bucket)
                 || !matches!(fields.get("IsTruncated").map(String::as_str), Some("true" | "false"))
             {
-                return Err(AssetError::Network("invalid multipart abort confirmation; receipt retained".into()));
+                return Err(AssetError::Invalid("invalid multipart abort confirmation; receipt retained".into()));
             }
             if !fields.contains_key("Part") && fields.get("IsTruncated").map(String::as_str) == Some("false") {
                 return Ok(());
@@ -481,7 +485,7 @@ impl S3Connection {
 
 fn parse_xml(bytes: &[u8], expected: &str) -> Result<BTreeMap<String, String>> {
     fn invalid() -> AssetError {
-        AssetError::Network("invalid or unsupported S3 XML response".into())
+        AssetError::Invalid("invalid or unsupported S3 XML response".into())
     }
     if bytes.len() > MAX_REPLY {
         return Err(invalid());
@@ -580,7 +584,13 @@ fn parse_xml(bytes: &[u8], expected: &str) -> Result<BTreeMap<String, String>> {
                             "multipart completion returned {code}; conditional writes are required; upload receipt and staged bytes are retained"
                         )));
                     }
-                    return Err(AssetError::Network(format!("S3 multipart completion returned {code}; retain the upload and retry")));
+                    let message = format!("S3 multipart completion returned {code}; upload receipt and staged bytes retained");
+                    return Err(match code {
+                        "InternalError" | "ServiceUnavailable" | "SlowDown" | "RequestTimeout" => AssetError::Network(message),
+                        "AccessDenied" | "InvalidAccessKeyId" | "SignatureDoesNotMatch" | "ExpiredToken" => AssetError::Unauthorized,
+                        "NoSuchUpload" => AssetError::Missing,
+                        _ => AssetError::Invalid(message),
+                    });
                 }
                 if root.as_deref() != Some(expected) {
                     return Err(invalid());
@@ -597,6 +607,25 @@ fn parse_xml(bytes: &[u8], expected: &str) -> Result<BTreeMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_error_codes_have_explicit_retry_policy_without_parsing_messages() {
+        use crate::cloud_status::{CloudFailure, FailureKind};
+        for (code, kind, retryable) in [
+            ("InternalError", FailureKind::Connectivity, true),
+            ("SlowDown", FailureKind::Connectivity, true),
+            ("AccessDenied", FailureKind::Authentication, false),
+            ("ExpiredToken", FailureKind::Authentication, false),
+            ("NoSuchUpload", FailureKind::InvalidHistory, false),
+            ("InvalidPart", FailureKind::InvalidHistory, false),
+        ] {
+            let xml = format!("<Error><Code>{code}</Code><Message>timeout network retry</Message></Error>");
+            let error = parse_xml(xml.as_bytes(), "CompleteMultipartUploadResult").unwrap_err();
+            let failure = CloudFailure::from(&error);
+            assert_eq!(failure.kind, kind, "{code}");
+            assert_eq!(failure.retryable(), retryable, "{code}");
+        }
+    }
 
     #[test]
     fn multipart_xml_resolves_namespaces_and_entities_and_refuses_errors() {

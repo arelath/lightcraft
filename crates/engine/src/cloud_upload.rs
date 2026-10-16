@@ -397,7 +397,7 @@ impl Item {
             });
             match result {
                 Ok(()) => return Ok(()),
-                Err(e @ (AssetError::Conflict | AssetError::Network(_))) => {
+                Err(e) if e.uncertain_write() => {
                     if self.remote_verified(blob, cancel, task, media).map_err(|e| error(e.to_string()))? {
                         return Ok(());
                     }
@@ -485,7 +485,7 @@ impl Item {
                 });
                 match completed {
                     Ok(()) => return Ok(()),
-                    Err(e @ (AssetError::Missing | AssetError::Conflict | AssetError::Network(_))) => {
+                    Err(e) if matches!(e, AssetError::Missing) || e.uncertain_write() => {
                         if self.remote_verified(blob, cancel, task, media).map_err(|e| error(e.to_string()))? {
                             return Ok(());
                         }

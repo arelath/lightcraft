@@ -104,6 +104,7 @@ pub fn pause_publication(s: &mut Session) {
 }
 pub fn resume_publication(s: &mut Session) {
     s.cloud_replication_jobs.preparing_migration = false;
+    s.cloud_replication_jobs.health.reset_retries();
     s.cloud_replication_jobs.paused = false;
     s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now());
 }
@@ -111,6 +112,7 @@ pub(crate) fn request_poll(s: &mut Session) {
     s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now());
 }
 pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
+    s.cloud_replication_jobs.health.reset_retries();
     start_impl(s, p, false)
 }
 pub fn prepare_migration(s: &mut Session, _: &Value) -> crate::Result<Value> {
@@ -207,15 +209,16 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
             media.publication();
             let result = crate::guard::catch("cloud synchronization worker", || {
                 if migrating {
-                    crate::cloud_append::migration::seed(&connection, &state, &worker_cancel).map_err(|e| AssetError::Invalid(e.to_string()))
+                    crate::cloud_append::migration::seed(&connection, &state, &worker_cancel)
                 } else if !state.protocol.is_head() {
                     crate::cloud_append::native::synchronize_verified(&connection, &state, checkpoint, audit, &worker_cancel, &mut media)
+                        .map_err(|e| EngineError::Cloud(e.into()))
                 } else {
-                    synchronize_verified(&connection, &state, checkpoint, &worker_cancel, &mut media)
+                    synchronize_verified(&connection, &state, checkpoint, &worker_cancel, &mut media).map_err(|e| EngineError::Cloud(e.into()))
                 }
             })
             .map_err(error)
-            .and_then(|result| result.map_err(|error| EngineError::Other(error.to_string())));
+            .and_then(std::convert::identity);
             if sender.send(result).is_ok() {
                 loop {
                     match applied.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -281,10 +284,14 @@ impl Session {
             return;
         }
         *deadline = now + std::time::Duration::from_secs(5);
-        if let Err(error) = start(self, &json!({"wait":false,"audit":false})) {
-            self.cloud_replication_jobs.paused = true;
-            self.cloud_replication_jobs.health.fail(&error.to_string(), None);
-            self.cloud_replication_jobs.reports.push(json!({"ok":false,"error":error.to_string()}));
+        if let Err(error) = start_impl(self, &json!({"wait":false,"audit":false}), false) {
+            let failure = crate::cloud_status::CloudFailure::from(&error);
+            let delay = self.cloud_replication_jobs.health.fail_typed(&failure, crate::cloud_status::now_ms(), None);
+            self.cloud_replication_jobs.paused = delay.is_none();
+            if let Some(seconds) = delay {
+                self.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(seconds));
+            }
+            self.cloud_replication_jobs.reports.push(json!({"ok":false,"error":error.to_string(),"failure":failure}));
         }
     }
     pub fn poll_cloud_replication(&mut self) {
@@ -393,24 +400,52 @@ impl Session {
             value["ownerApplyMs"] = json!(owner_started.elapsed().as_secs_f64() * 1000.0);
             value
         });
+        let mut next_delay = std::time::Duration::from_secs(5);
         if current_owner {
-            self.cloud_replication_jobs.paused = result.is_err() || self.cloud_replication_jobs.preparing_migration;
+            let jobs = &mut self.cloud_replication_jobs;
+            jobs.paused = jobs.preparing_migration;
             match &result {
-                Ok(value) if value["refreshRequired"] != true => self.cloud_replication_jobs.health.success(crate::cloud_status::now_ms(), Some(id)),
-                Err(reason) if !(self.cloud_paused && pending.cancel.load(Ordering::Relaxed)) => {
-                    self.cloud_replication_jobs.health.fail(&reason.to_string(), Some(id))
+                Ok(value) if value["refreshRequired"] != true => jobs.health.success(crate::cloud_status::now_ms(), Some(id)),
+                Err(_) if pending.cancel.load(Ordering::Relaxed) => {
+                    if pending.migration_owner.is_some() {
+                        // Cancellation can leave a remote cutover marker; never fall back to ordinary polling.
+                        jobs.health.fail_migration(
+                            &crate::cloud_status::CloudFailure::new(
+                                crate::cloud_status::FailureKind::Cancelled,
+                                "Migration cancelled; prior protocol and pending edits retained",
+                            ),
+                            Some(id),
+                        );
+                        jobs.paused = true;
+                    } else if !self.cloud_paused && !jobs.preparing_migration {
+                        // A quick Pause/Resume cannot let its cancelled old attempt halt the resumed scheduler.
+                        next_delay = std::time::Duration::ZERO;
+                    }
+                }
+                Err(reason) => {
+                    let failure = crate::cloud_status::CloudFailure::from(reason);
+                    let delay = if pending.migration_owner.is_some() {
+                        jobs.health.fail_migration(&failure, Some(id));
+                        None
+                    } else {
+                        jobs.health.fail_typed(&failure, crate::cloud_status::now_ms(), Some(id))
+                    };
+                    jobs.paused = delay.is_none() || jobs.preparing_migration;
+                    if let Some(seconds) = delay {
+                        next_delay = std::time::Duration::from_secs(seconds);
+                    }
                 }
                 _ => {}
             }
         }
-        self.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
+        self.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + next_delay);
         if result.as_ref().is_ok_and(|value| value.get("refreshRequired").and_then(Value::as_bool) == Some(true)) {
             request_poll(self);
         }
         let report = match result {
             Ok(result) => json!({"task":id,"ok":true,"result":result}),
             Err(error) => {
-                json!({"task":id,"ok":false,"error":error.to_string(),"paused":self.cloud_paused && pending.cancel.load(Ordering::Relaxed)})
+                json!({"task":id,"ok":false,"error":error.to_string(),"failure":crate::cloud_status::CloudFailure::from(&error),"paused":self.cloud_paused && pending.cancel.load(Ordering::Relaxed)})
             }
         };
         self.cloud_replication_jobs.reports.push(report);
@@ -505,6 +540,58 @@ mod tests {
         resolver
     }
     #[test]
+    fn typed_transient_worker_results_retry_without_losing_outbox_and_success_resets_budget() {
+        let (mut s, _) = session();
+        let before = s.catalog.sync_state().unwrap().clone();
+        for attempt in 1..=6 {
+            ready(&mut s);
+            s.cloud_replication_jobs.pending.as_mut().unwrap().ready =
+                Some(Err(EngineError::Cloud(crate::cloud_status::CloudFailure::http("scan", 503))));
+            let started = web_time::Instant::now();
+            s.poll_cloud_replication();
+            let health = s.cloud_replication_jobs.health(true, false);
+            assert_eq!(s.catalog.sync_state(), Some(&before));
+            assert_eq!(health["lastError"]["kind"], "connectivity");
+            assert_eq!(health["retry"]["attempt"], attempt.min(5));
+            assert_eq!(health["pollingHalted"], attempt > 5);
+            assert_eq!(health["retry"]["exhausted"], attempt > 5);
+            if attempt <= 5 {
+                assert_eq!(health["state"], "retrying");
+                assert!(s.cloud_replication_jobs.next_poll.unwrap() > started);
+            }
+        }
+        resume_publication(&mut s);
+        ready(&mut s);
+        s.poll_cloud_replication();
+        let health = s.cloud_replication_jobs.health(true, false);
+        assert_eq!(health["state"], "healthy");
+        assert_eq!(health["retry"]["attempt"], 0);
+        assert!(s.catalog.sync_state().unwrap().pending.is_empty());
+    }
+    #[test]
+    fn permanent_worker_results_halt_and_cancelled_old_attempt_cannot_halt_resume() {
+        use crate::cloud_status::{CloudFailure, FailureKind};
+        for kind in [FailureKind::Authentication, FailureKind::Integrity, FailureKind::InvalidHistory, FailureKind::LocalResource] {
+            let (mut s, _) = session();
+            ready(&mut s);
+            s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Err(EngineError::Cloud(CloudFailure::new(kind, "manual recovery"))));
+            s.poll_cloud_replication();
+            let health = s.cloud_replication_jobs.health(true, false);
+            assert_eq!(health["state"], "halted");
+            assert_eq!(health["retry"]["scheduled"], false);
+            assert!(!s.catalog.sync_state().unwrap().pending.is_empty());
+        }
+        let (mut s, _) = session();
+        ready(&mut s);
+        pause_publication(&mut s);
+        resume_publication(&mut s);
+        s.poll_cloud_replication();
+        let health = s.cloud_replication_jobs.health(true, false);
+        assert_eq!(health["pollingHalted"], false);
+        assert!(health["lastError"].is_null());
+        assert!(s.cloud_replication_jobs.next_poll.unwrap() <= web_time::Instant::now());
+    }
+    #[test]
     fn failed_incoming_ack_save_retains_outbox_and_restart_replays_publication_safely() {
         let (mut s, files) = session();
         let before = s.catalog.sync_state().unwrap().clone();
@@ -542,7 +629,7 @@ mod tests {
         assert!(overview["error"].as_str().unwrap().contains("authorization"));
         assert_eq!(s.execute("cloud.syncStatus", &json!({})).unwrap()["health"]["state"], "halted");
         resume_publication(&mut s);
-        assert_eq!(s.cloud_replication_jobs.health(true, false)["state"], "retrying");
+        assert_eq!(s.cloud_replication_jobs.health(true, false)["state"], "unverified");
         ready_same_head(&mut s, 1);
         s.poll_cloud_replication();
         let recovered = crate::cloud_status::overview(&mut s, &Value::Null).unwrap();
@@ -843,6 +930,15 @@ mod tests {
             s.poll_cloud_replication();
             assert_eq!(s.catalog.to_snapshot(), before, "{reason}");
             assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["ok"], false);
+            if reason == "cancelled" {
+                assert!(s.cloud_replication_jobs.paused);
+                assert_eq!(s.cloud_replication_jobs.health(true, false)["lastError"]["kind"], "cancelled");
+                let reports = s.cloud_replication_jobs.reports.len();
+                s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now());
+                s.resume_cloud_replication();
+                assert_eq!(s.cloud_replication_jobs.reports.len(), reports);
+                assert!(!s.cloud_replication_jobs.running());
+            }
             let (_, loaded, _) = Journal::open(Box::new(files.files)).unwrap();
             assert_eq!(loaded.sync_state(), s.catalog.sync_state());
         }

@@ -1,15 +1,16 @@
 //! Browser transport for the shared append codecs, scheduler and exact publication receipts.
 use super::{Provider, protocol::Outcome};
 use core::listing::ListRequest;
+use lightcraft_engine::cloud_status::CloudFailure;
 use lightcraft_engine::{assets::sha256, catalog::replication::SyncState, cloud_append as core};
 use std::collections::{BTreeMap, BTreeSet};
-fn ce(e: lightcraft_engine::assets::AssetError) -> String {
-    e.to_string()
+fn ce(e: lightcraft_engine::assets::AssetError) -> CloudFailure {
+    e.into()
 }
 fn list(prefix: String, delimiter: bool) -> ListRequest {
     ListRequest { prefix, delimiter, continuation: None, start_after: None }
 }
-async fn scan(provider: &Provider, mut request: ListRequest) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+async fn scan(provider: &Provider, mut request: ListRequest) -> Result<(BTreeSet<String>, BTreeSet<String>), CloudFailure> {
     let mut keys = BTreeSet::new();
     let mut prefixes = BTreeSet::new();
     let mut tokens = BTreeSet::new();
@@ -29,14 +30,14 @@ async fn scan(provider: &Provider, mut request: ListRequest) -> Result<(BTreeSet
     }
     Err("too many append listing pages".into())
 }
-async fn get(provider: &Provider, key: &str, limit: usize) -> Result<Vec<u8>, String> {
+async fn get(provider: &Provider, key: &str, limit: usize) -> Result<Vec<u8>, CloudFailure> {
     let r = provider.request("GET", key, None, None, None, limit).await?;
     if r.status != 200 {
-        return Err(format!("append record returned HTTP {}; local work retained", r.status));
+        return Err(CloudFailure::http("append record", r.status));
     }
     Ok(r.bytes)
 }
-pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: bool, audit: bool) -> Result<Outcome, String> {
+pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: bool, audit: bool) -> Result<Outcome, CloudFailure> {
     if provider.connection.bucket_root.is_none() {
         return Err("append mode requires a configured bucketRoot and a signer supporting list/putImmutable".into());
     }
@@ -140,14 +141,14 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
     Ok(Outcome::append(p, planner.acknowledged(local).map_err(ce)?))
 }
 
-pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, String> {
+pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, CloudFailure> {
     if provider.connection.bucket_root.is_none() {
         return Err("migration requires bucketRoot and an append-capable signer".into());
     }
     let mut planner = core::Planner::new(local).map_err(ce)?;
     let seed = super::protocol::migration_seed(provider, &local.library, &mut planner.proofs).await?;
     let seed = super::history::certify(provider, &planner.remote, &seed, &mut planner.proofs).await?;
-    planner.remote.merge(&seed).map_err(|e| e.to_string())?;
+    planner.remote.merge(&seed).map_err(CloudFailure::from)?;
     let mut p = planner.progress().map_err(ce)?;
     provider
         .put_immutable(&core::manifest_key(&provider.connection.prefix, &local.library).map_err(ce)?, &core::manifest(&local.library).map_err(ce)?)
@@ -162,20 +163,20 @@ pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, 
     Ok(Outcome::append(p, Default::default()))
 }
 
-async fn read_checkpoint(provider: &Provider, planner: &mut core::Planner, root: &str, key: &str) -> Result<usize, String> {
+async fn read_checkpoint(provider: &Provider, planner: &mut core::Planner, root: &str, key: &str) -> Result<usize, CloudFailure> {
     let bytes = get(provider, key, core::MAX_OBJECT).await?;
     core::immutable_metadata(key, &bytes).map_err(ce)?;
     let p: lightcraft_engine::catalog::replication::AppendProgress = serde_json::from_slice(&bytes).map_err(|_| "malformed append checkpoint")?;
-    p.validate(&planner.remote.library).map_err(|e| e.to_string())?;
+    p.validate(&planner.remote.library).map_err(CloudFailure::from)?;
     if p.manifest != sha256(&core::manifest(&planner.remote.library).map_err(ce)?).0 || !p.gaps.is_empty() {
         return Err("incomplete append checkpoint".into());
     }
     let remote = super::history::certify(provider, &planner.remote, &p.remote, &mut planner.proofs).await?;
-    planner.remote.merge(&remote).map_err(|e| e.to_string())?;
+    planner.remote.merge(&remote).map_err(CloudFailure::from)?;
     core::discovery::consume(planner, root, key).map_err(ce)?;
     Ok(bytes.len())
 }
-async fn read_operation(provider: &Provider, planner: &mut core::Planner, key: &str) -> Result<usize, String> {
+async fn read_operation(provider: &Provider, planner: &mut core::Planner, key: &str) -> Result<usize, CloudFailure> {
     let bytes = get(provider, key, lightcraft_engine::catalog::replication::MAX_MUTATION_BYTES).await?;
     let mutation = core::decode_mutation(&provider.connection.prefix, &planner.remote.library, key, &bytes).map_err(ce)?;
     if lightcraft_engine::catalog::replication::archive::covers(&planner.remote.archives, &mutation.revision.id()) {
@@ -193,7 +194,7 @@ async fn audit_history(
     root: &str,
     requested: bool,
     fetched: &BTreeMap<String, usize>,
-) -> Result<(), String> {
+) -> Result<(), CloudFailure> {
     let mut audit = core::discovery::Audit::new(&planner.scan, requested).map_err(ce)?;
     for namespace in ["checkpoints", "ops"] {
         let Some(mut request) = audit.request(root, namespace) else { continue };

@@ -218,6 +218,17 @@ before pending IDs drop. Reload can finish a saved acknowledgement, including hi
 
 ## Cloud status popup and pause
 
+Synchronization reports typed failures and bounded transient retries through
+`cloud.syncStatus.health` / `cloud.overview.health.sync`. Connectivity, signer unavailability,
+HTTP 408/425/429/500/502/503/504 and contention retry after 2/4/8/16/30 seconds; the sixth
+failure halts automatic polling. Authentication, corrupt or invalid history, identity/schema
+errors and local resource failures halt immediately. Fetch cannot distinguish offline from
+TLS/CORS rejection; its bounded connectivity diagnostic names those checks. The popup shows
+retry timing, exhaustion and recovery actions. Reauthorize the same destination and Resume
+after authentication repair; pending edits and exact IDs remain in browser storage. Successful
+polling clears the error; unrelated media/publication success does not. Migration failures
+require explicit cutover recovery. See [failure policy](cloud-sync-protocol.md#cloud-subsystem-health).
+
 The upper-right cloud icon now opens a shared status popup with managed-data totals, pending
 photo/library work, activity progress, errors and Pause/Resume Syncing. The Sync Status picker
 filters Waiting to sync, Syncing, Synced, Sync issues or Local only. Status counts describe this

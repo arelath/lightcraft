@@ -5,6 +5,10 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
+Current status (2026-10-17): CR.1–CR.41 are complete. Dated verification notes below
+describe their original snapshots; current operational limits remain in
+[cloud-storage-implementation.md](cloud-storage-implementation.md).
+
 - [x] CR.1 — Restore synchronization liveness with failed, deleted, orphaned, or other-connection uploads. Receive independently of publication; gate publication on exact media dependencies. Preserve append causal continuity by publishing frozen imports before tombstones. Test deletion before upload and unrelated failed uploads.
 - [x] CR.2 — Fix automatic multi-photo append imports. Represent dependency waiting separately from failure and reconcile every upload intent covered by verified publication. Test delayed sibling transfers and restart/retry.
 - [x] CR.3 — Materialize valid folder rearrangements independently of entity ID order. Validate the desired graph, detach before attaching, and resolve concurrent cycles deterministically while retaining conflict choices. Test reversed ancestry and concurrent cycles; audit stack uniqueness.
@@ -25,7 +29,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.18 — Make cloud deletion retention prominent and add explicit previewable retention/reclamation tooling with safe reference checks.
 - [x] CR.19 — Align and expose native input, pixel, and blob limits; validate representative large `.3fr` inputs before migration and test actionable limit errors.
 - [x] CR.20 — Provide supported browser signer deployment instructions and a desktop/browser capability matrix; verify the deployment workflow and stated scope.
-- [ ] CR.21 — Classify sync failures and retry transient connectivity with bounded backoff; pause authentication, integrity, schema, and identity failures with actionable status. Test native/browser recovery.
+- [x] CR.21 — Classify sync failures and retry transient connectivity with bounded backoff; pause authentication, integrity, schema, and identity failures with actionable status. Test native/browser recovery.
 
 ## Follow-up review: completion ordering and shared semantics
 
@@ -1506,3 +1510,59 @@ Configuration screenshots were inspected. Evidence: `target/cloud-reliability/cr
 This verifies the local deployment workflow. DNS, TLS termination, service-manager operation,
 actual account policy and fresh live AWS/B2/custom-provider conformance were not run and
 remain deployment-specific verification. CR.20 is complete. CR.21 remains open.
+
+
+2026-10-17 — CR.21: Producer-classified synchronization failures now survive native
+and browser transport, protocol and owner boundaries. HTTP/service codes and typed errors,
+never message text, choose recovery. Connectivity and contention receive five automatic
+retries after 2/4/8/16/30 seconds; a sixth failure halts polling. Authentication,
+integrity, invalid schema/history/library identity, unsupported configuration and local
+resource failures halt immediately. Native URL/TLS configuration failures require repair;
+browser Fetch cannot distinguish offline from TLS/CORS rejection and uses bounded
+connectivity retries with that limitation stated in its diagnostic. Permanent write errors
+are not hidden by speculative readback, while uncertain writes still reconcile exact bytes.
+Mismatching immutable readback is an integrity failure.
+
+Retry deadlines use monotonic time. Health exposes failure kind, optional HTTP status,
+recovery action, retry attempt/limit, exhaustion and an optional wall-clock countdown.
+The popup, icon tooltip and Info report retry/recovery status. Countdown and attempt formats
+are translated in all supported format catalogs. Successful polling clears the error and
+budget; upload publication cannot do so. Explicit Resume/Sync now and browser
+reauthorization reset the budget without discarding failure evidence. Cancelled ordinary
+attempts cannot halt a newly resumed scheduler. Failed or cancelled migration stays halted
+for explicit cutover recovery. Runtime budgets reset on catalog reopen; durable pending
+mutation IDs, import receipts and originals remain retained. No catalog/wire migration or
+data deletion is required.
+
+Focused checks passed: nine cloud-status/policy tests, 18 native replication worker tests,
+12 S3 tests, 18 cloud UI tests and all 43 browser unit tests. These include bounded exhaustion,
+manual/success reset, absent wall time, publication/error isolation, permanent error policy,
+producer provenance, migration cancellation and rendered countdown/recovery headlines.
+Strict workspace Clippy passed. Evidence: `target/cloud-reliability/cr21-health-test.log`,
+`cr21-worker-final.log`, `cr21-s3-tests.log`, `cr21-ui-tests.log`, `cr21-web-tests.log`,
+`cr21-clippy.log`, `cr21-native-build.log`, `cr21-web-build.log`.
+
+Native acceptance passed both protocols: injected HTTP 503 retried automatically and
+published retained edits without Resume; authentication stopped polling with no repeated
+requests; pending work survived restart; explicit repair/Resume converged with a fresh peer.
+All 141 storage requests were independently signature-verified. Chromium, using the
+maintained Rust signer, passed the same automatic recovery and authentication halt for both
+protocols, retained pending edits across reload, and converged with native peers after
+reauthorization. The extended browser run also forced Fetch rejection while offline and recovered automatically
+after reconnecting, without Resume. All 184 storage requests were independently
+signature-verified; HTTP 503 faults were injected in the browser route. No page errors occurred. Countdown,
+authentication and recovered UI screenshots were inspected.
+Evidence: `target/cloud-reliability/cr21-native-{head,append}.log`,
+`cr21-native-results-{conditional-head-v1,append-log-v1}.json`, `cr21-browser.log`,
+`cr21-browser-offline2.log`, `cr21-browser-results.json`; screenshots in
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr21-native/native-834ab6e6/`,
+`native-be7b8016/`, and
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr21-browser/browser-0459328d/`.
+These are procedural loopback/provider-fault checks, not fresh AWS/B2 acceptance or a
+large-library latency guarantee. Live provider/account/TLS deployment verification remains
+separate from repository CI and this reliability checklist.
+
+Full final-source `cargo +1.95.0 xtask ci` passed all eight gates: fmt, strict Clippy,
+HEIF, workspace tests, parity, layers, assets and WASM. Log:
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-reliability-target/cr21-ci.log`.
+CR.21 is complete and checked off. All CR.1–CR.41 checklist items are complete.

@@ -3,9 +3,6 @@ use crate::{EngineError, Result, Session};
 use lightcraft_catalog::replication::{AppendProgress, publication_prefixes};
 use serde_json::Value;
 use std::sync::atomic::AtomicBool;
-fn error(message: impl Into<String>) -> EngineError {
-    EngineError::Other(message.into())
-}
 pub fn migrate(s: &mut Session, p: &Value) -> Result<Value> {
     crate::cloud_replication::start_migration(s, p)
 }
@@ -16,11 +13,11 @@ pub(crate) fn seed(
     cancel: &AtomicBool,
 ) -> Result<crate::cloud_replication::Outcome> {
     let mut proofs = Default::default();
-    let remote = crate::cloud_replication::read_with_witness(conn, &state.library, &mut proofs, cancel).map_err(|e| error(e.to_string()))?;
+    let remote = crate::cloud_replication::read_with_witness(conn, &state.library, &mut proofs, cancel).map_err(|e| EngineError::Cloud(e.into()))?;
     let portable = remote.state.portable();
     let mut progress = AppendProgress {
         version: 1,
-        manifest: crate::assets::sha256(&super::manifest(&state.library).map_err(|e| error(e.to_string()))?).0,
+        manifest: crate::assets::sha256(&super::manifest(&state.library).map_err(|e| EngineError::Cloud(e.into()))?).0,
         frontiers: publication_prefixes(&portable)?,
         remote: portable,
         scan: Default::default(),
@@ -28,21 +25,22 @@ pub(crate) fn seed(
     };
     progress.validate(&state.library)?;
     conn.put_immutable_verified(
-        &super::manifest_key(&conn.prefix, &state.library).map_err(|e| error(e.to_string()))?,
-        &super::manifest(&state.library).map_err(|e| error(e.to_string()))?,
+        &super::manifest_key(&conn.prefix, &state.library).map_err(|e| EngineError::Cloud(e.into()))?,
+        &super::manifest(&state.library).map_err(|e| EngineError::Cloud(e.into()))?,
         cancel,
     )
-    .map_err(|e| error(e.to_string()))?;
-    let bytes = super::discovery::checkpoint_bytes(&progress).map_err(|e| error(e.to_string()))?;
+    .map_err(|e| EngineError::Cloud(e.into()))?;
+    let bytes = super::discovery::checkpoint_bytes(&progress).map_err(|e| EngineError::Cloud(e.into()))?;
     let key = format!(
         "{}/checkpoints/{}/{}.json",
-        super::root(&conn.prefix, &state.library).map_err(|e| error(e.to_string()))?,
+        super::root(&conn.prefix, &state.library).map_err(|e| EngineError::Cloud(e.into()))?,
         state.device,
         crate::assets::sha256(&bytes).0
     );
-    conn.put_immutable_verified(&key, &bytes, cancel).map_err(|e| error(e.to_string()))?;
-    let root = super::root(&conn.prefix, &state.library).map_err(|e| error(e.to_string()))?;
-    progress.scan.checkpoints.insert(super::discovery::relative(&root, &key).map_err(|e| error(e.to_string()))?.into());
-    progress.remote = crate::cloud_history::native::certify(conn, state, &progress.remote, &mut proofs, cancel).map_err(|e| error(e.to_string()))?;
+    conn.put_immutable_verified(&key, &bytes, cancel).map_err(|e| EngineError::Cloud(e.into()))?;
+    let root = super::root(&conn.prefix, &state.library).map_err(|e| EngineError::Cloud(e.into()))?;
+    progress.scan.checkpoints.insert(super::discovery::relative(&root, &key).map_err(|e| EngineError::Cloud(e.into()))?.into());
+    progress.remote =
+        crate::cloud_history::native::certify(conn, state, &progress.remote, &mut proofs, cancel).map_err(|e| EngineError::Cloud(e.into()))?;
     Ok(crate::cloud_replication::Outcome::append(progress, Default::default()))
 }

@@ -2,6 +2,7 @@
 use super::*;
 use crate::backend::Backend;
 use js_sys::{Reflect, Uint8Array};
+use lightcraft_engine::cloud_status::{CloudFailure, FailureKind};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{
@@ -15,7 +16,14 @@ use web_sys::{Request, RequestInit, Response};
 fn js_error(_: JsValue) -> String {
     "browser network/storage operation failed; reconnect or reauthorize and retry".into()
 }
-async fn body(response: &Response, limit: usize) -> Result<Vec<u8>, String> {
+fn network_error(cancel: &AtomicBool) -> CloudFailure {
+    if cancel.load(Ordering::Relaxed) {
+        CloudFailure::new(FailureKind::Cancelled, "cloud transfer cancelled; pending work retained")
+    } else {
+        CloudFailure::connectivity("browser Fetch failed or timed out; check connectivity, endpoint TLS and CORS, then retry (pending work retained)")
+    }
+}
+async fn body(response: &Response, limit: usize, cancel: &AtomicBool) -> Result<Vec<u8>, CloudFailure> {
     if response.headers().get("Content-Length").map_err(js_error)?.and_then(|v| v.parse::<usize>().ok()).is_some_and(|n| n > limit) {
         return Err("remote response exceeds the supported length".into());
     }
@@ -23,7 +31,7 @@ async fn body(response: &Response, limit: usize) -> Result<Vec<u8>, String> {
     let reader: web_sys::ReadableStreamDefaultReader = stream.get_reader().dyn_into().map_err(|e| js_error(e.into()))?;
     let mut bytes = Vec::new();
     loop {
-        let chunk = JsFuture::from(reader.read()).await.map_err(js_error)?;
+        let chunk = JsFuture::from(reader.read()).await.map_err(|_| network_error(cancel))?;
         if Reflect::get(&chunk, &"done".into()).map_err(js_error)?.as_bool() == Some(true) {
             break;
         }
@@ -44,13 +52,13 @@ struct TransferDeadline {
     _callback: Closure<dyn FnMut()>,
 }
 impl TransferDeadline {
-    fn new(options: &RequestInit, cancel: Arc<AtomicBool>) -> Result<Self, String> {
+    fn new(options: &RequestInit, cancel: Arc<AtomicBool>) -> Result<Self, CloudFailure> {
         let window = web_sys::window().ok_or("browser window unavailable")?;
         let controller = web_sys::AbortController::new().map_err(js_error)?;
         options.set_signal(Some(&controller.signal()));
-        let deadline = js_sys::Date::now() + 120_000.;
+        let deadline = web_time::Instant::now() + std::time::Duration::from_secs(120);
         let callback = Closure::<dyn FnMut()>::new(move || {
-            if cancel.load(Ordering::Relaxed) || js_sys::Date::now() >= deadline {
+            if cancel.load(Ordering::Relaxed) || web_time::Instant::now() >= deadline {
                 controller.abort();
             }
         });
@@ -63,11 +71,15 @@ impl Drop for TransferDeadline {
         self.window.clear_interval_with_handle(self.timer);
     }
 }
-async fn fetch(request: &Request) -> Result<Response, String> {
+async fn fetch(request: &Request, cancel: &AtomicBool) -> Result<Response, CloudFailure> {
     let window = web_sys::window().ok_or("browser window unavailable")?;
-    JsFuture::from(window.fetch_with_request(request)).await.map_err(js_error)?.dyn_into().map_err(js_error)
+    JsFuture::from(window.fetch_with_request(request))
+        .await
+        .map_err(|_| network_error(cancel))?
+        .dyn_into()
+        .map_err(|e| CloudFailure::from(js_error(e)))
 }
-fn url(url: &str) -> Result<web_sys::Url, String> {
+fn url(url: &str) -> Result<web_sys::Url, CloudFailure> {
     let parsed = web_sys::Url::new(url).map_err(js_error)?;
     if !parsed.username().is_empty()
         || !parsed.password().is_empty()
@@ -91,7 +103,7 @@ pub struct Reply {
     pub etag: Option<String>,
 }
 impl Provider {
-    pub fn new(connection: Connection, token: Option<String>) -> Result<Self, String> {
+    pub fn new(connection: Connection, token: Option<String>) -> Result<Self, CloudFailure> {
         connection.validate()?;
         url(&connection.authorize_endpoint)?;
         let origin = url(&connection.storage_origin)?;
@@ -126,9 +138,9 @@ impl Provider {
         data: Option<&[u8]>,
         list: Option<&lightcraft_engine::cloud_append::listing::ListRequest>,
         immutable: bool,
-    ) -> Result<Authorized, String> {
+    ) -> Result<Authorized, CloudFailure> {
         if let Some(list) = list {
-            list.validate(&self.connection.prefix).map_err(|e| e.to_string())?;
+            list.validate(&self.connection.prefix).map_err(CloudFailure::from)?;
         } else {
             self.connection.validate_key(key)?;
         }
@@ -152,11 +164,12 @@ impl Provider {
         if let Some(token) = self.token.borrow().as_ref() {
             request.headers().set("Authorization", &format!("Bearer {token}")).map_err(js_error)?;
         }
-        let response = fetch(&request).await?;
+        let response = fetch(&request, &self.cancel).await?;
         if !response.ok() {
-            return Err("cloud authorization failed; sign in again and retry (pending work retained)".into());
+            return Err(CloudFailure::http("cloud authorization", response.status()));
         }
-        let authorized: Authorized = serde_json::from_slice(&body(&response, 16 << 10).await?).map_err(|_| "invalid authorization response")?;
+        let authorized: Authorized =
+            serde_json::from_slice(&body(&response, 16 << 10, &self.cancel).await?).map_err(|_| "invalid authorization response")?;
         authorized.validate_headers()?;
         let signed = url(&authorized.url)?;
         if signed.origin() != self.connection.storage_origin {
@@ -214,7 +227,7 @@ impl Provider {
         condition: Option<&str>,
         data: Option<&[u8]>,
         limit: usize,
-    ) -> Result<Reply, String> {
+    ) -> Result<Reply, CloudFailure> {
         if !matches!(method, "GET" | "PUT" | "HEAD") || (method == "PUT" && condition.is_none()) {
             return Err("invalid or unconditional browser cloud request".into());
         }
@@ -230,10 +243,10 @@ impl Provider {
         limit: usize,
         list: Option<&lightcraft_engine::cloud_append::listing::ListRequest>,
         immutable: bool,
-    ) -> Result<Reply, String> {
+    ) -> Result<Reply, CloudFailure> {
         for attempt in 0..2 {
             if self.cancel.load(Ordering::Relaxed) {
-                return Err("cloud transfer cancelled; pending work retained".into());
+                return Err(CloudFailure::new(FailureKind::Cancelled, "cloud transfer cancelled; pending work retained"));
             }
             let authorized = self.authorize(method, key, version, condition, data, list, immutable).await?;
             let options = RequestInit::new();
@@ -249,7 +262,7 @@ impl Provider {
             for (name, value) in authorized.headers {
                 request.headers().set(&name, &value).map_err(js_error)?;
             }
-            let response = fetch(&request).await?;
+            let response = fetch(&request, &self.cancel).await?;
             // A transfer can outlive its URL. Re-authorize once, preserving the exact body,
             // key and precondition. A second refusal is an actionable login failure.
             if matches!(response.status(), 401 | 403) && attempt == 0 {
@@ -257,15 +270,18 @@ impl Provider {
             }
             let status = response.status();
             if matches!(status, 401 | 403) {
-                return Err("cloud access expired or was revoked; reauthorize and retry".into());
+                return Err(CloudFailure::http("cloud object authorization", status));
+            }
+            if CloudFailure::http("cloud request", status).retryable() && !matches!(status, 409 | 412) {
+                return Err(CloudFailure::http("cloud request", status));
             }
             let etag = response.headers().get("ETag").map_err(js_error)?;
-            let bytes = if matches!(status, 200 | 201 | 204) { body(&response, limit).await? } else { Vec::new() };
+            let bytes = if matches!(status, 200 | 201 | 204) { body(&response, limit, &self.cancel).await? } else { Vec::new() };
             return Ok(Reply { status, bytes, etag });
         }
         Err("cloud URL refresh exhausted; pending work retained".into())
     }
-    fn validate_list_url(&self, signed: &web_sys::Url, list: &lightcraft_engine::cloud_append::listing::ListRequest) -> Result<(), String> {
+    fn validate_list_url(&self, signed: &web_sys::Url, list: &lightcraft_engine::cloud_append::listing::ListRequest) -> Result<(), CloudFailure> {
         let root = url(self.connection.bucket_root.as_ref().ok_or("append mode requires bucketRoot")?)?;
         if root.origin() != self.connection.storage_origin || !root.search().is_empty() || root.pathname() != signed.pathname() {
             return Err("signer returned another bucket root".into());
@@ -309,41 +325,54 @@ impl Provider {
     pub async fn list(
         &self,
         list: &lightcraft_engine::cloud_append::listing::ListRequest,
-    ) -> Result<lightcraft_engine::cloud_append::listing::Page, String> {
+    ) -> Result<lightcraft_engine::cloud_append::listing::Page, CloudFailure> {
         let reply = self.request_typed("GET", "", None, None, None, 4 << 20, Some(list), false).await?;
         if reply.status != 200 {
-            return Err(format!("object listing returned HTTP {}", reply.status));
+            return Err(CloudFailure::http("object listing", reply.status));
         }
-        lightcraft_engine::cloud_append::listing::parse(&reply.bytes, list).map_err(|e| e.to_string())
+        lightcraft_engine::cloud_append::listing::parse(&reply.bytes, list).map_err(CloudFailure::from)
     }
-    pub async fn put_immutable(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
-        lightcraft_engine::cloud_append::immutable_metadata(key, bytes).map_err(|e| e.to_string())?;
+    pub async fn put_immutable(&self, key: &str, bytes: &[u8]) -> Result<(), CloudFailure> {
+        lightcraft_engine::cloud_append::immutable_metadata(key, bytes).map_err(CloudFailure::from)?;
         let existing = self.request("GET", key, None, None, None, 64 << 20).await?;
         if existing.status == 200 {
-            return if existing.bytes == bytes { Ok(()) } else { Err("immutable object identity collision".into()) };
+            return if existing.bytes == bytes { Ok(()) } else { Err(CloudFailure::integrity("immutable object identity collision")) };
         }
         if existing.status != 404 {
-            return Err(format!("immutable lookup returned HTTP {}", existing.status));
+            return Err(CloudFailure::http("immutable lookup", existing.status));
         }
         for attempt in 0..2 {
             let result = self.request_typed("PUT", key, None, None, Some(bytes), 2 << 20, None, true).await;
+            if let Err(error) = &result
+                && !error.retryable()
+            {
+                return Err(error.clone());
+            }
             let verified = self.request("GET", key, None, None, None, 64 << 20).await?;
             if verified.status == 200 {
-                return if verified.bytes == bytes { Ok(()) } else { Err("immutable readback failed SHA-256/length verification".into()) };
+                return if verified.bytes == bytes {
+                    Ok(())
+                } else {
+                    Err(CloudFailure::integrity("immutable readback failed SHA-256/length verification"))
+                };
             }
-            if attempt == 0 && verified.status == 404 && (result.is_err() || result.as_ref().is_ok_and(|r| matches!(r.status, 200 | 201 | 204))) {
+            if attempt == 0
+                && verified.status == 404
+                && (result.as_ref().is_err_and(CloudFailure::retryable) || result.as_ref().is_ok_and(|r| matches!(r.status, 200 | 201 | 204)))
+            {
                 continue;
             }
             return Err(match result {
-                Ok(reply) => {
-                    format!("immutable publication returned HTTP {} and readback HTTP {}; pending work retained", reply.status, verified.status)
+                Ok(reply) if matches!(reply.status, 200 | 201 | 204) && verified.status == 404 => {
+                    CloudFailure::connectivity("immutable publication is not yet visible; pending work retained")
                 }
-                Err(error) => format!("{error}; immutable readback HTTP {}; pending work retained", verified.status),
+                Ok(reply) => CloudFailure::http("immutable publication", reply.status),
+                Err(error) => error,
             });
         }
-        Err("immutable publication retry exhausted".into())
+        Err(CloudFailure::connectivity("immutable publication retry exhausted"))
     }
-    pub async fn blob(&self, backend: &Backend, blob: &Blob) -> Result<Vec<u8>, String> {
+    pub async fn blob(&self, backend: &Backend, blob: &Blob) -> Result<Vec<u8>, CloudFailure> {
         blob.validate()?;
         if blob.remote.connection != self.connection.id {
             return Err("blob belongs to another storage connection".into());
@@ -361,9 +390,9 @@ impl Provider {
         }
         let reply = self.request("GET", &blob.remote.key, blob.remote.version.as_deref(), None, None, blob.size as usize).await?;
         if reply.status != 200 {
-            return Err(format!("cloud download returned HTTP {}; cached/pending data retained", reply.status));
+            return Err(CloudFailure::http("cloud download", reply.status));
         }
-        verify_blob(blob, &reply.bytes)?;
+        verify_blob(blob, &reply.bytes).map_err(CloudFailure::integrity)?;
         if let Err(error) = super::cache::storage::store(backend, blob, &reply.bytes).await {
             super::cache::storage::temporary(blob, error);
         }

@@ -78,6 +78,8 @@ pub enum AssetError {
     Unauthorized,
     #[error("storage is temporarily unavailable: {0}")]
     Network(String),
+    #[error("S3 returned HTTP {0}; check endpoint, permissions and region (pending work retained)")]
+    Http(u16),
     #[error("download failed integrity verification")]
     Integrity,
     #[error("conditional object write conflicted; reread the remote object before retrying")]
@@ -90,6 +92,13 @@ pub enum AssetError {
     Unconfigured(String),
     #[error("this storage operation is unsupported: {0}")]
     Unsupported(String),
+}
+
+impl AssetError {
+    /// A failed write may already have committed. Reconcile exact remote bytes before retrying.
+    pub fn uncertain_write(&self) -> bool {
+        matches!(self, Self::Conflict | Self::Network(_) | Self::Http(408 | 425 | 429 | 500 | 502 | 503 | 504))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, AssetError>;

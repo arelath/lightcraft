@@ -178,8 +178,10 @@ fn read_incremental(
 fn immutable(connection: &S3Connection, key: &str, bytes: &[u8], cancel: &AtomicBool, max: usize) -> Result<()> {
     match connection.put_small(key, bytes, PutCondition::Absent, cancel) {
         Ok(_) => Ok(()),
-        Err(error @ (AssetError::Conflict | AssetError::Network(_))) => match connection.get_small(key, max, cancel) {
+        Err(error) if error.uncertain_write() => match connection.get_small(key, max, cancel) {
             Ok(Some(reply)) if reply.bytes == bytes => Ok(()),
+            Ok(Some(_)) => Err(AssetError::Integrity),
+            Err(read_error) => Err(read_error),
             _ => Err(error),
         },
         Err(error) => Err(error),
@@ -385,7 +387,8 @@ fn publish(
     let head = Head { version: 3, generation, tip, library: Some(library.into()), checkpoint };
     let condition = previous.map_or(PutCondition::Absent, |(_, etag)| PutCondition::Matches(etag));
     match connection.put_small(&keys::in_library(&connection.prefix, "catalog/head.json")?, &publication::encode(&head)?, condition, cancel) {
-        Ok(_) | Err(AssetError::Conflict | AssetError::Network(_)) => Ok(()),
+        Ok(_) => Ok(()),
+        Err(error) if error.uncertain_write() => Ok(()),
         Err(error) => Err(error),
     }
 }

@@ -404,7 +404,7 @@ impl BlobStore for S3Connection {
             200 => {}
             401 | 403 => return Err(AssetError::Unauthorized),
             404 => return Err(AssetError::Missing),
-            status => return Err(AssetError::Network(format!("S3 returned HTTP {status}; check the endpoint and region"))),
+            status => return Err(AssetError::Http(status)),
         }
         if response.content_length().is_some_and(|n| n != blob.size) {
             return Err(AssetError::Integrity);
@@ -430,7 +430,12 @@ impl BlobStore for S3Connection {
 fn http_error(error: http::HttpError) -> AssetError {
     match error {
         http::HttpError::Cancelled => AssetError::Cancelled,
-        _ => AssetError::Network(error.to_string()),
+        http::HttpError::BadUrl(_) | http::HttpError::Tls(_) => AssetError::Unsupported(error.to_string()),
+        // Framing errors also include an interrupted/truncated response. Exact-byte readback
+        // reconciles uncertain writes; metadata JSON/schema failures are classified separately.
+        http::HttpError::Connect(_) | http::HttpError::Stalled | http::HttpError::Io(_) | http::HttpError::Protocol(_) => {
+            AssetError::Network(error.to_string())
+        }
     }
 }
 
@@ -443,6 +448,22 @@ pub use requests::{ObjectReply, ObjectStat, PutCondition};
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transport_failure_classification_preserves_provenance() {
+        use crate::cloud_status::{CloudFailure, FailureKind};
+        use http::HttpError;
+        for (error, kind) in [
+            (HttpError::Cancelled, FailureKind::Cancelled),
+            (HttpError::BadUrl("invalid".into()), FailureKind::Unsupported),
+            (HttpError::Tls("certificate".into()), FailureKind::Unsupported),
+            (HttpError::Connect("dns".into()), FailureKind::Connectivity),
+            (HttpError::Stalled, FailureKind::Connectivity),
+            (HttpError::Io("interrupted".into()), FailureKind::Connectivity),
+            (HttpError::Protocol("truncated response".into()), FailureKind::Connectivity),
+        ] {
+            assert_eq!(CloudFailure::from(http_error(error)).kind, kind);
+        }
+    }
     #[test]
     fn hmac_matches_rfc4231() {
         let bytes = mac(&[0x0b; 20], b"Hi There").unwrap();

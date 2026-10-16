@@ -18,8 +18,9 @@ into managed storage. Existing catalogs open without a cloud connection.
 
 `cloud.syncEnable {connection, library?, protocol?}` enables a durable offline mutation journal.
 `cloud.sync {wait?, checkpoint?}` reconciles and publishes it. Native GUI synchronization
-runs on a worker and polls every five seconds while enabled. A failure pauses polling until
-an explicit Sync now retry. CLI/MCP wait by default. Activity cancellation preserves pending
+runs on a worker and polls every five seconds while enabled. Typed transient failures use
+bounded automatic backoff; permanent failures require explicit recovery (see Cloud subsystem
+health below). CLI/MCP wait for one attempt by default. Activity cancellation preserves pending
 work. `cloud.syncStatus` reports the cursor, pending work and retained conflict revisions.
 Managed uploads require synchronization enabled for their connection. Select the protocol
 in Cloud Synchronization (or `cloud.syncEnable`) before uploading; staging an import while
@@ -656,6 +657,25 @@ work and no unresolved conflicts. The displayed scan age explains the freshness 
 that claim; after reopen the UI checks again before displaying it. Browser media
 download failures are resource-specific and its host reports the same scheduler
 health model.
+
+Failure producers retain typed provenance through native and browser synchronization;
+error message text never selects retry policy. Connectivity and contention failures retry
+after 2, 4, 8, 16 and 30 seconds, then halt on a sixth consecutive failure. HTTP
+408/425/429/500/502/503/504 are transient; 409/412 are contention. Authentication (including
+401/403), integrity, invalid schema/history/library identity, local resources and unsupported
+configuration halt immediately. Browser Fetch rejection cannot distinguish offline, TLS or
+CORS failures, so it receives the same bounded connectivity policy and diagnostic guidance.
+Native explicit TLS/URL configuration failures require repair. Failed migration never resumes
+ordinary polling automatically; explicitly retry or cancel the cutover.
+
+Health includes `lastError.kind`, optional `httpStatus`, `retryable`, `action` and `retry`
+(`attempt`, `maxAttempts`, `exhausted`, `scheduled`, `nextAtUnixMs`, `secondsUntilRetry`).
+The popup and Info show a countdown or recovery action. Retry deadlines use monotonic time;
+wall time is display-only and may be unavailable. Resume/Sync now and browser reauthorization
+reset the budget but retain failure evidence until a successful polling scan. Upload publication
+does not clear that evidence or reset the budget. Pause/cancellation and obsolete owner results
+cannot halt a newly resumed scheduler. Budgets are session-local; durable pending mutation IDs,
+receipts and originals stay retained across restart. Retries never allocate replacement mutations.
 
 
 ### Logical undo and redo

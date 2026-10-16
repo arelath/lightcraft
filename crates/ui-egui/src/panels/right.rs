@@ -750,6 +750,8 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     ui.label(
                         egui::RichText::new(if status["migrating"].as_bool() == Some(true) {
                             "Migrating cloud library…".to_owned()
+                        } else if let Some(retry) = super::cloud::retry_text(&status["health"]) {
+                            retry
                         } else if status["health"]["pollingHalted"] == true {
                             crate::i18n::tr("Automatic checking stopped after an error.").to_owned()
                         } else if running {
@@ -769,6 +771,9 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     super::cloud::capacity(app, ui, &status, false);
                     if let Some(error) = status["health"]["lastError"]["message"].as_str() {
                         ui.label(egui::RichText::new(error).color(t.text_dim));
+                    }
+                    if let Some(action) = status["health"]["lastError"]["action"].as_str() {
+                        ui.label(egui::RichText::new(action).color(t.text_dim));
                     }
                     if !running
                         && text_button(ui, "cloudSyncNow", crate::i18n::tr("Sync now"), false).clicked()

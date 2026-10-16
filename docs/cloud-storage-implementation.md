@@ -51,9 +51,14 @@ in append mode. LIST discovery and full state validation still have linear costs
   native input is 512 MiB / 128 MP; browser original decoding is 32 MP with 512 MiB
   aggregate source admission. Shared descriptors accept 128 MP; larger browser photos
   use published smart previews. The 4 GiB blob wire bound does not imply decode capacity.
-- A synchronization failure halts automatic polling until explicit retry. Transient
-  classification/backoff remains CR.21. Resource-specific errors and last successful
-  remote scan are exposed separately from user pause and pending publication.
+- Synchronization retries connectivity, HTTP 408/425/429/500/502/503/504 and contention
+  failures after 2, 4, 8, 16 and 30 seconds. A sixth failure halts polling. Authentication,
+  integrity, invalid history/schema/identity, unsupported configuration and local resource
+  failures halt immediately with a recovery action. Explicit Resume/Sync now resets the
+  retry budget; successful polling clears the error. Migration requires explicit recovery.
+  Resource-specific errors and last successful remote scan remain separate from user pause
+  and pending publication. Pending edits, staged originals and exact mutation IDs survive
+  failures; the runtime retry budget resets on catalog reopen.
 - Checkpoints archive exact old receipts while retaining current/pending contexts.
   Author clocks and remote history remain retained. State validation, snapshot cloning,
   author/checkpoint listing and some structural reconciliation still scale with state;

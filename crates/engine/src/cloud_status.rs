@@ -1,7 +1,9 @@
 //! Shared cloud popup data and device-local publication controls.
 use crate::{EngineError, Result, Session};
 use serde_json::{Value, json};
+mod failure;
 mod health;
+pub use failure::{CloudFailure, FailureKind, RetryBudget};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use health::now_ms;
 pub use health::{PollHealth, ResourceHealth};

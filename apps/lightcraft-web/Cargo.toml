@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 crc32fast = { workspace = true }
+web-time = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 eframe = { workspace = true, features = ["default_fonts", "glow"] }

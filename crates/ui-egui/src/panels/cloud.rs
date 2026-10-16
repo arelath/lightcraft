@@ -25,6 +25,13 @@ pub(crate) fn needs_attention(data: &Value) -> bool {
 fn verified_scan(data: &Value) -> bool {
     data["health"]["sync"]["lastSuccessfulRemoteScan"].is_object() && matches!(data["health"]["sync"]["state"].as_str(), Some("healthy" | "checking"))
 }
+pub(crate) fn retry_text(health: &Value) -> Option<String> {
+    (health["state"] == "retrying").then(|| {
+        health["retry"]["secondsUntilRetry"]
+            .as_u64()
+            .map_or_else(|| crate::i18n::tr("Retrying synchronization…").to_owned(), |n| crate::i18n::tr_format!("Retrying in {n} s", n = n))
+    })
+}
 
 pub fn bytes(n: u64) -> String {
     if n >= 1_000_000_000_000 {
@@ -124,6 +131,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             "Migrating cloud library…"
         } else if paused {
             "Syncing paused"
+        } else if data["health"]["sync"]["state"] == "retrying" {
+            "Retrying synchronization…"
         } else if needs_attention(data) {
             "Sync needs attention"
         } else if waiting > 0
@@ -149,6 +158,20 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     }
     if halted {
         ui.label(egui::RichText::new(crate::i18n::tr("Automatic checking stopped after an error.")).color(t.caution));
+    }
+    if let Some(text) = retry_text(&data["health"]["sync"]) {
+        ui.label(text);
+        ui.label(crate::i18n::tr_format!(
+            "Automatic retry {attempt} of {max}",
+            attempt = data["health"]["sync"]["retry"]["attempt"].as_u64().unwrap_or(0),
+            max = data["health"]["sync"]["retry"]["maxAttempts"].as_u64().unwrap_or(0)
+        ));
+    }
+    if data["health"]["sync"]["retry"]["exhausted"] == true {
+        ui.colored_label(t.caution, crate::i18n::tr("Automatic retry limit reached. Resolve the error, then Retry Syncing."));
+    }
+    if let Some(action) = data["health"]["sync"]["lastError"]["action"].as_str() {
+        ui.label(egui::RichText::new(action).size(11.).color(t.caution));
     }
     if data["syncEnabled"] == true && !data["health"]["sync"]["lastSuccessfulRemoteScan"].is_object() {
         ui.label(egui::RichText::new(crate::i18n::tr("No successful remote check in this session.")).size(11.).color(t.text_dim));

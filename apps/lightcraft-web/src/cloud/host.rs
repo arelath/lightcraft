@@ -11,6 +11,7 @@ use lightcraft_engine::{
     Session,
     activity::{Cancel, TaskGuard},
     catalog::{Op, PhotoId, Source},
+    cloud_status::{CloudFailure, FailureKind},
 };
 use lightcraft_ui_egui::{CloudAction, LightcraftApp};
 use serde_json::{Value, json};
@@ -28,7 +29,7 @@ fn timestamp_ms() -> Option<u64> {
 }
 enum Stage {
     SaveThenSync { checkpoint: bool, audit: bool },
-    Network { ready: Rc<RefCell<Option<Result<Outcome, String>>>>, revision: u64, connection: String },
+    Network { ready: Rc<RefCell<Option<Result<Outcome, CloudFailure>>>>, revision: u64, connection: String },
     Ack { receipt: AckReceipt, result: Value },
     Received { result: Value },
     Acquire { command: String, params: Value, sources: Vec<(PhotoId, Source)>, lease: ByteLease },
@@ -54,7 +55,7 @@ struct Data {
     reports: Vec<Value>,
     sync_running: bool,
     paused: bool,
-    next_poll: f64,
+    next_poll: Option<web_time::Instant>,
     last_audit: f64,
     health: lightcraft_engine::cloud_status::PollHealth,
     media_health: lightcraft_engine::cloud_status::ResourceHealth,
@@ -87,7 +88,7 @@ impl Host {
         let memory = ManagedBytes::default();
         let host = Self {
             cache: super::cache::offline::Offline::new(backend.clone(), directory, memory.clone(), files.clone()),
-            data: Rc::new(RefCell::new(Data { next_poll: js_sys::Date::now() + 5000., ..Data::default() })),
+            data: Rc::new(RefCell::new(Data { next_poll: Some(web_time::Instant::now() + std::time::Duration::from_secs(5)), ..Data::default() })),
             memory,
             files,
             backend,
@@ -102,7 +103,7 @@ impl Host {
                             Ok(provider) => {
                                 host.data.borrow_mut().providers.insert(provider.connection.id.clone(), provider);
                             }
-                            Err(error) => crate::safety::notice(error),
+                            Err(error) => crate::safety::notice(error.to_string()),
                         }
                     }
                 }
@@ -196,7 +197,8 @@ impl Host {
                     let mut data = self.data.borrow_mut();
                     data.paused = false;
                     data.preparing_migration = false;
-                    data.next_poll = 0.;
+                    data.next_poll = Some(web_time::Instant::now());
+                    data.health.reset_retries();
                     drop(data);
                     self.overview(s)
                 })
@@ -206,6 +208,8 @@ impl Host {
                 self.cache.retry();
                 let mut data = self.data.borrow_mut();
                 data.paused = data.preparing_migration;
+                data.health.reset_retries();
+                data.next_poll = Some(web_time::Instant::now());
                 Ok(json!({"ready":true}))
             }),
             "cloud.fetch" => Some(self.acquire(s, "cloud.fetch", p)),
@@ -244,13 +248,15 @@ impl Host {
         }
         let provider = match data.providers.get(&config.id).filter(|old| old.connection == config && token.is_none()) {
             Some(old) => old.clone(),
-            None => Provider::new(config, token)?,
+            None => Provider::new(config, token).map_err(|e| e.to_string())?,
         };
         data.providers.insert(provider.connection.id.clone(), provider);
         let configs: Vec<_> = data.providers.values().map(|v| v.connection.clone()).collect();
         self.files.write(CONFIG_FILE, &serde_json::to_vec(&configs).map_err(|e| e.to_string())?);
         self.memory.retry();
         data.paused = data.preparing_migration;
+        data.health.reset_retries();
+        data.next_poll = Some(web_time::Instant::now());
         Ok(json!({"configured":true,"savePending":true,"credentials":"ephemeral authorized URLs"}))
     }
     fn enable(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
@@ -297,12 +303,13 @@ impl Host {
         status["preparingMigration"] = json!(data.preparing_migration);
         status["migrating"] = json!(data.jobs.iter().any(|job| job.migrating));
         status["reports"] = json!(data.reports);
-        status["health"] = data.health.view(
+        status["health"] = data.health.view_at(
             s.catalog.sync_state().is_some(),
             data.sync_running,
             s.cloud_paused,
             data.preparing_migration || data.jobs.iter().any(|job| job.migrating),
             data.paused,
+            timestamp_ms(),
         );
         status["health"]["secondsSinceLastRemoteScan"] = json!(data.health.age_seconds(timestamp_ms()));
         status["cache"] = self.memory.status();
@@ -318,12 +325,13 @@ impl Host {
         out["preparingMigration"] = json!(data.preparing_migration);
         out["migrating"] = json!(data.jobs.iter().any(|j| j.migrating));
         out["canResume"] = json!(!data.sync_running);
-        out["health"]["sync"] = data.health.view(
+        out["health"]["sync"] = data.health.view_at(
             s.catalog.sync_state().is_some(),
             data.sync_running,
             s.cloud_paused,
             data.preparing_migration || data.jobs.iter().any(|job| job.migrating),
             data.paused,
+            timestamp_ms(),
         );
         out["health"]["sync"]["secondsSinceLastRemoteScan"] = json!(data.health.age_seconds(timestamp_ms()));
         out["health"]["media"] = data.media_health.view();
@@ -338,6 +346,10 @@ impl Host {
         Ok(out)
     }
     fn start(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
+        self.data.borrow_mut().health.reset_retries();
+        self.start_impl(s, p)
+    }
+    fn start_impl(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
         self.claim_owner(s)?;
         let migrating = p.get("migrate").map(|v| v.as_bool().ok_or("migrate must be true or false")).transpose()?.unwrap_or(false);
         if s.cloud_paused && !migrating {
@@ -377,7 +389,7 @@ impl Host {
         data.sync_running = true;
         data.paused = false;
         data.preparing_migration = false;
-        data.next_poll = js_sys::Date::now() + 5000.;
+        data.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
         self.memory.retry();
         Ok(json!({"task":task,"background":true}))
     }
@@ -480,21 +492,41 @@ impl Host {
                     let mut data = self.data.borrow_mut();
                     if sync {
                         data.sync_running = false;
+                        let mut delay = 5;
                         if current_owner {
-                            data.paused = result.is_err() || data.preparing_migration;
+                            data.paused = data.preparing_migration;
                             match &result {
-                                Ok(value) if value["refreshRequired"] != true => {
-                                    data.health.success(timestamp_ms(), Some(job.guard.id()));
+                                Ok(value) if value["refreshRequired"] != true => data.health.success(timestamp_ms(), Some(job.guard.id())),
+                                Err(_) if job.guard.is_cancelled() => {
+                                    if job.migrating {
+                                        data.health.fail_migration(
+                                            &CloudFailure::new(
+                                                FailureKind::Cancelled,
+                                                "Migration cancelled; prior protocol and pending edits retained",
+                                            ),
+                                            Some(job.guard.id()),
+                                        );
+                                        data.paused = true;
+                                    } else if !app.session.cloud_paused && !data.preparing_migration {
+                                        delay = 0;
+                                    }
                                 }
-                                Err(message) if !(app.session.cloud_paused && job.guard.is_cancelled()) => {
-                                    data.health.fail(message, Some(job.guard.id()))
+                                Err(failure) => {
+                                    let retry = if job.migrating {
+                                        data.health.fail_migration(failure, Some(job.guard.id()));
+                                        None
+                                    } else {
+                                        data.health.fail_typed(failure, timestamp_ms(), Some(job.guard.id()))
+                                    };
+                                    data.paused = retry.is_none() || data.preparing_migration;
+                                    if let Some(seconds) = retry {
+                                        delay = seconds;
+                                    }
                                 }
                                 _ => {}
                             }
                         }
-                        // Leave a retry/explicit-sync window even when a remote scan takes
-                        // longer than the polling interval.
-                        data.next_poll = js_sys::Date::now() + 5000.;
+                        data.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(delay));
                     }
                     if current_owner
                         && !job.guard.is_cancelled()
@@ -504,15 +536,15 @@ impl Host {
                             let resource = format!("download:{}", photo.0);
                             match &result {
                                 Ok(_) => data.media_health.success(&resource),
-                                Err(message) => data.media_health.fail(resource, message, Some(job.guard.id())),
+                                Err(message) => data.media_health.fail(resource, &message.message, Some(job.guard.id())),
                             }
                         }
                     }
                     let report = match result {
                         Ok(value) => json!({"task":job.guard.id(),"ok":true,"result":value}),
                         Err(error) => {
-                            crate::safety::notice(error.clone());
-                            json!({"task":job.guard.id(),"ok":false,"error":error,"paused":app.session.cloud_paused && job.guard.is_cancelled()})
+                            crate::safety::notice(error.to_string());
+                            json!({"task":job.guard.id(),"ok":false,"error":error.to_string(),"failure":error,"paused":app.session.cloud_paused && job.guard.is_cancelled()})
                         }
                     };
                     data.reports.push(report);
@@ -528,12 +560,12 @@ impl Host {
             !app.session.cloud_paused
                 && !data.sync_running
                 && !data.paused
-                && js_sys::Date::now() >= data.next_poll
+                && data.next_poll.is_none_or(|deadline| web_time::Instant::now() >= deadline)
                 && app.session.catalog.sync_state().is_some_and(|s| data.providers.contains_key(&s.connection))
         };
         if poll
             && !self.frozen.get()
-            && let Err(error) = self.start(&mut app.session, &json!({"wait":false,"audit":false}))
+            && let Err(error) = self.start_impl(&mut app.session, &json!({"wait":false,"audit":false}))
         {
             let mut data = self.data.borrow_mut();
             data.paused = true;
@@ -544,16 +576,16 @@ impl Host {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
     }
-    fn advance(&self, job: &mut Job, app: &mut LightcraftApp, flushing: bool) -> Option<Result<Value, String>> {
-        let result = (|| -> Result<Option<Value>, String> {
+    fn advance(&self, job: &mut Job, app: &mut LightcraftApp, flushing: bool) -> Option<Result<Value, CloudFailure>> {
+        let result = (|| -> Result<Option<Value>, CloudFailure> {
             match &mut job.stage {
                 Stage::SaveThenSync { checkpoint, audit } => {
                     if job.guard.is_cancelled() {
-                        return Err("synchronization cancelled; pending work retained".into());
+                        return Err(CloudFailure::new(FailureKind::Cancelled, "synchronization cancelled; pending work retained"));
                     }
-                    app.session.persist().map_err(|e| e.to_string())?;
+                    app.session.persist().map_err(CloudFailure::from)?;
                     if let Some(error) = self.files.error() {
-                        return Err(format!("browser save failed: {error}; pending work retained"));
+                        return Err(CloudFailure::local(format!("browser save failed: {error}; pending work retained")));
                     }
                     if self.files.is_dirty() || flushing {
                         return Ok(None);
@@ -589,7 +621,7 @@ impl Host {
                     let Some(outcome) = ready.borrow_mut().take() else { return Ok(None) };
                     let outcome = outcome?;
                     if job.guard.is_cancelled() {
-                        return Err("synchronization cancelled; pending work retained".into());
+                        return Err(CloudFailure::new(FailureKind::Cancelled, "synchronization cancelled; pending work retained"));
                     }
                     if app.session.interaction.is_some() {
                         *ready.borrow_mut() = Some(Ok(outcome));
@@ -616,14 +648,14 @@ impl Host {
                         state.generation = 0;
                         state
                             .claim_owner(self.owner.clone().ok_or("persistent installation identity unavailable")?, random_identity()?)
-                            .map_err(|e| e.to_string())?;
+                            .map_err(CloudFailure::from)?;
                         let op = Op::SetSyncState { state: Some(Box::new(state)) };
-                        next.apply(op.clone()).map_err(|e| e.to_string())?;
+                        next.apply(op.clone()).map_err(CloudFailure::from)?;
                         binding = Some(op);
                     }
-                    let op = lightcraft_engine::cloud_sync::completed_outcome(&next, &outcome, &BTreeSet::new(), 0).map_err(|e| e.to_string())?;
+                    let op = lightcraft_engine::cloud_sync::completed_outcome(&next, &outcome, &BTreeSet::new(), 0).map_err(CloudFailure::from)?;
                     let op = if let Some(binding) = binding { Op::Batch { ops: vec![binding, op] } } else { op };
-                    app.session.apply_received(op).map_err(|e| e.to_string())?;
+                    app.session.apply_received(op).map_err(CloudFailure::from)?;
                     let received = app.session.catalog.sync_state().ok_or("synchronization identity unavailable")?;
                     let receipt = if outcome.append_progress().is_some() {
                         let progress = received.append.as_ref().ok_or("append publication progress unavailable")?;
@@ -637,12 +669,12 @@ impl Host {
                     } else {
                         None
                     };
-                    app.session.persist().map_err(|e| e.to_string())?;
+                    app.session.persist().map_err(CloudFailure::from)?;
                     let mut value = outcome.report();
                     value["unchanged"] = json!(false);
                     value["protocol"] = json!(app.session.catalog.sync_state().map(|s| s.protocol));
                     if let Some(receipt) = receipt {
-                        self.files.write(ACK_FILE, &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?);
+                        self.files.write(ACK_FILE, &serde_json::to_vec(&receipt).map_err(CloudFailure::from)?);
                         job.guard.handle().detail("Saving received changes and remote acknowledgement in browser storage");
                         job.stage = Stage::Ack { receipt, result: value };
                     } else {
@@ -653,7 +685,7 @@ impl Host {
                 }
                 Stage::Received { result } => {
                     if let Some(error) = self.files.error() {
-                        return Err(format!("browser received-state save failed: {error}; pending work retained"));
+                        return Err(CloudFailure::local(format!("browser received-state save failed: {error}; pending work retained")));
                     }
                     if self.files.is_dirty() || flushing {
                         return Ok(None);
@@ -663,7 +695,7 @@ impl Host {
                 }
                 Stage::Ack { receipt, result } => {
                     if let Some(error) = self.files.error() {
-                        return Err(format!("browser acknowledgement save failed: {error}; pending work retained"));
+                        return Err(CloudFailure::local(format!("browser acknowledgement save failed: {error}; pending work retained")));
                     }
                     if self.files.is_dirty() || flushing {
                         return Ok(None);
@@ -672,8 +704,8 @@ impl Host {
                     if !receipt.finish(&mut state)? {
                         return Err("browser acknowledgement is stale; pending work retained".into());
                     }
-                    app.session.apply_received(Op::SetSyncState { state: Some(Box::new(state)) }).map_err(|e| e.to_string())?;
-                    app.session.persist().map_err(|e| e.to_string())?;
+                    app.session.apply_received(Op::SetSyncState { state: Some(Box::new(state)) }).map_err(CloudFailure::from)?;
+                    app.session.persist().map_err(CloudFailure::from)?;
                     result["pending"] = json!(app.session.catalog.sync_state().map_or(0, |s| s.pending.len()));
                     Ok(Some(result.clone()))
                 }
@@ -695,7 +727,7 @@ impl Host {
                     let action = app.services.cloud_action.take();
                     let result = app.run(command, params.clone());
                     app.services.cloud_action = action;
-                    result.map(Some)
+                    result.map(Some).map_err(CloudFailure::local)
                 }
             }
         })();
@@ -715,7 +747,7 @@ impl Host {
             wasm_bindgen_futures::spawn_local(async move {
                 let outcome = async {
                     let bytes = match provider {
-                        Some(provider) => provider.with_cancel(download.cancel.clone()).blob(&backend, &blob).await?,
+                        Some(provider) => provider.with_cancel(download.cancel.clone()).blob(&backend, &blob).await.map_err(|e| e.to_string())?,
                         None => {
                             let bytes = super::cache::storage::read_verified(&backend, &blob)
                                 .await?

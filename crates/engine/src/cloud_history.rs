@@ -130,7 +130,8 @@ pub mod native {
                 connection.put_immutable_verified(&key, &bytes, cancel)?;
             } else {
                 match connection.put_small(&key, &bytes, crate::assets::s3::PutCondition::Absent, cancel) {
-                    Ok(_) | Err(AssetError::Conflict | AssetError::Network(_)) => {}
+                    Ok(_) => {}
+                    Err(error) if error.uncertain_write() => {}
                     Err(error) => return Err(error),
                 }
                 let stored = connection.get_small(&key, archive::MAX_NODE_BYTES, cancel)?.ok_or(AssetError::Missing)?;

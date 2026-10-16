@@ -8,6 +8,38 @@ use std::time::Duration;
 const T: Duration = Duration::from_secs(20);
 
 #[test]
+fn cloud_retry_headline_displays_bounded_countdown_and_manual_recovery_actions() {
+    for (state, exhausted, expected) in [("retrying", false, "Retrying in 4 s"), ("halted", true, "Automatic retry limit reached.")] {
+        let services = Services {
+            cloud_action: Some(Box::new(move |_, id, _| {
+                (id == "cloud.overview").then(|| {
+                    Ok(json!({
+                        "summary":{"cloudPhotos":1,"albums":0,"pendingChanges":1},"paused":false,"syncEnabled":true,"canResume":true,
+                        "health":{"sync":{"state":state,"pollingHalted":state=="halted",
+                            "retry":{"attempt":2,"maxAttempts":5,"secondsUntilRetry":4,"exhausted":exhausted},
+                            "lastError":{"message":"Storage unavailable","action":"Check connectivity, then Retry Syncing."}}}
+                    }))
+                })
+            })),
+            ..Default::default()
+        };
+        let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::with_demo(), services), [1400., 1000.], 1.);
+        for _ in 0..4 {
+            h.step();
+        }
+        assert_eq!(h.request("ui.clickWidget", json!({"id":"icon:cloud"}), T)["ok"], true);
+        for _ in 0..4 {
+            h.step();
+        }
+        let text = h.view.painted_text();
+        for label in [expected, "Check connectivity, then Retry Syncing.", "Retry Syncing"] {
+            assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
+        }
+        assert!(!text.iter().any(|value| value == "Up to date"));
+    }
+}
+
+#[test]
 fn cloud_health_headline_covers_halted_polling_and_structural_only_conflicts() {
     for structural in [false, true] {
         let overview = std::sync::Arc::new(std::sync::Mutex::new(json!({

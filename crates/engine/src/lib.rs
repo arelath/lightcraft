@@ -114,6 +114,8 @@ pub enum EngineError {
     BadParams { cmd: String, msg: String },
     #[error("{0}")]
     Catalog(#[from] lightcraft_catalog::CatalogError),
+    #[error("{0}")]
+    Cloud(#[from] cloud_status::CloudFailure),
     /// The command's change is applied (in memory, undoable) but its journal records could not
     /// be written. They stay queued and are written by the next successful save.
     #[error("saved in memory but not written to disk: {0}; LightCraft will retry")]
