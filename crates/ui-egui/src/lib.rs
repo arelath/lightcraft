@@ -51,6 +51,7 @@ mod tests_appearance;
 #[cfg(test)]
 mod tests_before_after;
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod tests_cloud_setup;
 #[cfg(test)]
 mod tests_compare;
@@ -362,6 +363,7 @@ pub struct LightcraftApp {
     /// A folder scan in progress (feeds the import review).
     pub scan: Option<import::ScanTask>,
     /// Cloud setup's connection check in progress (feeds its dialog).
+    #[cfg(not(target_arch = "wasm32"))]
     pub cloud_check: Option<cloud_setup::CheckTask>,
     /// A Synchronize Folder scan in progress (feeds its dialog).
     pub sync: Option<sync::SyncTask>,
@@ -458,6 +460,7 @@ impl LightcraftApp {
             merge: merge::MergeState::default(),
             import: None,
             scan: None,
+            #[cfg(not(target_arch = "wasm32"))]
             cloud_check: None,
             sync: None,
             sync_owns_changes: false,
@@ -1119,6 +1122,7 @@ impl LightcraftApp {
         self.session.resume_cloud_replication();
         merge::poll(self, ctx);
         import::poll_scan(self, ctx);
+        #[cfg(not(target_arch = "wasm32"))]
         cloud_setup::poll(self, ctx);
         sync::poll(self, ctx);
         sync::poll_run(self, ctx);

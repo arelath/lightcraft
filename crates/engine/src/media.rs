@@ -234,6 +234,7 @@ pub enum SourceRef {
         asset: Option<Box<lightcraft_catalog::assets::Asset>>,
         resolver: Option<Arc<crate::assets::AssetResolver>>,
         reader: Option<BlobReader>,
+        peek: Option<BlobReader>,
         requirement: crate::assets::SourceRequirement,
         max_edge: usize,
         loader: Option<FileLoader>,
@@ -267,10 +268,14 @@ impl SourceRef {
 
     pub fn load_source(&self) -> Result<DecodedSource, String> {
         let image = match self {
-            SourceRef::Managed { asset, resolver, reader, requirement, max_edge, loader, denoise } => {
+            SourceRef::Managed { asset, resolver, reader, peek, requirement, max_edge, loader, denoise } => {
                 let asset = asset.as_ref().ok_or("managed asset record is missing from the catalog")?;
                 if let Some(reader) = reader {
-                    let original = reader(&asset.original);
+                    let original = if *requirement == crate::assets::SourceRequirement::PreviewAllowed && asset.smart_preview.is_some() {
+                        peek.as_ref().unwrap_or(reader)(&asset.original)
+                    } else {
+                        reader(&asset.original)
+                    };
                     let (bytes, proxy) = match original {
                         Ok(bytes) => (bytes, false),
                         Err(original_error) if *requirement == crate::assets::SourceRequirement::PreviewAllowed => {
@@ -389,6 +394,8 @@ pub struct MediaCache {
     /// Reads a photo file's bytes (Photo Merge); `None` = the local file system.
     pub file_bytes: Option<crate::merge::ByteReader>,
     pub managed_reader: Option<BlobReader>,
+    /// Inspect resident bytes without scheduling an original while choosing a proxy.
+    pub managed_peek: Option<BlobReader>,
     pub managed_generation: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// The library's smart previews folder (originals offline: render from the proxy).
     pub smart_dir: Option<std::path::PathBuf>,
@@ -466,6 +473,7 @@ impl Default for MediaCache {
             preview_loader: None,
             file_bytes: None,
             managed_reader: None,
+            managed_peek: None,
             managed_generation: None,
             smart_dir: None,
             availability: Default::default(),
@@ -745,6 +753,7 @@ impl MediaCache {
                 asset: self.managed_assets.get(asset_id).cloned().map(Box::new),
                 resolver: self.asset_resolver.clone(),
                 reader: self.managed_reader.clone(),
+                peek: self.managed_peek.clone(),
                 requirement: if max_edge > SourceLevel::Preview.max_edge() {
                     crate::assets::SourceRequirement::OriginalRequired
                 } else {

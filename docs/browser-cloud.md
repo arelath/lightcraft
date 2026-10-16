@@ -1,6 +1,6 @@
 # Browser cloud adapter
 
-Last updated: 2026-10-14
+Last updated: 2026-10-16
 
 The browser uses Fetch and authorized object URLs. Native AWS profiles and long-lived keys
 are not available to this adapter. A user-controlled, stateless authorization endpoint signs
@@ -267,3 +267,23 @@ Acquisition/downloads remain available. Native original uploads can be paused/re
 same popup; browser original upload/import is still unsupported. OPFS and IndexedDB popup/
 filter/pause-reload/native-peer checks passed against the signed loopback fixture:
 `target/cloud-ux-acceptance/browser-results.json` and `browser-*.png`.
+
+
+## Browser source acquisition lifetime
+
+Exports and renderer misses share one source-byte queue with at most four active
+acquisitions. A deferred export reserves its complete distinct source set before
+starting and pins those verified bytes through command completion. Unrelated
+rendering cannot evict an earlier export original while a later original loads.
+Overlapping commands share downloads and release their own lease independently.
+Cancellation or failure releases the command's pins; an aborted transfer retains
+its reservation until its future settles. A batch that cannot fit reports a retry
+or smaller-group error before starting.
+
+The 512 MiB admission limit counts resident source payloads and distinct reserved
+or in-flight payloads together. It does not measure total browser memory: decoded
+images, workers and transport/storage copies incur additional costs. Status exposes
+`reservedBytes`, `budgetBytes`, and `pinned` alongside resident bytes and queue counts.
+Preview selection uses a cache-only original lookup; choosing a smart preview does
+not incidentally schedule an original download. Full-original export still requires
+verified original bytes.

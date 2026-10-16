@@ -490,10 +490,10 @@ fn actual_remote_rollback_with_pending_work_or_checkpoint_request_retains_local_
 fn unchanged_head_cli_polls_preserve_exact_catalog_files_and_only_read_the_head() {
     let f = Fixture::new();
     let (a, _, _) = initialize(&f);
-    // Peer enablement publishes its own causal identity receipt, even when the
-    // library identity value agrees. Receive that real progress before measuring.
+    // A read-only join does not publish another identity receipt. The creator's
+    // first subsequent poll is already unchanged, as are the measured polls.
     let received = success(&f, &a, &[("cloud.sync", json!({}))]);
-    assert_eq!(received[0]["result"]["unchanged"], false);
+    assert_eq!(received[0]["result"]["unchanged"], true);
     let saved = ["catalog.snap", "catalog.log"].map(|name| (name, std::fs::read(a.join(name)).unwrap()));
     let before = lightcraft_catalog::Journal::open(Box::new(lightcraft_catalog::FsStore::open(&a).unwrap())).unwrap().1;
     let requests = f.state.lock().unwrap().requests.len();

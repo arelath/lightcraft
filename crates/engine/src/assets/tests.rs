@@ -641,6 +641,7 @@ fn decoded_source_clones_keep_the_managed_original_leased() {
         asset: Some(Box::new(asset.clone())),
         resolver: Some(resolver.clone()),
         reader: None,
+        peek: None,
         requirement: SourceRequirement::OriginalRequired,
         max_edge: 4,
         denoise: None,

@@ -210,6 +210,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
     let mut close = false;
     let mut confirm = false;
     // cloud setup's Back (a step back, not a close)
+    #[cfg(not(target_arch = "wasm32"))]
     let mut back = false;
     // Return presses OK in a dialog without a text field of its own (Lightroom's default button);
     // a widget that has the keyboard focus (a text field, a button or checkbox reached with Tab)
@@ -230,6 +231,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::Import { .. } => "Import Photos",
         Dialog::CloudStorage { .. } => "Cloud Storage",
         Dialog::CloudSync { .. } => "Cloud Synchronization",
+        #[cfg(not(target_arch = "wasm32"))]
         Dialog::CloudSetup { setup } => setup.title(),
         Dialog::CloudMigration { .. } => "Migrate Cloud Library",
         Dialog::CloudImport { .. } => "Import to Cloud Storage",
@@ -297,8 +299,9 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
             Dialog::CloudStorage { .. }
             | Dialog::CloudImport { .. }
             | Dialog::CloudSync { .. }
-            | Dialog::CloudSetup { .. }
             | Dialog::CloudMigration { .. } => 480.0,
+            #[cfg(not(target_arch = "wasm32"))]
+            Dialog::CloudSetup { .. } => 480.0,
             Dialog::SmartRules { .. } => 680.0,
             Dialog::AllMetadata { .. } => 620.0,
             Dialog::FaceModel { .. } => 460.0,
@@ -1005,6 +1008,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         ui.label(egui::RichText::new("Login tokens stay in memory. Reauthorize after reloading when your service requires a login.").color(t.text_dim));
                     }
                 }
+                #[cfg(not(target_arch = "wasm32"))]
                 Dialog::CloudSetup { setup } => crate::cloud_setup::body(app, ui, setup),
                 Dialog::CloudImport { connections, connection } => {
                     ui.label(crate::i18n::tr("Choose where to upload these photos. You can edit as soon as their originals are saved locally; upload continues in the background."));
@@ -1315,6 +1319,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         close = true;
                     }
                 }
+                #[cfg(not(target_arch = "wasm32"))]
                 if let Dialog::CloudSetup { setup } = &dlg
                     && setup.can_go_back()
                 {
@@ -1333,6 +1338,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::ContactSheet { .. } => "Choose PDF…",
                     Dialog::CloudStorage { .. } => "Save Connection",
                     Dialog::CloudSync { .. } => "Enable & Synchronize",
+                    #[cfg(not(target_arch = "wasm32"))]
                     Dialog::CloudSetup { setup } => setup.ok_label(),
                     Dialog::CloudMigration { .. } => "Migrate Library",
                     Dialog::CloudImport { .. } => "Choose Photos…",
@@ -1361,12 +1367,16 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 };
                 // installing waits for the licence to be accepted
                 // (and Synchronize waits for the scan)
+                #[cfg(not(target_arch = "wasm32"))]
+                let setup_can_confirm = !matches!(&dlg, Dialog::CloudSetup { setup } if !setup.can_confirm());
+                #[cfg(target_arch = "wasm32")]
+                let setup_can_confirm = true;
                 let can_confirm = informational
                     || !matches!(
                         &dlg,
                         Dialog::DenoiseModel { accepted: false, .. } | Dialog::FaceModel { accepted: false, .. } | Dialog::SynchronizeFolder { counts: None, .. } | Dialog::CloudMigration { writers_stopped: false }
                     )
-                        && !matches!(&dlg, Dialog::CloudSetup { setup } if !setup.can_confirm())
+                        && setup_can_confirm
                         // smart-album rules that can't mean anything wait to be fixed
                         && !matches!(&dlg, Dialog::SmartRules { id, rules, .. } if !rules.check_for(&app.session.catalog, id.map(lightcraft_catalog::AlbumId)).is_empty());
                 let r = (!ok.is_empty()).then(|| {
@@ -1411,6 +1421,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !crate::widgets::escape_taken(ctx) {
         close = true;
     }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Dialog::CloudSetup { setup } = &mut dlg {
         if back {
             setup.back();
@@ -1433,7 +1444,6 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::Import { .. }
                         | Dialog::CloudStorage { .. }
                         | Dialog::CloudSync { .. }
-                        | Dialog::CloudSetup { .. }
                         | Dialog::CloudMigration { .. }
                         | Dialog::CloudImport { .. }
                         | Dialog::Export { .. }
@@ -1448,6 +1458,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
             {
                 app.toast(ctx, e)
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            Err(e) if matches!(dlg, Dialog::CloudSetup { .. }) => app.toast(ctx, e),
             // the SAM 3 dialog stays open to show the download (or why it can't start)
             Err(e) if matches!(dlg, Dialog::SamModel { .. }) => {
                 if let Dialog::SamModel { error, .. } = &mut dlg {
@@ -1857,6 +1869,7 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
                 )
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
         Dialog::CloudSetup { setup } => crate::cloud_setup::finish(app, setup),
         Dialog::CloudImport { connection, .. } => app.run("file.importCloud", json!({"connection":connection})),
         Dialog::CloudMigration { writers_stopped } => app.run("cloud.migrateAppend", json!({"writersStopped":writers_stopped,"wait":false})),

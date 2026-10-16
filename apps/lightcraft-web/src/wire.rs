@@ -82,9 +82,9 @@ impl WireJob {
             level: job.level,
             origin: job.origin.clone(),
             managed: match &job.source {
-                SourceRef::Managed { asset: Some(asset), reader, requirement, .. } => {
+                SourceRef::Managed { asset: Some(asset), reader, peek, requirement, .. } => {
                     let original = *requirement == lightcraft_engine::assets::SourceRequirement::OriginalRequired
-                        || reader.as_ref().is_some_and(|read| read(&asset.original).is_ok())
+                        || peek.as_ref().or(reader.as_ref()).is_some_and(|read| read(&asset.original).is_ok())
                         || asset.smart_preview.is_none();
                     let blob = if original { Some(&asset.original) } else { asset.smart_preview.as_ref() };
                     blob.map(|blob| {
@@ -646,6 +646,7 @@ mod tests {
         assert!(job.source.load_source().unwrap().proxy);
         let wire = WireJob::from_job(&job, false, "Main");
         assert!(wire.managed.as_ref().unwrap().proxy);
+        assert!(memory.take_wanted().is_empty(), "proxy selection must not acquire the original");
         let mut core = WorkerCore::default();
         assert_eq!(core.needs_original(&wire), Some(format!("cloud:{}", proxy.id.0)));
         assert!(core.render(&wire, Some(b"corrupt")).is_err());

@@ -3,7 +3,7 @@
 use super::{
     Connection, Provider,
     durability::{ACK_FILE, AckReceipt},
-    memory::ManagedBytes,
+    memory::{ByteLease, ManagedBytes},
     protocol::{self, Outcome},
 };
 use crate::{backend::Backend, files::Files};
@@ -31,7 +31,7 @@ enum Stage {
     Network(Rc<RefCell<Option<Result<Outcome, String>>>>),
     Ack { receipt: AckReceipt, result: Value },
     Received { result: Value },
-    Acquire { command: String, params: Value, sources: Vec<(PhotoId, Source)>, ready: Rc<RefCell<Option<Result<(), String>>>> },
+    Acquire { command: String, params: Value, sources: Vec<(PhotoId, Source)>, lease: ByteLease },
 }
 struct Job {
     migrating: bool,
@@ -391,7 +391,7 @@ impl Host {
         Ok(json!({"paused":true,"running":data.sync_running}))
     }
     fn acquire(&self, s: &mut Session, command: &str, p: &Value) -> Result<Value, String> {
-        let backend = self.backend.clone().ok_or("persistent browser storage is unavailable")?;
+        self.backend.as_ref().ok_or("persistent browser storage is unavailable")?;
         if self.data.borrow().jobs.len() >= 8 {
             return Err("browser cloud task queue is full".into());
         }
@@ -412,7 +412,7 @@ impl Host {
             sources.push((*id, photo.source.clone()));
             let Source::Managed { asset_id } = &photo.source else { continue };
             let asset = s.catalog.asset(asset_id).ok_or("managed asset record is missing")?;
-            let blob = if allow_preview && self.memory.get(&asset.original).is_err() {
+            let blob = if allow_preview && self.memory.peek(&asset.original).is_err() {
                 asset.smart_preview.as_ref().unwrap_or(&asset.original)
             } else {
                 &asset.original
@@ -425,27 +425,9 @@ impl Host {
         if bytes > super::MAX_BROWSER_BLOB {
             return Err("this batch exceeds the browser transfer budget; export smaller groups".into());
         }
-        let providers = self.data.borrow().providers.clone();
-        let memory = self.memory.clone();
+        let lease = self.memory.reserve(blobs)?;
         let guard = s.activity.start("download", "Acquire cloud originals", Cancel::Yes);
         let task = guard.id();
-        let cancel = guard.cancel_flag().ok_or("cancellation is unavailable")?;
-        let ready = Rc::new(RefCell::new(None));
-        let result = ready.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let outcome = async {
-                for blob in blobs {
-                    let provider =
-                        providers.get(&blob.remote.connection).ok_or("configure the browser connection first")?.with_cancel(cancel.clone());
-                    let bytes = provider.blob(&backend, &blob).await?;
-                    memory.insert(&blob, Arc::from(bytes))?;
-                }
-                Ok(())
-            }
-            .await;
-            *result.borrow_mut() = Some(outcome);
-            crate::web::request_repaint();
-        });
         let mut params = p.clone();
         if let Some(object) = params.as_object_mut() {
             object.insert("ids".into(), json!(ids));
@@ -454,7 +436,7 @@ impl Host {
             migrating: false,
             guard,
             owner: s.library_token(),
-            stage: Stage::Acquire { command: command.into(), params, sources, ready },
+            stage: Stage::Acquire { command: command.into(), params, sources, lease },
         });
         Ok(json!({"task":task,"background":true}))
     }
@@ -665,14 +647,15 @@ impl Host {
                     result["pending"] = json!(app.session.catalog.sync_state().map_or(0, |s| s.pending.len()));
                     Ok(Some(result.clone()))
                 }
-                Stage::Acquire { command, params, sources, ready } => {
-                    let Some(result) = ready.borrow_mut().take() else { return Ok(None) };
-                    result?;
+                Stage::Acquire { command, params, sources, lease } => {
                     if job.guard.is_cancelled() {
                         return Err("cloud acquisition cancelled".into());
                     }
                     if sources.iter().any(|(id, source)| app.session.catalog.photo(*id).is_none_or(|p| &p.source != source)) {
                         return Err("selected source changed; export was not started".into());
+                    }
+                    if !lease.ready()? {
+                        return Ok(None);
                     }
                     app.renderer.forget_all();
                     app.session.media.clear_sources();
@@ -693,7 +676,8 @@ impl Host {
     }
     pub fn load_wanted(&self, ctx: &egui::Context) {
         let Some(backend) = self.backend.clone() else { return };
-        for blob in self.memory.take_wanted() {
+        for download in self.memory.take_wanted() {
+            let blob = download.blob;
             let provider = self.data.borrow().providers.get(&blob.remote.connection).cloned();
             let backend = backend.clone();
             let memory = self.memory.clone();
@@ -701,7 +685,7 @@ impl Host {
             wasm_bindgen_futures::spawn_local(async move {
                 let outcome = async {
                     let bytes = match provider {
-                        Some(provider) => provider.blob(&backend, &blob).await?,
+                        Some(provider) => provider.with_cancel(download.cancel.clone()).blob(&backend, &blob).await?,
                         None => {
                             let bytes =
                                 backend.read(&super::cache_key(&blob)).await?.ok_or("configure browser cloud storage to download this photo")?;

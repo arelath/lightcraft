@@ -57,7 +57,7 @@ outcomes. Check items only after implementation and relevant acceptance.
 - [x] CR.34 — Make conditional-head checkpoint maintenance recover beyond the ordinary 4,096-batch replay budget. Automatically checkpoint before exhausting the normal tail, and provide bounded resumable recovery after it. Test 4,097-batch fresh bootstrap, pending local publication, maintenance and acknowledgement after boundary crossing.
 - [x] CR.35 — Bound aggregate history-replay memory independently of final state size and per-object limits. Avoid retaining the decoded tail; use bounded references/spooling/segments with actionable temporary-storage failure and resumable progress. Measure decoded resident batches and memory across longer superseding histories, plus network costs.
 - [x] CR.36 — Distinguish library creation from joining. Learn existing immutable identity before authoring join changes; preserve frozen mutation IDs/contexts. Test 129 fresh writers without accumulating identical initialization heads, and reject predictable append capacity failures before PUT.
-- [ ] CR.37 — Lease browser export originals through deferred command completion, sharing download admission/reservations with renderer loads. Add cache-only lookup; release reservations on cancellation/failure. Test acquisition paused between A/B while unrelated C churns the cache, export without reacquiring A, and total in-flight bounds.
+- [x] CR.37 — Lease browser export originals through deferred command completion, sharing download admission/reservations with renderer loads. Add cache-only lookup; release reservations on cancellation/failure. Test acquisition paused between A/B while unrelated C churns the cache, export without reacquiring A, and total in-flight bounds.
 - [ ] CR.38 — Preserve supporting XMP throughout managed import and original revisions. Reuse ordinary sidecar discovery/application, durably stage packets and preserve foreign properties. Define explicit carry/transform policy for external-editor/DNG/XMP-write operations; compare local/cloud RAW+XMP import and foreign-property access after revision.
 - [ ] CR.39 — Make interrupted managed import retry idempotent through durable request/session identity and explicit duplicate policy. Recover independent candidates with per-item errors while preserving invalid manifests and prior-asset consistency. Test interruption after staging A/B, retry/recovery producing one intended set, and corrupt manifest alongside healthy imports.
 - [ ] CR.40 — Bind storage destination independently of protocol. Reject bucket/prefix/endpoint retargeting before settings/resolver changes; permit credential/profile rotation for the same destination. Share destination identity across configuration, receipts and publication evidence. Test both protocols and actionable deliberate-migration guidance.
@@ -797,3 +797,49 @@ The added native empty-ID regression was compiled by clippy but was not executed
 its browser equivalent passed at runtime. No all-eight-stage CR.36 CI pass is
 claimed. CR.37-CR.41 remain unchecked; no further implementation will proceed in
 this session.
+
+
+2026-10-16 - CR.37 implementation: browser acquisition now reserves a command's
+complete distinct source set and retains a lease through synchronous deferred
+command execution. Renderer misses and commands use one four-slot queue with a
+512 MiB source-payload reservation limit. Last-lease cancellation releases queued
+work and aborts unused in-flight work while retaining its accounting until the
+future settles. Cache-only selection is installed in foreground/worker preview
+paths and export preparation. Four initial memory regressions passed; expanded
+regressions, full repository CI and rebuilt Chromium acceptance are pending.
+CR.37 remains unchecked. Total browser RSS is not bounded by the source-payload
+limit; decoded pixels and browser/transport copies have separate costs.
+
+
+CR.37's first gate passed fmt/clippy/HEIF and the history-memory/create-join tests,
+then stopped on an old no-op poll fixture that expected read-only joining to
+publish another identity receipt. The fixture now expects CR.36's intentional
+unchanged result; its focused regression passed. All 36 browser-library tests
+passed, including five source-admission/lease regressions and the foreground/
+worker cache-only proxy check. The first browser rebuild exposed native setup
+wizard references missing WASM guards after the merged setup branch. Those
+references now consistently share the module's native boundary; browser storage
+and synchronization dialogs retain their existing paths. Rebuilt runtime and a
+complete final gate remain pending.
+
+
+Rebuilt CR.37 Chromium acceptance passed in OPFS and IndexedDB
+(`cr37-web-build-2.log`, `cr37-browser.log`). Three distinct procedural PNGs padded to 200 MiB each
+exercised the production 512 MiB budget: with B held, A remained resident and
+A/B reserved 400 MiB; renderer C stayed queued. Releasing B produced both full
+32x24 PNG exports, with exactly one GET per original and no A reacquisition.
+Both commands released all pins; C then loaded and resident/reserved payloads
+remained 400 MiB. All 24 signed fixture requests verified, with no page errors.
+The editor screenshot and an exported image were inspected; the screenshot was
+taken with no photo selected, so no rendered-preview acceptance is claimed.
+Evidence: ignored `cr37-browser-results.json`, C: scratch
+`lightcraft-cr37-browser/browser-7f9dfdf2/`. The final complete gate is pending;
+CR.37 stays unchecked until that passes.
+
+
+CR.37 final source passed all eight CI stages (`cr37-ci-confirm.log`): fmt,
+clippy, HEIF, workspace tests, parity references, layers, assets and WASM.
+Clippy required retaining an explicit `cfg(test)` attribute separately from the
+native-platform guard so existing test-only unwraps remain recognized as tests.
+This does not change the accepted browser runtime. The task is complete and
+checked off. CR.38-CR.41 and the separate scale backlog remain open.

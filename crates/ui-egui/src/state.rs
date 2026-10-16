@@ -779,6 +779,7 @@ pub enum Dialog {
         library: String,
     },
     /// Cloud setup in steps (`crate::cloud_setup`).
+    #[cfg(not(target_arch = "wasm32"))]
     CloudSetup {
         setup: Box<crate::cloud_setup::Setup>,
     },
