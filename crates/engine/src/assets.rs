@@ -92,6 +92,9 @@ pub enum AssetError {
     Unconfigured(String),
     #[error("this storage operation is unsupported: {0}")]
     Unsupported(String),
+    /// The library's control envelope refuses this step (newer format, maintenance, …).
+    #[error("{0}")]
+    Blocked(crate::cloud_control::Blocked),
 }
 
 impl AssetError {

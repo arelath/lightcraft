@@ -1606,7 +1606,18 @@ records instead of refusing every upgraded library. Upgrade transitions treat CR
 upgrade runner returns typed `CloudFailure`s. Regressions:
 `signer_binds_exact_hash_condition_scope_and_lifetime`,
 `signer_rejects_media_writes_deletes_unscoped_lists_and_contradictory_fields` and
-`upgraded_heads_epoch_records_and_append_control_are_audited_not_refused`. Seed failures inside an
-upgrade are still reported as invalid rather than their typed kind (follow-up). The earlier
+`upgraded_heads_epoch_records_and_append_control_are_audited_not_refused`. The earlier
 `target/agent-upgrade/ci.log` was removed with its worktree; post-merge full CI:
 `target/merge-upgrade/ci.log`.
+
+2026-10-17 — CR.42 follow-up: typed upgrade failures. Native and browser upgrade runners no
+longer report every failure as invalid history. Seed failures keep their CR.21 kind; control
+blocks map through `From<Blocked> for CloudFailure` (newer format or retired protocol →
+unsupported, maintenance or competing control → contention, malformed control → invalid);
+ownership takeover and a busy head are contention, a non-reproducing checkpoint is integrity,
+an unconfirmed activation is connectivity, and storage without conditional writes stays
+unsupported. Ordinary native sync carries refused control envelopes as `AssetError::Blocked`
+instead of an "invalid asset" string. Every refused upgrade (append, rebase, cancel; native and
+browser) waits for an explicit retry rather than scheduling an ordinary poll as if it were the
+upgrade. Regressions: `control_blocks_keep_their_kind` and the held-lease assertions on
+`lastError.kind`/`retryable` in `held_lease_refuses_other_upgraders_and_cancellation_restores_the_same_epoch`.

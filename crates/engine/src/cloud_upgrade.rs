@@ -1,21 +1,57 @@
 //! Native conditional-head library upgrades. Every transition is a CAS on the same head
 //! that accepts ordinary commits, and is confirmed by rereading the control it wrote:
 //! "Ok on conflict" is never enough for a maintenance step (see `cloud_control`).
+//! Failures keep their typed kind (connectivity, contention, unsupported, …) so status
+//! and retry policy describe what actually went wrong.
+use crate::assets::AssetError;
 use crate::assets::s3::S3Connection;
-use crate::assets::{AssetError, Result};
 use crate::cloud_control::{Blocked, Boundary, Control, Plan, State, Successor};
 use crate::cloud_outcome::HeadPosition;
 use crate::cloud_publication::{self as publication, Batch, CheckpointRef, Head};
 use crate::cloud_replication::Outcome;
+use crate::cloud_status::{CloudFailure, FailureKind};
 use lightcraft_catalog::replication::SyncState;
 use std::sync::atomic::AtomicBool;
 
+type Result<T> = std::result::Result<T, CloudFailure>;
 const ATTEMPTS: usize = 16;
-fn invalid(message: impl Into<String>) -> AssetError {
-    AssetError::Invalid(message.into())
+fn invalid(message: impl Into<String>) -> CloudFailure {
+    CloudFailure::new(FailureKind::InvalidHistory, message)
 }
-fn blocked(b: Blocked) -> AssetError {
-    invalid(b.to_string())
+fn taken_over() -> CloudFailure {
+    CloudFailure::new(FailureKind::Contention, "upgrade ownership was taken over by another device; this result was not activated")
+}
+/// A maintenance transition's failure. Storage that rejects conditional writes cannot
+/// hold the barrier at all, which the append upgrade handles separately.
+enum Failure {
+    Unsupported(String),
+    Other(CloudFailure),
+}
+impl From<CloudFailure> for Failure {
+    fn from(error: CloudFailure) -> Self {
+        Self::Other(error)
+    }
+}
+impl From<Blocked> for Failure {
+    fn from(blocked: Blocked) -> Self {
+        Self::Other(blocked.into())
+    }
+}
+impl From<AssetError> for Failure {
+    fn from(error: AssetError) -> Self {
+        match error {
+            AssetError::Unsupported(why) => Self::Unsupported(why),
+            error => Self::Other(error.into()),
+        }
+    }
+}
+impl From<Failure> for CloudFailure {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::Unsupported(why) => AssetError::Unsupported(why).into(),
+            Failure::Other(error) => error,
+        }
+    }
 }
 fn now_ms() -> u64 {
     crate::cloud_status::now_ms().unwrap_or(0)
@@ -27,7 +63,7 @@ fn read(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result
         return Err(invalid("storage contains another library; upgrade refused"));
     }
     let control = head.control().map_err(invalid)?;
-    control.may_read().map_err(blocked)?;
+    control.may_read()?;
     Ok((head, etag, control))
 }
 
@@ -38,11 +74,11 @@ fn transition(
     connection: &S3Connection,
     library: &str,
     cancel: &AtomicBool,
-    next: impl Fn(&Head, &Control) -> std::result::Result<Control, Blocked>,
-) -> Result<Head> {
+    next: impl Fn(&Head, &Control) -> std::result::Result<Control, Failure>,
+) -> std::result::Result<Head, Failure> {
     for _ in 0..ATTEMPTS {
         let (head, etag, control) = read(connection, library, cancel)?;
-        let wanted = next(&head, &control).map_err(blocked)?;
+        let wanted = next(&head, &control)?;
         match crate::cloud_replication::commit(
             connection,
             Some((&head, &etag)),
@@ -56,7 +92,7 @@ fn transition(
         ) {
             Ok(_) => {}
             Err(error) if error.uncertain_write() => {}
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         }
         // `wanted` holds a fresh revision (and, while upgrading, our fencing token), so
         // observing it proves this transition was the one accepted.
@@ -66,18 +102,20 @@ fn transition(
         }
         // Another commit or transition won; recompute from the new head.
     }
-    Err(AssetError::Network("cloud library head remained busy; upgrade not started or not confirmed".into()))
+    Err(CloudFailure::new(FailureKind::Contention, "cloud library head remained busy; upgrade not started or not confirmed").into())
 }
 
 /// Acquire maintenance: begin a new migration, resume our own (same installation) or
 /// take over an expired one. Returns the head and our fresh token.
-fn acquire(connection: &S3Connection, library: &str, plan: Plan, owner: &str, cancel: &AtomicBool) -> Result<(Head, String)> {
-    let token = crate::cloud_control::token().map_err(invalid)?;
+fn acquire(connection: &S3Connection, library: &str, plan: Plan, owner: &str, cancel: &AtomicBool) -> std::result::Result<(Head, String), Failure> {
+    let token = crate::cloud_control::token().map_err(CloudFailure::local)?;
     let id = format!("{}-{}", plan.name(), token.get(..16).unwrap_or("migration"));
-    let head = transition(connection, library, cancel, |head, control| match &control.migration {
-        None => control.begin(&id, plan, Boundary { tip: head.tip.hash.0.clone(), generation: head.generation }, owner, &token, now_ms()),
-        Some(m) if m.plan != plan => Err(Blocked::Maintenance { migration: m.id.clone(), plan: m.plan, owner: m.owner.clone() }),
-        Some(m) => control.takeover(owner, &token, now_ms(), m.owner == owner),
+    let head = transition(connection, library, cancel, |head, control| {
+        Ok(match &control.migration {
+            None => control.begin(&id, plan, Boundary { tip: head.tip.hash.0.clone(), generation: head.generation }, owner, &token, now_ms()),
+            Some(m) if m.plan != plan => Err(Blocked::Maintenance { migration: m.id.clone(), plan: m.plan, owner: m.owner.clone() }),
+            Some(m) => control.takeover(owner, &token, now_ms(), m.owner == owner),
+        }?)
     })?;
     Ok((head, token))
 }
@@ -85,7 +123,7 @@ fn acquire(connection: &S3Connection, library: &str, plan: Plan, owner: &str, ca
 fn owned<'a>(head: &'a Head, token: &str) -> Result<&'a crate::cloud_control::Migration> {
     match &head.control {
         Some(Control { migration: Some(m), .. }) if m.token == token => Ok(m),
-        _ => Err(invalid("upgrade ownership was taken over by another device; this result was not activated")),
+        _ => Err(taken_over()),
     }
 }
 
@@ -108,14 +146,15 @@ fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &At
     // Verify the replacement before activation: exact bytes, structure and state.
     let written = crate::cloud_replication::read_checkpoint(connection, &checkpoint, cancel)?;
     if written.state != source.state.portable() {
-        return Err(invalid("upgraded checkpoint does not reproduce the frozen source state; old epoch remains active"));
+        return Err(CloudFailure::integrity("upgraded checkpoint does not reproduce the frozen source state; old epoch remains active"));
     }
-    crate::cloud_control::translate_mutation(migration.target_schema, migration.target_schema).map_err(invalid)?;
+    crate::cloud_control::translate_mutation(migration.target_schema, migration.target_schema)
+        .map_err(|why| CloudFailure::new(FailureKind::Unsupported, why))?;
     // A long build renews the lease before activation, so it is not taken over at the end.
     if now_ms() >= migration.lease_until_ms.saturating_sub(crate::cloud_control::LEASE_MS / 2) {
         transition(connection, library, cancel, |head, control| {
-            owned(head, &token).map_err(|e| Blocked::Invalid(e.to_string()))?;
-            control.renew(&token, now_ms())
+            owned(head, &token)?;
+            Ok(control.renew(&token, now_ms())?)
         })?;
     }
     let mut activated = None;
@@ -127,7 +166,7 @@ fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &At
             break;
         }
         owned(&current, &token)?;
-        let wanted = control.activate(&token, 1, 1).map_err(blocked)?;
+        let wanted = control.activate(&token, 1, 1)?;
         // The checkpoint records generation `base`; the activation head must follow both
         // it and any renewal/takeover heads written meanwhile.
         let generation = current.generation.max(base).checked_add(1).ok_or_else(|| invalid("generation exhausted"))?;
@@ -144,10 +183,10 @@ fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &At
         ) {
             Ok(_) => {}
             Err(error) if error.uncertain_write() => {}
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         }
     }
-    let activated = activated.ok_or_else(|| AssetError::Network("activation not confirmed; reread before retrying".into()))?;
+    let activated = activated.ok_or_else(|| CloudFailure::connectivity("activation not confirmed; reread before retrying"))?;
     let state = crate::cloud_history::native::certify(connection, local, &source.state.portable(), &mut proofs, cancel)?;
     let acknowledged = local.pending.keys().filter(|id| source.state.received.contains_key(*id)).cloned().collect();
     Ok(Outcome::head(state, HeadPosition::new(activated.tip.hash.0, activated.generation).map_err(invalid)?, acknowledged))
@@ -165,7 +204,7 @@ fn append_log(connection: &S3Connection, local: &SyncState, owner: &str, writers
         if !writers_stopped {
             return Err(invalid("cloud library has no published head; stop every other device, then retry with writersStopped:true"));
         }
-        return crate::cloud_append::migration::seed(connection, local, cancel).map_err(|e| invalid(e.to_string()));
+        return crate::cloud_append::migration::seed(connection, local, cancel).map_err(CloudFailure::from);
     }
     let (_, _, control) = read(connection, library, cancel)?;
     if control.state != State::Retired {
@@ -173,21 +212,22 @@ fn append_log(connection: &S3Connection, local: &SyncState, owner: &str, writers
             Ok((_, token)) => token,
             // Without conditional writes no conforming device can commit to this head, so
             // it is already frozen; the operator's confirmation covers older binaries.
-            Err(AssetError::Unsupported(_)) if writers_stopped => {
-                return crate::cloud_append::migration::seed(connection, local, cancel).map_err(|e| invalid(e.to_string()));
+            Err(Failure::Unsupported(_)) if writers_stopped => {
+                return crate::cloud_append::migration::seed(connection, local, cancel).map_err(CloudFailure::from);
             }
-            Err(AssetError::Unsupported(why)) => {
-                return Err(invalid(format!(
-                    "{why}; this provider cannot hold the maintenance barrier: stop every other device, then retry with writersStopped:true"
-                )));
+            Err(Failure::Unsupported(why)) => {
+                return Err(CloudFailure::new(
+                    FailureKind::Unsupported,
+                    format!("{why}; this provider cannot hold the maintenance barrier: stop every other device, then retry with writersStopped:true"),
+                ));
             }
-            Err(error) => return Err(error),
+            Err(Failure::Other(error)) => return Err(error),
         };
-        crate::cloud_append::migration::seed(connection, local, cancel).map_err(|e| invalid(e.to_string()))?;
+        crate::cloud_append::migration::seed(connection, local, cancel).map_err(CloudFailure::from)?;
         let successor = Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: manifest.clone() };
         transition(connection, library, cancel, |head, control| {
-            owned(head, &token).map_err(|e| Blocked::Invalid(e.to_string()))?;
-            control.retire(&token, successor.clone())
+            owned(head, &token)?;
+            Ok(control.retire(&token, successor.clone())?)
         })?;
     }
     rejoin(connection, local, &manifest, cancel)
@@ -208,16 +248,16 @@ fn rejoin(connection: &S3Connection, local: &SyncState, manifest: &str, cancel: 
     probe.generation = 0;
     probe.pending.clear();
     probe.require_existing = true;
-    crate::cloud_append::native::synchronize_verified(connection, &probe, false, true, cancel, &mut Default::default())
+    Ok(crate::cloud_append::native::synchronize_verified(connection, &probe, false, true, cancel, &mut Default::default())?)
 }
 
 /// Abandon maintenance before activation, restoring the unchanged epoch. A different
 /// device must wait for the lease to expire; the owning installation may cancel at once.
 fn cancel_upgrade(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &AtomicBool) -> Result<Outcome> {
-    let token = crate::cloud_control::token().map_err(invalid)?;
+    let token = crate::cloud_control::token().map_err(CloudFailure::local)?;
     let head = transition(connection, &local.library, cancel, |_, control| {
-        let Some(m) = &control.migration else { return Err(Blocked::Invalid("no upgrade in progress".into())) };
-        control.takeover(owner, &token, now_ms(), m.owner == owner)?.cancel(&token)
+        let Some(m) = &control.migration else { return Err(invalid("no upgrade in progress; nothing to cancel").into()) };
+        Ok(control.takeover(owner, &token, now_ms(), m.owner == owner)?.cancel(&token)?)
     })?;
     let remote = crate::cloud_replication::read(connection, &local.library, cancel)?;
     let acknowledged = local.pending.keys().filter(|id| remote.state.received.contains_key(*id)).cloned().collect();
@@ -237,7 +277,7 @@ pub enum Request {
 }
 pub fn run(connection: &S3Connection, local: &SyncState, owner: &str, request: Request, cancel: &AtomicBool) -> Result<Outcome> {
     if !local.protocol.is_head() {
-        return Err(invalid("this library already uses append synchronization"));
+        return Err(CloudFailure::new(FailureKind::Unsupported, "this library already uses append synchronization"));
     }
     match request {
         Request::Upgrade { plan: Plan::Rebase, .. } => rebase(connection, local, owner, cancel),

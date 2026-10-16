@@ -255,7 +255,7 @@ pub(crate) fn synchronize_verified(
         // Checked on every reread, against the exact head the CAS below will replace.
         let blocked = match crate::cloud_records::publishable(remote.head.as_ref().map(|(head, _)| head), &local.library) {
             Ok(_) => None,
-            Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => return Err(invalid(blocked.to_string())),
+            Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => return Err(AssetError::Blocked(blocked)),
             Err(blocked) => Some(blocked.to_string()),
         };
         if let Some((covers, generation)) = remote.recovery.take() {

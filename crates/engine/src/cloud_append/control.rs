@@ -59,10 +59,10 @@ pub fn effective(storage: &str, library: &str, records: &[(String, Vec<u8>)]) ->
 }
 /// Reading is refused for a newer envelope/reader or an invalid record; any other
 /// blocked state permits receiving but not publication.
-pub fn publication(control: std::result::Result<Control, Blocked>) -> std::result::Result<Option<String>, String> {
+pub fn publication(control: std::result::Result<Control, Blocked>) -> std::result::Result<Option<String>, Blocked> {
     match control.and_then(|c| c.may_publish().map(|_| c)) {
         Ok(_) => Ok(None),
-        Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => Err(blocked.to_string()),
+        Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => Err(blocked),
         Err(blocked) => Ok(Some(blocked.to_string())),
     }
 }
@@ -99,7 +99,10 @@ mod tests {
         newer["minimumReader"] = serde_json::json!(crate::cloud_control::READER + 1);
         let bytes = serde_json::to_vec(&newer).unwrap();
         assert!(
-            publication(effective("p", "library", &[(format!("p/sync-v2/library/control/{:020}-x.json", 3), bytes)])).unwrap_err().contains("update")
+            publication(effective("p", "library", &[(format!("p/sync-v2/library/control/{:020}-x.json", 3), bytes)]))
+                .unwrap_err()
+                .to_string()
+                .contains("update")
         );
     }
 }

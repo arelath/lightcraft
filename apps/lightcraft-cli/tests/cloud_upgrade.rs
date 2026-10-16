@@ -108,9 +108,14 @@ fn held_lease_refuses_other_upgraders_and_cancellation_restores_the_same_epoch()
     let maintenance = upgrading_head(&f, far);
     f.state.lock().unwrap().objects.insert(HEAD.into(), maintenance.clone());
     for request in [json!({"plan":"rebase"}), json!({"cancel":true}), json!({})] {
-        let (out, rows) = f.run(&a, &[("cloud.upgradeLibrary", request)]);
+        let (out, rows) = f.run(&a, &[("cloud.upgradeLibrary", request), ("cloud.syncStatus", json!({}))]);
         assert!(!out.status.success(), "{rows:?}");
         assert!(rows[0]["error"].as_str().unwrap().contains("maintenance"), "{rows:?}");
+        // Another device holding maintenance is contention, not an invalid library.
+        let last = &rows[1]["result"]["health"]["lastError"];
+        assert_eq!(last["kind"], "contention", "{rows:?}");
+        // An automatic retry would only poll, so a refused upgrade waits for the user.
+        assert_eq!((last["retryable"].clone(), rows[1]["result"]["health"]["retry"]["scheduled"].clone()), (json!(false), json!(false)), "{rows:?}");
         assert_eq!(f.state.lock().unwrap().objects[HEAD], maintenance, "refused requests leave the head unchanged");
     }
     // After the lease expires another device may cancel; the epoch is unchanged.

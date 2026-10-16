@@ -82,6 +82,7 @@ impl From<&crate::assets::AssetError> for CloudFailure {
         use crate::assets::AssetError;
         let kind = match error {
             AssetError::Http(status) => return Self::http("S3 request", *status),
+            AssetError::Blocked(blocked) => return Self::from(blocked.clone()),
             AssetError::Network(_) | AssetError::Pending => FailureKind::Connectivity,
             AssetError::Conflict => FailureKind::Contention,
             AssetError::Unauthorized | AssetError::Unconfigured(_) => FailureKind::Authentication,
@@ -116,6 +117,19 @@ impl From<crate::EngineError> for CloudFailure {
 impl From<lightcraft_catalog::CatalogError> for CloudFailure {
     fn from(error: lightcraft_catalog::CatalogError) -> Self {
         Self::from(error.to_string())
+    }
+}
+/// Why the control envelope stops this step: a newer format needs a newer build, another
+/// device holds maintenance or wrote a competing record, or the library moved protocol.
+impl From<crate::cloud_control::Blocked> for CloudFailure {
+    fn from(blocked: crate::cloud_control::Blocked) -> Self {
+        use crate::cloud_control::Blocked;
+        let kind = match &blocked {
+            Blocked::UpdateToRead(_) | Blocked::UpdateToWrite(_) | Blocked::Retired(_) => FailureKind::Unsupported,
+            Blocked::Maintenance { .. } | Blocked::Conflict(_) => FailureKind::Contention,
+            Blocked::Invalid(_) => FailureKind::InvalidHistory,
+        };
+        Self::new(kind, blocked.to_string())
     }
 }
 impl From<serde_json::Error> for CloudFailure {
@@ -187,6 +201,24 @@ mod tests {
         assert_eq!(budget.failed(&error, Some(1000)), Some(2));
         assert_eq!(budget.failed(&error, Some(u64::MAX)), Some(4));
         assert_eq!(budget.view(Some(u64::MAX))["secondsUntilRetry"], 0);
+    }
+    #[test]
+    fn control_blocks_keep_their_kind() {
+        use crate::cloud_control::{Blocked, Plan, Successor};
+        let maintenance = Blocked::Maintenance { migration: "m".into(), plan: Plan::Rebase, owner: "o".into() };
+        let retired = Blocked::Retired(Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "x".into() });
+        for (blocked, kind) in [
+            (Blocked::UpdateToRead("schema 9".into()), FailureKind::Unsupported),
+            (Blocked::UpdateToWrite("schema 9".into()), FailureKind::Unsupported),
+            (retired, FailureKind::Unsupported),
+            (maintenance, FailureKind::Contention),
+            (Blocked::Conflict("revision 3".into()), FailureKind::Contention),
+            (Blocked::Invalid("bad".into()), FailureKind::InvalidHistory),
+        ] {
+            let message = blocked.to_string();
+            let failure = CloudFailure::from(blocked);
+            assert_eq!((failure.kind, failure.message), (kind, message));
+        }
     }
     #[test]
     fn only_explicit_transient_provenance_retries_and_manual_failures_have_recovery_actions() {

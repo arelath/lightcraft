@@ -521,7 +521,8 @@ impl Host {
                                     }
                                 }
                                 Err(failure) => {
-                                    let retry = if job.migrating {
+                                    // A refused upgrade or cancel waits for an explicit retry.
+                                    let retry = if job.migrating || job.upgrade.is_some() {
                                         data.health.fail_migration(failure, Some(job.guard.id()));
                                         None
                                     } else {

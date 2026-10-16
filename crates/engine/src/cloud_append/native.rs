@@ -62,7 +62,8 @@ pub(crate) fn synchronize_verified(
         let reply = connection.get_small(&key, control::MAX_CONTROL_BYTES, cancel)?.ok_or(AssetError::Missing)?;
         records.push((key, reply.bytes));
     }
-    let blocked = control::publication(control::effective(&connection.prefix, &local.library, &records)).map_err(invalid)?;
+    let blocked =
+        control::publication(control::effective(&connection.prefix, &local.library, &records)).map_err(crate::assets::AssetError::Blocked)?;
     let bytes = manifest(&local.library)?;
     let manifest_key = manifest_key(&connection.prefix, &local.library)?;
     if local.require_existing {

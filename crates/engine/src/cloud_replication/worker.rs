@@ -235,7 +235,7 @@ fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::
             media.publication();
             let result = crate::guard::catch("cloud synchronization worker", || {
                 if let (Some(request), Some(owner)) = (upgrade, &upgrade_owner) {
-                    crate::cloud_upgrade::run(&connection, &state, owner, request, &worker_cancel).map_err(|e| EngineError::Cloud(e.into()))
+                    crate::cloud_upgrade::run(&connection, &state, owner, request, &worker_cancel).map_err(EngineError::Cloud)
                 } else if !state.protocol.is_head() {
                     crate::cloud_append::native::synchronize_verified(&connection, &state, checkpoint, audit, &worker_cancel, &mut media)
                         .map_err(|e| EngineError::Cloud(e.into()))
@@ -452,7 +452,9 @@ impl Session {
                 }
                 Err(reason) => {
                     let failure = crate::cloud_status::CloudFailure::from(reason);
-                    let delay = if pending.migration_owner.is_some() {
+                    // Any refused upgrade (append, rebase or cancel) waits for an explicit
+                    // retry: an automatic retry would only run an ordinary poll.
+                    let delay = if pending.migration_owner.is_some() || pending.upgrade.is_some() {
                         jobs.health.fail_migration(&failure, Some(id));
                         None
                     } else {

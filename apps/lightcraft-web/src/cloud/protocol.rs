@@ -216,7 +216,7 @@ pub async fn synchronize(
         // Checked on every reread, against the exact head the CAS below will replace.
         let blocked = match lightcraft_engine::cloud_records::publishable(remote.head.as_ref().map(|(head, _)| head), &local.library) {
             Ok(_) => None,
-            Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => return Err(blocked.to_string().into()),
+            Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => return Err(blocked.into()),
             Err(blocked) => Some(blocked.to_string()),
         };
         if let Some((covers, generation)) = remote.recovery.take() {
