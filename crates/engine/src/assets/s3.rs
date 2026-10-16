@@ -435,7 +435,7 @@ fn http_error(error: http::HttpError) -> AssetError {
 }
 
 mod requests;
-pub use requests::{ObjectReply, PutCondition};
+pub use requests::{ObjectReply, ObjectStat, PutCondition};
 
 #[cfg(test)]
 mod tests {

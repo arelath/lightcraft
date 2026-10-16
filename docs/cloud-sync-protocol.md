@@ -412,7 +412,9 @@ restoring capacity consumed by historical receipts. Full current-head and pendin
 live. Retired authors remain in the clock; 4,096 authors and the active document/pending/64 MiB
 state bounds still apply. Missing or conflicting archive proofs retain local work and stop the
 merge. Receipt compaction and remote garbage collection are separate operations. Neither a
-recent timestamp nor a few devices' acknowledgements proves safe GC.
+recent timestamp nor a few devices' acknowledgements proves safe GC. The separate
+[native orphan retention tool](cloud-retention.md) retains every published historical
+reference and requires explicit writer quiescence; it does not expire protocol history.
 
 ### Capacity status and recovery
 

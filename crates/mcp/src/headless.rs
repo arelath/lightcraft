@@ -138,7 +138,7 @@ impl Backend for Headless {
                     return self.export(&params);
                 }
                 #[cfg(not(target_arch = "wasm32"))]
-                if matches!(id, "cloud.upload" | "cloud.abortUploads" | "cloud.cleanupUploads" | "cloud.removeLocalCopy")
+                if matches!(id, "cloud.upload" | "cloud.abortUploads" | "cloud.cleanupUploads" | "cloud.reclaim" | "cloud.removeLocalCopy")
                     && let Some(mut hook) = self.progress.take()
                 {
                     let mut observer = |done, total, name: &str| {
@@ -146,6 +146,8 @@ impl Backend for Headless {
                     };
                     let result = if id == "cloud.cleanupUploads" {
                         lightcraft_engine::cloud_upload::observed_cleanup(&mut self.session, &params, &mut observer)
+                    } else if id == "cloud.reclaim" {
+                        lightcraft_engine::cloud_upload::observed_reclaim(&mut self.session, &params, &mut observer)
                     } else if id == "cloud.removeLocalCopy" {
                         lightcraft_engine::cloud_upload::observed_removal(&mut self.session, &params, &mut observer)
                     } else {

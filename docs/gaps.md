@@ -70,7 +70,9 @@ not proof of provider compatibility, camera fidelity or large-library responsive
 operational reference; [cloud-sync-protocol.md](cloud-sync-protocol.md) and the
 [browser adapter contract](browser-cloud.md) specify the protocol. The
 [reliability checklist](cloud-reliability-tasks.md) records current completion; remaining
-work includes remote reclamation, unified input limits, signer deployment and transient retry.
+work includes unified input limits, signer deployment and transient retry. Remote retention
+now has explicit native orphan preview/apply; published history remains retained and
+custom endpoints/B2 remain preview-only.
 [../tasks.md](../tasks.md) remains the original milestone index. Native photo/album
 offline policy now retains owner/quality intent, follows current membership and
 immutable source revisions, and protects dependencies through catalog save/restart.
@@ -190,3 +192,5 @@ scoped authorization endpoint. The optional managed metadata backend is deferred
 | 2026-10-17 | minor | CR.16: Adopt existing local records with durable staging and identity/history preservation; cloud remains OOS, counts unchanged |
 
 | 2026-10-17 | minor | CR.17: Browser verified-cache eviction, catalog reservation, live offline selections and temporary viewing; cloud remains OOS, summary counts unchanged |
+
+| 2026-10-17 | minor | CR.18: Retained-deletion notices and reference-checked native orphan reclamation; cloud remains OOS, summary counts unchanged |

@@ -470,6 +470,14 @@ impl Session {
         s
     }
 
+    pub(crate) fn ensure_reclamation_idle(&self) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.cloud_uploads.reclaiming() {
+            return Err(EngineError::Other("orphan cloud reclamation is applying a frozen preview; wait for completion or cancel it in Activity before editing or switching libraries".into()));
+        }
+        Ok(())
+    }
+
     /// Run a command by id. THE entry point for every frontend.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
@@ -496,6 +504,20 @@ impl Session {
             self.poll_cloud_uploads();
             self.poll_cache_move();
             self.poll_cloud_replication();
+        }
+        if !matches!(
+            id,
+            "activity.list"
+                | "activity.cancel"
+                | "cloud.overview"
+                | "cloud.syncStatus"
+                | "cloud.uploadStatus"
+                | "cloud.importStatus"
+                | "cloud.pause"
+                | "catalog.query"
+                | "albums.list"
+        ) {
+            self.ensure_reclamation_idle()?;
         }
         let log_start = self.pending_log.len();
         let was_active = self.active();
@@ -585,6 +607,7 @@ impl Session {
     }
 
     fn apply_catalog_mode(&mut self, op: Op, capture: bool) -> Result<Op> {
+        self.ensure_reclamation_idle()?;
         #[cfg(not(target_arch = "wasm32"))]
         let mut op = op;
         if let Some(reason) = &self.cloud_writer_error
@@ -793,6 +816,7 @@ impl Session {
     }
 
     pub(crate) fn undo_step_with(&mut self, fs: &dyn rename::MoveFs) -> Result<String> {
+        self.ensure_reclamation_idle()?;
         let mut e = self.undo.pop().ok_or_else(|| EngineError::Other("nothing to undo".into()))?;
         let clock = cloud_sync::undo_clock(&self.catalog);
         let redo = match self.apply_with_files(&mut e, fs) {
@@ -820,6 +844,7 @@ impl Session {
     }
 
     pub(crate) fn redo_step_with(&mut self, fs: &dyn rename::MoveFs) -> Result<String> {
+        self.ensure_reclamation_idle()?;
         let mut e = self.redo.pop().ok_or_else(|| EngineError::Other("nothing to redo".into()))?;
         let clock = cloud_sync::undo_clock(&self.catalog);
         let undo = match self.apply_with_files(&mut e, fs) {

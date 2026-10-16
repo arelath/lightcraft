@@ -559,6 +559,10 @@ pub fn specs() -> Vec<CommandSpec> {
             test_connection
         ),
         cmd!(query "cloud.status", "Cloud Photo Status", [], None, "{ids?}; cached, downloading, remote, missing or failed state on this device", always, status),
+        cmd!(query "cloud.reclaim", "Preview or Reclaim Orphan Cloud Media", [], None, "{connection, olderThanDays?:30 (7–3650), apply?:false, preview?, allWritersPausedAndPublished?:false, wait?}; complete reference audit; preview before conditional deletion of unreferenced unversioned media; published/deleted/revised content and history retained; desktop uses activity/cloud.uploadStatus", always, |s,p| {
+            #[cfg(not(target_arch="wasm32"))] { crate::cloud_upload::reclaim(s,p) }
+            #[cfg(target_arch="wasm32")] { let _=(s,p); Err(bad("cloud.reclaim","use the native app for remote retention audits; browser offline/cache controls do not delete remote objects")) }
+        }),
         cmd!(query "cloud.fetch", "Download Cloud Photos", [], None, "{ids?, original?: true, wait?: false}; background download, byte progress and cancellation via activity; wait only in headless CLI/MCP", always, fetch),
         cmd!(query "cloud.reconnect", "Reconnect Cloud Storage", [], None, "{id?}; reload saved connections and external credentials, retry failed renders and offline pins", always, reconnect),
         cmd!(query "cloud.cache", "Cloud Cache Settings", [], None, "{budgetMb?, keepAllOriginals?, keepAllPreviews?}; device-local disk budget, usage and offline pins; 0 retains only pinned or active bytes; keepAll* keep every managed original / smart preview offline (downloaded in the background, new arrivals included)", always, cache),

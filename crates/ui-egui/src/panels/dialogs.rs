@@ -1033,6 +1033,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     ui.label(crate::i18n::tr("Cancel leaves this device paused. Use Sync now to resume without migrating."));
                 }
                 Dialog::CloudSync { connection, library,protocol } => {
+                    ui.strong(crate::i18n::tr("Deleting cloud photos retains their uploaded originals, previous revisions and history. It does not free bucket space."));
                     ui.label(crate::i18n::tr("Use the same storage prefix and library ID on each device. Leave Library ID empty only when creating a shared library."));
                     ui.label(crate::i18n::tr("Smart albums with local folders or local photo selections stay on this device."));
                     ui.label(crate::i18n::tr_format!("Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.", limit = lightcraft_engine::cloud_sync::MAX_ENTITY_CHANGES));
@@ -1072,6 +1073,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                             }
                         }
                     }
+                    crate::cloud_retention::body(app, ui);
                     let deleted: Vec<_> = app.session.catalog.sync_state().into_iter().flat_map(|state| {
                         state.documents.keys().filter(|entity| entity.starts_with("photo:") && state.winning(entity,"deleted").is_some_and(|(_,v)| v.as_bool()==Some(true)))
                             .map(|entity| (entity.clone(),state.winning(entity,"file_name").and_then(|(_,v)| v.as_str()).unwrap_or("Deleted cloud photo").to_owned()))
@@ -1219,6 +1221,9 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     let what = if *count == 1 { crate::i18n::tr("this photo").to_string() } else { crate::i18n::tr_format!("these {count} photos", count = count) };
                     ui.label(crate::i18n::tr_format!("Move {what} to Recently Deleted?", what = what));
                     ui.label(egui::RichText::new(crate::i18n::tr("They can be restored from Recently Deleted until it is emptied.")).color(t.text_dim));
+                    if app.session.targets(&json!({})).iter().any(|id| app.session.catalog.photo(*id).is_some_and(|photo| matches!(photo.source,lightcraft_catalog::Source::Managed{..}))) {
+                        ui.strong(crate::i18n::tr("Uploaded originals and previous revisions remain in cloud storage after deletion, including after Recently Deleted is emptied. Bucket charges continue."));
+                    }
                 }
                 d @ Dialog::SynchronizeFolder { .. } => crate::sync::body(app, ui, d),
                 Dialog::LightroomCatalog { folder, catalog } => {

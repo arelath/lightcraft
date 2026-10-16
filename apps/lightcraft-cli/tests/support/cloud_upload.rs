@@ -129,6 +129,9 @@ pub struct State {
     pub hold_abort: bool,
     pub defer_abort: usize,
     pub unsupported_conditional: bool,
+    pub delete_conflict: bool,
+    pub versioned_media: bool,
+    pub retention_modified: Option<String>,
     pub next_head: Option<Vec<u8>>,
 }
 
@@ -207,9 +210,11 @@ impl Fixture {
                     method: method.clone(),
                     target: target.clone(),
                     request_bytes,
-                    response_bytes: if lose || hold_part || hold_head || hold_abort { 0 } else { response.len() as u64 },
+                    response_bytes: if method == "HEAD" || lose || hold_part || hold_head || hold_abort { 0 } else { response.len() as u64 },
                     status,
                 });
+                let versioned_media = state.versioned_media;
+                let retention_modified = state.retention_modified.clone();
                 drop(state);
                 if hold_part || hold_head || hold_abort {
                     while !worker_stop.load(Ordering::Relaxed) {
@@ -231,8 +236,16 @@ impl Fixture {
                 if let Some(etag) = etag {
                     write!(stream, "ETag: {etag}\r\n").unwrap();
                 }
+                if method == "HEAD" {
+                    write!(stream, "Last-Modified: {}\r\n", retention_modified.as_deref().unwrap_or("Mon, 01 Jan 2024 00:00:00 GMT")).unwrap();
+                    if versioned_media {
+                        stream.write_all(b"x-amz-version-id: fixture-version\r\n").unwrap();
+                    }
+                }
                 stream.write_all(b"\r\n").unwrap();
-                stream.write_all(&response).unwrap();
+                if method != "HEAD" {
+                    stream.write_all(&response).unwrap();
+                }
             }
         });
         Self { dir, endpoint, state, stop, worker: Some(worker) }
@@ -366,12 +379,19 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
         } else {
             status = 404;
         }
-    } else if method == "GET" {
+    } else if method == "GET" || method == "HEAD" {
         if let Some(bytes) = state.objects.get(key) {
             response = bytes.clone();
             etag = Some(tag(bytes));
         } else {
             status = 404;
+        }
+    } else if method == "DELETE" && query.is_empty() {
+        if state.delete_conflict || state.objects.get(key).is_none_or(|bytes| headers.get("if-match") != Some(&tag(bytes))) {
+            status = 412;
+        } else {
+            state.objects.remove(key);
+            status = 204;
         }
     } else if method == "POST" && query.contains_key("uploads") {
         state.created += 1;

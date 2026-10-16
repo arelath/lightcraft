@@ -299,6 +299,13 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         action(app, ui, "button:cloudShowWaiting", "Show waiting", true, "library.filter", json!({"syncStatus":"pending"}));
         action(app, ui, "button:cloudShowIssues", "Show issues", true, "library.filter", json!({"syncStatus":"issues"}));
     });
+    ui.label(
+        egui::RichText::new(crate::i18n::tr(
+            "Deleting photos retains uploaded originals and history in the bucket. Retention tools are in Cloud Synchronization.",
+        ))
+        .size(11.)
+        .color(t.text_dim),
+    );
     action(app, ui, "button:cloudStorage", "Storage Connection…", app.session.library.is_some(), "dialog.cloudStorage", json!({}));
     action(
         app,

@@ -22,7 +22,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.15 — Persist live offline owner-plus-quality policy, derive dependencies after membership/content changes, and allow empty albums to be pinned. Test new members and asset revisions.
 - [x] CR.16 — Add a command to move existing local photos into managed cloud storage while preserving photo IDs, virtual copies, edits, albums, and history. Test identity/history preservation and restart.
 - [x] CR.17 — Handle browser cache exhaustion with safe verified-blob eviction, catalog/outbox space reservation, and temporary viewing versus guaranteed offline retention. Test quota failures and pinned data preservation.
-- [ ] CR.18 — Make cloud deletion retention prominent and add explicit previewable retention/reclamation tooling with safe reference checks.
+- [x] CR.18 — Make cloud deletion retention prominent and add explicit previewable retention/reclamation tooling with safe reference checks.
 - [ ] CR.19 — Align and expose native input, pixel, and blob limits; validate representative large `.3fr` inputs before migration and test actionable limit errors.
 - [ ] CR.20 — Provide supported browser signer deployment instructions and a desktop/browser capability matrix; verify the deployment workflow and stated scope.
 - [ ] CR.21 — Classify sync failures and retry transient connectivity with bounded backoff; pause authentication, integrity, schema, and identity failures with actionable status. Test native/browser recovery.
@@ -1388,3 +1388,34 @@ already-admitted writes; those runs were not counted as passes. This is procedur
 acceptance, not fresh live-provider or large-library acceptance. Browser persistence can
 still be denied or site data removed externally. Backup intent is codec-tested; fresh
 backup/restore UI acceptance was not run for this task.
+2026-10-17 — CR.18: deletion dialogs, the cloud popup and Cloud Synchronization
+now state that published originals, earlier revisions, tombstones, XMP and metadata
+history remain retained and billable. Native `cloud.reclaim` and the rendered retention
+section provide reviewed orphan-media preview/apply. Complete bounded inventories,
+local staging, every historical operation, exact checkpoint receipts and authenticated
+archive leaf/context commitments protect references. Missing/corrupt/inconsistent
+history fails before deletion. Apply requires the exact reviewed token and all writers
+published/stopped, freezes local mutation/library switching, rechecks object identity,
+and uses ETag-conditional deletion with absence readback and no unconditional fallback.
+AWS default endpoints and loopback fixtures support apply; B2/custom endpoints are
+preview-only. Published history and supporting XMP never expire through this tool.
+
+All four focused retention tests passed, including rewritten operation/context forks,
+wrong archive ranges and edit/cancellation guards (`target/cloud-reliability/
+cr18-proof-unit.log`). Full repository CI passed all eight gates on final executable
+source: `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-reliability-target/
+cr18-ci-proof.log`. Its two real-CLI retention regressions passed both protocols,
+covering published deletion/emptying, changed previews, version/future exclusions,
+HTTP 501/412 refusal, exact surviving bytes and unreadable metadata/history.
+
+Final rebuilt desktop acceptance passed both protocols with 141 independently
+SigV4-verified fixture requests (66 head / 75 append). Actual preview/confirmation/apply
+controls removed only the reviewed orphan; every other remote object was unchanged,
+the source file survived, and a fresh peer still opened the published photo. Final
+retention and deletion-warning screenshots were inspected. Evidence:
+`target/cloud-reliability/cr18-native-head-proof.log`, `cr18-native-append-proof.log`,
+`cr18-native-results-conditional-head-v1.json`, `cr18-native-results-append-log-v1.json`;
+screenshots in `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr18-native/native-29a9967f/`
+and `native-1f95eeb6/`. This verifies the procedural fixture workflow, not fresh live
+AWS/B2 acceptance. Bounds and stopped-writer requirements are documented in
+[cloud-retention.md](cloud-retention.md).

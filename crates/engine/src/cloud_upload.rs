@@ -23,9 +23,11 @@ const PART_BYTES: usize = 8 << 20;
 const MAX_RECEIPT: u64 = 4 << 20;
 mod cleanup;
 mod finalize;
+mod retention;
 mod stages;
 mod transitions;
 pub use cleanup::{observed as observed_cleanup, start as cleanup};
+pub use retention::{observed as observed_reclaim, start as reclaim};
 fn error(value: impl Into<String>) -> EngineError {
     EngineError::Other(value.into())
 }
@@ -512,6 +514,7 @@ impl Item {
 enum Maintenance {
     Receipt,
     Cleanup { connection: String },
+    Retention { connection: String, apply: bool },
 }
 
 struct Pending {
@@ -531,7 +534,7 @@ struct Pending {
 impl Pending {
     fn maintenance_connection(&self) -> Option<&str> {
         match &self.maintenance {
-            Some(Maintenance::Cleanup { connection }) => Some(connection),
+            Some(Maintenance::Cleanup { connection } | Maintenance::Retention { connection, .. }) => Some(connection),
             _ => None,
         }
     }
@@ -555,6 +558,9 @@ pub struct Uploads {
     health: crate::cloud_status::ResourceHealth,
 }
 impl Uploads {
+    pub(crate) fn reclaiming(&self) -> bool {
+        self.pending.iter().any(|pending| matches!(pending.maintenance, Some(Maintenance::Retention { apply: true, .. })))
+    }
     pub fn health(&self) -> Value {
         self.health.view()
     }
@@ -625,9 +631,10 @@ fn task_health(health: &mut crate::cloud_status::ResourceHealth, s: &Session, pe
         }
     }
     if pending.ids.is_empty()
-        && let Some(Maintenance::Cleanup { connection }) = &pending.maintenance
+        && let Some(Maintenance::Cleanup { connection } | Maintenance::Retention { connection, .. }) = &pending.maintenance
     {
-        let key = format!("cleanup:{connection}");
+        let kind = if matches!(pending.maintenance, Some(Maintenance::Retention { .. })) { "retention" } else { "cleanup" };
+        let key = format!("{kind}:{connection}");
         match result {
             Ok(_) => health.success(&key),
             Err(reason) => health.fail(key, &reason.to_string(), Some(pending.guard.id())),

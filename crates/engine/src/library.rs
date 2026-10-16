@@ -339,6 +339,7 @@ impl Session {
     /// created ([`crate::lightroom_folder`]); a LightCraft library always opens, whatever else
     /// its folder holds.
     pub fn open_library(&mut self, dir: impl AsRef<Path>, seed_demo: bool) -> Result<&LoadReport> {
+        self.ensure_reclamation_idle()?;
         let dir = dir.as_ref().to_path_buf();
         if let Some(place) = crate::lightroom_folder::lightroom_catalog_at(&dir) {
             return Err(EngineError::LightroomCatalog { path: dir, catalog: place.catalog });
@@ -391,6 +392,7 @@ impl Session {
 
     /// Open `stores`; the new library takes `lock` once nothing can fail any more.
     fn open_stores(&mut self, stores: LibraryStores, seed_demo: bool, lock: &mut Option<LibraryLock>, cache_dir: Option<PathBuf>) -> Result<()> {
+        self.ensure_reclamation_idle()?;
         let LibraryStores { dir, catalog, mut files, on_disk } = stores;
         let cache_dir = cache_dir.or_else(|| on_disk.then(|| dir.clone()));
         self.media.smart_dir = cache_dir.as_ref().map(|d| crate::smart::dir(d));
@@ -678,6 +680,7 @@ impl Session {
     /// holding everything in memory, so it saves those ops too (the log handle may be the only
     /// thing that's broken). Fails only if nothing could be saved; the ops then stay queued.
     pub fn close_library(&mut self) -> Result<()> {
+        self.ensure_reclamation_idle()?;
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.cloud_imports = Default::default();

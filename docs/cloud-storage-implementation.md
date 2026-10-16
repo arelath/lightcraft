@@ -9,7 +9,7 @@ contract is [cloud-history-compaction-design.md](cloud-history-compaction-design
 checklist. [../tasks.md](../tasks.md) indexes the original milestones. The initial
 [proposal](cloud-storage.md) is historical, not the implemented specification.
 
-Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
+Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and published remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
 
 `cloud.syncStatus` / `cloud.overview` expose exact metadata bytes and count utilization,
 with warnings at 80% and critical warnings at 95%. Cloud Synchronization shows
@@ -43,7 +43,9 @@ in append mode. LIST discovery and full state validation still have linear costs
   storage remains subject to browser eviction/site-data removal; see [quota recovery](browser-cloud.md#verified-cache-offline-selections-and-quota-recovery). A maintained signer deployment
   and explicit capability matrix remain CR.20.
 - Deletion retains complete objects, revisions, tombstones and receipt archives.
-  Safe previewable reclamation remains CR.18. Multipart cleanup only retires incomplete
+  Native [retention tooling](cloud-retention.md) previews/apply-checks unreferenced,
+  unversioned orphan media; AWS S3 apply requires a reviewed token and stopped writers.
+  Custom endpoints/B2 remain preview-only. Multipart cleanup only retires incomplete
   uploads. Never expire history or supporting objects independently of this protocol.
 - Native managed import is bounded to 512 MiB per input; browser source admission
   has a 512 MiB aggregate payload/reservation budget. Other decode/dimension limits differ. Unified limit reporting and representative
@@ -382,10 +384,12 @@ Removing an original first releases decoded sources for every photo sharing it. 
 `photo.delete` moves library records to Recently Deleted; restoring or undoing preserves the managed
 asset reference. Emptying Recently Deleted removes local photo records and memberships while retaining
 asset/upload records and staged or working data for recovery. Neither deletion command issues an object
-DELETE. Immutable image objects, catalog history and deleted-photo receipts are retained indefinitely
+DELETE. Published immutable image objects, catalog history and deleted-photo receipts are retained indefinitely
 in this implementation; there is no automatic remote garbage collector. Explicit multipart retention
 only aborts incomplete uploads and preserves these objects. Enabled libraries publish deletion tombstones through synchronization; explicit
 conflict recovery retains alternate edits. Neither mechanism reclaims remote bytes.
+The separate [orphan reclamation tool](cloud-retention.md) retains every published
+historical reference and explicitly reviews unreferenced media; it does not expire deleted photos.
 
 Malformed, oversized or future retention settings are preserved and reported. Policy writes and eviction are disabled until repaired; verified local bytes remain usable. Atomic-save failures preserve the previous policy. Settings and staging files, subdirectories and symbolic links are never eviction candidates.
 
@@ -421,6 +425,8 @@ remote seed is retained for safe retry. See [migration operation](cloud-sync-pro
 and [browser requirements](browser-cloud.md).
 
 ## Revision history
+
+CR.18 (2026-10-17): explicit retained-deletion notices and native orphan retention preview/apply; historical, staged and versioned content stays protected.
 
 CR.17 (2026-10-17): browser verified-cache eviction, catalog headroom, offline intent and temporary source delivery; actual quota/reload acceptance is recorded in the reliability checklist.
 

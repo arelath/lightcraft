@@ -22,6 +22,15 @@ pub struct ObjectReply {
     pub etag: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectStat {
+    pub size: u64,
+    pub etag: String,
+    pub modified: String,
+    pub version: Option<String>,
+}
+
 #[derive(Clone, Copy)]
 pub enum PutCondition<'a> {
     Absent,
@@ -94,6 +103,46 @@ fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result
 }
 
 impl S3Connection {
+    /// Retention uses complete object identity, never a listing's age alone.
+    pub fn stat_object(&self, key: &str, cancel: &AtomicBool) -> Result<Option<ObjectStat>> {
+        let response =
+            self.request(Request { method: Method::Head, key, query: &[], headers: &[], payload: &sha256(b"").0, body: None }, cancel, &mut |_| {})?;
+        if response.status == 404 {
+            return Ok(None);
+        }
+        status(&response)?;
+        Ok(Some(ObjectStat {
+            // HEAD has no response body; the HTTP client's body length is None.
+            size: response
+                .header("content-length")
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| AssetError::Invalid("retention needs object Content-Length; nothing deleted".into()))?,
+            etag: etag(response.header("etag").ok_or_else(|| AssetError::Invalid("retention needs an object ETag; nothing deleted".into()))?)?,
+            modified: response
+                .header("last-modified")
+                .filter(|v| v.len() <= 128)
+                .ok_or_else(|| AssetError::Invalid("retention needs Last-Modified; nothing deleted".into()))?
+                .into(),
+            version: response.header("x-amz-version-id").map(str::to_owned),
+        }))
+    }
+    /// No unconditional fallback. Versioned objects are outside orphan reclamation.
+    pub fn delete_unversioned(&self, key: &str, expected: &ObjectStat, cancel: &AtomicBool) -> Result<()> {
+        if expected.version.is_some() || self.stat_object(key, cancel)?.as_ref() != Some(expected) {
+            return Err(AssetError::Conflict);
+        }
+        let headers = condition_headers(PutCondition::Matches(&expected.etag))?;
+        let response = self.request(
+            Request { method: Method::Delete, key, query: &[], headers: &headers, payload: &sha256(b"").0, body: None },
+            cancel,
+            &mut |_| {},
+        )?;
+        status(&response)?;
+        if self.stat_object(key, cancel)?.is_some() {
+            return Err(AssetError::Integrity);
+        }
+        Ok(())
+    }
     fn request_url(&self, key: &str, query: &[(&str, &str)]) -> Result<Url> {
         // Reuse the download boundary's connection/key/prefix validation.
         let mut url = if key.is_empty() {
