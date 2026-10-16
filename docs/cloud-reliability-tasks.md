@@ -63,6 +63,18 @@ outcomes. Check items only after implementation and relevant acceptance.
 - [x] CR.40 — Bind storage destination independently of protocol. Reject bucket/prefix/endpoint retargeting before settings/resolver changes; permit credential/profile rotation for the same destination. Share destination identity across configuration, receipts and publication evidence. Test both protocols and actionable deliberate-migration guidance.
 - [x] CR.41 — Separate incremental archive proof planning from final merge. Batch missing hashes, verify immutable nodes once, avoid repeated state merges/forest rebuilds per node, and retain exact-proof safety. Add counters for full merges, forest construction, witness checks and archive GETs across small/large compacted histories.
 
+## Format upgrade framework (pre-release)
+
+Source: maintainer-supplied migration design, received 2026-10-16. Starting commit:
+`c3d3d687`. Only disposable test data uses the current formats, so the control envelope
+is introduced before the first published release, while every client can still be made to
+honour it. Specification: [cloud-sync-protocol.md](cloud-sync-protocol.md#library-control-and-format-upgrades-2026-10-17).
+
+- [x] CR.42 — Add a stable library control envelope with separate reader/writer compatibility, carried by a version-4 conditional head and enforced on every reread before each native/browser CAS (receive-only while blocked). Implement CAS-confirmed maintenance transitions (begin, takeover after lease expiry, cancel, rebase activation into a new epoch namespace, append retirement) behind `cloud.upgradeLibrary`, epoch rejoin with unchanged pending mutations, and cooperative append-log control records. Test two upgraders, a commit racing maintenance, crashed-upgrader takeover, a lost activation response and an offline client returning with pending edits.
+- [ ] CR.43 — Make append-log maintenance a hard barrier: a provider-specific control adapter that elects one upgrader and serializes metadata commits (prototype B2 `b2_update_bucket` with `ifRevisionIs`, preserving unrelated bucket info and requiring `writeBuckets`; or a small commit coordinator), plus an append upgrade runner and discovery of late operations written to a retired namespace. Test simultaneous upgraders and a late old-epoch write being recovered, not ignored.
+- [ ] CR.44 — Implement the first real mutation translation only when a schema change needs it: preserve the original mutation identity/digest, create translated mutations with a durable original→translated provenance/deduplication map, and test a crash between translation and publication (no duplicate edit, no identity collision).
+- [ ] CR.45 — Run the upgrade workflow in the desktop and browser UIs against live AWS S3 and (after CR.43) B2, inspect Activity/Info states, and record request costs for begin/activate/rejoin.
+
 ## Verification log
 
 2026-10-14 — CR.1/CR.2: 11 append and 5 conditional-head real-CLI tests passed
@@ -1238,3 +1250,21 @@ OPFS/append and IndexedDB/head states were inspected under
 No source changes followed the passing CI run. CR.12 is complete and checked off.
 This is fixture interoperability evidence; it does not assert live-provider or
 large-library performance. CR.13–CR.21 remain open.
+
+2026-10-17 — CR.42: library control envelope and maintenance-gated upgrades. Pure
+`cloud_control` tests cover two simultaneous upgraders, a commit racing maintenance,
+crashed-upgrader takeover (stale owner can neither activate nor cancel), a lost activation
+response, cancellation/retirement and malformed or newer envelopes. Five real-CLI tests
+(`apps/lightcraft-cli/tests/cloud_upgrade.rs`, signed loopback S3 fixture) cover a commit
+losing its CAS to maintenance (receive-only, `publicationBlocked` in the report and
+`cloud.syncStatus`, exact pending mutation retained), a losing simultaneous upgrader that
+changes nothing, takeover of an expired lease plus rebase to epoch 2 with a lost activation
+response, a held lease refusing other upgraders followed by cancellation to epoch 1, append
+retirement with an offline device rejoining (no head write, identical pending mutation,
+published afterwards) and append control records pausing or refusing publication. Existing
+append, head, join and migration CLI suites pass unchanged except the migration dialog test,
+which now needs no peer confirmation. A headless snapshot of the migration dialog was
+inspected. All eight CI stages passed (`target/agent-upgrade/ci.log`). The browser upgrade
+runner and append control check compile for wasm32 but were not executed in a browser; no
+live AWS/B2 run was made (CR.45). Append polls make one additional scoped LIST of `control/`.
+CR.43–CR.45 remain open.

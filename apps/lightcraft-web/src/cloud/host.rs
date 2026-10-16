@@ -34,7 +34,9 @@ enum Stage {
     Acquire { command: String, params: Value, sources: Vec<(PhotoId, Source)>, lease: ByteLease },
 }
 struct Job {
+    /// The result switches this catalog to the append protocol.
     migrating: bool,
+    upgrade: Option<super::upgrade::Request>,
     guard: TaskGuard,
     owner: Arc<()>,
     stage: Stage,
@@ -161,7 +163,7 @@ impl Host {
                 "endpoint":v.connection.bucket_root.as_deref().unwrap_or(""),"profile":"","storageOrigin":v.connection.storage_origin,"authorizeEndpoint":v.connection.authorize_endpoint,"bucketRoot":v.connection.bucket_root})).collect::<Vec<_>>()}))),
             "cloud.syncEnable" => Some(self.enable(s, p)),
             "cloud.sync" => Some(self.start(s, p)),
-            "cloud.migrateAppend" => Some(self.migrate(s, p)),
+            "cloud.migrateAppend" | "cloud.upgradeLibrary" => Some(self.migrate(s, p)),
             "cloud.prepareMigration" => Some(self.prepare_migration(s)),
             "cloud.syncStatus" => Some(self.status(s)),
             "cloud.overview" => Some(self.overview(s)),
@@ -323,13 +325,13 @@ impl Host {
         Ok(out)
     }
     fn start(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
+        self.start_job(s, p, None)
+    }
+    fn start_job(&self, s: &mut Session, p: &Value, upgrade: Option<super::upgrade::Request>) -> Result<Value, String> {
         self.claim_owner(s)?;
-        let migrating = p.get("migrate").map(|v| v.as_bool().ok_or("migrate must be true or false")).transpose()?.unwrap_or(false);
-        if s.cloud_paused && !migrating {
+        let migrating = matches!(upgrade, Some(super::upgrade::Request::Append { .. }));
+        if s.cloud_paused && upgrade.is_none() {
             return Err("cloud syncing is paused; use cloud.resume first".into());
-        }
-        if migrating && p.get("writersStopped").and_then(Value::as_bool) != Some(true) {
-            return Err("migration requires writersStopped:true after stopping every old writer".into());
         }
         if self.backend.is_none() || self.frozen.get() {
             return Err("persistent browser storage is unavailable".into());
@@ -350,7 +352,7 @@ impl Host {
             return Err("browser cloud task queue is full".into());
         }
         s.persist().map_err(|e| e.to_string())?;
-        let guard = s.activity.start("cloudSync", if migrating { "Migrate cloud library" } else { "Synchronize cloud library" }, Cancel::Yes);
+        let guard = s.activity.start("cloudSync", if upgrade.is_some() { "Upgrade cloud library" } else { "Synchronize cloud library" }, Cancel::Yes);
         let task = guard.id();
         let audit = p.get("audit").map(|v| v.as_bool().ok_or("audit must be true or false")).transpose()?.unwrap_or(true)
             || data.last_audit == 0.
@@ -358,7 +360,7 @@ impl Host {
         if audit {
             data.last_audit = js_sys::Date::now();
         }
-        data.jobs.push(Job { migrating, guard, owner: s.library_token(), stage: Stage::SaveThenSync { checkpoint, audit } });
+        data.jobs.push(Job { migrating, upgrade, guard, owner: s.library_token(), stage: Stage::SaveThenSync { checkpoint, audit } });
         data.sync_running = true;
         data.paused = false;
         data.preparing_migration = false;
@@ -370,9 +372,18 @@ impl Host {
         if s.catalog.sync_state().is_some_and(|s| !s.protocol.is_head()) {
             return self.status(s);
         }
-        let mut params = p.as_object().cloned().ok_or("migration parameters must be an object")?;
-        params.insert("migrate".into(), json!(true));
-        self.start(s, &Value::Object(params))
+        let params = p.as_object().ok_or("upgrade parameters must be an object")?;
+        let writers_stopped = match params.get("writersStopped") {
+            None => false,
+            Some(value) => value.as_bool().ok_or("writersStopped must be true or false")?,
+        };
+        let request = match (params.get("cancel"), params.get("plan").and_then(Value::as_str)) {
+            (Some(Value::Bool(true)), _) => super::upgrade::Request::Cancel,
+            (_, None | Some("appendLog")) => super::upgrade::Request::Append { writers_stopped },
+            (_, Some("rebase")) => return Err("rebase upgrades run in the desktop app or CLI; browsing continues here".into()),
+            _ => return Err("upgrade expects {plan?: \"appendLog\", cancel?: bool}".into()),
+        };
+        self.start_job(s, p, Some(request))
     }
     fn prepare_migration(&self, s: &Session) -> Result<Value, String> {
         if s.catalog.sync_state().is_none_or(|state| !state.protocol.is_head()) {
@@ -437,6 +448,7 @@ impl Host {
         }
         self.data.borrow_mut().jobs.push(Job {
             migrating: false,
+            upgrade: None,
             guard,
             owner: s.library_token(),
             stage: Stage::Acquire { command: command.into(), params, sources, lease },
@@ -545,17 +557,21 @@ impl Host {
                     let backend = self.backend.clone().ok_or("browser storage is unavailable")?;
                     let checkpoint = *checkpoint;
                     let audit = *audit;
-                    let migrating = job.migrating;
+                    let upgrade = job.upgrade;
+                    let owner = match upgrade {
+                        Some(_) => Some(self.owner.clone().ok_or("persistent installation identity unavailable")?),
+                        None => None,
+                    };
                     let ready = Rc::new(RefCell::new(None));
                     let result = ready.clone();
-                    job.guard.handle().detail(if migrating {
-                        "Verifying committed history and publishing the migration seed"
+                    job.guard.handle().detail(if upgrade.is_some() {
+                        "Pausing library publication, verifying committed history and writing the upgraded format"
                     } else {
                         "Reconciling and publishing saved library changes"
                     });
                     wasm_bindgen_futures::spawn_local(async move {
-                        *result.borrow_mut() = Some(if migrating {
-                            super::append::migrate(&provider, &local).await
+                        *result.borrow_mut() = Some(if let (Some(request), Some(owner)) = (upgrade, owner) {
+                            super::upgrade::run(&provider, &local, &owner, request).await
                         } else {
                             protocol::synchronize(&provider, &backend, &local, checkpoint, audit).await
                         });

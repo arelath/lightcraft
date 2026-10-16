@@ -55,6 +55,14 @@ pub(crate) fn synchronize_verified(
         return Err(invalid("append synchronization requires explicit protocol selection"));
     }
     let root = root(&connection.prefix, &local.library)?;
+    // Cooperative barrier: read the latest library control before any write.
+    let (control_keys, _) = scan(connection, list(control::prefix(&connection.prefix, &local.library)?, false), cancel)?;
+    let mut records = Vec::new();
+    for key in control::latest(&control_keys) {
+        let reply = connection.get_small(&key, control::MAX_CONTROL_BYTES, cancel)?.ok_or(AssetError::Missing)?;
+        records.push((key, reply.bytes));
+    }
+    let blocked = control::publication(control::effective(&connection.prefix, &local.library, &records)).map_err(invalid)?;
     let bytes = manifest(&local.library)?;
     let manifest_key = manifest_key(&connection.prefix, &local.library)?;
     if local.require_existing {
@@ -64,7 +72,7 @@ pub(crate) fn synchronize_verified(
         if existing.bytes != bytes {
             return Err(AssetError::Integrity);
         }
-    } else {
+    } else if blocked.is_none() {
         connection.put_immutable_verified(&manifest_key, &bytes, cancel)?;
     }
     let mut planner = Planner::new(local)?;
@@ -120,8 +128,9 @@ pub(crate) fn synchronize_verified(
     audit_history(connection, &mut planner, &root, audit || checkpoint || local.append.is_none(), &fetched, cancel)?;
     planner.drain()?;
     crate::cloud_history::native::hydrate(connection, &mut planner.remote, local, &mut planner.proofs, cancel)?;
-    let mut pending: Vec<_> = local.pending.values().collect();
+    let mut pending: Vec<_> = if blocked.is_some() { Vec::new() } else { local.pending.values().collect() };
     pending.sort_by_key(|m| m.revision.clone());
+    let checkpoint = checkpoint && blocked.is_none();
     // Each author advances only after its dependencies are remotely verified. Uploads can
     // publish an early prefix while later imports still wait for their media transfers.
     loop {
@@ -166,7 +175,10 @@ pub(crate) fn synchronize_verified(
     }
     let acknowledged = planner.acknowledged(local)?;
     progress.remote = crate::cloud_history::native::certify(connection, local, &progress.remote, &mut planner.proofs, cancel)?;
-    Ok(crate::cloud_replication::Outcome::append(progress, acknowledged))
+    Ok(match blocked {
+        Some(blocked) => crate::cloud_replication::Outcome::append_blocked(progress, acknowledged, blocked),
+        None => crate::cloud_replication::Outcome::append(progress, acknowledged),
+    })
 }
 
 fn read_checkpoint(connection: &S3Connection, planner: &mut Planner, root: &str, key: &str, cancel: &AtomicBool) -> Result<usize> {

@@ -24,6 +24,7 @@ pub mod camera_profiles;
 pub mod cloud_append;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_cache_location;
+pub mod cloud_control;
 pub mod cloud_history;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_import;
@@ -41,6 +42,8 @@ pub mod cloud_replication;
 pub mod cloud_setup;
 pub mod cloud_status;
 pub mod cloud_sync;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cloud_upgrade;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_upload;
 pub mod cmd;

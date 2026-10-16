@@ -1,6 +1,6 @@
 # Browser cloud adapter
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
 
 The browser uses Fetch and authorized object URLs. Native AWS profiles and long-lived keys
 are not available to this adapter. A user-controlled, stateless authorization endpoint signs
@@ -168,15 +168,20 @@ writers in the same browser storage.
 Select Append-only (Backblaze B2) in Cloud Synchronization, or pass `protocol:"append-log-v1"`
 to `cloud.syncEnable`. The default remains conditional S3. For migration, configure an
 append-capable signer/root and use File → Migrate Cloud Library… or the setup/Info migration
-button. The shared dialog pauses this session's automatic publication and requires confirmation
-that every other device is stopped and upgraded. Cancel keeps it paused; reconfiguring the
-signer or reconnecting does not resume it. Explicit Sync now resumes cancelled preparation.
-The pause does not survive app restart; keep other devices closed until cutover is ready.
-`cloud.prepareMigration` and `cloud.migrateAppend {writersStopped:true}` expose the same control
-flow. Observe Activity and the background report before retrying `cloud.sync`. Cancellation
-after remote seed publication preserves local mode/pending work; retry migration to finish.
+button. The shared dialog pauses this session's automatic publication; the migration itself
+puts the conditional head into maintenance, so other current devices stop publishing without
+manual coordination (the optional confirmation applies only when no head can hold that
+barrier). Cancel keeps it paused; reconfiguring the signer or reconnecting does not resume it.
+Explicit Sync now resumes cancelled preparation. The pause does not survive app restart.
+`cloud.prepareMigration` and `cloud.upgradeLibrary {plan?:"appendLog", cancel?, writersStopped?}`
+(alias `cloud.migrateAppend`) expose the same control flow as the desktop, using the same head
+transitions and token confirmation; `rebase` upgrades run in the desktop app or CLI. Observe
+Activity and the background report before retrying `cloud.sync`. Cancellation after remote seed
+publication preserves local mode/pending work; retry the upgrade to finish or cancel it.
 Migration saves the remotely verified seed and local mode durably without acknowledging
-unsent pending work. Each catalog must migrate; the app cannot stop old binaries remotely.
+unsent pending work. Each other catalog rejoins a retired head with the same command, which
+writes nothing remotely. Browser append scans honour append control records like native ones.
+See [cloud-sync-protocol.md](cloud-sync-protocol.md#library-control-and-format-upgrades-2026-10-17).
 
 Existing requests retain the original JSON contract. Append requests add:
 
@@ -200,6 +205,11 @@ An immutable PUT includes `operation:"putImmutable"`, exact key, `size` and `con
 Receipt maintenance also reads/writes `sync-v2/<library-id>/receipts/<sha256>.json`:
 canonical, at-most-1-KiB Merkle nodes bound to that library. The signer must permit these
 scoped immutable objects with the same exact content-hash binding as checkpoints.
+Every append scan also lists and reads `sync-v2/<library-id>/control/` (library control
+records, at most 16 KiB each) before writing, so a signer restricted to `ops/` and
+`checkpoints/` must also permit that scoped listing and GET; otherwise browser append sync
+fails with a listing authorization error and pending work stays local. Future upgraders
+publish control records with `putImmutable` under the same exact content-hash binding.
 Conditional-head maintenance uses conditional PUT plus readback for these objects;
 append maintenance uses `putImmutable`. Retain receipt archives and upgrade devices
 before maintenance. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md).

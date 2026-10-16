@@ -44,16 +44,10 @@ impl Imported {
 }
 
 impl RecordRef {
-    pub(crate) fn validate(&self, connection: &S3Connection) -> Result<()> {
-        if self.size == 0
-            || self.size > MAX_BYTES as u64
-            || self.hash.0.len() != 64
-            || !self.hash.0.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
-            || self.key != keys::in_library(&connection.prefix, &format!("catalog/changes/{}.json", self.hash.0))?
-        {
-            return Err(invalid("invalid remote catalog batch reference"));
-        }
-        Ok(())
+    /// Validates a change-batch reference and returns its epoch namespace.
+    pub(crate) fn validate(&self, connection: &S3Connection) -> Result<u64> {
+        keys::in_library("", &self.key)?;
+        self.validate_scope(&connection.prefix, "changes", MAX_BYTES as u64).map_err(|_| invalid("invalid remote catalog batch reference"))
     }
 }
 
@@ -68,38 +62,19 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 pub fn read_head(connection: &S3Connection, cancel: &AtomicBool) -> Result<Option<(Head, String)>> {
     let key = keys::in_library(&connection.prefix, "catalog/head.json")?;
     let Some(reply) = connection.get_small(&key, 16 << 10, cancel)? else { return Ok(None) };
-    let head: Head =
-        serde_json::from_slice(&reply.bytes).map_err(|_| invalid("remote catalog head is malformed or from an unsupported version; preserved"))?;
-    if !matches!(head.version, 1..=3)
-        || head.generation == 0
-        || (head.version == 1 && (head.library.is_some() || head.checkpoint.is_some()))
-        || (head.version >= 2 && head.library.as_ref().is_none_or(|id| !identifier(id)))
-    {
-        return Err(invalid("unsupported remote catalog head; preserved"));
-    }
-    head.tip.validate(connection)?;
-    if let Some(checkpoint) = &head.checkpoint {
-        checkpoint.covers.validate(connection)?;
-        if checkpoint.generation == 0
-            || checkpoint.generation >= head.generation
-            || checkpoint.object.size == 0
-            || checkpoint.object.size > 64 << 20
-            || checkpoint.object.hash.0.len() != 64
-            || !checkpoint.object.hash.0.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
-            || checkpoint.object.key != keys::in_library(&connection.prefix, &format!("catalog/checkpoints/{}.json", checkpoint.object.hash.0))?
-        {
-            return Err(invalid("invalid remote checkpoint reference"));
-        }
-    }
+    let head = Head::decode(&reply.bytes).map_err(AssetError::Invalid)?;
     if head.version < 2 {
         return Err(invalid("obsolete pre-release catalog head; use a fresh catalog and storage prefix; local data retained"));
     }
+    let library = head.library.clone().filter(|id| identifier(id)).ok_or_else(|| invalid("unsupported remote catalog head; preserved"))?;
+    keys::in_library("", &head.tip.key)?;
+    head.validate_scope(&connection.prefix, &library).map_err(AssetError::Invalid)?;
     let etag = reply.etag.ok_or_else(|| invalid("remote head has no ETag; conditional synchronization is unavailable"))?;
     Ok(Some((head, etag)))
 }
 
 pub fn read_batch(connection: &S3Connection, reference: &RecordRef, cancel: &AtomicBool) -> Result<Batch> {
-    reference.validate(connection)?;
+    let epoch = reference.validate(connection)?;
     let reply = connection.get_small(&reference.key, MAX_BYTES, cancel)?.ok_or(AssetError::Missing)?;
     if reply.bytes.len() as u64 != reference.size || sha256(&reply.bytes) != reference.hash {
         return Err(AssetError::Integrity);
@@ -115,8 +90,10 @@ pub fn read_batch(connection: &S3Connection, reference: &RecordRef, cancel: &Ato
     {
         return Err(invalid("unsupported remote catalog batch"));
     }
-    if let Some(parent) = &batch.parent {
-        parent.validate(connection)?;
+    if let Some(parent) = &batch.parent
+        && parent.validate(connection)? != epoch
+    {
+        return Err(invalid("remote batch parent is outside its epoch"));
     }
     let mut ids = BTreeSet::new();
     for imported in &batch.imports {
