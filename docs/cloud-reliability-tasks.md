@@ -24,7 +24,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.17 — Handle browser cache exhaustion with safe verified-blob eviction, catalog/outbox space reservation, and temporary viewing versus guaranteed offline retention. Test quota failures and pinned data preservation.
 - [x] CR.18 — Make cloud deletion retention prominent and add explicit previewable retention/reclamation tooling with safe reference checks.
 - [x] CR.19 — Align and expose native input, pixel, and blob limits; validate representative large `.3fr` inputs before migration and test actionable limit errors.
-- [ ] CR.20 — Provide supported browser signer deployment instructions and a desktop/browser capability matrix; verify the deployment workflow and stated scope.
+- [x] CR.20 — Provide supported browser signer deployment instructions and a desktop/browser capability matrix; verify the deployment workflow and stated scope.
 - [ ] CR.21 — Classify sync failures and retry transient connectivity with bounded backoff; pause authentication, integrity, schema, and identity failures with actionable status. Test native/browser recovery.
 
 ## Follow-up review: completion ordering and shared semantics
@@ -1468,3 +1468,41 @@ assets and WASM): `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-reliability-t
 cr19-ci-final2.log`. This is procedural-fixture and one representative real-file acceptance,
 not fresh live-provider, every compression variant, camera-colour or large-library parity.
 CR.19 is complete. CR.20–CR.21 remain open.
+
+2026-10-17 — CR.20: `lightcraft-cli cloud-signer` is the maintained personal signer.
+One canonical browser origin, dedicated prefix and separate random bearer token authorize
+scoped object reads, exact-version reads, bounded metadata PUTs and append discovery.
+SigV4 query URLs bind method/key/version, exact Content-Length, SHA-256 checksum and
+conditional-head preconditions. Content-addressed keys must match the digest; media PUT,
+DELETE, bucket-wide listing and contradictory requests are refused. Credentials remain
+server-side; URLs/session tokens are not logged or persisted by the service. HTTP headers,
+JSON bodies, request read deadlines and concurrent connections are bounded; remote serving
+requires an HTTPS reverse proxy over its loopback listener. Browser validation now requires
+body binding on every PUT and rejects case-duplicate authorized headers.
+
+The [deployment guide and capability matrix](browser-signer.md) covers CLI build/config,
+private environment/profile credentials, Caddy/systemd examples, an AWS permission template,
+exact-origin bucket/signer CORS, browser setup and token/credential rotation. It explicitly
+separates personal token authorization from multi-user account management and documents
+native-only import/adoption, external-editor/DNG and reclamation workflows. Existing custom
+signers must return the exact hash/checksum header for conditional PUTs as well as append
+writes. No catalog/wire migration or data deletion is required.
+
+All five signer unit tests, the real CLI-process launch/auth/scope integration test and
+43 browser tests passed; strict workspace Clippy passed. Evidence:
+`target/cloud-reliability/cr20-unit.log`, `cr20-cli-test.log`, `cr20-web-tests.log`,
+`cr20-clippy.log`, `cr20-web-build.log`. Full final-source repository CI passed all eight
+gates: `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-reliability-target/cr20-ci.log`.
+
+Chromium acceptance used the maintained Rust signer (not the fixture signer) for both
+protocols. It verified missing/wrong token, wrong-origin/out-of-prefix/delete/media-write
+refusal, short URL lifetime, independently checked signatures, exact checksum/condition/
+length enforcement, browser join/preview/export, browser metadata publication and desktop
+convergence. Of 121 storage requests, 115 were independently signature-verified and six
+intentional body/condition/length tampering requests were refused. No page errors occurred.
+Configuration screenshots were inspected. Evidence: `target/cloud-reliability/cr20-browser.log`,
+`cr20-browser-results.json`; screenshots/exports in
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr20-browser/browser-a1e93e42/`.
+This verifies the local deployment workflow. DNS, TLS termination, service-manager operation,
+actual account policy and fresh live AWS/B2/custom-provider conformance were not run and
+remain deployment-specific verification. CR.20 is complete. CR.21 remains open.

@@ -193,19 +193,16 @@ impl Provider {
         {
             return Err("signer changed the requested object version".into());
         }
-        if immutable {
-            let data = data.ok_or("immutable write has no bytes")?;
+        if method == "PUT" {
+            let data = data.ok_or("write has no bytes")?;
             let digest = lightcraft_engine::assets::sha256(data).0;
-            let header = |name: &str| authorized.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
             let mut latin = String::new();
             for pair in digest.as_bytes().chunks_exact(2) {
                 let part = std::str::from_utf8(pair).map_err(|_| "invalid digest")?;
                 latin.push(char::from(u8::from_str_radix(part, 16).map_err(|_| "invalid digest")?));
             }
             let checksum = web_sys::window().ok_or("browser window unavailable")?.btoa(&latin).map_err(js_error)?;
-            if header("x-amz-content-sha256") != Some(digest.as_str()) && header("x-amz-checksum-sha256") != Some(checksum.as_str()) {
-                return Err("immutable authorization must bind the exact body SHA-256/checksum".into());
-            }
+            authorized.validate_body_binding(&digest, &checksum)?;
         }
         Ok(authorized)
     }

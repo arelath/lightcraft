@@ -39,6 +39,8 @@ pub mod cloud_records;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_replication;
 pub mod cloud_setup;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cloud_signer;
 pub mod cloud_status;
 pub mod cloud_sync;
 #[cfg(not(target_arch = "wasm32"))]

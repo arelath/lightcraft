@@ -40,8 +40,8 @@ in append mode. LIST discovery and full state validation still have linear costs
   blobs, reserves
   catalog headroom, retains live photo/album offline intent across reload/backup, and
   distinguishes temporary session bytes from durably saved offline copies. Browser
-  storage remains subject to browser eviction/site-data removal; see [quota recovery](browser-cloud.md#verified-cache-offline-selections-and-quota-recovery). A maintained signer deployment
-  and explicit capability matrix remain CR.20.
+  storage remains subject to browser eviction/site-data removal; see [quota recovery](browser-cloud.md#verified-cache-offline-selections-and-quota-recovery). The maintained [personal signer deployment and capability matrix](browser-signer.md)
+  use `lightcraft-cli cloud-signer`, exact-origin CORS and private server credentials.
 - Deletion retains complete objects, revisions, tombstones and receipt archives.
   Native [retention tooling](cloud-retention.md) previews/apply-checks unreferenced,
   unversioned orphan media; AWS S3 apply requires a reviewed token and stopped writers.
@@ -435,6 +435,7 @@ CR.17 (2026-10-17): browser verified-cache eviction, catalog headroom, offline i
 
 | Date | Change |
 |---|---|
+| 2026-10-17 | CR.20: maintained personal browser signer, bounded metadata authorization, deployment recipe and capability matrix. |
 | 2026-10-12 | Initial managed-asset and verified-cache foundation; completion evidence tracked per task. |
 | 2026-10-12 | Deferred native UI acquisition, cached-only dispatch, source-change/cancellation recovery and managed-cache output protection. |
 | 2026-10-12 | Device-local asset budgets, persistent offline photo/album pin owners, retained decoded-source leases and safe local-original removal; offline restart/export and native controls verified. |

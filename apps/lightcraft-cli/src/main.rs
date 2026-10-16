@@ -100,6 +100,9 @@ USAGE:
                           (default LIGHTCRAFT_DENOISE_TOKEN)
         --run-on WHERE    auto (default), gpu or cpu
         --max-connections N   concurrent clients (default 8)
+  lightcraft-cli cloud-signer --config FILE [--listen 127.0.0.1:8787] [--token-env NAME] [--max-connections N]
+      Personal browser storage signer. Requires a dedicated prefix and a random session token
+      (default LIGHTCRAFT_SIGNER_TOKEN). Deploy behind HTTPS; see docs/browser-signer.md.
   lightcraft-cli commands [--json]   list every command id with its parameters
   lightcraft-cli controls [--json]   list every develop control id with its range
   lightcraft-cli calibrate [--max N] [--out DIR] FOLDERS/FILES…
@@ -164,6 +167,7 @@ fn main() -> ExitCode {
         Some("synth-merge") => synth_merge(&args[1..]),
         Some("controls") => controls(&args[1..]),
         Some("denoise-serve") => denoise_serve(&args[1..]),
+        Some("cloud-signer") => cloud_signer(&args[1..]),
         Some("calibrate") => calibrate(&args[1..]),
         Some("--version" | "-V" | "version") => {
             println!("lightcraft-cli {}", env!("CARGO_PKG_VERSION"));
@@ -968,4 +972,34 @@ fn denoise_serve(args: &[String]) -> Result<(), String> {
 #[cfg(not(feature = "denoise"))]
 fn denoise_serve(_: &[String]) -> Result<(), String> {
     Err("denoise-serve: this build has no denoise support (build with the `denoise` feature)".into())
+}
+
+fn cloud_signer(args: &[String]) -> Result<(), String> {
+    use std::io::Read;
+    let mut config_path = None;
+    let mut listen = "127.0.0.1:8787".to_owned();
+    let mut token_env = "LIGHTCRAFT_SIGNER_TOKEN".to_owned();
+    let mut max_connections = 16;
+    let mut args = args.iter();
+    while let Some(option) = args.next() {
+        let value = args.next().ok_or_else(|| format!("missing value for {option}"))?;
+        match option.as_str() {
+            "--config" => config_path = Some(value),
+            "--listen" => listen = value.clone(),
+            "--token-env" => token_env = value.clone(),
+            "--max-connections" => max_connections = value.parse().map_err(|_| "invalid max-connections")?,
+            _ => return Err(format!("unknown cloud-signer option {option}")),
+        }
+    }
+    let path = config_path.ok_or("cloud-signer requires --config FILE; see docs/browser-signer.md")?;
+    let file = std::fs::File::open(path).map_err(|_| "cannot open signer configuration")?;
+    let mut bytes = Vec::new();
+    file.take((16 << 10) + 1).read_to_end(&mut bytes).map_err(|_| "cannot read signer configuration")?;
+    if bytes.len() > 16 << 10 {
+        return Err("signer configuration exceeds 16 KiB".into());
+    }
+    let config = serde_json::from_slice(&bytes).map_err(|_| "invalid signer configuration; see docs/browser-signer.md")?;
+    let token = std::env::var(&token_env).map_err(|_| "signer session token environment variable is missing")?;
+    let listen = listen.parse().map_err(|_| "listen must be a loopback IP address:port")?;
+    lightcraft_engine::cloud_signer::serve(config, listen, token, max_connections)
 }

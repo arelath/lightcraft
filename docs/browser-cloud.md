@@ -17,6 +17,9 @@ It is device-local. Login tokens and returned signed URLs stay in memory. The au
 endpoint and storage origin require HTTPS; loopback HTTP is supported for development.
 Do not put an application key or secret key in browser configuration or catalog data.
 
+Use the maintained [personal signer deployment recipe and capability matrix](browser-signer.md)
+for `lightcraft-cli cloud-signer`, private server credentials, exact-origin CORS and token rotation.
+
 ## Authorization endpoint contract
 
 POST the following JSON to the configured endpoint, optionally with an ephemeral
@@ -147,8 +150,9 @@ Exports larger than the transfer/memory budget require smaller batches or the de
 
 See [current limits](cloud-storage-implementation.md#current-limits-and-remaining-work)
 and [dated acceptance](cloud-acceptance-history.md) for distinct implementation and
-verification scope. A live deployment requires bucket CORS, a signer and login; a
-maintained deployment recipe remains CR.20. The optional metadata backend is deferred.
+verification scope. A live deployment requires bucket CORS, a signer and session authorization; a
+maintained [personal signer recipe](browser-signer.md) covers configuration, HTTPS proxy,
+server permissions and the native/browser scope. The optional metadata backend is deferred.
 
 ## Append mode and signer extension
 
@@ -292,6 +296,7 @@ remains unsupported.
 
 | Date | Change |
 | --- | --- |
+| 2026-10-17 | CR.20: maintained personal signer deployment, scoped checksummed writes, token rotation and native/browser capability matrix. |
 | 2026-10-17 | CR.17: verified cache eviction, catalog headroom, live offline intent, temporary source delivery and quota recovery. |
 
 | 2026-10-17 | CR.19: explicit original decode budgets, shared descriptor limits and oversized-photo proxy selection after original caching. |

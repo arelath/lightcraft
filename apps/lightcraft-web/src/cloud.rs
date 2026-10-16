@@ -65,17 +65,28 @@ pub struct Authorized {
 }
 impl Authorized {
     pub fn validate_headers(&self) -> Result<(), String> {
+        let mut names = std::collections::BTreeSet::new();
         if self.url.len() > 16384
             || self.headers.len() > 16
             || self.headers.iter().any(|(name, value)| {
-                !matches!(
-                    name.to_ascii_lowercase().as_str(),
-                    "content-type" | "if-match" | "if-none-match" | "x-amz-content-sha256" | "x-amz-checksum-sha256"
-                ) || value.len() > 2048
+                !names.insert(name.to_ascii_lowercase())
+                    || !matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "content-type" | "if-match" | "if-none-match" | "x-amz-content-sha256" | "x-amz-checksum-sha256"
+                    )
+                    || value.len() > 2048
                     || value.chars().any(char::is_control)
             })
         {
             return Err("invalid authorized URL response".into());
+        }
+        Ok(())
+    }
+    pub fn validate_body_binding(&self, digest: &str, checksum: &str) -> Result<(), String> {
+        self.validate_headers()?;
+        let header = |name: &str| self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+        if header("x-amz-content-sha256") != Some(digest) && header("x-amz-checksum-sha256") != Some(checksum) {
+            return Err("write authorization must bind the exact body SHA-256/checksum".into());
         }
         Ok(())
     }
@@ -112,6 +123,19 @@ pub use transport::Provider;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn all_writes_require_body_binding_and_case_duplicate_headers_are_rejected() {
+        let mut auth = Authorized { url: "https://bucket.example/object?signed".into(), expires_at: 1, headers: BTreeMap::new() };
+        assert!(auth.validate_body_binding("digest", "checksum").is_err());
+        auth.headers.insert("x-amz-checksum-sha256".into(), "checksum".into());
+        auth.validate_body_binding("digest", "checksum").unwrap();
+        assert!(auth.validate_body_binding("digest", "different").is_err());
+        auth.headers.insert("X-Amz-Checksum-Sha256".into(), "different".into());
+        assert!(auth.validate_headers().is_err());
+        auth.headers.clear();
+        auth.headers.insert("x-amz-content-sha256".into(), "digest".into());
+        auth.validate_body_binding("digest", "checksum").unwrap();
+    }
     #[test]
     fn destination_identity_includes_optional_bucket_root_and_excludes_authorization() {
         let base = Connection {
