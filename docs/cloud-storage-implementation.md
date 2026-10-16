@@ -577,3 +577,20 @@ media uploads remain independent. Committed upload intents suppress obsolete
 preparation failures on restart, while upload-integrity failures remain visible.
 A library switch cancels waiting workers without applying a
 result to the replacement library.
+
+
+### Upload decision boundary (2026-10-16, CR.13)
+
+`cloud_upload/transitions.rs` owns pure decisions for content readiness, phase
+acceptance, one-batch publication binding, exact-proof dependency waiting and
+receipt-finalization completion. Worker stages own byte transfer/verification and
+receipt I/O. `VerifiedUpload` can only be produced after a fresh byte-verification
+stage; durable verified keys alone cannot make a restarted attempt ready.
+
+The owner applies accepted intent/catalog operations, persists them, then replies
+to the worker. Failed persistence restores the prior intent or catalog inverse.
+A removed/relinked photo can finish its retained frozen publication without being
+recreated. Missing causal publication evidence remains dependency waiting.
+Ordinary obsolete failures cannot revoke a synchronized acknowledgement; explicit
+remote byte damage remains a distinct failure. Receipt completion requires written
+proof covering the queued generation and every queued exact mutation digest.

@@ -17,7 +17,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.10 — Track consumed append checkpoints and avoid downloading unchanged covered history. Separate budgeted integrity audits from ordinary polls; test remote request counts.
 - [x] CR.11 — Enforce one immutable published asset-manifest contract with device-local connection binding; test permitted/rejected descriptor changes and extract shared blob rebinding.
 - [x] CR.12 — Replace subtractive catalog JSON projection/materialization with explicit portable photo, content, album, and reference types and typed boundary conversions; retain wire compatibility tests.
-- [ ] CR.13 — Extract testable upload readiness, transfer, verification, dependency waiting, publication, acknowledgement, and failure transitions; test deletion/restart behavior.
+- [x] CR.13 — Extract testable upload readiness, transfer, verification, dependency waiting, publication, acknowledgement, and failure transitions; test deletion/restart behavior.
 - [ ] CR.14 — Consolidate current behavior/limitations, protocol specification, and dated acceptance evidence. Remove obsolete current-status claims and distinguish historical verification.
 - [ ] CR.15 — Persist live offline owner-plus-quality policy, derive dependencies after membership/content changes, and allow empty albums to be pinned. Test new members and asset revisions.
 - [ ] CR.16 — Add a command to move existing local photos into managed cloud storage while preserving photo IDs, virtual copies, edits, albums, and history. Test identity/history preservation and restart.
@@ -1238,3 +1238,29 @@ OPFS/append and IndexedDB/head states were inspected under
 No source changes followed the passing CI run. CR.12 is complete and checked off.
 This is fixture interoperability evidence; it does not assert live-provider or
 large-library performance. CR.13–CR.21 remain open.
+
+
+2026-10-16 — CR.13 implementation, final CI pending: `cloud_upload/transitions.rs`
+extracts pure retained-content readiness, attempt/library/connection/asset phase
+acceptance, one-batch destination/library/protocol/clock binding, dependency
+waiting versus exact publication coverage, and receipt-finalization decisions.
+The existing transfer/verification stages construct `VerifiedUpload` only after
+fresh byte verification. The owner retains catalog apply, journal persistence,
+rollback and reply ordering. Written receipt proofs are validated before they can
+clear newer durable work. No wire or local catalog layout changes.
+
+Clippy passed with warnings denied (`cr13-clippy.log`); 25 focused upload tests
+passed (`cr13-engine-final.log`). New regressions run the transfer/verified/published/
+synchronized phases after soft deletion, permanent deletion and relinking in both
+protocols, replay the journal mid-flow, reject stale scope/attempt/asset failures,
+retain newer receipt proofs and distinguish deliberate remote damage. The actual
+owner event queue also accepts a verified phase after those three local changes,
+persists and reopens the library with the frozen outbox intact and without
+recreating the photo or changing its replacement source. Existing full-disk,
+receipt-write failure/restart, preflight, shared-ACK and slider-group tests passed.
+An intermediate focused build was stopped to adjust the test helper's migration
+probe for already-append libraries; the final focused run above passed. Full
+repository CI then passed all eight gates on the final source (`target/cloud-reliability/cr13-ci.log`),
+including real CLI bulk request/byte assertions, deletion and process-restart recovery.
+CR.13 is complete and checked off. CR.14–CR.21 remain open. This is fixture acceptance;
+no fresh live-provider or large-library claim is made.

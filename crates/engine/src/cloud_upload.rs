@@ -24,6 +24,7 @@ const MAX_RECEIPT: u64 = 4 << 20;
 mod cleanup;
 mod finalize;
 mod stages;
+mod transitions;
 pub use cleanup::{observed as observed_cleanup, start as cleanup};
 fn error(value: impl Into<String>) -> EngineError {
     EngineError::Other(value.into())
@@ -699,8 +700,7 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<(Vec<Item>, Vec<Valu
             continue;
         };
         let photo = s.catalog.photo(intent.photo_id);
-        let retained = retained_content(&s.catalog, intent);
-        if photo.is_none_or(|p| p.deleted || !matches!(p.source, Source::Managed { .. })) && !retained {
+        if !transitions::ContentReadiness::of(&s.catalog, intent).eligible() {
             log::warn!("upload {id}: removed photo has no synchronized content; staged original retained");
             skipped.push(json!({"import":id,"error":"removed photo has no synchronized content; staged original retained"}));
             continue;
@@ -1158,24 +1158,9 @@ impl Session {
                 match pending.receiver.try_recv() {
                     Ok(Event::Finalized { id, proof, reply }) => {
                         let result = (|| {
-                            if !Arc::ptr_eq(&pending.library, &self.library_token())
-                                || pending.connection_revision != pending.resolver.connection_revision() {
-                                return Err(error("library or connection changed; receipt proof remains queued"));
-                            }
-                            let previous = self.catalog.upload_intents().get(&id).cloned().ok_or_else(|| error("upload intent disappeared; receipt proof retained"))?;
-                            if pending.ids.get(&id) != Some(&previous.asset_id) || previous.state != UploadState::Synchronized {
-                                return Err(error("upload acknowledgement changed; receipt proof retained"));
-                            }
-                            let Some(current) = &previous.finalization else { return Ok(()) };
-                            if current.version != proof.version || current.protocol != proof.protocol || current.library != proof.library
-                                || current.generation.is_some_and(|generation| proof.generation.is_none_or(|written| written < generation))
-                                || current.proofs.iter().any(|(id, digest)| proof.proofs.get(id) != Some(digest)) {
-                                return Err(error("upload receipt proof changed; newer finalization remains queued"));
-                            }
-                            let mut intent = previous.clone();
-                            intent.finalization = None;
-                            intent.error = None;
-                            let inverse = self.apply_catalog_mode(Op::SetUploadIntent { id: id.clone(), intent: Some(Box::new(intent)) }, false)?;
+                            let ownership = transitions::Ownership::new(Arc::ptr_eq(&pending.library, &self.library_token()), pending.connection_revision == pending.resolver.connection_revision());
+                            let transitions::IntentDecision::Persist(intent) = transitions::finalized(ownership, self.catalog.upload_intents().get(&id), pending.ids.get(&id), &proof)? else {return Ok(())};
+                            let inverse = self.apply_catalog_mode(Op::SetUploadIntent { id: id.clone(), intent: Some(intent) }, false)?;
                             if let Err(reason) = self.persist() {
                                 self.apply_received(inverse)?;
                                 return Err(reason);
@@ -1188,11 +1173,7 @@ impl Session {
                     }
                     Ok(Event::Publication { outcome, started_generation, covered, reply }) => {
                         let result = (|| {
-                            if !Arc::ptr_eq(&pending.library, &self.library_token())
-                                || pending.connection_revision != pending.resolver.connection_revision()
-                            {
-                                return Err(error("library or connection changed; append publication retained"));
-                            }
+                            transitions::Ownership::new(Arc::ptr_eq(&pending.library, &self.library_token()), pending.connection_revision == pending.resolver.connection_revision()).publication()?;
                             let (ops, refresh) = stages::completion_ops(&self.catalog, &outcome, started_generation, covered, &pending.ids)?;
                             if refresh { crate::cloud_replication::request_poll(self); }
                             if ops.is_empty() { return Ok(()) }
@@ -1208,40 +1189,16 @@ impl Session {
                     }
                     Ok(Event::Phase { attempt, remote_invalid, id, state, verified, error: message, reply }) => {
                         let result = (|| {
-                            if attempt != pending.guard.id() {
-                                return Err(error("obsolete upload attempt; current acknowledgement retained"));
-                            }
-                            if !Arc::ptr_eq(&pending.library, &self.library_token()) {
-                                return Err(error("library changed; staged data preserved"));
-                            }
-                            if pending.connection_revision != pending.resolver.connection_revision() {
-                                return Err(error("storage connection changed; retry using its current settings; staged data preserved"));
-                            }
-                            let mut intent =
-                                self.catalog.upload_intents().get(&id).ok_or_else(|| error("import was removed; staged original preserved"))?.clone();
-                            let previous = intent.clone();
-                            if pending.ids.get(&id) != Some(&intent.asset_id) {
-                                return Err(error("import's asset changed; staged data preserved"));
-                            }
-                            if self.catalog.photo(intent.photo_id).is_none_or(|photo| photo.deleted || !matches!(photo.source, Source::Managed { .. }))
-                                && !retained_content(&self.catalog, &intent) {
-                                return Err(error("photo was deleted or changed; upload stopped and original preserved"));
-                            }
-                            let paused = self.cloud_paused && pending.cancel.load(Ordering::Relaxed) && state == UploadState::Failed;
-                            // Another worker may have acknowledged this shared mutation while
-                            // this worker still holds an older phase. Never undo that proof.
-                            if intent.state != UploadState::Synchronized || (state == UploadState::Failed && remote_invalid) {
-                                intent.state = if paused { UploadState::SavedLocally } else { state };
-                                intent.verified = verified;
-                                intent.error = if paused { None } else { message };
-                                if state == UploadState::Failed && remote_invalid {
-                                    intent.finalization = None;
-                                }
-                            }
-                            if intent == previous {
-                                return Ok(());
-                            }
-                            self.apply_system(Op::SetUploadIntent { id: id.clone(), intent: Some(Box::new(intent)) })?;
+                            let current = self.catalog.upload_intents().get(&id);
+                            let context = transitions::PhaseContext {
+                                ownership: transitions::Ownership::new(Arc::ptr_eq(&pending.library, &self.library_token()), pending.connection_revision == pending.resolver.connection_revision()),
+                                attempt, worker: pending.guard.id(), asset: pending.ids.get(&id),
+                                paused: self.cloud_paused && pending.cancel.load(Ordering::Relaxed),
+                            };
+                            let decision = transitions::phase(context, &self.catalog, current, transitions::PhaseUpdate {state, verified, error: message, remote_invalid})?;
+                            let transitions::IntentDecision::Persist(intent) = decision else {return Ok(())};
+                            let previous = current.cloned().ok_or_else(|| error("import was removed; staged original preserved"))?;
+                            self.apply_system(Op::SetUploadIntent { id: id.clone(), intent: Some(intent) })?;
                             if let Err(e) = self.persist() {
                                 // Do not display synchronized after a failed local acknowledgement.
                                 // Both operations remain pending, preserving the previous durable state.
@@ -1385,6 +1342,10 @@ mod tests {
         acknowledgement_with_revision(session, library, None)
     }
     fn acknowledgement_with_revision(session: &mut Session, library: Arc<()>, revision: Option<u64>) -> mpsc::Receiver<Result<()>> {
+        acknowledgement_phase(session, library, revision, UploadState::Synchronized)
+    }
+
+    fn acknowledgement_phase(session: &mut Session, library: Arc<()>, revision: Option<u64>, state: UploadState) -> mpsc::Receiver<Result<()>> {
         let (sender, receiver) = mpsc::sync_channel(2);
         let (reply, response) = mpsc::sync_channel(1);
         let intent = session.catalog.upload_intents()["upload-ack-test"].clone();
@@ -1394,7 +1355,7 @@ mod tests {
                 attempt: guard.id(),
                 remote_invalid: false,
                 id: "upload-ack-test".into(),
-                state: UploadState::Synchronized,
+                state,
                 verified: intent.verified,
                 error: None,
                 reply,
@@ -1418,12 +1379,75 @@ mod tests {
             cancel,
         });
         // An in-flight upload must finish its durable acknowledgement before cutover.
-        let before = session.catalog.to_snapshot();
-        let error = crate::cloud_replication::start_migration(session, &json!({"writersStopped":true})).unwrap_err();
-        assert!(error.to_string().contains("finish or cancel uploads"));
-        assert_eq!(session.catalog.to_snapshot(), before);
+        if session.catalog.sync_state().is_none_or(|state| state.protocol.is_head()) {
+            let before = session.catalog.to_snapshot();
+            let error = crate::cloud_replication::start_migration(session, &json!({"writersStopped":true})).unwrap_err();
+            assert!(error.to_string().contains("finish or cancel uploads"));
+            assert_eq!(session.catalog.to_snapshot(), before);
+        }
         session.poll_cloud_uploads();
         response
+    }
+
+    #[test]
+    fn pending_verified_phase_after_deletion_or_relink_survives_owner_persistence_and_restart() {
+        use lightcraft_catalog::replication::SyncProtocol;
+        for protocol in [SyncProtocol::ConditionalHead, SyncProtocol::AppendLog] {
+            for removal in 0..3 {
+                let root = std::env::temp_dir().join(format!(
+                    "lightcraft-upload-deleted-phase-{}-{}-{removal}",
+                    std::process::id(),
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                ));
+                let (mut s, _) = session(&root);
+                let mut enabled = crate::cloud_sync::enable(&s.catalog, "library".into(), "writer".into(), "test".into()).unwrap();
+                // Select the protocol before applying the initial state, retaining frozen IDs.
+                if let Op::Batch { ops } = &mut enabled {
+                    for op in ops {
+                        if let Op::SetSyncState { state: Some(state) } = op {
+                            state.protocol = protocol;
+                        }
+                    }
+                }
+                s.apply_system(enabled).unwrap();
+                assert_eq!(s.catalog.sync_state().unwrap().protocol, protocol);
+                s.commit(
+                    "Remove while transfer finishes",
+                    match removal {
+                        0 => Op::SetDeleted { id: PhotoId(1), deleted: true },
+                        1 => Op::RemovePhoto { id: PhotoId(1) },
+                        _ => Op::Relink {
+                            id: PhotoId(1),
+                            file_name: "local.raw".into(),
+                            source: Source::File { path: "local.raw".into() },
+                            format: None,
+                        },
+                    },
+                )
+                .unwrap();
+                let frozen = s.catalog.sync_state().unwrap().pending.clone();
+                assert!(!frozen.is_empty());
+                let token = s.library_token();
+                acknowledgement_phase(&mut s, token, None, UploadState::ObjectsVerified).recv().unwrap().unwrap();
+                assert_eq!(s.catalog.upload_intents()["upload-ack-test"].state, UploadState::ObjectsVerified);
+                assert_eq!(s.catalog.sync_state().unwrap().pending, frozen);
+                s.close_library().unwrap();
+                drop(s);
+                let mut reopened = Session::new().with_fs();
+                reopened.open_library(&root, false).unwrap();
+                assert_eq!(reopened.catalog.upload_intents()["upload-ack-test"].state, UploadState::ObjectsVerified);
+                assert_eq!(reopened.catalog.sync_state().unwrap().pending, frozen);
+                assert!(reopened.catalog.asset(&AssetId("upload-ack-test".into())).is_some());
+                match removal {
+                    0 => assert!(reopened.catalog.photo(PhotoId(1)).unwrap().deleted),
+                    1 => assert!(reopened.catalog.photo(PhotoId(1)).is_none()),
+                    _ => assert!(matches!(reopened.catalog.photo(PhotoId(1)).unwrap().source, Source::File { .. })),
+                }
+                reopened.close_library().unwrap();
+                drop(reopened);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
     }
 
     #[test]

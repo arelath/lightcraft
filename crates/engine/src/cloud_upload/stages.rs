@@ -5,6 +5,15 @@ use crate::cloud_replication::VerifiedMedia;
 pub(super) struct VerifiedUpload {
     receipt: Receipt,
 }
+impl VerifiedUpload {
+    fn require_ready(receipt: &Receipt) -> Result<()> {
+        receipt.validate()?;
+        if !transitions::media_ready(receipt.state, &receipt.imported.asset, &receipt.verified) {
+            return Err(error("media must be byte verified before publication"));
+        }
+        Ok(())
+    }
+}
 
 /// Constructed only from fully verified media and exact remotely checked mutation proof.
 #[derive(Clone)]
@@ -211,7 +220,7 @@ impl Item {
             receipt.state = UploadState::ObjectsVerified;
             self.write_receipt(&receipt, cancel)?;
             self.phase(&receipt, events, cancel)?;
-            Ok(())
+            VerifiedUpload::require_ready(&receipt)
         })();
         match result {
             Ok(()) => Ok(VerifiedUpload { receipt }),
@@ -294,13 +303,9 @@ pub(super) fn publish_ready(
     media: &mut VerifiedMedia,
 ) -> Result<Vec<Result<Value>>> {
     let first = ready.first().map(|(item, _)| *item).ok_or_else(|| error("no verified media ready for publication"))?;
-    let local = first.sync.as_ref().ok_or_else(|| error("enable cloud synchronization before publishing; originals retained"))?;
-    if ready.iter().any(|(item, _)| {
-        !item.connection.same_destination(&first.connection)
-            || item.sync.as_ref().is_none_or(|state| state.library != local.library || state.protocol != local.protocol || state.clock != local.clock)
-    }) {
-        return Err(error("verified upload batch spans different publication bindings; originals retained"));
-    }
+    let local = transitions::publication_binding(
+        ready.iter().map(|(item, _)| transitions::PublicationBinding { connection: &item.connection, state: item.sync.as_deref() }),
+    )?;
     media.publication();
     let permit = first.coordinator.acquire(cancel)?;
     task.detail("Publishing verified library changes");
@@ -331,23 +336,17 @@ pub(super) fn publish_ready(
             published &= crate::cloud_history::native::published(&first.connection, outcome.state(), id, digest, &mut witness, cancel)
                 .map_err(|e| error(e.to_string()))?;
         }
-        if published {
-            receipt.append_proof = expected;
-            if local.protocol.is_head() {
-                receipt.generation = outcome.head_position().map(|position| position.generation());
-            }
+        if let transitions::PublicationReadiness::Covered(proof) =
+            transitions::publication_readiness(local, outcome.head_position().map(|position| position.generation()), expected, published)?
+        {
+            receipt.append_proof = proof.proofs.clone();
+            receipt.generation = proof.generation;
             covered.push(CoveredUpload {
                 id: item.id.clone(),
                 asset: (*receipt.imported.asset).clone(),
                 asset_id: receipt.imported.asset_id.clone(),
                 global: receipt.imported.photo_id.clone(),
-                proof: UploadFinalization {
-                    version: 1,
-                    protocol: local.protocol,
-                    library: local.library.clone(),
-                    generation: receipt.generation,
-                    proofs: receipt.append_proof.clone(),
-                },
+                proof,
             });
             published_ids.insert(item.id.clone());
         }
