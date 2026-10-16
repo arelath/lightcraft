@@ -9,6 +9,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod capability;
+pub use capability::{Converter, MigrationSpec};
+
 /// Envelope format this build understands. A newer envelope is refused before any
 /// other field of the library is interpreted.
 pub const CONTROL_VERSION: u32 = 1;
@@ -120,6 +123,8 @@ pub enum Blocked {
     UpdateToRead(String),
     /// Readable, but publishing could lose newer fields.
     UpdateToWrite(String),
+    /// A readable maintenance envelope describes a converter this build lacks.
+    UpdateToUpgrade(String),
     /// An upgrade holds the publication authority; receiving continues.
     Maintenance {
         migration: String,
@@ -139,6 +144,9 @@ impl std::fmt::Display for Blocked {
             Self::UpdateToRead(why) => write!(f, "update LightCraft to read this cloud library ({why}); local data retained"),
             Self::UpdateToWrite(why) => {
                 write!(f, "update LightCraft to publish to this cloud library ({why}); browsing and local edits continue, pending work retained")
+            }
+            Self::UpdateToUpgrade(why) => {
+                write!(f, "update LightCraft to complete this cloud library upgrade ({why}); remote data preserved, pending work retained")
             }
             Self::Maintenance { migration, plan, .. } => write!(
                 f,
@@ -275,13 +283,14 @@ impl Control {
     /// Active → Upgrading, freezing `source` (the head this transition replaces).
     pub fn begin(&self, id: &str, plan: Plan, source: Boundary, owner: &str, token: &str, now_ms: u64) -> Outcome<Self> {
         self.may_publish()?;
+        let spec = MigrationSpec::resolve(plan, self.schema, SCHEMA.max(self.schema))?;
         let mut next = self.next()?;
         next.state = State::Upgrading;
         next.migration = Some(Migration {
             id: id.into(),
             plan,
             target_epoch: self.epoch.checked_add(1).ok_or_else(|| Blocked::Invalid("epoch exhausted".into()))?,
-            target_schema: SCHEMA.max(self.schema),
+            target_schema: spec.target_schema(),
             source,
             owner: owner.into(),
             token: token.into(),
@@ -298,6 +307,13 @@ impl Control {
             None => Err(Blocked::Invalid("no migration in progress".into())),
         }
     }
+    /// The enclosing control retains the frozen source schema until activation.
+    /// Resolve it with the actual target before taking ownership or producing data.
+    pub fn migration_spec(&self) -> Outcome<MigrationSpec> {
+        self.may_read()?;
+        let m = self.migration.as_ref().ok_or_else(|| Blocked::Invalid("no migration in progress".into()))?;
+        MigrationSpec::resolve(m.plan, self.schema, m.target_schema)
+    }
     pub fn renew(&self, token: &str, now_ms: u64) -> Outcome<Self> {
         self.owned(token)?;
         let mut next = self.next()?;
@@ -310,6 +326,7 @@ impl Control {
     /// with a new token, so a stale owner can no longer activate its result.
     pub fn takeover(&self, owner: &str, token: &str, now_ms: u64, force: bool) -> Outcome<Self> {
         self.validate()?;
+        self.migration_spec()?;
         let Some(current) = &self.migration else { return Err(Blocked::Invalid("no migration in progress".into())) };
         if !force && now_ms < current.lease_until_ms {
             return Err(Blocked::Maintenance { migration: current.id.clone(), plan: current.plan, owner: current.owner.clone() });
@@ -329,14 +346,16 @@ impl Control {
     /// Before activation, the owner can return the library to its unchanged epoch.
     pub fn cancel(&self, token: &str) -> Outcome<Self> {
         self.owned(token)?;
+        self.migration_spec()?;
         let mut next = self.next()?;
         next.state = State::Active;
         next.migration = None;
         Ok(next)
     }
     /// Upgrading → Active at the target epoch; only the current token may do this.
-    pub fn activate(&self, token: &str, minimum_reader: u32, minimum_writer: u32) -> Outcome<Self> {
+    pub fn activate(&self, token: &str) -> Outcome<Self> {
         let m = self.owned(token)?.clone();
+        let spec = self.migration_spec()?;
         if m.plan != Plan::Rebase {
             return Err(Blocked::Invalid("this plan retires the head instead of activating an epoch".into()));
         }
@@ -344,8 +363,8 @@ impl Control {
         next.state = State::Active;
         next.epoch = m.target_epoch;
         next.schema = m.target_schema;
-        next.minimum_reader = minimum_reader;
-        next.minimum_writer = minimum_writer;
+        next.minimum_reader = spec.minimum_reader();
+        next.minimum_writer = spec.minimum_writer();
         next.active_metadata_root = epoch_root(m.target_epoch);
         next.migration = None;
         next.validate()?;
@@ -354,6 +373,7 @@ impl Control {
     /// Upgrading → Retired: the head becomes a permanent pointer to its successor.
     pub fn retire(&self, token: &str, successor: Successor) -> Outcome<Self> {
         let m = self.owned(token)?;
+        self.migration_spec()?;
         if m.plan != Plan::AppendLog {
             return Err(Blocked::Invalid("only a protocol migration retires the head".into()));
         }
@@ -379,7 +399,7 @@ pub fn token() -> Result<String, String> {
 /// a future translator must keep the original mutation (identity and digest) and record
 /// a durable original→translated provenance mapping before publishing the new one.
 pub fn translate_mutation(from_schema: u32, to_schema: u32) -> Result<(), String> {
-    if from_schema == to_schema {
+    if from_schema == SCHEMA && to_schema == SCHEMA {
         return Ok(());
     }
     Err(format!("translating pending mutations from schema {from_schema} to {to_schema} is unsupported in this build; pending work retained"))

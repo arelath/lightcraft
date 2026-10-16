@@ -58,6 +58,43 @@ fn upgrading_head(f: &Fixture, lease_until_ms: u64) -> Vec<u8> {
 }
 
 #[test]
+fn unsupported_expired_migrations_leave_remote_objects_and_pending_work_unchanged() {
+    use lightcraft_engine::cloud_control::{Control, SCHEMA};
+    let f = Fixture::new();
+    let (a, _) = initialize(&f);
+    ok(&f, &a, &[("photo.rate", json!({"ids":[1],"rating":3}))]);
+    let offline = pending(&a);
+    let maintenance = upgrading_head(&f, 0);
+    for plan in ["rebase", "appendLog"] {
+        let mut newer: Value = serde_json::from_slice(&maintenance).unwrap();
+        newer["control"]["migration"]["plan"] = json!(plan);
+        newer["control"]["migration"]["targetSchema"] = json!(SCHEMA + 1);
+        Control::decode(&newer["control"]).unwrap().may_read().unwrap();
+        f.state.lock().unwrap().objects.insert(HEAD.into(), serde_json::to_vec(&newer).unwrap());
+        for request in [json!({"plan":plan}), json!({"plan":plan,"writersStopped":true}), json!({"cancel":true})] {
+            let (objects, request_count) = {
+                let state = f.state.lock().unwrap();
+                (state.objects.clone(), state.requests.len())
+            };
+            let snapshot = catalog(&a).to_snapshot();
+            let (out, rows) = f.run(&a, &[("cloud.upgradeLibrary", request), ("cloud.syncStatus", json!({}))]);
+            assert!(!out.status.success(), "{rows:?}");
+            assert!(rows[0]["error"].as_str().unwrap().contains("update LightCraft to complete"), "{rows:?}");
+            let health = &rows[1]["result"]["health"];
+            assert_eq!(health["lastError"]["kind"], "unsupported", "{rows:?}");
+            assert_eq!(health["retry"]["scheduled"], false, "upgrade needs a capable application");
+            let state = f.state.lock().unwrap();
+            assert_eq!(state.objects, objects, "no ownership transition, checkpoint, seed or activation");
+            assert!(state.requests.iter().skip(request_count).all(|(method, _)| method == "GET"), "refusal happens before any remote write");
+            assert_eq!(state.signature_errors, 0);
+            drop(state);
+            assert_eq!(pending(&a), offline);
+            assert_eq!(catalog(&a).to_snapshot(), snapshot, "failed upgrades preserve the catalog");
+        }
+    }
+}
+
+#[test]
 fn commit_racing_maintenance_stays_pending_then_takeover_rebases_and_offline_work_rejoins() {
     let f = Fixture::new();
     let (a, b) = initialize(&f);

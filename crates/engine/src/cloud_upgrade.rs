@@ -133,6 +133,11 @@ fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &At
     let library = &local.library;
     let (head, token) = acquire(connection, library, Plan::Rebase, owner, cancel)?;
     let migration = owned(&head, &token)?.clone();
+    let spec = head.control().map_err(invalid)?.migration_spec()?;
+    match spec.converter() {
+        crate::cloud_control::Converter::Identity => crate::cloud_control::translate_mutation(spec.source_schema(), spec.target_schema())
+            .map_err(|why| CloudFailure::new(FailureKind::Unsupported, why))?,
+    }
     // The maintenance head holds only marker batches after the frozen source, so
     // its full verified history is exactly the source state.
     let mut proofs = Default::default();
@@ -148,8 +153,6 @@ fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &At
     if written.state != source.state.portable() {
         return Err(CloudFailure::integrity("upgraded checkpoint does not reproduce the frozen source state; old epoch remains active"));
     }
-    crate::cloud_control::translate_mutation(migration.target_schema, migration.target_schema)
-        .map_err(|why| CloudFailure::new(FailureKind::Unsupported, why))?;
     // A long build renews the lease before activation, so it is not taken over at the end.
     if now_ms() >= migration.lease_until_ms.saturating_sub(crate::cloud_control::LEASE_MS / 2) {
         transition(connection, library, cancel, |head, control| {
@@ -166,7 +169,7 @@ fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &At
             break;
         }
         owned(&current, &token)?;
-        let wanted = control.activate(&token, 1, 1)?;
+        let wanted = control.activate(&token)?;
         // The checkpoint records generation `base`; the activation head must follow both
         // it and any renewal/takeover heads written meanwhile.
         let generation = current.generation.max(base).checked_add(1).ok_or_else(|| invalid("generation exhausted"))?;

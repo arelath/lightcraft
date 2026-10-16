@@ -951,6 +951,17 @@ overwriting it. Pending mutations are never rewritten: translating a mutation be
 schemas is refused in this build (`translate_mutation`), and a future translator must keep
 the original identity/digest and record a durable original→translated provenance mapping.
 
+Maintenance readability does not grant upgrade capability. A shared typed converter
+registry resolves the plan plus the enclosing control's frozen source schema and the
+migration's target schema. This build implements only schema-1 → schema-1 rebase and
+append migration. New migration acquisition and every takeover (including the same
+installation resuming, cancellation, and the browser append runner) refuse unsupported
+conversions before writing control markers or migration outputs. Activation derives
+reader/writer requirements from the selected converter. A readable maintenance record
+targeting a future schema stays unchanged and reports an unsupported upgrade with an
+instruction to update LightCraft; it is not evidence of malformed history. Structural
+validation deliberately continues to accept that record so newer builds can recover it.
+
 **Conditional head: one authority.** The control lives inside `catalog/head.json`, so
 ordinary commits and maintenance compete at the same compare-and-swap. Every publisher
 checks the control of the head it just reread, immediately before the CAS that carries that

@@ -1,6 +1,6 @@
 # Cloud storage implementation
 
-Last updated: 2026-10-17. This document describes current behavior and operational limits. The normative wire and
+Last updated: 2026-10-16. This document describes current behavior and operational limits. The normative wire and
 durability contract is [cloud-sync-protocol.md](cloud-sync-protocol.md); its receipt-history
 contract is [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
 [browser-cloud.md](browser-cloud.md) defines the browser adapter contract.
@@ -59,6 +59,12 @@ in append mode. LIST discovery and full state validation still have linear costs
   Resource-specific errors and last successful remote scan remain separate from user pause
   and pending publication. Pending edits, staged originals and exact mutation IDs survive
   failures; the runtime retry budget resets on catalog reopen.
+- Upgrade ownership is separate from conversion capability: only schema-1 identity
+  rebase and append migrations are executable in this build. A readable maintenance
+  envelope targeting a future schema is retained unchanged and requires an application
+  update before takeover or cancellation. Activation compatibility comes from the
+  converter registry. Other upgrade and cache review findings remain explicitly open
+  in CR.43–CR.45 and CR.48–CR.55.
 - Checkpoints archive exact old receipts while retaining current/pending contexts.
   Author clocks and remote history remain retained. State validation, snapshot cloning,
   author/checkpoint listing and some structural reconciliation still scale with state;

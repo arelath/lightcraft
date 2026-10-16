@@ -125,7 +125,7 @@ impl From<crate::cloud_control::Blocked> for CloudFailure {
     fn from(blocked: crate::cloud_control::Blocked) -> Self {
         use crate::cloud_control::Blocked;
         let kind = match &blocked {
-            Blocked::UpdateToRead(_) | Blocked::UpdateToWrite(_) | Blocked::Retired(_) => FailureKind::Unsupported,
+            Blocked::UpdateToRead(_) | Blocked::UpdateToWrite(_) | Blocked::UpdateToUpgrade(_) | Blocked::Retired(_) => FailureKind::Unsupported,
             Blocked::Maintenance { .. } | Blocked::Conflict(_) => FailureKind::Contention,
             Blocked::Invalid(_) => FailureKind::InvalidHistory,
         };
@@ -210,6 +210,7 @@ mod tests {
         for (blocked, kind) in [
             (Blocked::UpdateToRead("schema 9".into()), FailureKind::Unsupported),
             (Blocked::UpdateToWrite("schema 9".into()), FailureKind::Unsupported),
+            (Blocked::UpdateToUpgrade("converter 1 to 2".into()), FailureKind::Unsupported),
             (retired, FailureKind::Unsupported),
             (maintenance, FailureKind::Contention),
             (Blocked::Conflict("revision 3".into()), FailureKind::Contention),

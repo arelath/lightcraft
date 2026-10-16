@@ -5,7 +5,8 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
-Current status (2026-10-17): CR.1–CR.41 are complete. Dated verification notes below
+Current status (2026-10-16): CR.1–CR.42, CR.46 and CR.47 are complete.
+CR.43–CR.45 and CR.48–CR.55 remain open. Dated verification notes below
 describe their original snapshots; current operational limits remain in
 [cloud-storage-implementation.md](cloud-storage-implementation.md).
 
@@ -84,6 +85,28 @@ honour it. Specification: [cloud-sync-protocol.md](cloud-sync-protocol.md#librar
 Source: static review of `cloud-support` at `a883fbfb`.
 
 - [x] CR.46 — Let people resolve every retained field conflict (not only develop) from Cloud Synchronization and Info; show a refused publication (maintenance, moved library, newer writer) in the popup, Info and attention state on desktop and browser; replace the per-frame, unbounded deleted-photo scan with a cached, capped list; translate the popup's counts and show the last remote check as a readable age.
+
+## Follow-up review: upgrade safety and durable cache recovery
+
+Source: supplied static review of `cloud-support` at `a883fbf` against `0abef0a`,
+received 2026-10-16. Starting commit: `edc556a0`. These findings are proposed
+regressions from a static review, not executed acceptance. Preserve the confirmed
+CAS transitions, ownership tokens, typed failures and browser byte leases.
+CR.43–CR.45 remain separately open; do not count their deferred work as complete.
+
+- [x] CR.47 — Resolve migration capability independently of ownership before acquisition or takeover. Introduce a typed specification for plan, actual source/target schemas, converter and activation reader/writer requirements. Reject a newer unsupported target before any control transition or migration output; test an expired maintenance record targeting `SCHEMA + 1` and supported identity rebases. Cross-schema translation remains CR.44.
+- [ ] CR.48 — Preserve the append control's effective epoch/root through synchronization. Until epoch routing and discovery-progress reset are implemented, reject unsupported namespace transitions before publication. Test readable Active epoch-two control and assert no operation PUT to epoch one; preserve typed compatibility/publication decisions.
+- [ ] CR.49 — Define durable successor-exposure stages and cancellation rules for head-to-append migration. Permit cancellation only while the old library can remain usable; after successor exposure require completion or explicit recovery. Never delete a possibly used successor blindly. Test interruption/retry/cancel after manifest, checkpoint and seed publication and before retirement, with expected remote states and next actions.
+- [ ] CR.50 — Carry publication capability in every head outcome, including unchanged scans and clean clients with no pending work. Preserve maintenance/newer-writer/retirement reasons and slower polling without no-op journal writes. Test repeated clean-client polls under each readable but nonpublishable control state.
+- [ ] CR.51 — Renew upgrade leases during expensive source reads, verification and checkpoint/archive writes. Bind renewals to the current token/revision; stop output after cancellation or ownership loss. Test a healthy paused worker over a lease interval with an injectable clock, takeover after renewal stops and refusal of stale activation.
+- [ ] CR.52 — Recover browser blob/index publication across interruption or policy-save failure with a durable transaction boundary or bounded verified reconciliation of the owned namespace. Preserve all libraries' offline protections. Inject failure between blob publication and index persistence, reload and verify actual storage usage plus safe Clear cache/quota reclamation.
+- [ ] CR.53 — Finish cache-relocation cleanup safety. Verify the reopened resolver adopted the intended destination before removing old files, and use lease-aware cleanup. Test destination fallback and outstanding old byte leases; a successful reopen alone cannot authorize deletion.
+- [ ] CR.54 — Isolate credential records between independent libraries sharing a connection name. Preserve validation-before-save for rejected retargets and same-destination credential rotation. Test two libraries with the default connection name and distinct credentials without overwriting each other's profile.
+- [ ] CR.55 — Make guided library discovery authoritative and paginated. Validate manifest/control records, resolve retained/retired head versus successor protocol, and process every listing page under explicit bounds. Test invalid prefixes, head retirement, duplicate identities and libraries beyond the first page.
+
+Refactoring acceptance is included in the corresponding tasks: CR.47 owns typed
+migration capability, CR.48/CR.50 retain effective control decisions, and
+CR.47/CR.49/CR.51 exercise mixed capabilities and intermediate migration stages.
 
 ## Verification log
 
@@ -1642,3 +1665,37 @@ reads as seconds, minutes, hours or days. Regressions:
 `cloud_popup_says_publishing_is_blocked_and_counts_field_conflicts` and
 `cloud_sync_dialog_keeps_a_chosen_conflict_value_and_bounds_the_recover_list`. Headless renders of the
 popup and dialog were inspected; the browser build compiles but was not run in a browser.
+
+2026-10-16 — CR.47: migration capability is separate from ownership. The shared
+`MigrationSpec` registry resolves plan plus actual frozen source/target schemas to
+an implemented converter and activation reader/writer requirements. This build
+supports only schema-1 identity rebase and append migration. Begin, takeover
+(including same-installation resume and cancellation), activation and retirement
+refuse unsupported conversions. Native rebase validates the actual schemas before
+building outputs; identical unknown schema numbers no longer authorize identity
+translation. Browser append takeover uses the same shared control checks. The
+persisted control envelope is unchanged; readable future maintenance records remain
+valid and retained, with a typed unsupported/update-required failure.
+
+All 11 control tests and six real-CLI upgrade tests passed. The new signed-fixture
+regression seeds expired rebase and append migrations targeting `SCHEMA + 1`, then
+tries ordinary acquisition, `writersStopped:true` and cancellation. Every refusal
+performs only GETs, retains exact remote objects/control revision, preserves the
+catalog and pending mutations, and schedules no automatic poll retry. Existing
+supported takeover/rebase, lost activation, retirement and offline rejoin still pass.
+Focused logs: `target/cloud-reliability/cr47-control-tests.log` and
+`target/cloud-reliability/cr47-upgrade-tests.log`.
+
+The rebuilt desktop app was driven through its control channel against an owned
+loopback fixture with EXAMPLE credentials. The cloud popup visibly reports the
+update-required reason and retains one pending change; the screenshot was inspected.
+All eight storage requests were independently signature-verified, with no upgrade
+writes. Evidence: `target/cloud-reliability/cr47-native-results.json` and
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr47-acceptance/cr47-4dec4d81/unsupported-upgrade.png`.
+This is local fixture acceptance; browser execution and live AWS/B2 upgrade acceptance
+were not performed (CR.45 remains open).
+
+Full final-source `cargo +1.95.0 xtask ci` passed all eight gates: fmt, strict Clippy,
+HEIF, workspace tests, parity, layers, assets and WASM (including the browser callers).
+Log: `target/cloud-reliability/cr47-ci.log`. CR.47 is complete; CR.48–CR.55 and the
+previously deferred CR.43–CR.45 remain unchecked.

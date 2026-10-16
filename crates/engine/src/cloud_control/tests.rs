@@ -30,6 +30,52 @@ fn initial_control_is_active_epoch_one_in_the_legacy_root() {
 }
 
 #[test]
+fn migration_registry_uses_actual_schemas_and_converter_compatibility() {
+    for plan in [Plan::Rebase, Plan::AppendLog] {
+        let spec = MigrationSpec::resolve(plan, SCHEMA, SCHEMA).unwrap();
+        assert_eq!(spec.converter(), Converter::Identity);
+        assert_eq!((spec.source_schema(), spec.target_schema()), (SCHEMA, SCHEMA));
+        assert_eq!((spec.minimum_reader(), spec.minimum_writer()), (1, 1));
+        for (source, target) in [(SCHEMA, SCHEMA + 1), (SCHEMA + 1, SCHEMA + 1), (0, SCHEMA)] {
+            assert!(matches!(MigrationSpec::resolve(plan, source, target), Err(Blocked::UpdateToUpgrade(_))));
+        }
+    }
+    // Identical numbers alone do not imply this build implements their wire schema.
+    assert!(translate_mutation(SCHEMA + 1, SCHEMA + 1).is_err());
+    let base = Control::initial("library");
+    let upgrade = base.begin("m", Plan::Rebase, source(), "owner", &tok(1), 0).unwrap();
+    let spec = upgrade.migration_spec().unwrap();
+    let active = upgrade.activate(&tok(1)).unwrap();
+    assert_eq!((active.schema, active.minimum_reader, active.minimum_writer), (spec.target_schema(), spec.minimum_reader(), spec.minimum_writer()));
+}
+
+#[test]
+fn readable_future_migration_is_refused_before_ownership_or_activation() {
+    for plan in [Plan::Rebase, Plan::AppendLog] {
+        let mut c = Control::initial("library").begin("future", plan, source(), "old-owner", &tok(1), 0).unwrap();
+        c.migration.as_mut().unwrap().target_schema = SCHEMA + 1;
+        c.may_read().unwrap(); // A valid newer upgrader's readable maintenance record.
+        let original = c.clone();
+        assert!(matches!(c.takeover("new-owner", &tok(2), LEASE_MS, false), Err(Blocked::UpdateToUpgrade(_))));
+        assert!(
+            matches!(c.takeover("old-owner", &tok(2), 0, true), Err(Blocked::UpdateToUpgrade(_))),
+            "same-installation resume also checks capability"
+        );
+        assert!(matches!(c.activate(&tok(1)), Err(Blocked::UpdateToUpgrade(_))));
+        assert!(matches!(
+            c.retire(&tok(1), Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "b".repeat(64) }),
+            Err(Blocked::UpdateToUpgrade(_))
+        ));
+        assert!(matches!(c.cancel(&tok(1)), Err(Blocked::UpdateToUpgrade(_))));
+        assert_eq!(c, original);
+    }
+    let mut compatible = Control::initial("library");
+    compatible.schema = SCHEMA + 1;
+    compatible.may_publish().unwrap(); // Read/write compatibility is not conversion capability.
+    assert!(matches!(compatible.begin("m", Plan::Rebase, source(), "owner", &tok(1), 0), Err(Blocked::UpdateToUpgrade(_))));
+}
+
+#[test]
 fn compatibility_separates_reading_from_writing_and_refuses_newer_envelopes() {
     let mut value = serde_json::to_value(Control::initial("library")).unwrap();
     value["controlVersion"] = json!(CONTROL_VERSION + 1);
@@ -58,7 +104,7 @@ fn two_simultaneous_upgraders_elect_exactly_one_owner() {
     assert!(!head.cas(&base, b), "loser's CAS fails against the changed head");
     let reread = head.0.clone();
     assert!(matches!(reread.begin("m2", Plan::Rebase, source(), "device-b", &tok(2), 0), Err(Blocked::Maintenance { .. })));
-    let active = reread.activate(&tok(1), 1, 1).unwrap();
+    let active = reread.activate(&tok(1)).unwrap();
     assert!(head.cas(&reread, active));
     assert_eq!(head.0.epoch, 2);
     assert_eq!(head.0.active_metadata_root, "catalog/epochs/2");
@@ -90,10 +136,10 @@ fn crashed_upgrader_takeover_invalidates_the_stale_owner() {
     assert!(head.cas(&a, b.clone()));
     assert!(matches!(b.may_publish(), Err(Blocked::Maintenance { .. })), "takeover never lets ordinary writers resume");
     // The resumed stale owner can neither activate from its old view nor from the new one.
-    assert!(!head.cas(&a, a.activate(&tok(1), 1, 1).unwrap()));
-    assert!(b.activate(&tok(1), 1, 1).is_err());
+    assert!(!head.cas(&a, a.activate(&tok(1)).unwrap()));
+    assert!(b.activate(&tok(1)).is_err());
     assert!(b.cancel(&tok(1)).is_err());
-    assert!(head.cas(&b, b.activate(&tok(2), 1, 1).unwrap()));
+    assert!(head.cas(&b, b.activate(&tok(2)).unwrap()));
 }
 
 #[test]
@@ -102,12 +148,12 @@ fn lost_activation_response_is_resolved_by_rereading_the_token_outcome() {
     let mut head = Authority(base.clone());
     let a = base.begin("m1", Plan::Rebase, source(), "device-a", &tok(1), 0).unwrap();
     head.cas(&base, a.clone());
-    let active = a.activate(&tok(1), 1, 1).unwrap();
+    let active = a.activate(&tok(1)).unwrap();
     head.cas(&a, active.clone()); // response lost
     // Retrying against the stale view fails; the reread shows our epoch is authoritative.
     assert!(!head.cas(&a, active.clone()));
     assert_eq!(head.0, active);
-    assert!(head.0.activate(&tok(1), 1, 1).is_err(), "activation cannot be applied twice");
+    assert!(head.0.activate(&tok(1)).is_err(), "activation cannot be applied twice");
 }
 
 #[test]
@@ -118,7 +164,7 @@ fn cancellation_restores_the_same_epoch_and_retirement_points_at_the_successor()
     assert_eq!((back.epoch, back.state), (1, State::Active));
     back.may_publish().unwrap();
     let m = base.begin("m2", Plan::AppendLog, source(), "device-a", &tok(3), 0).unwrap();
-    assert!(m.activate(&tok(3), 1, 1).is_err(), "protocol migrations retire instead");
+    assert!(m.activate(&tok(3)).is_err(), "protocol migrations retire instead");
     let retired = m.retire(&tok(3), Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "b".repeat(64) }).unwrap();
     assert!(matches!(retired.may_publish(), Err(Blocked::Retired(_))));
     retired.may_read().unwrap();
