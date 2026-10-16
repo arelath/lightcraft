@@ -1079,23 +1079,9 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                             }
                         }
                     }
+                    crate::cloud_conflicts::list(app, ui, &status);
                     crate::cloud_retention::body(app, ui);
-                    let deleted: Vec<_> = app.session.catalog.sync_state().into_iter().flat_map(|state| {
-                        state.documents.keys().filter(|entity| entity.starts_with("photo:") && state.winning(entity,"deleted").is_some_and(|(_,v)| v.as_bool()==Some(true)))
-                            .map(|entity| (entity.clone(),state.winning(entity,"file_name").and_then(|(_,v)| v.as_str()).unwrap_or("Deleted cloud photo").to_owned()))
-                    }).collect();
-                    if !deleted.is_empty() {
-                        ui.separator();
-                        ui.label(crate::i18n::tr("Recover deleted cloud photos and their retained edits:"));
-                        for (entity,name) in deleted {
-                            ui.horizontal(|ui| {
-                                ui.label(name);
-                                let response = ui.button(crate::i18n::tr("Recover"));
-                                crate::widgets::register(ui.ctx(),format!("button:cloudRecover:{entity}"),response.rect);
-                                if response.clicked() && let Err(error) = app.run("cloud.restoreDeleted",json!({"entity":entity})) { app.toast(ui.ctx(),error); }
-                            });
-                        }
-                    }
+                    crate::cloud_conflicts::deleted(app, ui, &status);
                 }
                 Dialog::Settings { tab } => crate::panels::settings::body(app, ui, tab),
                 Dialog::SamModel { error, .. } => sam_model_body(app, ui, error.as_deref()),

@@ -248,12 +248,15 @@
   "{n} added to Apple Photos": "已將 {n} 個加入 Apple 照片",
   "{n} photos opened for editing; each is stacked with its original": "已開啟 {n} 張相片進行編輯；每張都與其原始相片堆疊在一起",
   "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "為現有相片和相簿啟用同步，或編輯單一實體時，每個實體最多允許變更 {limit} 個欄位，序列化大小上限為 1 MiB。相簿中繼資料與受管理相片的成員關係共用此額度；請在設定前分拆大型相簿。",
-  "Last remote check: {n} s ago": "最近一次遠端檢查：{n} 秒前",
   "{used} of {total} used": "已用 {used}，共 {total}",
   "{free} free": "可用 {free}",
   "Store a copy of all Smart previews locally on “{drive}”": "在「{drive}」上本機儲存所有智慧型預覽的副本",
   "Keys are saved on this computer in the AWS credentials file, as profile “{profile}”. They are never stored in the catalog or the cloud.": "金鑰以設定檔「{profile}」儲存在此電腦的 AWS 憑證檔案中，絕不會存入目錄或雲端。",
   "Connected. Found {n} libraries in this folder.": "已連線。在此資料夾中找到 {n} 個圖庫。",
   "Connected to “{bucket}”. Choose the cloud library for this catalog.": "已連線到「{bucket}」。請為此目錄選擇雲端圖庫。",
-  "Join library {id}… ({kind})": "加入圖庫 {id}…（{kind}）"
+  "Join library {id}… ({kind})": "加入圖庫 {id}…（{kind}）",
+  "{n} s ago": "{n} 秒前",
+  "{n} min ago": "{n} 分鐘前",
+  "{n} h ago": "{n} 小時前",
+  "{n} d ago": "{n} 天前"
 }

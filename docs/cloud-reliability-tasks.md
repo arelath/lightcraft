@@ -79,6 +79,12 @@ honour it. Specification: [cloud-sync-protocol.md](cloud-sync-protocol.md#librar
 - [ ] CR.44 — Implement the first real mutation translation only when a schema change needs it: preserve the original mutation identity/digest, create translated mutations with a durable original→translated provenance/deduplication map, and test a crash between translation and publication (no duplicate edit, no identity collision).
 - [ ] CR.45 — Run the upgrade workflow in the desktop and browser UIs against live AWS S3 and (after CR.43) B2, inspect Activity/Info states, and record request costs for begin/activate/rejoin.
 
+## Sync UX review (2026-10-17)
+
+Source: static review of `cloud-support` at `a883fbfb`.
+
+- [x] CR.46 — Let people resolve every retained field conflict (not only develop) from Cloud Synchronization and Info; show a refused publication (maintenance, moved library, newer writer) in the popup, Info and attention state on desktop and browser; replace the per-frame, unbounded deleted-photo scan with a cached, capped list; translate the popup's counts and show the last remote check as a readable age.
+
 ## Verification log
 
 This is chronological evidence. Earlier statements that a task is pending or open
@@ -1621,3 +1627,18 @@ instead of an "invalid asset" string. Every refused upgrade (append, rebase, can
 browser) waits for an explicit retry rather than scheduling an ordinary poll as if it were the
 upgrade. Regressions: `control_blocks_keep_their_kind` and the held-lease assertions on
 `lastError.kind`/`retryable` in `held_lease_refuses_other_upgraders_and_cancellation_restores_the_same_epoch`.
+
+2026-10-17 — CR.46: sync UX review. `cloud.syncStatus` conflicts now carry the entity name and up to
+eight choices (current first, newest next) with a short preview, origin and `moreChoices`; the deleted
+photo list (`deletedPhotos`, at most 200, plus `deletedPhotoCount`) is built once per catalog revision
+in the same cache. Cloud Synchronization lists up to 16 conflicts with Keep buttons and a scrolling
+Recover list; Info offers the same choices for the selected photo's conflicting fields. `publicationBlocked`
+reaches `cloud.overview` and its health, the browser host records it from completed scans (polling
+it every 60 s like native), and the popup headline reads "Publishing paused by the cloud library" with
+the reason. Popup counts use translated labels instead of English plurals; the last remote check
+reads as seconds, minutes, hours or days. Regressions:
+`any_field_conflict_lists_named_choices_and_keeping_another_value_resolves_it_everywhere`,
+`deleted_photo_list_is_computed_once_per_revision_and_capped_with_a_full_count`,
+`cloud_popup_says_publishing_is_blocked_and_counts_field_conflicts` and
+`cloud_sync_dialog_keeps_a_chosen_conflict_value_and_bounds_the_recover_list`. Headless renders of the
+popup and dialog were inspected; the browser build compiles but was not run in a browser.

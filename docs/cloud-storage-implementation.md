@@ -481,6 +481,14 @@ still stops this session and reports that it could not save; a failed resume wri
 Downloads remain available for editing/export. Explicit migration is a separate coordinated
 operation. Resume also releases cancelled migration preparation, like explicit Sync now.
 
+When the library refuses publication (another device holds maintenance, the library moved to
+another protocol, or it needs a newer writer), the popup headline reads "Publishing paused by the
+cloud library" with the reason; changes from other devices still arrive and local changes wait.
+Conflicting edits to any synchronized field are listed in Cloud Synchronization (and for the
+selected photo in Info) with each retained value and a Keep button (`cloud.resolveConflict`);
+the displayed value is marked. Deleted cloud photos are listed there for recovery, capped at 200
+with the full count.
+
 Sync Status in the filter bar offers Waiting to sync, Syncing, Synced, Sync issues and Local
 only, with a removable chip. Status derives from durable original-upload intent and pending
 photo recipe/metadata mutations; sync issues include failed uploads and retained field

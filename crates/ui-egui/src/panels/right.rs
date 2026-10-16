@@ -754,6 +754,8 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                             retry
                         } else if status["health"]["pollingHalted"] == true {
                             crate::i18n::tr("Automatic checking stopped after an error.").to_owned()
+                        } else if status["publicationBlocked"].is_string() {
+                            crate::i18n::tr("Publishing paused by the cloud library").to_owned()
                         } else if running {
                             "Synchronizing library…".to_owned()
                         } else if status["protocol"].as_str() == Some("append-log-v1") {
@@ -769,6 +771,9 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     );
                     ui.label(egui::RichText::new(format!("Library ID: {library}")).small().color(t.text_dim));
                     super::cloud::capacity(app, ui, &status, false);
+                    if let Some(reason) = status["publicationBlocked"].as_str() {
+                        ui.label(egui::RichText::new(reason).color(t.caution));
+                    }
                     if let Some(error) = status["health"]["lastError"]["message"].as_str() {
                         ui.label(egui::RichText::new(error).color(t.text_dim));
                     }
@@ -787,27 +792,29 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     {
                         app.toast(ui.ctx(), error);
                     }
-                    let conflict = app.session.catalog.sync_state().and_then(|state| {
-                        let id = app.session.catalog.cloud_identity(&format!("photo:{}", p.id.0))?;
-                        let entity = format!("photo:{id}");
-                        let register = state.documents.get(&entity)?.get("develop")?;
-                        let (_, winner) = state.winning(&entity, "develop")?;
-                        register
-                            .0
-                            .values()
-                            .any(|value| value != winner)
-                            .then(|| (entity.clone(), state.winning(&entity, "develop").map(|(stamp, _)| stamp.id())))
-                    });
-                    if let Some((entity, Some(revision))) = conflict {
-                        ui.label(crate::i18n::tr("Competing edits are preserved in Versions."));
-                        if text_button(ui, "cloudConflictVersions", crate::i18n::tr("Open Versions"), false).clicked() {
-                            let _ = app.run("panel.versions", json!({}));
+                    let entity = app.session.catalog.cloud_identity(&format!("photo:{}", p.id.0)).map(|id| format!("photo:{id}"));
+                    let conflicts: Vec<serde_json::Value> = status["conflicts"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|conflict| entity.as_deref().is_some_and(|entity| conflict["entity"] == entity))
+                        .cloned()
+                        .collect();
+                    if !conflicts.is_empty() {
+                        ui.label(
+                            egui::RichText::new(crate::i18n::tr("Another device changed this photo at the same time. Choose what to keep:"))
+                                .color(t.caution),
+                        );
+                    }
+                    for conflict in &conflicts {
+                        ui.label(egui::RichText::new(crate::cloud_conflicts::field_label(conflict["field"].as_str().unwrap_or_default())).strong());
+                        if conflict["field"] == "develop" {
+                            ui.label(crate::i18n::tr("Competing edits are preserved in Versions."));
+                            if text_button(ui, "cloudConflictVersions", crate::i18n::tr("Open Versions"), false).clicked() {
+                                let _ = app.run("panel.versions", json!({}));
+                            }
                         }
-                        if text_button(ui, "cloudKeepCurrent", crate::i18n::tr("Keep current edit"), false).clicked()
-                            && let Err(error) = app.run("cloud.resolveConflict", json!({"entity":entity,"field":"develop","revision":revision}))
-                        {
-                            app.toast(ui.ctx(), error);
-                        }
+                        crate::cloud_conflicts::choices(app, ui, conflict);
                     }
                 } else if text_button(ui, "cloudSyncSetup", crate::i18n::tr("Enable synchronization…"), false).clicked() {
                     let connection = app.session.catalog.asset(asset_id).map(|asset| asset.original.remote.connection.clone());

@@ -21,6 +21,7 @@ pub(crate) fn needs_attention(data: &Value) -> bool {
         || data["conflicts"].as_array().is_some_and(|items| !items.is_empty())
         || data["structuralConflicts"].as_array().is_some_and(|items| !items.is_empty())
         || data["capacityWarnings"].as_array().is_some_and(|items| !items.is_empty())
+        || data["publicationBlocked"].is_string()
 }
 fn verified_scan(data: &Value) -> bool {
     data["health"]["sync"]["lastSuccessfulRemoteScan"].is_object() && matches!(data["health"]["sync"]["state"].as_str(), Some("healthy" | "checking"))
@@ -31,6 +32,21 @@ pub(crate) fn retry_text(health: &Value) -> Option<String> {
             .as_u64()
             .map_or_else(|| crate::i18n::tr("Retrying synchronization…").to_owned(), |n| crate::i18n::tr_format!("Retrying in {n} s", n = n))
     })
+}
+
+/// How long ago, in the largest whole unit: "just now", "40 s ago", "5 min ago", "3 h ago", "2 d ago".
+pub(crate) fn ago(seconds: u64) -> String {
+    match seconds {
+        0..5 => crate::i18n::tr("just now").to_owned(),
+        5..60 => crate::i18n::tr_format!("{n} s ago", n = seconds),
+        60..3600 => crate::i18n::tr_format!("{n} min ago", n = seconds / 60),
+        3600..86400 => crate::i18n::tr_format!("{n} h ago", n = seconds / 3600),
+        _ => crate::i18n::tr_format!("{n} d ago", n = seconds / 86400),
+    }
+}
+/// "Label: value", with the label translated; counts read the same in every language this way.
+pub(crate) fn count(label: &str, value: impl std::fmt::Display) -> String {
+    format!("{}: {value}", crate::i18n::tr(label))
 }
 
 pub fn bytes(n: u64) -> String {
@@ -63,7 +79,8 @@ pub(super) fn capacity(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value,
     let used = usage["stateBytes"].as_u64().unwrap_or(0);
     let limit = usage["stateLimitBytes"].as_u64().unwrap_or(64 << 20);
     ui.label(format!(
-        "Metadata: {:.1} / {:.0} MiB ({:.1}%)",
+        "{}: {:.1} / {:.0} MiB ({:.1}%)",
+        crate::i18n::tr("Metadata"),
         used as f64 / 1_048_576.,
         limit as f64 / 1_048_576.,
         usage["statePercent"].as_f64().unwrap_or(0.)
@@ -80,9 +97,9 @@ pub(super) fn capacity(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value,
             ui.label(format!("{}: {} / {}", crate::i18n::tr(label), usage[count].as_u64().unwrap_or(0), usage[max].as_u64().unwrap_or(0)));
         }
         ui.label(format!(
-            "{} historical full receipts · {} archive roots",
-            usage["historicalReceipts"].as_u64().unwrap_or(0),
-            usage["archiveRoots"].as_u64().unwrap_or(0)
+            "{} · {}",
+            count("Historical full receipts", usage["historicalReceipts"].as_u64().unwrap_or(0)),
+            count("Archive roots", usage["archiveRoots"].as_u64().unwrap_or(0))
         ));
     }
     if let Some(warnings) = data.get("capacityWarnings").and_then(Value::as_array) {
@@ -112,8 +129,12 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     ui.set_min_width(290.);
     ui.set_max_width(320.);
     ui.label(egui::RichText::new(crate::i18n::tr("CLOUD LIBRARY")).font(t.semibold(11.)).color(t.text_label));
-    ui.label(format!("{} cloud photos · {} albums", summary["cloudPhotos"].as_u64().unwrap_or(0), summary["albums"].as_u64().unwrap_or(0)));
-    ui.label(format!("{} of managed originals", bytes(summary["originalBytes"].as_u64().unwrap_or(0)))).on_hover_text(crate::i18n::tr(
+    ui.label(format!(
+        "{} · {}",
+        count("Cloud photos", summary["cloudPhotos"].as_u64().unwrap_or(0)),
+        count("Albums", summary["albums"].as_u64().unwrap_or(0))
+    ));
+    ui.label(count("Managed originals", bytes(summary["originalBytes"].as_u64().unwrap_or(0)))).on_hover_text(crate::i18n::tr(
         "Known original data in this catalog; shared originals count once. This is not the storage provider's quota or total bucket usage.",
     ));
     let paused = data["paused"] == true;
@@ -125,6 +146,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let halted = data["health"]["sync"]["pollingHalted"] == true;
     let receipts = data["health"]["receipts"]["pending"].as_u64().unwrap_or(0);
     let structural = data["structuralConflicts"].as_array().map_or(0, Vec::len);
+    let fields = data["conflicts"].as_array().map_or(0, Vec::len);
+    let blocked_publication = data["publicationBlocked"].as_str();
     ui.separator();
     ui.label(
         egui::RichText::new(crate::i18n::tr(if migrating {
@@ -133,6 +156,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             "Syncing paused"
         } else if data["health"]["sync"]["state"] == "retrying" {
             "Retrying synchronization…"
+        } else if blocked_publication.is_some() {
+            "Publishing paused by the cloud library"
         } else if needs_attention(data) {
             "Sync needs attention"
         } else if waiting > 0
@@ -152,12 +177,27 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         }))
         .font(t.semibold(14.)),
     );
-    ui.label(format!("{waiting} files waiting · {active} uploading"));
+    if let Some(reason) = blocked_publication {
+        ui.label(egui::RichText::new(reason).size(11.).color(t.caution));
+        ui.label(
+            egui::RichText::new(crate::i18n::tr(
+                "Changes from other devices still arrive. Your changes stay on this device and publish when the library allows it.",
+            ))
+            .size(11.)
+            .color(t.text_dim),
+        );
+    }
+    ui.label(format!("{} · {}", count("Files waiting", waiting), count("Uploading", active)));
     if let Some(n) = data["preparingFiles"].as_u64().filter(|n| *n > 0) {
-        ui.label(format!("{n} import batches preparing"));
+        ui.label(count("Import batches preparing", n));
     }
     if halted {
         ui.label(egui::RichText::new(crate::i18n::tr("Automatic checking stopped after an error.")).color(t.caution));
+    }
+    // What happened, then what to do about it.
+    let sync_error = data["health"]["sync"]["lastError"]["message"].as_str();
+    if let Some(message) = sync_error {
+        ui.label(egui::RichText::new(message).size(11.).color(t.caution));
     }
     if let Some(text) = retry_text(&data["health"]["sync"]) {
         ui.label(text);
@@ -177,7 +217,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         ui.label(egui::RichText::new(crate::i18n::tr("No successful remote check in this session.")).size(11.).color(t.text_dim));
     }
     if let Some(n) = data["health"]["sync"]["secondsSinceLastRemoteScan"].as_u64() {
-        ui.label(egui::RichText::new(crate::i18n::tr_format!("Last remote check: {n} s ago", n = n)).size(11.).color(t.text_dim));
+        ui.label(egui::RichText::new(count("Last remote check", ago(n))).size(11.).color(t.text_dim));
     }
     if data["health"]["offline"]["persistentCache"]["temporaryBlobs"].as_u64().unwrap_or(0) > 0 {
         ui.colored_label(t.caution, crate::i18n::tr("Some downloads are available for this session only."));
@@ -188,13 +228,17 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         }
     }
     if receipts > 0 {
-        ui.label(format!("{}: {receipts}", crate::i18n::tr("Local upload records waiting")));
+        ui.label(count("Local upload records waiting", receipts));
     }
     if structural > 0 {
-        ui.label(egui::RichText::new(format!("{}: {structural}", crate::i18n::tr("Album or stack choices need attention"))).color(t.caution));
+        ui.label(egui::RichText::new(count("Album or stack choices need attention", structural)).color(t.caution));
+    }
+    if fields > 0 {
+        ui.label(egui::RichText::new(count("Conflicting edits to choose between", fields)).color(t.caution))
+            .on_hover_text(crate::i18n::tr("Choose which edit to keep in Cloud Synchronization. Every competing value is retained until then."));
     }
     if failed > 0 {
-        ui.label(egui::RichText::new(format!("{failed} files need upload retry")).color(t.caution));
+        ui.label(egui::RichText::new(count("Files needing upload retry", failed)).color(t.caution));
     }
     if let Some(issues) = data["health"]["imports"]["failed"].as_array() {
         for issue in issues.iter().take(3) {
@@ -229,9 +273,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                 );
             }
         }
-        let count = summary["blockedImportCount"].as_u64().unwrap_or(blocked.len() as u64);
-        if count > 3 {
-            ui.label(format!("{} more blocked imports; select a photo for details", count.saturating_sub(3)));
+        let all = summary["blockedImportCount"].as_u64().unwrap_or(blocked.len() as u64);
+        if all > 3 {
+            ui.label(format!("{} {}", count("More blocked imports", all.saturating_sub(3)), crate::i18n::tr("Select a photo for details.")));
         }
     }
     if let Some(resource) = data["health"]["uploads"]["activity"]["firstFailedResource"].as_str()
@@ -252,13 +296,13 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         );
     }
     if summary["issues"].as_u64().unwrap_or(0) > 0 {
-        ui.label(format!("{} photos with sync issues", summary["issues"].as_u64().unwrap_or(0)));
+        ui.label(count("Photos with sync issues", summary["issues"].as_u64().unwrap_or(0)));
     }
-    ui.label(format!("{} queued data", bytes(summary["queuedBytes"].as_u64().unwrap_or(0)))).on_hover_text(crate::i18n::tr(
+    ui.label(count("Queued data", bytes(summary["queuedBytes"].as_u64().unwrap_or(0)))).on_hover_text(crate::i18n::tr(
         "Originals, previews and sidecars awaiting verification. Existing multipart transfers resume from saved parts.",
     ));
     let changes = summary["pendingChanges"].as_u64().unwrap_or(0);
-    ui.label(format!("{changes} library changes waiting to sync"));
+    ui.label(count("Library changes waiting to sync", changes));
     capacity(app, ui, data, false);
     action(
         app,
@@ -303,10 +347,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             }
         }
     }
-    if let Some(error) = data["error"]
-        .as_str()
-        .filter(|error| !paused && !blocked.is_some_and(|items| items.iter().any(|item| item["reason"].as_str() == Some(error))))
-    {
+    if let Some(error) = data["error"].as_str().filter(|error| {
+        !paused && sync_error != Some(*error) && !blocked.is_some_and(|items| items.iter().any(|item| item["reason"].as_str() == Some(error)))
+    }) {
         ui.label(egui::RichText::new(error).size(11.).color(t.caution));
     }
     if let Some(error) = summary["firstUploadError"].as_str().filter(|error| {

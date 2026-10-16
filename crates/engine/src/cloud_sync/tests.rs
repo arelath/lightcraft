@@ -1212,3 +1212,61 @@ fn logical_restore_guards_different_retained_fields_instead_of_recertifying_an_o
     assert!(a.redo_step().unwrap_err().to_string().contains("received another revision"));
     assert_eq!(a.catalog.to_snapshot(), before);
 }
+
+#[test]
+fn any_field_conflict_lists_named_choices_and_keeping_another_value_resolves_it_everywhere() {
+    let (mut a, _) = session();
+    let (mut b, _) = peer("device-b");
+    deliver(&a, &mut b, 1);
+    a.commit("rating", Op::SetRating { id: PhotoId(1), rating: 2 }).unwrap();
+    b.commit("rating", Op::SetRating { id: PhotoId(1), rating: 5 }).unwrap();
+    deliver(&a, &mut b, 2);
+    deliver(&b, &mut a, 2);
+    let status = a.execute("cloud.syncStatus", &json!({})).unwrap();
+    let entity = format!("photo:{}", a.catalog.cloud_identity("photo:1").unwrap());
+    let conflict = status["conflicts"].as_array().unwrap().iter().find(|c| c["entity"] == entity && c["field"] == "rating").unwrap().clone();
+    assert_eq!(conflict["name"], a.catalog.photo(PhotoId(1)).unwrap().file_name.as_str());
+    let choices = conflict["choices"].as_array().unwrap();
+    assert_eq!(choices.len(), 2);
+    assert_eq!(choices[0]["current"], true, "the displayed value is listed first");
+    assert_eq!(choices.iter().filter(|c| c["thisDevice"] == true).count(), 1);
+    let shown = a.catalog.photo(PhotoId(1)).unwrap().rating;
+    let other = choices.iter().find(|c| c["current"] == false).unwrap();
+    assert_eq!(other["kind"], "value");
+    assert_ne!(other["preview"], shown.to_string());
+    let overview = a.execute("cloud.overview", &json!({})).unwrap();
+    assert_eq!(overview["health"]["conflicts"]["fields"], 1);
+    a.execute("cloud.resolveConflict", &json!({"entity":entity,"field":"rating","revision":other["revision"]})).unwrap();
+    assert_eq!(a.catalog.photo(PhotoId(1)).unwrap().rating.to_string(), other["preview"].as_str().unwrap());
+    assert!(a.execute("cloud.syncStatus", &json!({})).unwrap()["conflicts"].as_array().unwrap().is_empty());
+    deliver(&a, &mut b, 3);
+    assert!(b.execute("cloud.syncStatus", &json!({})).unwrap()["conflicts"].as_array().unwrap().is_empty());
+    assert_eq!(a.catalog.photo(PhotoId(1)).unwrap().rating, b.catalog.photo(PhotoId(1)).unwrap().rating);
+}
+
+#[test]
+fn deleted_photo_list_is_computed_once_per_revision_and_capped_with_a_full_count() {
+    let (mut s, _) = session();
+    let template = (**s.catalog.photo(PhotoId(1)).unwrap()).clone();
+    let extra = crate::cmd::cloud_sync::MAX_DELETED_LISTED + 4;
+    for n in 2..=(extra as u64 + 1) {
+        let mut photo = template.clone();
+        photo.id = PhotoId(n);
+        photo.file_name = format!("photo-{n}.jpg");
+        s.commit("add", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+    }
+    for n in 2..=(extra as u64 + 1) {
+        s.commit("delete", Op::RemovePhoto { id: PhotoId(n) }).unwrap();
+    }
+    let status = s.execute("cloud.syncStatus", &json!({})).unwrap();
+    assert_eq!(status["deletedPhotoCount"], extra);
+    let listed = status["deletedPhotos"].as_array().unwrap();
+    assert_eq!(listed.len(), crate::cmd::cloud_sync::MAX_DELETED_LISTED);
+    assert!(listed[0]["name"].as_str().unwrap().starts_with("photo-"));
+    s.cloud_conflicts_cache.as_mut().unwrap().2["reuseMarker"] = json!(true);
+    s.execute("cloud.syncStatus", &json!({})).unwrap();
+    assert_eq!(s.cloud_conflicts_cache.as_ref().unwrap().2["reuseMarker"], true, "unchanged revision reuses the cached lists");
+    let entity = listed[0]["entity"].as_str().unwrap().to_owned();
+    s.execute("cloud.restoreDeleted", &json!({"entity":entity})).unwrap();
+    assert_eq!(s.execute("cloud.syncStatus", &json!({})).unwrap()["deletedPhotoCount"], extra - 1);
+}

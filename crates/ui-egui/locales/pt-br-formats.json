@@ -248,12 +248,15 @@
   "{n} added to Apple Photos": "{n} adicionadas ao Fotos da Apple",
   "{n} photos opened for editing; each is stacked with its original": "{n} fotos abertas para edição; cada uma está empilhada com a original",
   "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "Ativar a sincronização de fotos e álbuns existentes ou editar uma entidade exige no máximo {limit} campos alterados e 1 MiB por entidade. Os metadados do álbum e suas associações gerenciadas compartilham esse limite; divida álbuns grandes antes da configuração.",
-  "Last remote check: {n} s ago": "Última verificação remota: há {n} s",
   "{used} of {total} used": "{used} de {total} usados",
   "{free} free": "{free} livres",
   "Store a copy of all Smart previews locally on “{drive}”": "Armazenar uma cópia de todas as pré-visualizações inteligentes localmente em “{drive}”",
   "Keys are saved on this computer in the AWS credentials file, as profile “{profile}”. They are never stored in the catalog or the cloud.": "As chaves são salvas neste computador no arquivo de credenciais da AWS, como perfil “{profile}”. Elas nunca são armazenadas no catálogo nem na nuvem.",
   "Connected. Found {n} libraries in this folder.": "Conectado. Bibliotecas encontradas nesta pasta: {n}.",
   "Connected to “{bucket}”. Choose the cloud library for this catalog.": "Conectado a “{bucket}”. Escolha a biblioteca na nuvem para este catálogo.",
-  "Join library {id}… ({kind})": "Entrar na biblioteca {id}… ({kind})"
+  "Join library {id}… ({kind})": "Entrar na biblioteca {id}… ({kind})",
+  "{n} s ago": "há {n} s",
+  "{n} min ago": "há {n} min",
+  "{n} h ago": "há {n} h",
+  "{n} d ago": "há {n} d"
 }

@@ -366,3 +366,90 @@ fn cloud_migration_dialog_relies_on_library_maintenance_and_cancel_keeps_pause()
         &[json!({"plan":"appendLog","writersStopped":false,"wait":false}), json!({"plan":"appendLog","writersStopped":true,"wait":false})]
     );
 }
+
+#[test]
+fn cloud_popup_says_publishing_is_blocked_and_counts_field_conflicts() {
+    let services = Services {
+        cloud_action: Some(Box::new(|_, id, _| {
+            (id == "cloud.overview").then(|| {
+                Ok(json!({"summary":{"cloudPhotos":3,"albums":1,"pendingChanges":2},"paused":false,"syncEnabled":true,"canResume":true,"tasks":[],
+                    "health":{"sync":{"state":"healthy","lastSuccessfulRemoteScan":{"atUnixMs":1000},"secondsSinceLastRemoteScan":7200},
+                        "conflicts":{"fields":1}},
+                    "conflicts":[{"entity":"photo:a","field":"rating"}],
+                    "publicationBlocked":"another device is upgrading this cloud library; receiving continues and local changes wait"}))
+            })
+        })),
+        ..Default::default()
+    };
+    let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::with_demo(), services), [1400., 1000.], 1.);
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(h.request("ui.clickWidget", json!({"id":"icon:cloud"}), T)["ok"], true);
+    for _ in 0..4 {
+        h.step();
+    }
+    let text = h.view.painted_text();
+    for label in [
+        "Publishing paused by the cloud library",
+        "another device is upgrading this cloud library",
+        "Changes from other devices still arrive.",
+        "Conflicting edits to choose between: 1",
+        "Cloud photos: 3",
+        "Library changes waiting to sync: 2",
+        "Last remote check: 2 h ago",
+    ] {
+        assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
+    }
+    assert!(!text.iter().any(|value| value == "Up to date"));
+}
+
+#[test]
+fn cloud_sync_dialog_keeps_a_chosen_conflict_value_and_bounds_the_recover_list() {
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let deleted: Vec<Value> = (0..200).map(|n| json!({"entity":format!("photo:d{n}"),"name":format!("gone-{n}.jpg")})).collect();
+    let services = Services {
+        cloud_action: Some(Box::new(move |_, id, params| match id {
+            "cloud.connections" => Some(Ok(json!({"connections":[]}))),
+            "cloud.syncStatus" => Some(Ok(json!({
+                "conflicts":[{"entity":"photo:p1","field":"rating","name":"beach.jpg","choices":[
+                    {"revision":"dev-a-3","current":true,"thisDevice":true,"kind":"value","preview":"2"},
+                    {"revision":"dev-b-4","current":false,"thisDevice":false,"kind":"value","preview":"5"}]}],
+                "deletedPhotos":deleted,"deletedPhotoCount":250
+            }))),
+            "cloud.resolveConflict" => {
+                recorded.lock().unwrap().push(params.clone());
+                Some(Ok(json!({})))
+            }
+            _ => None,
+        })),
+        ..Default::default()
+    };
+    let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::with_demo(), services), [1400., 1000.], 1.);
+    h.step();
+    let state = lightcraft_catalog::replication::SyncState::new("library".into(), "device".into(), "personal".into()).unwrap();
+    h.app.session.apply_received(lightcraft_catalog::Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+    h.app.run("dialog.cloudSync", json!({})).unwrap();
+    for _ in 0..4 {
+        h.step();
+    }
+    let text = h.view.painted_text();
+    for label in [
+        "Conflicting edits",
+        "beach.jpg · Rating",
+        "★★ · This device · shown now",
+        "★★★★★ · Another device",
+        "Deleted cloud photos: 250",
+        "Not listed here: 50",
+    ] {
+        assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
+    }
+    let painted = text.iter().filter(|value| value.starts_with("gone-")).count();
+    assert!(painted > 0 && painted < 200, "the Recover list scrolls instead of painting every row: {painted}");
+    assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudKeepRevision:photo:p1:rating:dev-b-4"}), T)["ok"], true);
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(*calls.lock().unwrap(), vec![json!({"entity":"photo:p1","field":"rating","revision":"dev-b-4"})]);
+}

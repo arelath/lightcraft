@@ -61,6 +61,9 @@ struct Data {
     last_audit: f64,
     health: lightcraft_engine::cloud_status::PollHealth,
     media_health: lightcraft_engine::cloud_status::ResourceHealth,
+    /// Why the last completed scan could not publish (maintenance, a moved library, a newer
+    /// writer); receiving continues and local changes wait until it clears.
+    publication_blocked: Option<String>,
 }
 #[derive(Clone)]
 pub struct Host {
@@ -316,6 +319,7 @@ impl Host {
         status["health"]["secondsSinceLastRemoteScan"] = json!(data.health.age_seconds(timestamp_ms()));
         status["cache"] = self.memory.status();
         status["offline"] = self.cache.view(s);
+        status["publicationBlocked"] = json!(data.publication_blocked);
         status["savePending"] = json!(self.files.is_dirty());
         status["saveError"] = json!(self.files.error());
         Ok(status)
@@ -338,6 +342,8 @@ impl Host {
         out["health"]["sync"]["secondsSinceLastRemoteScan"] = json!(data.health.age_seconds(timestamp_ms()));
         out["health"]["media"] = data.media_health.view();
         out["health"]["offline"] = self.cache.view(s);
+        out["publicationBlocked"] = json!(data.publication_blocked);
+        out["health"]["publicationBlocked"] = json!(data.publication_blocked);
         if let Some(message) = out["health"]["sync"]["lastError"]["message"].as_str() {
             out["error"] = json!(message);
         } else if let Some(failures) = out["health"]["media"]["failures"].as_object()
@@ -535,6 +541,13 @@ impl Host {
                                 }
                                 _ => {}
                             }
+                            if let Ok(value) = &result {
+                                data.publication_blocked = value.get("publicationBlocked").and_then(Value::as_str).map(str::to_owned);
+                            }
+                        }
+                        // Maintenance normally lasts minutes: poll it less often than ordinary changes.
+                        if data.publication_blocked.is_some() && result.is_ok() {
+                            delay = 60;
                         }
                         data.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(delay));
                     }

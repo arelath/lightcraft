@@ -8,6 +8,7 @@
 
 pub mod album_picker;
 pub mod brush_live;
+mod cloud_conflicts;
 mod cloud_retention;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_setup;

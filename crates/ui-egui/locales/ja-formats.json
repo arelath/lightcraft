@@ -248,12 +248,15 @@
   "{n} added to Apple Photos": "{n}件をAppleの写真に追加しました",
   "{n} photos opened for editing; each is stacked with its original": "{n}枚の写真を編集用に開きました。それぞれ元の写真とスタックされています",
   "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "既存の写真やアルバムの同期を有効にする場合、または1つの項目を編集する場合、項目ごとの変更は最大{limit}フィールド、1 MiBです。アルバムのメタデータと管理対象写真の所属情報はこの枠を共有します。設定前に大きなアルバムを分割してください。",
-  "Last remote check: {n} s ago": "最終のリモート確認: {n} 秒前",
   "{used} of {total} used": "{total} 中 {used} 使用",
   "{free} free": "空き {free}",
   "Store a copy of all Smart previews locally on “{drive}”": "すべてのスマートプレビューのコピーを「{drive}」に保存",
   "Keys are saved on this computer in the AWS credentials file, as profile “{profile}”. They are never stored in the catalog or the cloud.": "キーはこのコンピューターの AWS 認証情報ファイルにプロファイル「{profile}」として保存されます。カタログやクラウドには保存されません。",
   "Connected. Found {n} libraries in this folder.": "接続しました。このフォルダーに {n} 個のライブラリがあります。",
   "Connected to “{bucket}”. Choose the cloud library for this catalog.": "「{bucket}」に接続しました。このカタログのクラウドライブラリを選択してください。",
-  "Join library {id}… ({kind})": "ライブラリ {id}… に参加（{kind}）"
+  "Join library {id}… ({kind})": "ライブラリ {id}… に参加（{kind}）",
+  "{n} s ago": "{n} 秒前",
+  "{n} min ago": "{n} 分前",
+  "{n} h ago": "{n} 時間前",
+  "{n} d ago": "{n} 日前"
 }

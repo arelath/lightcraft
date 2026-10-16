@@ -248,12 +248,15 @@
   "{n} added to Apple Photos": "Додано до Apple Фото: {n}",
   "{n} photos opened for editing; each is stacked with its original": "Відкрито для редагування фото: {n}; кожне об’єднано в стос з оригіналом",
   "Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.": "Увімкнення синхронізації наявних фотографій і альбомів або редагування одного об’єкта допускає щонайбільше {limit} змінених полів і 1 MiB на об’єкт. Метадані альбому та записи про належність керованих фотографій мають спільний ліміт; розділіть великі альбоми перед налаштуванням.",
-  "Last remote check: {n} s ago": "Остання перевірка хмари: {n} с тому",
   "{used} of {total} used": "Зайнято {used} з {total}",
   "{free} free": "Вільно {free}",
   "Store a copy of all Smart previews locally on “{drive}”": "Зберігати копію всіх смарт-переглядів локально на «{drive}»",
   "Keys are saved on this computer in the AWS credentials file, as profile “{profile}”. They are never stored in the catalog or the cloud.": "Ключі зберігаються на цьому комп’ютері у файлі облікових даних AWS як профіль «{profile}». Вони ніколи не потрапляють у каталог чи хмару.",
   "Connected. Found {n} libraries in this folder.": "Підключено. Бібліотек у цій папці: {n}.",
   "Connected to “{bucket}”. Choose the cloud library for this catalog.": "Підключено до «{bucket}». Виберіть хмарну бібліотеку для цього каталогу.",
-  "Join library {id}… ({kind})": "Приєднатися до бібліотеки {id}… ({kind})"
+  "Join library {id}… ({kind})": "Приєднатися до бібліотеки {id}… ({kind})",
+  "{n} s ago": "{n} с тому",
+  "{n} min ago": "{n} хв тому",
+  "{n} h ago": "{n} год тому",
+  "{n} d ago": "{n} дн. тому"
 }

@@ -16,15 +16,17 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
                 fields
                     .iter()
                     .filter(|(_, register)| register.0.values().next().is_some_and(|first| register.0.values().any(|value| value != first)))
-                    .map(move |(field, register)| json!({"entity":entity,"field":field,"revisions":register.0.keys().collect::<Vec<_>>()}))
+                    .map(move |(field, register)| conflict_view(state, entity, field, register))
             })
             .collect();
+        let deleted = deleted_photos(state);
         let utilization = serde_json::to_value(state.utilization()?).map_err(|e| crate::EngineError::Other(e.to_string()))?;
         s.cloud_conflicts_cache = Some((
             token,
             s.catalog.revision,
             json!({"conflicts":conflicts,"structuralConflicts":crate::cloud_sync::structural_conflicts(&s.catalog),
-                "warnings":utilization.get("warnings"),"utilization":utilization}),
+                "warnings":utilization.get("warnings"),"utilization":utilization,
+                "deletedPhotos":deleted.0,"deletedPhotoCount":deleted.1}),
         ));
     }
     let conflicts = s.cloud_conflicts_cache.as_ref().map(|(_, _, value)| value);
@@ -51,9 +53,81 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
         "consumedCheckpoints":state.append.as_ref().map(|p|p.scan.checkpoints.len()),
         "pending":state.pending.len(),"generation":state.generation,"cursor":state.cursor,"conflicts":conflicts.and_then(|v|v.get("conflicts")),
         "structuralConflicts":conflicts.and_then(|v|v.get("structuralConflicts")),
+        "deletedPhotos":conflicts.and_then(|v|v.get("deletedPhotos")),"deletedPhotoCount":conflicts.and_then(|v|v.get("deletedPhotoCount")),
         "utilization":conflicts.and_then(|v|v.get("utilization")),"capacityWarnings":conflicts.and_then(|v|v.get("warnings")),
         "running":running,"reports":reports,
         "transportAvailable":cfg!(not(target_arch="wasm32"))}))
+}
+/// Retained conflict choices listed per field, so a long-lived conflict cannot grow the status.
+pub const MAX_CONFLICT_CHOICES: usize = 8;
+/// Deleted photos listed for recovery; `deletedPhotoCount` reports the full number.
+pub const MAX_DELETED_LISTED: usize = 200;
+const PREVIEW_CHARS: usize = 80;
+
+/// What a person needs to pick between the retained values of one field: the entity's name,
+/// and each value's short preview, newest first with the displayed (winning) value at the top.
+fn conflict_view(
+    state: &lightcraft_catalog::replication::SyncState,
+    entity: &str,
+    field: &str,
+    register: &lightcraft_catalog::replication::Register,
+) -> Value {
+    let winner = state.winning(entity, field).map(|(stamp, _)| stamp.id());
+    let sequence = |revision: &str| revision.rsplit_once('-').and_then(|(_, n)| n.parse::<u64>().ok()).unwrap_or(0);
+    let mut revisions: Vec<(&String, &Value)> = register.0.iter().collect();
+    revisions.sort_by_key(|(revision, _)| (winner.as_deref() != Some(revision.as_str()), std::cmp::Reverse(sequence(revision))));
+    let choices: Vec<_> = revisions
+        .iter()
+        .take(MAX_CONFLICT_CHOICES)
+        .map(|(revision, value)| {
+            let (kind, preview) = preview(value);
+            json!({"revision":revision,"current":winner.as_deref()==Some(revision.as_str()),
+                "thisDevice":revision.rsplit_once('-').is_some_and(|(device, _)| device == state.device),
+                "kind":kind,"preview":preview})
+        })
+        .collect();
+    json!({"entity":entity,"field":field,"name":entity_name(state, entity),"revisions":register.0.keys().collect::<Vec<_>>(),
+        "choices":choices,"moreChoices":register.0.len().saturating_sub(MAX_CONFLICT_CHOICES)})
+}
+/// `(kind, text)`: kind is "none", "settings" (an object: develop settings and the like,
+/// too large to preview) or "value" with a short single-line text.
+fn preview(value: &Value) -> (&'static str, String) {
+    let text = match value {
+        Value::Null => return ("none", String::new()),
+        Value::Object(_) => return ("settings", String::new()),
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items.iter().map(|item| item.as_str().map_or_else(|| item.to_string(), str::to_owned)).collect::<Vec<_>>().join(", "),
+        other => other.to_string(),
+    };
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut short: String = line.chars().take(PREVIEW_CHARS).collect();
+    if line.chars().count() > PREVIEW_CHARS {
+        short.push('…');
+    }
+    ("value", short)
+}
+/// A photo's file name or an album's name as currently shown; None when neither is known.
+fn entity_name(state: &lightcraft_catalog::replication::SyncState, entity: &str) -> Option<String> {
+    let field = match entity.split_once(':')?.0 {
+        "photo" => "file_name",
+        "album" => "name",
+        _ => return None,
+    };
+    state.winning(entity, field).and_then(|(_, value)| value.as_str()).map(str::to_owned)
+}
+/// Retained deleted cloud photos that `cloud.restoreDeleted` can recover, capped for display.
+fn deleted_photos(state: &lightcraft_catalog::replication::SyncState) -> (Vec<Value>, usize) {
+    let mut listed = Vec::new();
+    let mut count = 0usize;
+    for entity in state.documents.keys().filter(|entity| entity.starts_with("photo:")) {
+        if state.winning(entity, "deleted").is_some_and(|(_, value)| value.as_bool() == Some(true)) {
+            count = count.saturating_add(1);
+            if listed.len() < MAX_DELETED_LISTED {
+                listed.push(json!({"entity":entity,"name":entity_name(state, entity)}));
+            }
+        }
+    }
+    (listed, count)
 }
 fn preparing_migration(s: &Session) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
