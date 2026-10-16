@@ -44,6 +44,14 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
     let root = core::root(&provider.connection.prefix, &local.library).map_err(ce)?;
     let manifest_key = core::manifest_key(&provider.connection.prefix, &local.library).map_err(ce)?;
     let manifest = core::manifest(&local.library).map_err(ce)?;
+    // Cooperative barrier: read the latest library control before any write.
+    let (control_keys, _) = scan(provider, list(core::control::prefix(&provider.connection.prefix, &local.library).map_err(ce)?, false)).await?;
+    let mut records = Vec::new();
+    for key in core::control::latest(&control_keys) {
+        let bytes = get(provider, &key, core::control::MAX_CONTROL_BYTES).await?;
+        records.push((key, bytes));
+    }
+    let blocked = core::control::publication(core::control::effective(&provider.connection.prefix, &local.library, &records))?;
     if local.require_existing {
         let existing = provider.request("GET", &manifest_key, None, None, None, 16 << 10).await?;
         if existing.status == 404 {
@@ -52,7 +60,7 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
         if existing.status != 200 || existing.bytes != manifest {
             return Err("append manifest could not be verified; local work retained".into());
         }
-    } else {
+    } else if blocked.is_none() {
         provider.put_immutable(&manifest_key, &manifest).await?;
     }
     let mut planner = core::Planner::new(local).map_err(ce)?;
@@ -106,8 +114,9 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
     audit_history(provider, &mut planner, &root, audit || checkpoint || local.append.is_none(), &fetched).await?;
     planner.drain().map_err(ce)?;
     super::history::hydrate(provider, &mut planner.remote, local, &mut planner.proofs).await?;
-    let mut pending: Vec<_> = local.pending.values().collect();
+    let mut pending: Vec<_> = if blocked.is_some() { Vec::new() } else { local.pending.values().collect() };
     pending.sort_by_key(|m| m.revision.clone());
+    let checkpoint = checkpoint && blocked.is_none();
     loop {
         let mut changed = false;
         for m in &pending {
@@ -138,7 +147,11 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
         p.scan = planner.scan.clone();
     }
     p.remote = super::history::certify(provider, local, &p.remote, &mut planner.proofs).await?;
-    Ok(Outcome::append(p, planner.acknowledged(local).map_err(ce)?))
+    let acknowledged = planner.acknowledged(local).map_err(ce)?;
+    Ok(match blocked {
+        Some(blocked) => Outcome::append_blocked(p, acknowledged, blocked),
+        None => Outcome::append(p, acknowledged),
+    })
 }
 
 pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, CloudFailure> {

@@ -31,6 +31,10 @@ fn hash(s: &str) -> bool {
 fn identifier(s: &str) -> bool {
     lightcraft_catalog::assets::identifier(s)
 }
+/// A canonical post-rebase epoch directory (`catalog/epochs/<n>`, n >= 2; see `cloud_control::epoch_root`).
+fn epoch(s: &str) -> bool {
+    s.parse::<u64>().is_ok_and(|epoch| epoch >= 2 && epoch.to_string() == s)
+}
 fn write_limit(key: &str, digest: &str, immutable: bool) -> Option<u64> {
     let parts: Vec<_> = key.split('/').collect();
     let named = format!("{digest}.json");
@@ -38,6 +42,8 @@ fn write_limit(key: &str, digest: &str, immutable: bool) -> Option<u64> {
         ["catalog", "head.json"] if !immutable => Some(16 << 10),
         ["catalog", "changes", file] if !immutable && *file == named => Some(2 << 20),
         ["catalog", "checkpoints", file] if !immutable && *file == named => Some(64 << 20),
+        ["catalog", "epochs", n, "changes", file] if !immutable && epoch(n) && *file == named => Some(2 << 20),
+        ["catalog", "epochs", n, "checkpoints", file] if !immutable && epoch(n) && *file == named => Some(64 << 20),
         ["sync-v2", library, "receipts", file] if identifier(library) && *file == named => Some(1024),
         ["sync-v2", library, "manifest", file] if immutable && identifier(library) && *file == named => Some(64 << 10),
         ["sync-v2", library, "checkpoints", author, file] if immutable && identifier(library) && identifier(author) && *file == named => {
@@ -53,7 +59,7 @@ fn write_limit(key: &str, digest: &str, immutable: bool) -> Option<u64> {
 }
 fn listing_scope(prefix: &str) -> bool {
     let parts: Vec<_> = prefix.split('/').collect();
-    matches!(parts.as_slice(), ["sync-v2", library, "ops" | "checkpoints", ""] if identifier(library))
+    matches!(parts.as_slice(), ["sync-v2", library, "ops" | "checkpoints" | "control", ""] if identifier(library))
         || matches!(parts.as_slice(), ["sync-v2", library, "ops", author, ""] if identifier(library) && identifier(author))
 }
 // SHA-256 is exactly 32 bytes. This small encoder needs no browser or SDK dependency.
@@ -265,6 +271,19 @@ mod tests {
         assert!(c.authorize_browser(&r, 300).is_ok());
         r.condition = Some("\"etag\"".into());
         assert!(c.authorize_browser(&r, 300).is_err());
+        // Rebased libraries publish into canonical epoch namespaces (CR.42).
+        r.condition = Some("*".into());
+        for (key, ok) in [
+            (format!("library/catalog/epochs/2/changes/{digest}.json"), true),
+            (format!("library/catalog/epochs/17/checkpoints/{digest}.json"), true),
+            (format!("library/catalog/epochs/1/changes/{digest}.json"), false),
+            (format!("library/catalog/epochs/02/changes/{digest}.json"), false),
+            (format!("library/catalog/epochs/x/changes/{digest}.json"), false),
+            ("library/catalog/epochs/2/head.json".to_owned(), false),
+        ] {
+            r.key = key;
+            assert_eq!(c.authorize_browser(&r, 300).is_ok(), ok, "{}", r.key);
+        }
     }
     #[test]
     fn signer_rejects_media_writes_deletes_unscoped_lists_and_contradictory_fields() {
@@ -279,6 +298,8 @@ mod tests {
         let mut r = request(
             json!({"connection":"personal","method":"GET","key":"","operation":"list","list":{"prefix":"library/sync-v2/lib/ops/","delimiter":true}}),
         );
+        assert!(c.authorize_browser(&r, 300).is_ok());
+        r.list.as_mut().unwrap().prefix = "library/sync-v2/lib/control/".into();
         assert!(c.authorize_browser(&r, 300).is_ok());
         r.list.as_mut().unwrap().prefix = "library/".into();
         assert!(c.authorize_browser(&r, 300).is_err());

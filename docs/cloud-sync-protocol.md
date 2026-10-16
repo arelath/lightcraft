@@ -78,8 +78,10 @@ Upgrade all devices before using these semantics. Current local snapshots use fo
 new mutations version 2, and new synchronization/checkpoint states version 3. Older
 builds reject these required versions before applying an empty allowed set. New
 readers accept legacy mutation/state versions and retain their exact identities and
-digests. Receipt maintenance preserves the newer checkpoint barrier. Head, batch,
-append manifest and outer checkpoint wrappers keep their existing formats.
+digests. Receipt maintenance preserves the newer checkpoint barrier. Batch, append
+manifest and outer checkpoint wrappers keep their existing formats. The head is version 4
+and carries the library control envelope (see [Library control and format upgrades](#library-control-and-format-upgrades-2026-10-17)),
+which future format changes use instead of "upgrade every device first".
 
 ## Object layout and publication
 
@@ -88,7 +90,9 @@ documented in [cloud-storage-implementation.md](cloud-storage-implementation.md)
 
 | Key | Contents |
 |---|---|
-| `catalog/head.json` | Small version-3 head: library, increasing generation, tip and optional checkpoint; archive-aware writer barrier |
+| `catalog/head.json` | Small version-4 head: library, increasing generation, tip, optional checkpoint and library control (epoch, schema, reader/writer minimums, maintenance state); the single CAS authority for commits and upgrades |
+| `catalog/epochs/<n>/{changes,checkpoints}/…` | Immutable batches/checkpoints of conditional-head epoch `n ≥ 2`; epoch 1 keeps the `catalog/changes`/`catalog/checkpoints` layout |
+| `sync-v2/<library>/control/<revision:020>-<sha256>.json` | Immutable append-log library control records (cooperative barrier) |
 | `catalog/changes/<sha256>.json` | Immutable version-3 batch: parent and version-2 mutations (legacy version 1 remains readable) |
 | `catalog/checkpoints/<sha256>.json` | Version-1 wrapper containing version-3 portable state and authenticated receipt forests; obsolete import-receipt map stays empty |
 | `sync-v2/<library>/receipts/<sha256>.json` | Immutable bounded Merkle receipt node shared by both transports |
@@ -490,16 +494,18 @@ bucket GET/PUT CORS behavior remain. Credentials require scoped listing permissi
 as object read/write; Backblaze application keys need the corresponding `listFiles` capability.
 
 Preserve `conditional-head-v1` for existing S3 libraries. Mode is explicitly chosen and pinned
-to the library, not silently changed after a 501. For an existing CAS library, migration needs
-a coordinated pause/upgrade of all writers: verify the legacy remote history, publish a new
-append-mode seed checkpoint containing only remotely committed state, retain pending IDs and
-local entity mappings, then switch devices to the new namespace. Legacy records stay intact.
-Without that cutover, old clients could keep writing a history the new readers do not discover.
+to the library, not silently changed after a 501. For an existing CAS library, migration puts
+the head into maintenance (a CAS that every conforming writer's next commit loses), seeds the
+append namespace from that frozen history, retains pending IDs and local entity mappings, then
+retires the head to the append successor. Legacy records stay intact. Other devices detect the
+retired head and rejoin without rewriting their pending mutations.
 The earlier B2 tests did not successfully publish a shared head. Their staged imports can
 be recovered through explicit migration without reimporting the originals. If the catalog
 does not yet have a mutation journal, enable the default conditional-head journal with its
-existing connection first, then migrate with every old writer stopped. This explicitly rebinds
-legacy upload receipts; selecting append mode alone does not silently change those receipts.
+existing connection first. With no published head (or storage rejecting conditional writes)
+there is no barrier to hold, so migration then requires `writersStopped:true` after stopping
+every other device. This explicitly rebinds legacy upload receipts; selecting append mode alone
+does not silently change those receipts.
 
 ### Protocol acceptance requirements
 
@@ -536,25 +542,27 @@ still exist in the retained log and are rediscovered on the next scan.
 For an existing CAS catalog, choose File → Migrate Cloud Library… (also available in Cloud
 Synchronization and Info). Opening the dialog calls `cloud.prepareMigration`: this device's
 automatic uploads and synchronization pause, and active catalog synchronization is cancelled.
-Wait for running uploads to finish or cancel them in Activity. Stop synchronization on every
-other device, upgrade every client, and confirm the dialog's peer checkbox before migration.
-Cancel keeps preparation paused in this session; explicit Sync now resumes it. Preparation is
-not persisted across app restarts, so keep paused devices closed until cutover is ready.
+Wait for running uploads to finish or cancel them in Activity. Other up-to-date devices need
+no manual stop: the head's maintenance state refuses their commits while they keep browsing,
+editing and receiving. The dialog's checkbox is needed only when there is no head to hold the
+barrier (see above). Cancel keeps preparation paused in this session; explicit Sync now
+resumes it. Preparation is not persisted across app restarts.
 
-`cloud.migrateAppend {"writersStopped":true,"wait":false}` performs the same cutover. Desktop
-and browser return a cancellable Activity task; native CLI/MCP wait by default. Inspect
-`cloud.syncStatus` (`preparingMigration`, `migrating`, reports) for progress and completion.
-Migration verifies committed CAS history on a worker, publishes/readbacks an immutable seed,
-then atomically saves mode/progress on the catalog owner. Unsent pending IDs and mappings,
-including edits made while the worker runs, remain intact. A failed native journal save rolls
-back the local cutover. Cancellation can leave a verified remote marker/seed behind; retry
-migration rather than reverting protocols or deleting remote objects. Apply the migration to
-every local catalog before resuming the fleet. This confirmation is operator coordination;
-LightCraft cannot remotely stop or upgrade other devices.
+`cloud.upgradeLibrary {"plan":"appendLog","wait":false}` (alias `cloud.migrateAppend`) performs
+the same cutover. Desktop and browser return a cancellable Activity task; native CLI/MCP wait
+by default. Inspect `cloud.syncStatus` (`preparingMigration`, `migrating`, reports) for progress
+and completion. Migration verifies committed CAS history on a worker, publishes/readbacks an
+immutable seed, retires the head, then atomically saves mode/progress on the catalog owner.
+Unsent pending IDs and mappings, including edits made while the worker runs, remain intact. A
+failed native journal save rolls back the local cutover. Cancellation can leave the head in
+maintenance with a verified seed; retry the upgrade (the same installation resumes at once)
+or cancel it with `cloud.upgradeLibrary {"cancel":true}` before retirement. Every other catalog
+runs the same command once after retirement to rejoin; that rejoin writes nothing remotely.
 Failed legacy upload receipts are explicitly rebound during this migration and retain their
 staged bytes and multipart identities. This version rejects CAS synchronization when it finds
-an append manifest for the same library. It cannot control older binaries: keep those stopped.
-Never resume the two protocols concurrently. Legacy heads, changes and checkpoints remain.
+an append manifest for the same library. Builds released before the library control envelope
+cannot see maintenance or retirement: keep those stopped. Legacy heads, changes and
+checkpoints remain.
 
 `AppendProgress.remote` caches only verified remote state, separate from the local pending
 projection. Both belong to the existing combined 64 MiB local synchronization-state budget.
@@ -918,3 +926,99 @@ identity mappings without creating live albums. Arbitrary rule payload propertie
 are not recursively rewritten. Smart albums containing filesystem path rules or
 per-device synchronization-status criteria, together with their dependent smart
 albums, remain device-local under the existing nonportable-rule policy.
+
+
+### Library control and format upgrades (2026-10-17)
+
+"Old software detects an unsupported format" prevents misreading data; it does not
+coordinate changing a format while other writers exist. Every library therefore carries a
+small, stable **control envelope** (`crates/engine/src/cloud_control.rs`):
+
+| Field | Meaning |
+|---|---|
+| `controlVersion` | Envelope format. A newer one is refused ("update LightCraft") before any other field is decoded |
+| `epoch` | Active generation of the library's metadata, not an edit sequence |
+| `schema`, `minimumReader`, `minimumWriter` | Separate read and write compatibility: a build may display a library it must not publish to, because deserializing is not proof that writing keeps newer fields |
+| `state` | `active`, `upgrading` (with `migration`) or `retired` (with `successor`) |
+| `activeMetadataRoot` | Epoch namespace: `catalog` for epoch 1, `catalog/epochs/<n>` later |
+| `revision` | Increments on every control transition |
+| `migration` | Stable `id`, `plan` (`rebase` or `appendLog`), target epoch/schema, exact frozen `source` (head tip and generation), `owner`, fencing `token` (it stops a stale owner, not a malicious writer), `leaseUntilMs` |
+
+This build reads and writes schema 1 (the current wire set). Version 2/3 heads, written
+before the envelope existed, read as Active epoch 1 schema 1 and become version 4 on the
+next conditional write; older builds refuse version 4, so they fail closed rather than
+overwriting it. Pending mutations are never rewritten: translating a mutation between
+schemas is refused in this build (`translate_mutation`), and a future translator must keep
+the original identity/digest and record a durable original→translated provenance mapping.
+
+**Conditional head: one authority.** The control lives inside `catalog/head.json`, so
+ordinary commits and maintenance compete at the same compare-and-swap. Every publisher
+checks the control of the head it just reread, immediately before the CAS that carries that
+control forward unchanged (including recovery-prefix and automatic checkpoints). A commit
+prepared before maintenance loses its `If-Match` and rereads; it then stops. While publication
+is blocked (maintenance, retirement, newer writer schema) synchronization still receives and
+certifies remote state, acknowledges only mutations already present remotely, keeps the rest
+pending, and reports `publicationBlocked` with an actionable reason.
+
+Transitions are empty marker batches plus a head CAS, so tip and generation always advance
+together (cursors and the unchanged-poll path stay consistent). They never use the ordinary
+"conflict means reread and retry" rule as proof: after each attempt the upgrader rereads the
+head and accepts only exactly the control it wrote (new revision and, while upgrading, its
+token). That resolves lost responses, including a lost activation response.
+
+```text
+Active(epoch e, root R)
+  → Upgrading(e, frozen source S, migration M, owner O, token T)      begin / takeover
+  → Active(e+1, root R')       rebase: only token T; checkpoint in R' read back first
+  → Retired(successor)         appendLog: only token T; seed published first
+  → Active(e)                  cancel before activation: only token T
+```
+
+The lease decides only when another device may *attempt* a takeover; wall clocks never
+authorize a commit. A takeover keeps the migration id, plan and frozen source, issues a new
+token (so a resumed stale owner can no longer activate or cancel) and never lets ordinary
+writers resume. The same installation may resume or cancel its own migration immediately.
+
+`cloud.upgradeLibrary {plan?: "appendLog"|"rebase", cancel?, writersStopped?, wait?}`:
+
+* `rebase` writes the verified frozen state as a checkpoint in the next epoch's namespace
+  beside the old one (no original or rendition is copied), reads it back and compares it
+  with the source, then activates. Retries reuse the same content-addressed objects.
+* `appendLog` (default; alias `cloud.migrateAppend`) seeds the append namespace and retires
+  the head. Run on a device whose head is already retired, it only rejoins: read-only
+  discovery, local protocol switch, pending mutations unchanged. The browser supports
+  `appendLog` and `cancel`; `rebase` runs in the desktop app or CLI.
+* `cancel` returns an unactivated library to its unchanged epoch.
+
+**Rejoining.** A device that was offline sees the new epoch on its next read: its cursor is
+not in the new chain, so it rebootstraps from the new epoch's checkpoint and then publishes
+its preserved pending mutations with their original identities and digests. After epoch
+`e+1` accepts edits, rollback is no longer "point back at epoch `e`"; those edits would also
+have to be preserved or migrated. The old epoch's objects remain for recovery.
+
+**Append log: cooperative barrier.** Append mode has no mutable object or CAS. Its control
+is a set of immutable records `sync-v2/<library>/control/<revision:020>-<sha256>.json` with
+the same envelope. Each scan reads the records at the greatest revision before any write;
+none means Active epoch 1. A newer reader requirement or invalid record refuses the scan; a
+newer writer requirement, maintenance, retirement or two different records at one revision
+pause publication (manifest creation, operation PUTs and checkpoints) while receiving
+continues. This is cooperative: a write already in flight can still land, and no producer of
+these records ships in this build. A hard append barrier needs an election-capable control
+adapter (B2 `b2_update_bucket` `ifRevisionIs` bucket info, or a small commit coordinator) and
+late-write discovery in a retired namespace; both are tracked in
+[cloud-reliability-tasks.md](cloud-reliability-tasks.md). S3/B2 Object Lock is not a mutex: it
+retains object versions but does not stop new versions or objects.
+
+**Compatibility boundary.** No build can be made to obey a protocol it never implemented.
+Head-mode builds before version 4 fail closed on a version-4 head. Append-mode builds before
+the control records cannot see them; keep such prerelease builds stopped, and restrict old
+write credentials when it matters. An application-level lock cannot stop a client holding
+unrestricted bucket credentials.
+
+Evidence: `cloud_control` unit tests (two simultaneous upgraders, commit racing maintenance,
+crashed upgrader takeover, lost activation, cancellation/retirement, malformed and newer
+envelopes) and `apps/lightcraft-cli/tests/cloud_upgrade.rs` against the signed loopback S3
+fixture (a commit losing its CAS to maintenance stays pending; takeover of an expired lease
+and rebase to epoch 2 with a lost activation response; a held lease refuses other upgraders;
+cancellation; append retirement and offline rejoin with identical pending mutations; append
+control records blocking and refusing publication). Live AWS/B2 runs were not repeated.

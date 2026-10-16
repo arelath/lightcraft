@@ -297,7 +297,7 @@ fn modal_dialogs_close_background_menus() {
 }
 
 #[test]
-fn cloud_migration_dialog_requires_peer_confirmation_and_cancel_keeps_pause() {
+fn cloud_migration_dialog_relies_on_library_maintenance_and_cancel_keeps_pause() {
     use std::{cell::RefCell, rc::Rc};
     let calls = Rc::new(RefCell::new(Vec::new()));
     let output = calls.clone();
@@ -310,9 +310,9 @@ fn cloud_migration_dialog_requires_peer_confirmation_and_cancel_keeps_pause() {
                 Some(Ok(json!({"paused":true})))
             }
             "cloud.syncStatus" => Some(Ok(json!({"running":false,"preparingMigration":*control.borrow()}))),
-            "cloud.migrateAppend" => {
+            "cloud.upgradeLibrary" => {
                 output.borrow_mut().push(p.clone());
-                if p["writersStopped"] != true { Some(Err("confirm stopped peers".into())) } else { Some(Ok(json!({"task":1,"background":true}))) }
+                Some(Ok(json!({"task":1,"background":true})))
             }
             "cloud.sync" => {
                 *control.borrow_mut() = false;
@@ -337,11 +337,6 @@ fn cloud_migration_dialog_requires_peer_confirmation_and_cancel_keeps_pause() {
     h.step();
     h.step();
     assert!(*paused.borrow());
-    let r = h.request("ui.clickWidget", json!({"id":"button:dialogOk"}), T);
-    assert_eq!(r["ok"], true, "{r}");
-    h.step();
-    assert!(h.app.ui.dialog.is_some());
-    assert!(calls.borrow().is_empty());
     let r = h.request("ui.clickWidget", json!({"id":"button:dialogCancel"}), T);
     assert_eq!(r["ok"], true, "{r}");
     h.step();
@@ -349,6 +344,15 @@ fn cloud_migration_dialog_requires_peer_confirmation_and_cancel_keeps_pause() {
     assert!(*paused.borrow());
     h.app.run("cloud.sync", json!({"wait":false})).unwrap();
     assert!(!*paused.borrow());
+    assert!(calls.borrow().is_empty(), "cancel never migrates");
+    // The head's maintenance state is the barrier: no peer confirmation is required.
+    h.app.run("dialog.cloudMigrate", json!({})).unwrap();
+    h.step();
+    let r = h.request("ui.clickWidget", json!({"id":"button:dialogOk"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    assert!(h.app.ui.dialog.is_none());
+    // The optional confirmation covers storage that cannot hold the barrier.
     h.app.run("dialog.cloudMigrate", json!({})).unwrap();
     h.step();
     let r = h.request("ui.clickWidget", json!({"id":"checkbox:cloudMigrationStopped"}), T);
@@ -357,6 +361,8 @@ fn cloud_migration_dialog_requires_peer_confirmation_and_cancel_keeps_pause() {
     let r = h.request("ui.clickWidget", json!({"id":"button:dialogOk"}), T);
     assert_eq!(r["ok"], true, "{r}");
     h.step();
-    assert!(h.app.ui.dialog.is_none());
-    assert_eq!(calls.borrow().as_slice(), &[json!({"writersStopped":true,"wait":false})]);
+    assert_eq!(
+        calls.borrow().as_slice(),
+        &[json!({"plan":"appendLog","writersStopped":false,"wait":false}), json!({"plan":"appendLog","writersStopped":true,"wait":false})]
+    );
 }

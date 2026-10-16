@@ -32,6 +32,10 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
     let (running, reports) = (s.cloud_replication_jobs.running(), s.cloud_replication_jobs.reports.clone());
     #[cfg(not(target_arch = "wasm32"))]
     let health = s.cloud_replication_jobs.health(true, s.cloud_paused);
+    #[cfg(not(target_arch = "wasm32"))]
+    let publication_blocked = s.cloud_replication_jobs.publication_blocked().map(str::to_owned);
+    #[cfg(target_arch = "wasm32")]
+    let publication_blocked: Option<String> = None;
     #[cfg(target_arch = "wasm32")]
     let (running, reports) = (false, Vec::<Value>::new());
     #[cfg(target_arch = "wasm32")]
@@ -39,6 +43,7 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"enabled":true,"library":state.library,"device":state.device,"connection":state.connection,
         "paused":s.cloud_paused,
         "health":health,
+        "publicationBlocked":publication_blocked,
         "preparingMigration":preparing_migration(s),
         "migrating":migrating(s),
         "protocol":state.protocol,"frontiers":state.append.as_ref().map(|p|&p.frontiers),"gaps":state.append.as_ref().map(|p|&p.gaps),
@@ -163,11 +168,21 @@ pub fn specs() -> Vec<CommandSpec> {
     ));
     #[cfg(not(target_arch = "wasm32"))]
     specs.push(cmd!(
+        "cloud.upgradeLibrary",
+        "Upgrade cloud library format",
+        [],
+        None,
+        "{plan?: appendLog|rebase, cancel?, wait?}; pause library publication through the head, write the upgraded format beside the old one, then activate or retire by token; a retired head rejoins its successor",
+        always,
+        crate::cloud_append::migration::migrate
+    ));
+    #[cfg(not(target_arch = "wasm32"))]
+    specs.push(cmd!(
         "cloud.migrateAppend",
         "Migrate cloud library to append synchronization",
         [],
         None,
-        "{writersStopped:true,wait?}; background on desktop; seed verified remote state after every old writer stops",
+        "{wait?}; alias of cloud.upgradeLibrary {plan:\"appendLog\"}; writersStopped is accepted but no longer required",
         always,
         crate::cloud_append::migration::migrate
     ));
@@ -195,7 +210,8 @@ pub fn specs() -> Vec<CommandSpec> {
     #[cfg(target_arch = "wasm32")]
     specs.extend([
         cmd!(query "cloud.prepareMigration","Pause this device for cloud migration",[],None,"{}; stop automatic publication; Sync now resumes",always,browser_host),
-        cmd!(query "cloud.migrateAppend","Migrate cloud library to append synchronization",[],None,"{writersStopped:true}; seed verified remote history; pause every old writer",always,browser_host),
+        cmd!(query "cloud.upgradeLibrary","Upgrade cloud library format",[],None,"{plan?: appendLog, cancel?}; pause publication through the head, seed and retire, or rejoin a retired head",always,browser_host),
+        cmd!(query "cloud.migrateAppend","Migrate cloud library to append synchronization",[],None,"{}; alias of cloud.upgradeLibrary {plan:\"appendLog\"}",always,browser_host),
         cmd!(query "cloud.connections","Cloud storage connections",[],None,"{}",always,browser_host),
         cmd!(query "cloud.syncEnable","Enable cloud synchronization",[],None,"{connection,library?,protocol?}; omit library to create, supply its ID to join",always,browser_host),
         cmd!(query "cloud.sync","Synchronize cloud library",[],None,"{checkpoint?}; durable async synchronization",always,browser_host),

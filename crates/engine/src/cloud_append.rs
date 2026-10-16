@@ -1,4 +1,5 @@
-//! Shared append-log records and causal scheduling. No mutable remote coordination object.
+//! Shared append-log records and causal scheduling. No mutable remote coordination object;
+//! library control records under `control/` are a cooperative barrier (see `control`).
 use crate::assets::{AssetError, Result, keys, sha256};
 use lightcraft_catalog::assets::{Blob, identifier};
 use lightcraft_catalog::replication::{AppendProgress, Mutation, SyncState, publication_prefixes};
@@ -79,6 +80,15 @@ pub fn immutable_metadata(key: &str, bytes: &[u8]) -> Result<()> {
             identifier(library)
                 && *name == format!("{}.json", sha256(bytes).0)
                 && lightcraft_catalog::replication::archive::Node::decode(&sha256(bytes).0, bytes).is_ok_and(|node| node.library == *library)
+        }
+        [_, library, "control", _] => {
+            identifier(library)
+                && serde_json::from_slice::<crate::cloud_control::Control>(bytes)
+                    .ok()
+                    .filter(|c| control::encode(c).is_ok_and(|canonical| canonical == bytes))
+                    .zip(parts.get(..start).map(|storage| storage.join("/")))
+                    .and_then(|(c, storage)| control::key(&storage, &c).ok())
+                    .is_some_and(|expected| expected == key)
         }
         [_, library, "checkpoints", author, name] => identifier(library) && identifier(author) && *name == format!("{}.json", sha256(bytes).0),
         [_, library, "ops", author, name] => {
@@ -222,6 +232,7 @@ impl Planner {
     }
 }
 
+pub mod control;
 pub mod discovery;
 pub mod listing;
 #[cfg(not(target_arch = "wasm32"))]

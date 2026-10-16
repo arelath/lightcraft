@@ -422,8 +422,10 @@ only where explicitly allowed, and source-generation changes reject stale result
 ## Coordinated migration workflow
 
 File → Migrate Cloud Library… and the Cloud Synchronization/Info buttons pause this session's
-automatic publication. Confirm that every other device is stopped and upgraded, then start the
-cancellable background migration in Activity. Cancelled preparation stays paused until explicit
+automatic publication. The migration (`cloud.upgradeLibrary`, alias `cloud.migrateAppend`) puts
+the conditional head into maintenance, so other current devices stop publishing without manual
+coordination; confirming that every other device is stopped is needed only when storage cannot
+hold that barrier. Start the cancellable background migration in Activity. Cancelled preparation stays paused until explicit
 Sync now; restart does not preserve this pause. Each device must complete its own cutover before
 resuming the fleet. Native owner persistence changes protocol/progress together, preserves edits
 made during the worker's remote scan, and rolls back on journal failure. A partially published

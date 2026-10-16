@@ -6,6 +6,7 @@ use crate::backend::Backend;
 use lightcraft_engine::assets::sha256;
 use lightcraft_engine::catalog::assets::Asset;
 use lightcraft_engine::catalog::replication::{Mutation, Portable, SyncState};
+use lightcraft_engine::cloud_control::Blocked;
 use lightcraft_engine::cloud_records::replay::{AUTO_CHECKPOINT_BATCHES, Cycle, WINDOW_BATCHES, Window};
 use lightcraft_engine::cloud_records::{Batch, Checkpoint, CheckpointRef, Head, RecordRef};
 use lightcraft_engine::cloud_status::{CloudFailure, FailureKind};
@@ -42,19 +43,9 @@ async fn read(
     segmented: bool,
     proofs: &mut lightcraft_engine::catalog::replication::archive::Witness,
 ) -> Result<Remote, CloudFailure> {
-    let key = format!("{}/catalog/head.json", provider.connection.prefix);
-    let reply = provider.request("GET", &key, None, None, None, 16 << 10).await?;
     let state = SyncState::new(library.into(), "remote".into(), provider.connection.id.clone()).map_err(CloudFailure::from)?;
     let mut remote = Remote { head: None, state, tail_records: 0, recovery: None };
-    if reply.status == 404 {
-        return Ok(remote);
-    }
-    if reply.status != 200 {
-        return Err(CloudFailure::http("catalog head", reply.status));
-    }
-    let etag = reply.etag.ok_or("catalog head has no exposed ETag; check bucket CORS")?;
-    let head: Head = serde_json::from_slice(&reply.bytes).map_err(|_| "malformed catalog head")?;
-    head.validate_scope(&provider.connection.prefix, library)?;
+    let Some((head, etag)) = read_head(provider, library).await? else { return Ok(remote) };
     let mut boundary = None;
     if let Some(reference) = &head.checkpoint {
         let checkpoint: Checkpoint =
@@ -99,7 +90,7 @@ async fn read(
             seen.visit(&reference.hash)?;
             window.push(&reference)?;
             let batch: Batch = serde_json::from_slice(&object(provider, &reference, 2 << 20).await?).map_err(|_| "malformed change batch")?;
-            batch.validate_scope(&provider.connection.prefix, library)?;
+            batch.validate_at(&provider.connection.prefix, library, &reference)?;
             next = batch.parent;
         }
         if first {
@@ -110,7 +101,7 @@ async fn read(
         for _ in 0..budget {
             let reference = window.pop_oldest().ok_or("history ended before its verified prefix")?;
             let batch: Batch = serde_json::from_slice(&object(provider, &reference, 2 << 20).await?).map_err(|_| "malformed change batch")?;
-            batch.validate_scope(&provider.connection.prefix, library)?;
+            batch.validate_at(&provider.connection.prefix, library, &reference)?;
             if batch.parent != boundary {
                 return Err("history parent changed during replay".into());
             }
@@ -138,6 +129,20 @@ async fn read(
     }
     remote.head = Some((head, etag));
     Ok(remote)
+}
+pub(super) async fn read_head(provider: &Provider, library: &str) -> Result<Option<(Head, String)>, CloudFailure> {
+    let key = format!("{}/catalog/head.json", provider.connection.prefix);
+    let reply = provider.request("GET", &key, None, None, None, 16 << 10).await?;
+    if reply.status == 404 {
+        return Ok(None);
+    }
+    if reply.status != 200 {
+        return Err(CloudFailure::http("catalog head", reply.status));
+    }
+    let etag = reply.etag.ok_or("catalog head has no exposed ETag; check bucket CORS")?;
+    let head = Head::decode(&reply.bytes)?;
+    head.validate_scope(&provider.connection.prefix, library)?;
+    Ok(Some((head, etag)))
 }
 pub(super) async fn immutable(provider: &Provider, key: &str, bytes: &[u8]) -> Result<(), CloudFailure> {
     let outcome = provider.request("PUT", key, None, Some("*"), Some(bytes), 16 << 10).await;
@@ -208,8 +213,18 @@ pub async fn synchronize(
         if remote.head.as_ref().map_or(0, |(head, _)| head.generation) < local.generation {
             return Err("remote catalog rolled back below the acknowledged generation; local work retained".into());
         }
+        // Checked on every reread, against the exact head the CAS below will replace.
+        let blocked = match lightcraft_engine::cloud_records::publishable(remote.head.as_ref().map(|(head, _)| head), &local.library) {
+            Ok(_) => None,
+            Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => return Err(blocked.to_string().into()),
+            Err(blocked) => Some(blocked.to_string()),
+        };
         if let Some((covers, generation)) = remote.recovery.take() {
-            let checkpoint = checkpoint(provider, &mut remote.state, covers, generation).await?;
+            if let Some(blocked) = blocked {
+                return Err(blocked.into());
+            }
+            let epoch = remote.head.as_ref().map_or(Ok(1), |(head, _)| head.control().map(|c| c.epoch))?;
+            let checkpoint = checkpoint(provider, &mut remote.state, covers, generation, epoch).await?;
             publish(provider, remote.head.as_ref().map(|(head, etag)| (head, etag.as_str())), Vec::new(), Some(checkpoint), &local.library).await?;
             continue;
         }
@@ -244,6 +259,13 @@ pub async fn synchronize(
                 },
             );
         }
+        if let Some(blocked) = blocked {
+            // Receive-only: apply remote state, keep pending work until publishable again.
+            let (head, _) = remote.head.ok_or(blocked.clone())?;
+            let state = super::history::certify(provider, local, &remote.state.portable(), &mut archive_proofs).await?;
+            let acknowledged = local.pending.keys().filter(|id| remote.state.received.contains_key(*id)).cloned().collect();
+            return Ok(Outcome::head_blocked(state, HeadPosition::new(head.tip.hash.0, head.generation)?, acknowledged, blocked));
+        }
         let count = pending.len();
         let pending = lightcraft_engine::cloud_sync::publication_order(pending, &remote.state.clock).map_err(CloudFailure::from)?;
         let mut chunk = Vec::new();
@@ -273,7 +295,8 @@ pub async fn synchronize(
         verified.extend(newly_referenced.iter().map(|m| m.revision.id()));
         let mut checkpoint_ref = remote.head.as_ref().and_then(|(head, _)| head.checkpoint.clone());
         if checkpoint_needed && let Some((head, _)) = &remote.head {
-            checkpoint_ref = Some(checkpoint(provider, &mut remote.state, head.tip.clone(), head.generation).await?);
+            let epoch = head.control()?.epoch;
+            checkpoint_ref = Some(checkpoint(provider, &mut remote.state, head.tip.clone(), head.generation, epoch).await?);
         }
         for mutation in &chunk {
             remote.state.receive(mutation).map_err(CloudFailure::from)?;
@@ -291,15 +314,24 @@ pub(super) async fn migration_seed(
     Ok(read(provider, library, false, proofs).await?.state.portable())
 }
 
-async fn checkpoint(provider: &Provider, state: &mut SyncState, covers: RecordRef, generation: u64) -> Result<CheckpointRef, CloudFailure> {
+async fn checkpoint(
+    provider: &Provider,
+    state: &mut SyncState,
+    covers: RecordRef,
+    generation: u64,
+    epoch: u64,
+) -> Result<CheckpointRef, CloudFailure> {
     super::history::compact(provider, state, false).await?;
     let payload = Checkpoint { version: 1, generation, covers: covers.clone(), state: state.portable(), imports: BTreeMap::new() };
     let bytes = encode(&payload, 64 << 20)?;
     let hash = sha256(&bytes);
-    let object = RecordRef { key: format!("{}/catalog/checkpoints/{}.json", provider.connection.prefix, hash.0), size: bytes.len() as u64, hash };
+    let key = lightcraft_engine::cloud_records::object_key(&provider.connection.prefix, epoch, "checkpoints", &hash.0);
+    let object = RecordRef { key, size: bytes.len() as u64, hash };
     immutable(provider, &object.key, &bytes).await?;
     Ok(CheckpointRef { object, covers, generation })
 }
+/// An ordinary commit: refuses unless the observed head is publishable, then carries
+/// its control forward unchanged so the CAS also guards the maintenance state.
 async fn publish(
     provider: &Provider,
     previous: Option<(&Head, &str)>,
@@ -307,6 +339,7 @@ async fn publish(
     checkpoint: Option<CheckpointRef>,
     library: &str,
 ) -> Result<(), CloudFailure> {
+    let control = lightcraft_engine::cloud_records::publishable(previous.map(|(head, _)| head), library).map_err(|blocked| blocked.to_string())?;
     let batch = Batch {
         version: 3,
         parent: previous.map(|(head, _)| head.tip.clone()),
@@ -316,10 +349,10 @@ async fn publish(
     };
     let bytes = encode(&batch, 2 << 20)?;
     let hash = sha256(&bytes);
-    let tip = RecordRef { key: format!("{}/catalog/changes/{}.json", provider.connection.prefix, hash.0), size: bytes.len() as u64, hash };
+    let key = lightcraft_engine::cloud_records::object_key(&provider.connection.prefix, control.epoch, "changes", &hash.0);
+    let tip = RecordRef { key, size: bytes.len() as u64, hash };
     immutable(provider, &tip.key, &bytes).await?;
-    let generation = previous.map_or(Ok(1), |(head, _)| head.generation.checked_add(1).ok_or("catalog generation exhausted"))?;
-    let head = Head { version: 3, generation, tip, library: Some(library.into()), checkpoint };
+    let head = Head::next(previous.map(|(head, _)| head), tip, library, checkpoint, control)?;
     let bytes = encode(&head, 16 << 10)?;
     match provider
         .request(
@@ -337,4 +370,14 @@ async fn publish(
         Err(error) => Err(error),
         Ok(reply) => Err(CloudFailure::http("conditional head write", reply.status)),
     }
+}
+
+/// Receive the verified remote state without publishing (after an upgrade transition).
+pub(super) async fn receive_only(provider: &Provider, local: &SyncState) -> Result<Outcome, CloudFailure> {
+    let mut proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
+    let remote = read(provider, &local.library, false, &mut proofs).await?;
+    let (head, _) = remote.head.ok_or("cloud library has no head")?;
+    let state = super::history::certify(provider, local, &remote.state.portable(), &mut proofs).await?;
+    let acknowledged = local.pending.keys().filter(|id| remote.state.received.contains_key(*id)).cloned().collect();
+    Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation)?, acknowledged))
 }

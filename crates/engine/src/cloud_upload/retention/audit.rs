@@ -137,15 +137,19 @@ impl Audit {
         let value: Value = serde_json::from_slice(bytes).map_err(|_| bad())?;
         self.references(&value)?;
         let parts: Vec<_> = relative.split('/').collect();
+        // Change batches and checkpoints live in epoch 1 (`catalog/`) or a rebased epoch namespace.
+        let digest = sha256(bytes).0;
+        let record = |namespace| crate::cloud_records::object_epoch(prefix, namespace, key, &digest).is_some();
         match parts.as_slice() {
             ["catalog", "head.json"] => {
-                let head: crate::cloud_records::Head = serde_json::from_slice(bytes).map_err(|_| bad())?;
+                // Version 4 carries the library control envelope; newer heads are refused by `decode`.
+                let head = crate::cloud_records::Head::decode(bytes).map_err(|_| bad())?;
                 head.validate_scope(prefix, head.library.as_deref().ok_or_else(bad)?).map_err(|_| bad())?;
-                if head.version != 3 {
+                if head.version < 3 {
                     return Err(bad());
                 }
             }
-            ["catalog", "changes", name] if *name == format!("{}.json", sha256(bytes).0) => {
+            _ if record("changes") => {
                 let batch: crate::cloud_records::Batch = serde_json::from_slice(bytes).map_err(|_| bad())?;
                 batch.validate_scope(prefix, batch.mutations.first().map_or("", |m| m.library.as_str())).map_err(|_| bad())?;
                 if batch.version != 3 || !batch.imports.is_empty() {
@@ -155,13 +159,16 @@ impl Audit {
                     self.mutation(mutation)?;
                 }
             }
-            ["catalog", "checkpoints", name] if *name == format!("{}.json", sha256(bytes).0) => {
+            _ if record("checkpoints") => {
                 let checkpoint: crate::cloud_records::Checkpoint = serde_json::from_slice(bytes).map_err(|_| bad())?;
                 if checkpoint.version != 1 || checkpoint.generation == 0 || !checkpoint.imports.is_empty() {
                     return Err(bad());
                 }
                 checkpoint.covers.validate_scope(prefix, "changes", 2 << 20).map_err(|_| bad())?;
                 self.portable(prefix, &checkpoint.state)?;
+            }
+            ["sync-v2", library, "control", _] => {
+                crate::cloud_append::control::effective(prefix, library, &[(key.to_owned(), bytes.to_vec())]).map_err(|_| bad())?;
             }
             ["sync-v2", library, "manifest", _] => {
                 crate::cloud_append::immutable_metadata(key, bytes).map_err(|_| bad())?;

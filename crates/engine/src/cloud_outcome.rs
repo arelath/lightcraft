@@ -33,14 +33,31 @@ impl HeadPosition {
 }
 #[derive(Clone)]
 pub enum HeadOutcome {
-    Empty { state: Box<Portable> },
-    Published { state: Box<Portable>, position: HeadPosition, acknowledged: BTreeSet<String> },
+    Empty {
+        state: Box<Portable>,
+    },
+    /// `blocked` names why publication was refused (maintenance, retirement, newer
+    /// writer schema): remote state was still received and pending work retained.
+    Published {
+        state: Box<Portable>,
+        position: HeadPosition,
+        acknowledged: BTreeSet<String>,
+        blocked: Option<String>,
+    },
 }
 #[derive(Clone)]
 pub enum Outcome {
-    Unchanged { state: Box<Portable>, position: HeadPosition },
+    Unchanged {
+        state: Box<Portable>,
+        position: HeadPosition,
+    },
     ConditionalHead(HeadOutcome),
-    Append { progress: Box<AppendProgress>, acknowledged: BTreeSet<String> },
+    /// `blocked`: append control refused publication; remote state was still received.
+    Append {
+        progress: Box<AppendProgress>,
+        acknowledged: BTreeSet<String>,
+        blocked: Option<String>,
+    },
 }
 static NO_ACK: BTreeSet<String> = BTreeSet::new();
 impl Outcome {
@@ -51,10 +68,16 @@ impl Outcome {
         Self::ConditionalHead(HeadOutcome::Empty { state: Box::new(state) })
     }
     pub fn head(state: Portable, position: HeadPosition, acknowledged: BTreeSet<String>) -> Self {
-        Self::ConditionalHead(HeadOutcome::Published { state: Box::new(state), position, acknowledged })
+        Self::ConditionalHead(HeadOutcome::Published { state: Box::new(state), position, acknowledged, blocked: None })
+    }
+    pub fn head_blocked(state: Portable, position: HeadPosition, acknowledged: BTreeSet<String>, blocked: String) -> Self {
+        Self::ConditionalHead(HeadOutcome::Published { state: Box::new(state), position, acknowledged, blocked: Some(blocked) })
     }
     pub fn append(progress: AppendProgress, acknowledged: BTreeSet<String>) -> Self {
-        Self::Append { progress: Box::new(progress), acknowledged }
+        Self::Append { progress: Box::new(progress), acknowledged, blocked: None }
+    }
+    pub fn append_blocked(progress: AppendProgress, acknowledged: BTreeSet<String>, blocked: String) -> Self {
+        Self::Append { progress: Box::new(progress), acknowledged, blocked: Some(blocked) }
     }
     pub fn state(&self) -> &Portable {
         match self {
@@ -90,9 +113,17 @@ impl Outcome {
                 value["outcome"] = json!("conditionalHead");
                 value["head"] = json!("empty");
             }
-            Self::ConditionalHead(HeadOutcome::Published { .. }) => value["outcome"] = json!("conditionalHead"),
-            Self::Append { progress, .. } => {
+            Self::ConditionalHead(HeadOutcome::Published { blocked, .. }) => {
+                value["outcome"] = json!("conditionalHead");
+                if let Some(blocked) = blocked {
+                    value["publicationBlocked"] = json!(blocked);
+                }
+            }
+            Self::Append { progress, blocked, .. } => {
                 value["outcome"] = json!("append");
+                if let Some(blocked) = blocked {
+                    value["publicationBlocked"] = json!(blocked);
+                }
                 value["frontiers"] = json!(&progress.frontiers);
                 value["gaps"] = json!(&progress.gaps);
                 value["consumedCheckpoints"] = json!(progress.scan.checkpoints.len());

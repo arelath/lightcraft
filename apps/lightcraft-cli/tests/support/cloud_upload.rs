@@ -120,6 +120,8 @@ pub struct State {
     pub lost_put: bool,
     pub lost_complete: bool,
     pub lost_head: bool,
+    /// Lose the response of the first accepted head PUT whose body contains this text.
+    pub lost_head_matching: Option<String>,
     pub stop_after_recovery_prefix: bool,
     pub embedded_error: bool,
     pub unauthorized: bool,
@@ -500,6 +502,10 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
                     state.unauthorized = true;
                 }
                 lose = std::mem::take(&mut state.lost_head);
+                if state.lost_head_matching.as_ref().is_some_and(|text| String::from_utf8_lossy(&body).contains(text.as_str())) {
+                    state.lost_head_matching = None;
+                    lose = true;
+                }
             } else {
                 lose = std::mem::take(&mut state.lost_put);
             }

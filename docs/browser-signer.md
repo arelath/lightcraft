@@ -17,7 +17,9 @@ script-set header or an additional bucket CORS allowed-header entry; see the
 [Fetch network request algorithm](https://fetch.spec.whatwg.org/#http-network-or-cache-fetch).
 Append writes are content addressed and require the exact digest in their canonical key.
 Media uploads, deletion, arbitrary destinations and bucket-wide listings are rejected.
-Append discovery lists only operations/checkpoints under the configured prefix.
+Append discovery lists only operations, checkpoints and library control records under the
+configured prefix. Rebased conditional-head libraries write changes/checkpoints under
+`catalog/epochs/<n>/` (n ≥ 2) with the same bounds.
 
 Metadata PUT bounds match the protocol: head 16 KiB, changes/operations 2 MiB,
 checkpoints 64 MiB, receipt nodes 1 KiB. The fixed append manifest is capped at 64 KiB.

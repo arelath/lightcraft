@@ -118,6 +118,8 @@ pub mod protocol;
 #[cfg(target_arch = "wasm32")]
 mod transport;
 #[cfg(target_arch = "wasm32")]
+mod upgrade;
+#[cfg(target_arch = "wasm32")]
 pub use transport::Provider;
 
 #[cfg(test)]

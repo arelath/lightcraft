@@ -67,6 +67,35 @@ fn archived_receipts_bind_operations_and_causal_context_before_reclamation() {
     assert!(audit.record("library", &key, &serde_json::to_vec(&node).unwrap()).unwrap_err().to_string().contains("scope collision"));
 }
 #[test]
+fn upgraded_heads_epoch_records_and_append_control_are_audited_not_refused() {
+    use crate::cloud_records::{Batch, Head, RecordRef, object_key};
+    let mut state = SyncState::new("library".into(), "author".into(), "personal".into()).unwrap();
+    let old = "b".repeat(64);
+    let mutation = state
+        .enqueue(vec![Change { entity: "photo:p".into(), field: "content".into(), base: None, value: json!(format!("library/originals/{old}")) }])
+        .unwrap()
+        .unwrap();
+    let batch =
+        serde_json::to_vec(&Batch { version: 3, parent: None, imports: Vec::new(), checkpoint_marker: false, mutations: vec![mutation] }).unwrap();
+    let hash = sha256(&batch);
+    let mut audit = audit::Audit::default();
+    // A rebased (epoch 2) change batch is a recognised record and keeps its media protected.
+    audit.record("library", &object_key("library", 2, "changes", &hash.0), &batch).unwrap();
+    assert!(audit.protects(&format!("library/originals/{old}"), &old));
+    assert!(audit.record("library", &format!("library/catalog/epochs/02/changes/{}.json", hash.0), &batch).is_err());
+    // Version-4 heads carry the library control envelope.
+    let tip = RecordRef { key: object_key("library", 1, "changes", &hash.0), size: batch.len() as u64, hash };
+    let head = Head::next(None, tip, "library", None, crate::cloud_control::Control::initial("library")).unwrap();
+    assert_eq!(head.version, 4);
+    audit.record("library", "library/catalog/head.json", &serde_json::to_vec(&head).unwrap()).unwrap();
+    // Append control records must be canonical for their key.
+    let control = crate::cloud_control::Control::initial_append("library");
+    let key = crate::cloud_append::control::key("library", &control).unwrap();
+    let bytes = crate::cloud_append::control::encode(&control).unwrap();
+    audit.record("library", &key, &bytes).unwrap();
+    assert!(audit.record("library", &key.replace(".json", "0.json"), &bytes).is_err());
+}
+#[test]
 fn retention_dates_and_candidate_paths_are_strict() {
     assert_eq!(modified("Mon, 01 Jan 2024 00:00:00 GMT").unwrap(), 1704067200);
     assert!(modified("Mon, 99 Jan 2024 00:00:00 GMT").is_err());

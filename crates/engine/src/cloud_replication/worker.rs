@@ -31,7 +31,9 @@ struct Pending {
     started_generation: u64,
     started_revision: u64,
     connection: String,
+    /// Set when the result switches this catalog to the append protocol.
     migration_owner: Option<String>,
+    upgrade: Option<crate::cloud_upgrade::Request>,
     receiver: mpsc::Receiver<crate::Result<Outcome>>,
     library: Arc<()>,
     resolver: Arc<AssetResolver>,
@@ -75,8 +77,14 @@ pub struct Jobs {
     paused: bool,
     last_audit: Option<web_time::Instant>,
     health: crate::cloud_status::PollHealth,
+    /// Why the last completed scan could not publish (maintenance, retirement, newer
+    /// writer schema); pending work stays local until it clears.
+    publication_blocked: Option<String>,
 }
 impl Jobs {
+    pub fn publication_blocked(&self) -> Option<&str> {
+        self.publication_blocked.as_deref()
+    }
     pub(crate) fn publication_scan(&mut self, task: u64) {
         self.health.publication_scan(crate::cloud_status::now_ms(), Some(task));
     }
@@ -87,7 +95,7 @@ impl Jobs {
         self.preparing_migration
     }
     pub fn migrating(&self) -> bool {
-        self.pending.as_ref().is_some_and(|p| p.migration_owner.is_some())
+        self.pending.as_ref().is_some_and(|p| p.migration_owner.is_some() || p.upgrade.is_some())
     }
     pub fn running(&self) -> bool {
         self.pending.is_some()
@@ -113,7 +121,7 @@ pub(crate) fn request_poll(s: &mut Session) {
 }
 pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
     s.cloud_replication_jobs.health.reset_retries();
-    start_impl(s, p, false)
+    start_impl(s, p, None)
 }
 pub fn prepare_migration(s: &mut Session, _: &Value) -> crate::Result<Value> {
     if s.cloud_replication_jobs.migrating() {
@@ -129,19 +137,34 @@ pub fn prepare_migration(s: &mut Session, _: &Value) -> crate::Result<Value> {
     }
     Ok(json!({"paused":true,"running":s.cloud_replication_jobs.running()}))
 }
+/// `cloud.upgradeLibrary {plan?: "appendLog"|"rebase", cancel?: bool}` (and the
+/// `cloud.migrateAppend` alias). The head's maintenance state is the cross-device
+/// barrier; `writersStopped` is accepted for compatibility but no longer required.
 pub fn start_migration(s: &mut Session, p: &Value) -> crate::Result<Value> {
-    if p.get("writersStopped").and_then(Value::as_bool) != Some(true) {
-        return Err(error("migration requires writersStopped:true after stopping and upgrading every other device"));
+    use crate::cloud_upgrade::Request;
+    if p.get("writersStopped").is_some_and(|v| !v.is_boolean()) {
+        return Err(error("writersStopped must be true or false"));
     }
+    let writers_stopped = p.get("writersStopped").and_then(Value::as_bool) == Some(true);
+    let request = match (p.get("cancel"), p.get("plan")) {
+        (Some(Value::Bool(true)), _) => Request::Cancel,
+        (Some(Value::Bool(false)) | None, None) => Request::Upgrade { plan: crate::cloud_control::Plan::AppendLog, writers_stopped },
+        (Some(Value::Bool(false)) | None, Some(Value::String(plan))) => Request::Upgrade {
+            plan: crate::cloud_control::Plan::parse(plan).ok_or_else(|| error("plan must be \"appendLog\" or \"rebase\""))?,
+            writers_stopped,
+        },
+        _ => return Err(error("upgrade expects {plan?: \"appendLog\"|\"rebase\", cancel?: bool, writersStopped?: bool}")),
+    };
     if s.catalog.sync_state().is_some_and(|state| !state.protocol.is_head()) {
         return s.execute("cloud.syncStatus", p);
     }
     if s.cloud_uploads.running() > 0 {
-        return Err(error("finish or cancel uploads before migration"));
+        return Err(error("finish or cancel uploads before upgrading the cloud library"));
     }
-    start_impl(s, p, true)
+    start_impl(s, p, Some(request))
 }
-fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Value> {
+fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::Request>) -> crate::Result<Value> {
+    let migrating = upgrade.is_some();
     if s.cloud_paused && !migrating {
         return Err(error("cloud syncing is paused; use cloud.resume first"));
     }
@@ -176,10 +199,13 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
         .into_iter()
         .find(|connection| connection.id == state.connection)
         .ok_or_else(|| error("synchronization storage connection is not configured"))?;
-    let migration_owner = if migrating { Some(crate::cloud_append::owner::identity(&lib.dir)?) } else { None };
+    let upgrade_owner = if migrating { Some(crate::cloud_append::owner::identity(&lib.dir)?) } else { None };
+    let migration_owner = upgrade_owner
+        .clone()
+        .filter(|_| matches!(upgrade, Some(crate::cloud_upgrade::Request::Upgrade { plan: crate::cloud_control::Plan::AppendLog, .. })));
     let resolver = s.media.asset_resolver.clone().ok_or_else(|| error("native asset storage is unavailable"))?;
     let guard =
-        s.activity.start("cloudSync", if migrating { "Migrate cloud library" } else { "Synchronize cloud library" }, crate::activity::Cancel::Yes);
+        s.activity.start("cloudSync", if migrating { "Upgrade cloud library" } else { "Synchronize cloud library" }, crate::activity::Cancel::Yes);
     let id = guard.id();
     let handle = guard.handle();
     let cancel = guard.cancel_flag().ok_or_else(|| error("synchronization cancellation flag unavailable"))?;
@@ -201,15 +227,15 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
                 }
             };
             handle.detail(if migrating {
-                "Verifying committed history and publishing the migration seed"
+                "Pausing library publication, verifying committed history and writing the upgraded format"
             } else {
                 "Reconciling and publishing saved library changes"
             });
             let mut media = VerifiedMedia::coordinated(coordinator.media.clone(), revision, None, false);
             media.publication();
             let result = crate::guard::catch("cloud synchronization worker", || {
-                if migrating {
-                    crate::cloud_append::migration::seed(&connection, &state, &worker_cancel)
+                if let (Some(request), Some(owner)) = (upgrade, &upgrade_owner) {
+                    crate::cloud_upgrade::run(&connection, &state, owner, request, &worker_cancel).map_err(|e| EngineError::Cloud(e.into()))
                 } else if !state.protocol.is_head() {
                     crate::cloud_append::native::synchronize_verified(&connection, &state, checkpoint, audit, &worker_cancel, &mut media)
                         .map_err(|e| EngineError::Cloud(e.into()))
@@ -242,6 +268,7 @@ fn start_impl(s: &mut Session, p: &Value, migrating: bool) -> crate::Result<Valu
         started_revision,
         connection: snapshot_connection,
         migration_owner,
+        upgrade,
         receiver,
         library: s.library_token(),
         connection_revision: resolver.connection_revision(),
@@ -284,7 +311,7 @@ impl Session {
             return;
         }
         *deadline = now + std::time::Duration::from_secs(5);
-        if let Err(error) = start_impl(self, &json!({"wait":false,"audit":false}), false) {
+        if let Err(error) = start_impl(self, &json!({"wait":false,"audit":false}), None) {
             let failure = crate::cloud_status::CloudFailure::from(&error);
             let delay = self.cloud_replication_jobs.health.fail_typed(&failure, crate::cloud_status::now_ms(), None);
             self.cloud_replication_jobs.paused = delay.is_none();
@@ -385,6 +412,7 @@ impl Session {
             let mut value = outcome.report();
             value["unchanged"] = json!(false);
             value["migrated"] = json!(pending.migration_owner.is_some());
+            value["upgraded"] = json!(pending.upgrade.is_some());
             value["legacyHistoryRetained"] = json!(true);
             value["protocol"] = json!(self.catalog.sync_state().map(|s| s.protocol));
             value["pending"] = json!(self.catalog.sync_state().map_or(0, |state| state.pending.len()));
@@ -437,6 +465,14 @@ impl Session {
                 }
                 _ => {}
             }
+        }
+        let blocked = result.as_ref().ok().and_then(|value| value.get("publicationBlocked")).and_then(Value::as_str).map(str::to_owned);
+        if current_owner && result.is_ok() {
+            self.cloud_replication_jobs.publication_blocked = blocked.clone();
+        }
+        // Maintenance normally lasts minutes: poll it less often than ordinary changes.
+        if blocked.is_some() {
+            next_delay = std::time::Duration::from_secs(60);
         }
         self.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + next_delay);
         if result.as_ref().is_ok_and(|value| value.get("refreshRequired").and_then(Value::as_bool) == Some(true)) {
@@ -529,6 +565,7 @@ mod tests {
             started_revision: s.catalog.revision,
             connection: local.connection.clone(),
             migration_owner: None,
+            upgrade: None,
             receiver,
             library: s.library_token(),
             resolver: resolver.clone(),
@@ -954,7 +991,7 @@ mod tests {
         assert!(s.cloud_replication_jobs.preparing_migration());
         assert!(s.cloud_replication_jobs.paused);
         assert!(!s.cloud_replication_jobs.running());
-        assert!(start_migration(&mut s, &json!({"writersStopped":false})).is_err());
+        assert!(start_migration(&mut s, &json!({"plan":"unknown"})).is_err());
         let reports = s.cloud_replication_jobs.reports.len();
         s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now());
         s.resume_cloud_replication();

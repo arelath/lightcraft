@@ -221,7 +221,7 @@ pub(crate) fn synchronize_verified(
         return crate::cloud_append::native::synchronize_verified(connection, local, checkpoint_requested, false, cancel, media);
     }
     if connection.get_small(&crate::cloud_append::manifest_key(&connection.prefix, &local.library)?, 16 << 10, cancel)?.is_some() {
-        return Err(invalid("this library has an append manifest; stop conditional-head writers and explicitly migrate before continuing"));
+        return Err(invalid("this library has an append manifest; run cloud.upgradeLibrary on this device to rejoin it; pending work retained"));
     }
     local.validate().map_err(catalog_error)?;
     if local.pending.is_empty() && !checkpoint_requested {
@@ -252,11 +252,20 @@ pub(crate) fn synchronize_verified(
         if remote.head.as_ref().map_or(0, |(head, _)| head.generation) < local.generation {
             return Err(invalid("remote catalog rolled back below the acknowledged generation; local work retained"));
         }
+        // Checked on every reread, against the exact head the CAS below will replace.
+        let blocked = match crate::cloud_records::publishable(remote.head.as_ref().map(|(head, _)| head), &local.library) {
+            Ok(_) => None,
+            Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => return Err(invalid(blocked.to_string())),
+            Err(blocked) => Some(blocked.to_string()),
+        };
         if let Some((covers, generation)) = remote.recovery.take() {
             let Some((head, etag)) = &remote.head else {
                 return Err(invalid("recovery prefix has no head"));
             };
-            let checkpoint = checkpoint(connection, &mut remote.state, covers, generation, cancel)?;
+            if let Some(blocked) = blocked {
+                return Err(invalid(blocked));
+            }
+            let checkpoint = checkpoint(connection, &mut remote.state, covers, generation, epoch(head)?, cancel)?;
             // Each prefix becomes durable through CAS before replaying the next.
             // Cancellation/restart resumes from this published boundary, with all
             // local pending IDs unchanged. A competitor simply causes a new scan.
@@ -289,6 +298,14 @@ pub(crate) fn synchronize_verified(
             };
             let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
             return Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged));
+        }
+        if let Some(blocked) = blocked {
+            // Receive-only: apply remote state, acknowledge what it already contains and
+            // keep the rest pending until the library is publishable again.
+            let Some((head, _)) = &remote.head else { return Err(invalid(blocked)) };
+            let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
+            let position = HeadPosition::new(head.tip.hash.0.clone(), head.generation).map_err(invalid)?;
+            return Ok(Outcome::head_blocked(state, position, acknowledged, blocked));
         }
         let pending_count = pending.len();
         pending = crate::cloud_sync::publication_order(pending, &remote.state.clock).map_err(|e| invalid(e.to_string()))?;
@@ -341,7 +358,7 @@ pub(crate) fn synchronize_verified(
         dependency_proof.extend(newly_referenced.iter().map(|mutation| mutation.revision.id()));
         let mut checkpoint_ref = remote.head.as_ref().and_then(|(head, _)| head.checkpoint.clone());
         if checkpoint_needed && let Some((head, _)) = &remote.head {
-            checkpoint_ref = Some(checkpoint(connection, &mut remote.state, head.tip.clone(), head.generation, cancel)?);
+            checkpoint_ref = Some(checkpoint(connection, &mut remote.state, head.tip.clone(), head.generation, epoch(head)?, cancel)?);
         }
         for mutation in &chunk {
             remote.state.receive(mutation).map_err(catalog_error)?;
@@ -351,7 +368,17 @@ pub(crate) fn synchronize_verified(
     Err(AssetError::Network("catalog remained busy or unreachable; durable mutations retained for retry".into()))
 }
 
-fn checkpoint(connection: &S3Connection, state: &mut SyncState, covers: RecordRef, generation: u64, cancel: &AtomicBool) -> Result<CheckpointRef> {
+fn epoch(head: &Head) -> Result<u64> {
+    Ok(head.control().map_err(invalid)?.epoch)
+}
+pub(crate) fn checkpoint(
+    connection: &S3Connection,
+    state: &mut SyncState,
+    covers: RecordRef,
+    generation: u64,
+    epoch: u64,
+    cancel: &AtomicBool,
+) -> Result<CheckpointRef> {
     crate::cloud_history::native::compact(connection, state, false, cancel)?;
     let payload = Checkpoint { version: 1, generation, covers: covers.clone(), state: state.portable(), imports: BTreeMap::new() };
     let bytes = serde_json::to_vec(&payload).map_err(|_| invalid("could not encode checkpoint"))?;
@@ -359,11 +386,13 @@ fn checkpoint(connection: &S3Connection, state: &mut SyncState, covers: RecordRe
         return Err(invalid("checkpoint exceeds 64 MiB; local work retained"));
     }
     let hash = sha256(&bytes);
-    let object =
-        RecordRef { key: keys::in_library(&connection.prefix, &format!("catalog/checkpoints/{}.json", hash.0))?, size: bytes.len() as u64, hash };
+    let key = keys::in_library("", &crate::cloud_records::object_key(&connection.prefix, epoch, "checkpoints", &hash.0))?;
+    let object = RecordRef { key, size: bytes.len() as u64, hash };
     immutable(connection, &object.key, &bytes, cancel, MAX_CHECKPOINT)?;
     Ok(CheckpointRef { object, covers, generation })
 }
+/// An ordinary commit: refuses unless the observed head is publishable, then carries
+/// its control forward unchanged so the CAS also guards the maintenance state.
 fn publish(
     connection: &S3Connection,
     previous: Option<(&Head, &str)>,
@@ -372,26 +401,54 @@ fn publish(
     library: &str,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let batch = Batch {
-        version: 3,
-        parent: previous.map(|(head, _)| head.tip.clone()),
-        imports: Vec::new(),
-        checkpoint_marker: mutations.is_empty(),
-        mutations,
-    };
-    let bytes = publication::encode(&batch)?;
-    let hash = sha256(&bytes);
-    let tip = RecordRef { key: keys::in_library(&connection.prefix, &format!("catalog/changes/{}.json", hash.0))?, size: bytes.len() as u64, hash };
-    immutable(connection, &tip.key, &bytes, cancel, 2 << 20)?;
-    let generation = previous.map_or(Ok(1), |(head, _)| head.generation.checked_add(1).ok_or_else(|| invalid("remote generation exhausted")))?;
-    let head = Head { version: 3, generation, tip, library: Some(library.into()), checkpoint };
-    let condition = previous.map_or(PutCondition::Absent, |(_, etag)| PutCondition::Matches(etag));
-    match connection.put_small(&keys::in_library(&connection.prefix, "catalog/head.json")?, &publication::encode(&head)?, condition, cancel) {
+    let control = crate::cloud_records::publishable(previous.map(|(head, _)| head), library).map_err(|blocked| invalid(blocked.to_string()))?;
+    let parent = previous.map(|(head, _)| head.tip.clone());
+    match commit(connection, previous, parent, mutations, checkpoint, None, control, library, cancel) {
         Ok(_) => Ok(()),
         Err(error) if error.uncertain_write() => Ok(()),
         Err(error) => Err(error),
     }
 }
+/// Write one immutable batch in `control`'s epoch namespace, then conditionally replace
+/// the head with it. Conflict/network outcomes are returned: ordinary publishers reread,
+/// transitions reread and confirm their own control revision/token.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit(
+    connection: &S3Connection,
+    previous: Option<(&Head, &str)>,
+    parent: Option<RecordRef>,
+    mutations: Vec<Mutation>,
+    checkpoint: Option<CheckpointRef>,
+    generation: Option<u64>,
+    control: Control,
+    library: &str,
+    cancel: &AtomicBool,
+) -> Result<Head> {
+    let batch = Batch { version: 3, parent, imports: Vec::new(), checkpoint_marker: mutations.is_empty(), mutations };
+    let bytes = publication::encode(&batch)?;
+    let tip = batch_ref(connection, control.epoch, &bytes)?;
+    immutable(connection, &tip.key, &bytes, cancel, 2 << 20)?;
+    let mut head = Head::next(previous.map(|(head, _)| head), tip, library, checkpoint, control).map_err(invalid)?;
+    if let Some(generation) = generation {
+        if previous.is_some_and(|(old, _)| generation <= old.generation) {
+            return Err(invalid("head generation must increase"));
+        }
+        head.generation = generation;
+    }
+    head.validate_scope(&connection.prefix, library).map_err(invalid)?;
+    let condition = previous.map_or(PutCondition::Absent, |(_, etag)| PutCondition::Matches(etag));
+    connection.put_small(&keys::in_library(&connection.prefix, "catalog/head.json")?, &publication::encode(&head)?, condition, cancel)?;
+    Ok(head)
+}
+pub(crate) fn batch_ref(connection: &S3Connection, epoch: u64, bytes: &[u8]) -> Result<RecordRef> {
+    let hash = sha256(bytes);
+    let key = keys::in_library("", &crate::cloud_records::object_key(&connection.prefix, epoch, "changes", &hash.0))?;
+    Ok(RecordRef { key, size: bytes.len() as u64, hash })
+}
+pub(crate) fn write_immutable(connection: &S3Connection, key: &str, bytes: &[u8], cancel: &AtomicBool) -> Result<()> {
+    immutable(connection, key, bytes, cancel, MAX_CHECKPOINT)
+}
+use crate::cloud_control::{Blocked, Control};
 
 mod worker;
 pub(crate) use worker::Coordinator;
