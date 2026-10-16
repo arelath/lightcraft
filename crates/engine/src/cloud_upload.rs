@@ -87,7 +87,9 @@ impl Receipt {
             || self.publication_intent.iter().any(|(id, hash)| !identifier(id) || hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
             || !identifier(&self.id)
             || self.id != self.imported.mutation_id
-            || (self.imported.base_asset.is_none() && self.id != self.imported.photo_id)
+            // Current causal receipts bind publication through exact mutation proofs.
+            // Adoption keeps an existing photo identity distinct from its request.
+            || (self.version < 3 && self.imported.base_asset.is_none() && self.id != self.imported.photo_id)
             || self.multipart.len() > 19
             || self.error.as_ref().is_some_and(|message| message.len() > 4096 || message.contains('\0'))
         {
@@ -730,6 +732,7 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<(Vec<Item>, Vec<Valu
             || manifest.asset_id != intent.asset_id
             || manifest.asset != *asset
             || manifest.target.as_ref().is_some_and(|target| target.photo_id != intent.photo_id)
+            || manifest.adopted_photo().is_some_and(|id| id != intent.photo_id)
         {
             skipped.push(json!({"import":id,"error":"staged identity differs or is incomplete; preserved"}));
             continue;

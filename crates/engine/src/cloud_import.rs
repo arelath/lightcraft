@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 
+mod adopt;
+pub(crate) use adopt::start as adopt;
 mod issues;
 mod requests;
 mod settled;
@@ -21,6 +23,8 @@ use issues::Issue;
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Recipe {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    adoption: Vec<Photo>,
     now: String,
     defaults: crate::import::ImportDefaults,
     presets: Vec<lightcraft_develop::Preset>,
@@ -74,6 +78,8 @@ pub struct Manifest {
     pub origin_asset: Option<AssetId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     duplicate_policy: Option<requests::DuplicatePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adoption: Option<adopt::Target>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -85,8 +91,15 @@ pub struct RevisionTarget {
 }
 
 impl Manifest {
+    pub(crate) fn adopted_photo(&self) -> Option<PhotoId> {
+        self.adoption.as_ref().map(|target| target.photo_id())
+    }
     fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1..=3)
+        if !matches!(self.version, 1..=4)
+            || (self.version < 4 && self.adoption.is_some())
+            || (self.adoption.is_some()
+                && (self.target.is_some() || self.working.is_some() || self.stack_with.is_some() || self.origin_asset.is_some()))
+            || self.adoption.as_ref().is_some_and(|target| !target.valid())
             || (self.version < 3 && self.duplicate_policy.is_some())
             || (self.version == 1 && (self.target.is_some() || self.working.is_some() || self.stack_with.is_some() || self.origin_asset.is_some()))
             || !lightcraft_catalog::assets::identifier(&self.id)
@@ -236,6 +249,8 @@ struct RequestOptions {
 }
 struct Job {
     paths: Vec<PathBuf>,
+    adoption: Option<Vec<Photo>>,
+    adoption_key: Option<String>,
     root: PathBuf,
     connection: crate::assets::s3::S3Connection,
     resolver: Arc<AssetResolver>,
@@ -420,6 +435,8 @@ impl Job {
         }
         let mut job = Self {
             paths,
+            adoption: None,
+            adoption_key: None,
             root,
             connection,
             resolver,
@@ -463,6 +480,7 @@ impl Job {
         let fresh = options.fresh;
         let policy = options.policy;
         let recipe = Recipe {
+            adoption: self.adoption.clone().unwrap_or_default(),
             now: self.now.clone(),
             defaults: self.defaults.clone(),
             presets: self.presets.clone(),
@@ -475,18 +493,26 @@ impl Job {
         };
         let request = {
             let _guard = self.resolver.durable_guard(cancel).map_err(|e| error(e.to_string()))?;
-            requests::register(
-                &self.root,
+            let request_root = if self.adoption.is_some() { self.root.join("adoptions") } else { self.root.clone() };
+            requests::ensure_directory(&self.root)?;
+            requests::register_keyed(
+                &request_root,
                 &self.connection,
                 &self.paths,
                 requested,
                 fresh,
                 policy,
                 serde_json::to_value(recipe).map_err(|e| error(e.to_string()))?,
+                self.adoption_key.clone(),
             )?
         };
         let recipe: Recipe = serde_json::from_value(request.recipe.clone()).map_err(|_| error("invalid saved import recipe; request preserved"))?;
         self.paths = request.candidates.iter().map(|candidate| PathBuf::from(&candidate.path)).collect();
+        if self.adoption.is_some() {
+            self.adoption = Some(recipe.adoption);
+        } else if !recipe.adoption.is_empty() {
+            return Err(error("an adoption request cannot be used as a new import"));
+        }
         self.now = recipe.now;
         self.defaults = recipe.defaults;
         self.presets = recipe.presets;
@@ -505,7 +531,10 @@ impl Job {
             return Err(error("import cancelled; staged data and request retained"));
         }
         let (command, retry) = match &self.request {
-            Some(request) => ("cloud.import", json!({"connection":self.connection.id,"requestId":request.id,"wait":false})),
+            Some(request) => (
+                if self.adoption.is_some() { "cloud.adopt" } else { "cloud.import" },
+                json!({"connection":self.connection.id,"requestId":request.id,"wait":false}),
+            ),
             None => ("cloud.recoverImports", json!({"connection":self.connection.id,"imports":[id],"wait":false})),
         };
         let issue = Issue { id: id.into(), name: name.into(), reason, command: command.into(), retry };
@@ -541,6 +570,9 @@ impl Job {
 
     fn prepare(&mut self, cancel: &AtomicBool, progress: &crate::activity::TaskHandle) -> Result<Vec<Manifest>> {
         self.initialize_request(cancel)?;
+        if self.adoption.is_some() {
+            return self.prepare_adoption(cancel, progress);
+        }
         if self.recover {
             return self.recover_prepared(cancel, progress);
         }
@@ -647,6 +679,7 @@ impl Job {
             photo: None,
             prepared: false,
             target: None,
+            adoption: None,
             working: None,
             stack_with: None,
             origin_asset: None,
@@ -727,6 +760,7 @@ impl Job {
                 photo: Some(Box::new(updated)),
                 prepared: false,
                 target: Some(target.clone()),
+                adoption: None,
                 working: match work {
                     RevisionWork::Returned(path) => Some(path.clone()),
                     RevisionWork::Xmp { working, .. } => working.clone(),
@@ -784,6 +818,7 @@ impl Job {
                 photo: None,
                 prepared: false,
                 target: None,
+                adoption: None,
                 working: Some(format!("working/{id}/{name}")),
                 stack_with: Some(parent),
                 origin_asset: Some(base_asset),
@@ -865,6 +900,9 @@ impl Job {
         if sha256(&bytes) != manifest.asset.original.id || bytes.len() as u64 != manifest.asset.original.size {
             return Err(error("durable original failed verification"));
         }
+        if self::adopt::original_mismatch(manifest, &bytes) {
+            return Err(error("staged adoption original differs from the saved source identity; retained for repair"));
+        }
         let mut packet = None;
         for (name, blob) in &manifest.asset.associated {
             let document = read_bounded(&self.root.join("blobs").join(&blob.id.0), MAX_DOCUMENT_BYTES)?;
@@ -889,6 +927,7 @@ impl Job {
         manifest.photo = Some(Box::new(photo.clone()));
         manifest.prepared = false;
         self.write_manifest(manifest, cancel)?;
+        photo.copy_of = None; // the render seed does not need its catalog family
         shadow.media.asset_resolver = Some(self.resolver.clone());
         shadow.commit(
             "Prepare cloud import",
@@ -985,6 +1024,9 @@ fn plan_candidate(catalog: &mut lightcraft_catalog::Catalog, root: Option<&Path>
     manifest.validate()?;
     if !manifest.prepared {
         return Err(error("import has not finished staging its renditions"));
+    }
+    if manifest.adoption.is_some() {
+        return adopt::plan(catalog, manifest);
     }
     if let Some(existing) = catalog.upload_intents().get(&manifest.id) {
         plan.ids.push(existing.photo_id.0);
@@ -1102,6 +1144,8 @@ fn complete(s: &mut Session, mut prepared: Prepared) -> Result<Completed> {
     }
     let mut completed = already_complete;
     completed.extend(skipped.iter().map(|record| record.manifest.id.clone()));
+    let adopting = prepared.manifests.iter().any(|m| m.adoption.is_some());
+    let selection = s.selection.clone();
     if prepared.manifests.is_empty() {
         let ids = ordered_ids(&prepared.order, &resolved, ids);
         return Ok(completed_result(s, ids, Vec::new(), prepared.failed, prepared.request, skipped, completed));
@@ -1173,11 +1217,27 @@ fn complete(s: &mut Session, mut prepared: Prepared) -> Result<Completed> {
     }
     if !ops.is_empty() {
         s.skip_auto_write = true;
-        s.commit("Import cloud photos", Op::Batch { ops })?;
+        s.commit(if adopting { "Move photos to cloud storage" } else { "Import cloud photos" }, Op::Batch { ops })?;
+        if adopting && let Some(entry) = s.undo.last_mut() {
+            // Publication may already reference these durable resources. Undo
+            // withdraws the photos; it must not strand the frozen outbox.
+            adopt::retain_resources(&mut entry.op);
+        }
         s.cloud_uploads.request_resume(false);
     }
-    let ids = ordered_ids(&prepared.order, &resolved, ids);
-    Ok(completed_result(s, ids, copies, prepared.failed, prepared.request, skipped, completed))
+    let ids = if adopting {
+        let mut ids = ids;
+        ids.sort();
+        ids.dedup();
+        ids
+    } else {
+        ordered_ids(&prepared.order, &resolved, ids)
+    };
+    let done = completed_result(s, ids, copies, prepared.failed, prepared.request, skipped, completed);
+    if adopting {
+        s.selection = selection;
+    }
+    Ok(done)
 }
 fn ordered_ids(order: &[String], resolved: &std::collections::BTreeMap<String, u64>, ids: Vec<u64>) -> Vec<u64> {
     if order.is_empty() { ids } else { order.iter().filter_map(|id| resolved.get(id).copied()).collect() }
@@ -2469,5 +2529,199 @@ mod tests {
         let retry = session.execute("cloud.import", &json!({"connection":"personal","requestId":first["requestId"]})).unwrap();
         assert_eq!(retry["ids"], first["ids"]);
         assert_eq!(session.catalog.photos().count(), 2);
+    }
+    fn import_local(fixture: &Fixture, session: &mut Session) -> PhotoId {
+        session.execute("library.import", &json!({"paths":[fixture.original]})).unwrap();
+        session.catalog.photos().next().unwrap().id
+    }
+
+    #[test]
+    fn adoption_preserves_existing_ids_recipes_metadata_history_albums_copies_and_restart() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let id = import_local(&fixture, &mut session);
+        session.selection = Selection::single(id);
+        let copy = PhotoId(session.execute("photo.virtualCopy", &json!({})).unwrap()["ids"][0].as_u64().unwrap());
+        session.execute("photo.rate", &json!({"ids":[id.0],"rating":4})).unwrap();
+        session.execute("develop.set", &json!({"ids":[id.0],"control":"light.exposure","value":0.7})).unwrap();
+        let album = session.execute("album.create", &json!({"name":"Keep"})).unwrap()["id"].as_u64().unwrap();
+        session.commit("Membership", Op::SetAlbumPhotos { id: lightcraft_catalog::AlbumId(album), photos: vec![id, copy] }).unwrap();
+        let before: Vec<_> = [id, copy].into_iter().map(|id| session.catalog.photo(id).unwrap().clone()).collect();
+        let members = session.catalog.album(lightcraft_catalog::AlbumId(album)).unwrap().photos.clone();
+        let selected = session.selection.clone();
+        let params = json!({"connection":"personal","ids":[copy.0,id.0]});
+        let done = session.execute("cloud.adopt", &params).unwrap();
+        assert_eq!(done["failed"], json!([]), "{done}");
+        assert_eq!(done["ids"], json!([id.0, copy.0]));
+        assert_eq!(session.selection.ids, selected.ids);
+        for old in &before {
+            let mut expected = (**old).clone();
+            expected.source = session.catalog.photo(old.id).unwrap().source.clone();
+            assert!(matches!(expected.source, Source::Managed { .. }));
+            assert_eq!(serde_json::to_value(&expected).unwrap(), serde_json::to_value(session.catalog.photo(old.id).unwrap()).unwrap());
+        }
+        assert_eq!(session.catalog.album(lightcraft_catalog::AlbumId(album)).unwrap().photos, members);
+        assert!(fixture.original.is_file(), "adoption keeps original files");
+        session.close_library().unwrap();
+        drop(session);
+        let mut reopened = fixture.session();
+        let repeat = reopened.execute("cloud.adopt", &params).unwrap();
+        assert_eq!(repeat["failed"], json!([]), "{repeat}");
+        assert_eq!(repeat["requestId"], done["requestId"]);
+        assert_eq!(reopened.catalog.photos().count(), 2);
+        assert_eq!(reopened.catalog.upload_intents().len(), 1);
+        assert_eq!(reopened.catalog.photo(id).unwrap().develop, before[0].develop);
+        assert_eq!(reopened.catalog.photo(copy).unwrap().copy_of, Some(id));
+    }
+
+    #[test]
+    fn adoption_preparation_preserves_edits_made_while_worker_runs_and_retains_resources_on_undo() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let id = import_local(&fixture, &mut session);
+        let params = json!({"connection":"personal","ids":[id.0],"wait":false});
+        let queued = session.execute("cloud.adopt", &params).unwrap();
+        let index = session.cloud_imports.pending.iter().position(|p| p.guard.id() == queued["task"].as_u64().unwrap()).unwrap();
+        let prepared = session.cloud_imports.pending[index].receiver.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
+        session.execute("photo.rate", &json!({"ids":[id.0],"rating":5})).unwrap();
+        let done = complete(&mut session, prepared).unwrap();
+        assert_eq!(done.value["failed"], json!([]));
+        assert_eq!(session.catalog.photo(id).unwrap().rating, 5);
+        session.undo_step().unwrap();
+        assert!(matches!(session.catalog.photo(id).unwrap().source, Source::File { .. }));
+        assert_eq!(session.catalog.photo(id).unwrap().rating, 5);
+        assert_eq!(session.catalog.upload_intents().len(), 1);
+        assert_eq!(session.catalog.assets().len(), 1);
+        session.redo_step().unwrap();
+        assert!(matches!(session.catalog.photo(id).unwrap().source, Source::Managed { .. }));
+        assert_eq!(session.catalog.photo(id).unwrap().rating, 5);
+    }
+
+    #[test]
+    fn adoption_recovery_uses_staged_bytes_without_original_and_refuses_undone_retry() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let id = import_local(&fixture, &mut session);
+        let params = json!({"connection":"personal","ids":[id.0],"wait":false});
+        session.execute("cloud.adopt", &params).unwrap();
+        let prepared = session.cloud_imports.pending[0].receiver.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
+        let import = prepared.manifests[0].id.clone();
+        std::fs::remove_file(&fixture.original).unwrap();
+        session.close_library().unwrap();
+        drop(session);
+        let mut session = fixture.session();
+        let done = session.execute("cloud.recoverImports", &json!({"connection":"personal","imports":[import]})).unwrap();
+        assert_eq!(done["failed"], json!([]), "{done}");
+        assert_eq!(session.catalog.photos().count(), 1);
+        assert!(matches!(session.catalog.photo(id).unwrap().source, Source::Managed { .. }));
+        session.execute("edit.undo", &json!({})).unwrap();
+        session
+            .commit(
+                "Relink elsewhere",
+                Op::Relink { id, source: Source::File { path: "elsewhere.png".into() }, file_name: "elsewhere.png".into(), format: None },
+            )
+            .unwrap();
+        let root = session.media.asset_resolver.as_ref().unwrap().durable_root().unwrap();
+        let manifest = read_manifest(&root, &import).unwrap();
+        let failure = plan_candidate(&mut session.catalog, Some(&root), manifest, None).err().unwrap();
+        assert!(failure.to_string().contains("undone"), "{failure}");
+        assert!(matches!(session.catalog.photo(id).unwrap().source, Source::File { .. }));
+    }
+
+    #[test]
+    fn adoption_reports_changed_original_without_replacing_it_or_blocking_healthy_sibling() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let first = import_local(&fixture, &mut session);
+        let other = original_at(&fixture, "other.png", 190);
+        session.execute("library.import", &json!({"paths":[other]})).unwrap();
+        let second = session.catalog.photos().find(|p| p.id != first).unwrap().id;
+        let original_bytes = std::fs::read(&fixture.original).unwrap();
+        std::fs::write(&fixture.original, b"changed").unwrap();
+        let params = json!({"connection":"personal","ids":[first.0,second.0]});
+        let done = session.execute("cloud.adopt", &params).unwrap();
+        assert_eq!(done["failed"].as_array().unwrap().len(), 1, "{done}");
+        assert_eq!(done["failed"][0]["command"], "cloud.adopt");
+        assert!(matches!(session.catalog.photo(first).unwrap().source, Source::File { .. }));
+        assert!(matches!(session.catalog.photo(second).unwrap().source, Source::Managed { .. }));
+        assert_eq!(std::fs::read(&fixture.original).unwrap(), b"changed");
+        assert_eq!(session.catalog.photos().count(), 2);
+        let sibling_source = session.catalog.photo(second).unwrap().source.clone();
+        std::fs::write(&fixture.original, original_bytes).unwrap();
+        let retry = session.execute("cloud.adopt", &params).unwrap();
+        assert_eq!(retry["failed"], json!([]), "{retry}");
+        assert_eq!(retry["requestId"], done["requestId"]);
+        assert_eq!(session.catalog.photo(second).unwrap().source, sibling_source);
+        assert!(matches!(session.catalog.photo(first).unwrap().source, Source::Managed { .. }));
+        assert_eq!(session.catalog.upload_intents().len(), 2);
+        assert!(session.cloud_imports.failures.is_empty());
+    }
+
+    #[test]
+    fn adoption_promotes_browsed_photos_without_reapplying_sidecar_or_import_defaults() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let id = import_local(&fixture, &mut session);
+        let packet = supporting_packet(&session.catalog);
+        std::fs::write(fixture.original.with_extension("xmp"), packet).unwrap();
+        session.commit("Browse marker", Op::SetLocal { id, local: true }).unwrap();
+        session.execute("photo.rate", &json!({"ids":[id.0],"rating":2})).unwrap();
+        session.import_defaults.creator = "Do not apply again".into();
+        let done = session.execute("cloud.adopt", &json!({"connection":"personal","ids":[id.0]})).unwrap();
+        assert_eq!(done["failed"], json!([]), "{done}");
+        let photo = session.catalog.photo(id).unwrap();
+        assert!(!photo.local);
+        assert_eq!(photo.rating, 2);
+        assert_ne!(photo.meta.creator, "Do not apply again");
+        let packet = packet_for(&session, id);
+        assert_foreign(&packet);
+        let parsed = crate::sidecar::parse_sidecar(std::str::from_utf8(&packet).unwrap(), crate::crs::Target::for_photo(photo)).unwrap();
+        assert_eq!(parsed.rating, Some(2));
+        session.undo_step().unwrap();
+        assert!(session.catalog.photo(id).unwrap().local);
+    }
+
+    #[test]
+    fn adoption_undo_keeps_frozen_publication_dependencies_in_both_protocols() {
+        for protocol in ["conditional-head-v1", "append-log-v1"] {
+            let fixture = Fixture::new();
+            let mut session = fixture.session();
+            let id = import_local(&fixture, &mut session);
+            session.execute("cloud.syncEnable", &json!({"connection":"personal","protocol":protocol})).unwrap();
+            let done = session.execute("cloud.adopt", &json!({"connection":"personal","ids":[id.0]})).unwrap();
+            assert_eq!(done["failed"], json!([]), "{done}");
+            let managed = session.catalog.photo(id).unwrap().source.clone();
+            let frozen = session.catalog.sync_state().unwrap().pending.clone();
+            assert!(frozen.len() >= 2);
+            session.undo_step().unwrap();
+            let state = session.catalog.sync_state().unwrap();
+            assert!(frozen.iter().all(|(id, mutation)| state.pending.get(id) == Some(mutation)));
+            assert!(state.pending.len() > frozen.len());
+            let Source::Managed { asset_id } = managed else { panic!("managed") };
+            assert!(session.catalog.asset(&asset_id).is_some());
+            assert_eq!(session.catalog.upload_intents().len(), 1);
+            session.close_library().unwrap();
+            drop(session);
+            let reopened = fixture.session();
+            assert!(reopened.catalog.asset(&asset_id).is_some());
+            assert!(matches!(reopened.catalog.photo(id).unwrap().source, Source::File { .. }));
+            assert!(frozen.iter().all(|(id, mutation)| reopened.catalog.sync_state().unwrap().pending.get(id) == Some(mutation)));
+        }
+    }
+    #[test]
+    fn adoption_rejects_owner_source_changes_after_worker_preparation() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let id = import_local(&fixture, &mut session);
+        session.execute("cloud.adopt", &json!({"connection":"personal","ids":[id.0],"wait":false})).unwrap();
+        let prepared = session.cloud_imports.pending[0].receiver.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
+        session
+            .commit("Relink", Op::Relink { id, source: Source::File { path: "other.png".into() }, file_name: "other.png".into(), format: None })
+            .unwrap();
+        let done = complete(&mut session, prepared).unwrap().value;
+        assert!(done["failed"][0]["reason"].as_str().unwrap().contains("source changed"), "{done}");
+        assert!(session.catalog.upload_intents().is_empty());
+        assert!(session.catalog.assets().is_empty());
+        assert_eq!(session.catalog.photo(id).unwrap().source, Source::File { path: "other.png".into() });
     }
 }

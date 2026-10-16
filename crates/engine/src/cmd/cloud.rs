@@ -507,6 +507,16 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             crate::cloud_import::start
         ),
+        #[cfg(not(target_arch = "wasm32"))]
+        cmd!(
+            "cloud.adopt",
+            "Move Photos to Cloud Storage",
+            [],
+            None,
+            "{connection, ids?, requestId?, newRequest?, wait?}; preserves existing IDs, edits and history; original files remain on disk",
+            always,
+            crate::cloud_import::adopt
+        ),
         cmd!(query "cloud.importStatus", "Cloud Import Status", [], None, "{}; recent results, durable preparation failures with retry actions, and upload intents", always, |s, _| Ok(json!({"reports": s.cloud_imports.reports, "failed":s.cloud_imports.failures,"preparing": s.cloud_imports.preparing(), "uploads": s.catalog.upload_intents()}))),
         cmd!(
             "cloud.recoverImports",

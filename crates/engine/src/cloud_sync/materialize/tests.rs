@@ -235,3 +235,27 @@ fn scale_unchanged_and_single_photo_owner_application() {
         );
     }
 }
+
+#[test]
+fn withdrawn_adoption_keeps_local_file_through_later_tombstone_metadata() {
+    let mut catalog = fixture(1);
+    let original = Source::File { path: "retained-original.dng".into() };
+    catalog.apply(Op::Relink { id: PhotoId(1), source: original.clone(), file_name: "retained-original.dng".into(), format: None }).unwrap();
+    let mut state = catalog.sync_state().unwrap().clone();
+    state.enqueue(vec![Change { entity: "photo:p000000".into(), field: "deleted".into(), base: None, value: json!(true) }]).unwrap();
+    catalog.apply(Op::SetSyncState { state: Some(Box::new(state.clone())) }).unwrap();
+    state
+        .enqueue(vec![Change {
+            entity: "photo:p000000".into(),
+            field: "rating".into(),
+            base: state.winning("photo:p000000", "rating").map(|(stamp, _)| stamp),
+            value: json!(5),
+        }])
+        .unwrap();
+    let before = catalog.photo(PhotoId(1)).unwrap().clone();
+    let ops = install(&catalog, &state).unwrap();
+    catalog.apply(Op::Batch { ops }).unwrap();
+    assert_eq!(catalog.photo(PhotoId(1)).unwrap(), &before);
+    assert_eq!(catalog.photo(PhotoId(1)).unwrap().source, original);
+    assert!(!catalog.photo(PhotoId(1)).unwrap().deleted);
+}

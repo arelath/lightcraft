@@ -20,7 +20,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.13 — Extract testable upload readiness, transfer, verification, dependency waiting, publication, acknowledgement, and failure transitions; test deletion/restart behavior.
 - [x] CR.14 — Consolidate current behavior/limitations, protocol specification, and dated acceptance evidence. Remove obsolete current-status claims and distinguish historical verification.
 - [x] CR.15 — Persist live offline owner-plus-quality policy, derive dependencies after membership/content changes, and allow empty albums to be pinned. Test new members and asset revisions.
-- [ ] CR.16 — Add a command to move existing local photos into managed cloud storage while preserving photo IDs, virtual copies, edits, albums, and history. Test identity/history preservation and restart.
+- [x] CR.16 — Add a command to move existing local photos into managed cloud storage while preserving photo IDs, virtual copies, edits, albums, and history. Test identity/history preservation and restart.
 - [ ] CR.17 — Handle browser cache exhaustion with safe verified-blob eviction, catalog/outbox space reservation, and temporary viewing versus guaranteed offline retention. Test quota failures and pinned data preservation.
 - [ ] CR.18 — Make cloud deletion retention prominent and add explicit previewable retention/reclamation tooling with safe reference checks.
 - [ ] CR.19 — Align and expose native input, pixel, and blob limits; validate representative large `.3fr` inputs before migration and test actionable limit errors.
@@ -1319,3 +1319,37 @@ updates were 40.6/43.8 ms with no queued/in-flight renders while CI was running;
 this tiny procedural fixture is not a performance or live-provider benchmark.
 Owned app/fixture processes were stopped. CR.15 is complete and checked off.
 CR.16–CR.21 remain open.
+
+
+2026-10-17 — CR.16: `cloud.adopt` and File ▸ Move Selected Photos to Cloud Storage
+stage existing originals, merged supporting XMP and renditions on the durable import
+worker, then relink the existing records. Live virtual-copy families retain separate
+recipes, metadata, IDs, album membership and photo history. Current edits survive
+preparation; no import defaults or stale sidecar settings are reapplied. Original files
+remain on disk. Version-4 local manifests add an explicit adoption target; wire records
+and receipt formats are unchanged. Current causal receipts bind publication through
+exact mutation evidence rather than assuming request ID equals photo identity.
+
+Durable selection-keyed requests resume partial batches and restart recovery. Owner
+source/fingerprint guards reject intervening relinks; changed/unreadable originals have
+per-photo retry actions without stopping healthy siblings. Undo retains immutable
+publication resources while returning records to local files; later metadata on the
+withdrawn tombstone cannot relink or delete that local record. Legacy initial-import
+receipt constraints remain enforced. Focused evidence: 35 managed-import tests passed
+(`target/cloud-reliability/cr16-tests5.log`), then all nine final adoption, publication
+and materialization regressions passed (`cr16-tests-final2.log`), including partial retry.
+
+Final rebuilt native control-channel acceptance passed both protocols. The rendered
+confirmation button performed adoption; local catalog records (apart from source),
+albums and original files were compared. Retry after restart reused one request and
+asset, and a fresh catalog received both photos with their virtual-copy relationship.
+Undo before upload completed publication/withdrawal, retained the local-file photo,
+and left a fresh peer empty. All 149 signed fixture requests were independently verified
+(63 head / 86 append). Screenshots were inspected. Evidence: `target/cloud-reliability/
+cr16-native-results-conditional-head-v1.json`, `cr16-native-results-append-log-v1.json`,
+`cr16-native-head-verified.log`, `cr16-native-append-verified.log`; temporary screenshots
+in `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr16-native/native-e88cf2f0/` and
+`native-94f90dda/`. These procedural fixture checks do not establish live-provider or
+large-library performance. Full final-source repository CI passed all eight gates
+(fmt, strict Clippy, HEIF, workspace tests, parity, layers, assets and WASM):
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-reliability-target/cr16-ci-final.log`.

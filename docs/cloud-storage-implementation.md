@@ -31,8 +31,10 @@ in append mode. LIST discovery and full state validation still have linear costs
 
 ## Current limits and remaining work
 
-- Native local files stay local until managed import; adopting existing photo records
-  is CR.16. Native photo/album offline intent follows current members and source revisions.
+- Native local files stay local until managed import or explicit `cloud.adopt`. Adoption
+  relinks existing photo and virtual-copy records after verified staging; IDs, edits,
+  metadata, album memberships and photo history remain. Original files are retained.
+  Native photo/album offline intent follows current members and source revisions.
 - Browser original import/upload is unsupported. Its verified persistent cache has
   quota failure recovery, but automatic eviction/reserved catalog capacity and a
   guaranteed offline-retention policy remain CR.17. A maintained signer deployment
@@ -58,6 +60,27 @@ in append mode. LIST discovery and full state validation still have linear costs
 The checklist above describes this revision; use the [task checkboxes](cloud-reliability-tasks.md)
 for later completion state. Verification details and provider/account caveats belong
 to the dated archive, not to current feature claims.
+
+## Adopting existing photos
+
+File ▸ Move Selected Photos to Cloud Storage stages verified originals, supporting XMP,
+editable previews and thumbnails on a worker, then atomically relinks existing records.
+No import defaults or stale sidecar settings are reapplied. Edits made during preparation
+remain authoritative. Selecting a live virtual copy adopts its matching live parent family;
+independent duplicate records stay independent. Existing source files are never removed.
+
+`cloud.adopt` accepts at most 1,000 selected IDs and uses the same 512 MiB input and
+100 MP rendition limits as managed import. Missing, changed or unsupported originals
+produce per-photo retry actions; healthy siblings can finish. Reload a changed original
+before starting a new request. Retrying the same selection resumes its durable request;
+`requestId` resumes without source selection, and `newRequest:true` starts another attempt.
+Prepared version-4 manifests also work with `cloud.recoverImports` after restart, even
+when the source file is unavailable. These device-local records never enter cloud metadata.
+
+Undo restores the local source and Library/browse membership. It retains immutable assets
+and upload intents so an already-frozen publication can finish before its withdrawal.
+Redo reattaches the same asset. The old browse baseline is retained for Undo and is inert
+while the photo is managed; it is excluded from portable synchronization data.
 
 ## Managed revisions and owner-thread I/O
 
@@ -226,6 +249,7 @@ Native commands use the shared engine registry, CLI, control channel and MCP:
 |---|---|---|
 | `cloud.configure` | `{id, bucket, region, prefix?, endpoint?, profile?}` | Save and attach a connection; no network request. |
 | `cloud.attach` | `{assetId, asset, fileName, width, height, kind?, format?}` | Add and select a photo referencing already uploaded blobs. The caller supplies its source description. |
+| `cloud.adopt` | `{connection, ids?, requestId?, newRequest?, wait?}` | Move existing file-backed photos and their live virtual copies into managed storage. Durable requests resume staging; relink guards reject changed originals. Undo restores local sources while retaining frozen publication resources. |
 | `cloud.import` | `{connection, paths, wait?}` | Stage originals/renditions and atomically save local photos and upload intent. Headless defaults to waiting; desktop returns a background task. |
 | `cloud.importStatus` | `{}` | Return preparation activity, bounded completion reports and durable local upload intents. |
 | `cloud.recoverImports` | `{connection, imports?, wait?}` | Recover validated staged manifests without duplicating recorded imports; optional import IDs limit recovery. |
@@ -416,6 +440,7 @@ and [browser requirements](browser-cloud.md).
 | 2026-10-16 | Preserve and apply supporting XMP on managed import; retain foreign properties through XMP, DNG and external-editor revisions with explicit rendered-recipe semantics. |
 | 2026-10-17 | Separate current behavior/limits, normative protocol and dated acceptance; remove superseded current claims (CR.14). |
 | 2026-10-17 | Live owner/quality offline policy, empty albums, current dependencies and save/restart eviction protection (CR.15). |
+| 2026-10-17 | Existing-photo adoption preserves records, stages on workers and resumes durable requests (CR.16). |
 
 ## Cloud queue UX
 

@@ -168,7 +168,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         for issue in issues.iter().take(3) {
             ui.label(egui::RichText::new(issue["name"].as_str().unwrap_or("Staged import")).size(11.));
             ui.label(egui::RichText::new(issue["reason"].as_str().unwrap_or("Import recovery needs attention")).size(11.).color(t.caution));
-            if let Some(command @ ("cloud.import" | "cloud.recoverImports")) = issue["command"].as_str() {
+            if let Some(command @ ("cloud.import" | "cloud.adopt" | "cloud.recoverImports")) = issue["command"].as_str() {
                 action(
                     app,
                     ui,

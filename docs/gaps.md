@@ -70,11 +70,13 @@ not proof of provider compatibility, camera fidelity or large-library responsive
 operational reference; [cloud-sync-protocol.md](cloud-sync-protocol.md) and the
 [browser adapter contract](browser-cloud.md) specify the protocol. The
 [reliability checklist](cloud-reliability-tasks.md) records current completion; remaining
-work includes local-photo adoption, browser quota/retention,
+work includes browser quota/retention,
 remote reclamation, unified input limits, signer deployment and transient retry.
 [../tasks.md](../tasks.md) remains the original milestone index. Native photo/album
 offline policy now retains owner/quality intent, follows current membership and
 immutable source revisions, and protects dependencies through catalog save/restart.
+Explicit existing-photo adoption stages verified bytes and relinks original IDs and live
+virtual copies without replacing their edits, album memberships or photo history.
 
 [Dated acceptance](cloud-acceptance-history.md) distinguishes procedural native/browser
 fixtures, measured scale/request costs and the earlier live B2 runs. B2 conditional
@@ -184,3 +186,5 @@ scoped authorization endpoint. The optional managed metadata backend is deferred
 | 2026-10-17 | minor | CR.14: Consolidate current cloud behavior/limits, protocol and dated acceptance; cloud remains OOS, summary counts unchanged |
 
 | 2026-10-17 | minor | CR.15: Resolve live offline owner/quality dependencies after catalog changes and preserve bytes through save/restart; cloud remains OOS, summary counts unchanged |
+
+| 2026-10-17 | minor | CR.16: Adopt existing local records with durable staging and identity/history preservation; cloud remains OOS, counts unchanged |

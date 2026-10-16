@@ -85,7 +85,8 @@ impl Request {
 
 /// Caller holds the durable guard across registration, including the pointer and
 /// request writes. This is local metadata; paths/recipes never enter cloud objects.
-pub fn register(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn register_keyed(
     root: &Path,
     storage: &S3Connection,
     paths: &[PathBuf],
@@ -93,13 +94,17 @@ pub fn register(
     fresh: bool,
     policy: Option<DuplicatePolicy>,
     recipe: Value,
+    fingerprint: Option<String>,
 ) -> Result<Request> {
     if requested.is_some() && fresh {
         return Err(error("requestId resumes an existing attempt; omit newRequest"));
     }
+    let keyed_selection = fingerprint.is_some();
     let paths = paths.iter().map(|path| normalize(path)).collect::<Result<Vec<_>>>()?;
     let fingerprint = if let Some(id) = requested {
         group(id)?.to_owned()
+    } else if let Some(fingerprint) = fingerprint {
+        fingerprint
     } else {
         let mut keys = paths.clone();
         keys.sort();
@@ -129,7 +134,7 @@ pub fn register(
         if saved.id != id || !saved.storage.same_destination(storage) || policy.is_some_and(|policy| policy != saved.duplicate_policy) {
             return Err(error("import request destination or duplicate policy changed; resume the original request or start a new one"));
         }
-        if !paths.is_empty() {
+        if !keyed_selection && !paths.is_empty() {
             let mut expected: Vec<_> = saved.candidates.iter().map(|candidate| candidate.path.clone()).collect();
             let mut actual = paths;
             expected.sort();

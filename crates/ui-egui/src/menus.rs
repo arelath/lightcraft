@@ -174,6 +174,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("merge.hdrPanoramaLast", "HDR Panorama with Last Settings", None, "Photo>Photo Merge"),
     ("file.addPhotos", "Import Photos…", Some("Cmd+Shift+I"), "File"),
     ("file.importCloud", "Import to Cloud Storage…", None, "File"),
+    ("file.adoptCloud", "Move Selected Photos to Cloud Storage…", None, "File"),
     ("dialog.cloudStorage", "Cloud Storage…", None, "File"),
     ("dialog.cloudSync", "Cloud Synchronization…", None, "File"),
     ("dialog.cloudMigrate", "Migrate Cloud Library…", None, "File"),
@@ -1360,7 +1361,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             });
             Ok(Value::Null)
         }
-        "file.importCloud" => {
+        "file.importCloud" | "file.adoptCloud" => {
             let configured = match app.run("cloud.connections", json!({})) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
@@ -1378,10 +1379,18 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 Some(connection) if connections.iter().any(|saved| saved == connection) => connection.to_owned(),
                 Some(_) => return Some(Err("unknown cloud connection".into())),
                 None => {
-                    app.ui.dialog = Some(Dialog::CloudImport { connection: connections.first().cloned().unwrap_or_default(), connections });
+                    app.ui.dialog = Some(Dialog::CloudImport {
+                        adopt_ids: if id == "file.adoptCloud" { app.session.targets(p).iter().map(|id| id.0).collect() } else { Vec::new() },
+                        connection: connections.first().cloned().unwrap_or_default(),
+                        connections,
+                    });
                     return Some(Ok(Value::Null));
                 }
             };
+            if id == "file.adoptCloud" {
+                let ids: Vec<_> = app.session.targets(p).iter().map(|id| id.0).collect();
+                return Some(app.run("cloud.adopt", json!({"connection":connection,"ids":ids,"wait":false})));
+            }
             let mut params = p.clone();
             params["connection"] = json!(connection);
             let paths = match p.get("paths").and_then(Value::as_array) {
@@ -1924,6 +1933,13 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
                     .active()
                     .and_then(|id| app.session.catalog.photo(id))
                     .is_some_and(|p| matches!(p.source, lightcraft_engine::catalog::Source::File { .. }))
+        }
+        "file.adoptCloud" => {
+            cfg!(not(target_arch = "wasm32"))
+                && app.session.library.is_some()
+                && app.session.targets(&json!({})).iter().any(|id| {
+                    app.session.catalog.photo(*id).is_some_and(|p| !p.deleted && matches!(p.source, lightcraft_catalog::Source::File { .. }))
+                })
         }
         "file.importCloud" => cfg!(not(target_arch = "wasm32")) && app.session.library.is_some(),
         "dialog.cloudStorage" | "dialog.cloudSync" => {

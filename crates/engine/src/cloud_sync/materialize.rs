@@ -199,7 +199,10 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
         match kind {
             "photo" if values.contains_key("content") => {
                 let known = local(&next, kind, global).map(PhotoId);
-                if deleted && known.is_none_or(|id| next.photo(id).is_none()) {
+                if deleted && known.is_none_or(|id| next.photo(id).is_none_or(|photo| matches!(photo.source, Source::File { .. }))) {
+                    // Undoing adoption withdraws the shared photo while keeping
+                    // its original local record. Later metadata on that retained
+                    // tombstone must not relink or delete the local-file photo.
                     continue;
                 }
                 let id = known.unwrap_or_else(|| next.alloc_photo_id());

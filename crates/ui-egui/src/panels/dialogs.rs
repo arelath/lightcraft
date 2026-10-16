@@ -234,6 +234,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         #[cfg(not(target_arch = "wasm32"))]
         Dialog::CloudSetup { setup } => setup.title(),
         Dialog::CloudMigration { .. } => "Migrate Cloud Library",
+        Dialog::CloudImport { adopt_ids, .. } if !adopt_ids.is_empty() => "Move Photos to Cloud Storage",
         Dialog::CloudImport { .. } => "Import to Cloud Storage",
         Dialog::LabelNames { .. } => "Edit Color Label Names",
         Dialog::CaptureTime { .. } => "Edit Capture Time",
@@ -1010,7 +1011,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 Dialog::CloudSetup { setup } => crate::cloud_setup::body(app, ui, setup),
-                Dialog::CloudImport { connections, connection } => {
+                Dialog::CloudImport { connections, connection, adopt_ids } => {
+                    if !adopt_ids.is_empty() { ui.label(crate::i18n::tr("Existing photo IDs, edits, albums and history are preserved. Original files remain on disk.")); }
                     ui.label(crate::i18n::tr("Choose where to upload these photos. You can edit as soon as their originals are saved locally; upload continues in the background."));
                     egui::ComboBox::from_id_salt("cloudImportConnection").selected_text(connection.as_str()).show_ui(ui, |ui| {
                         for saved in connections { ui.selectable_value(connection, saved.clone(), saved.as_str()); }
@@ -1341,6 +1343,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     #[cfg(not(target_arch = "wasm32"))]
                     Dialog::CloudSetup { setup } => setup.ok_label(),
                     Dialog::CloudMigration { .. } => "Migrate Library",
+                    Dialog::CloudImport { adopt_ids, .. } if !adopt_ids.is_empty() => "Move Photos",
                     Dialog::CloudImport { .. } => "Choose Photos…",
                     Dialog::Merge { .. } => "Merge",
                     Dialog::DenoiseModel { info, .. } if info["download"].is_string() => "Accept & Download",
@@ -1871,7 +1874,13 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         }
         #[cfg(not(target_arch = "wasm32"))]
         Dialog::CloudSetup { setup } => crate::cloud_setup::finish(app, setup),
-        Dialog::CloudImport { connection, .. } => app.run("file.importCloud", json!({"connection":connection})),
+        Dialog::CloudImport { connection, adopt_ids, .. } => {
+            if adopt_ids.is_empty() {
+                app.run("file.importCloud", json!({"connection":connection}))
+            } else {
+                app.run("cloud.adopt", json!({"connection":connection,"ids":adopt_ids,"wait":false}))
+            }
+        }
         Dialog::CloudMigration { writers_stopped } => app.run("cloud.migrateAppend", json!({"writersStopped":writers_stopped,"wait":false})),
         Dialog::CloudSync { connection, library, protocol } => {
             let mut params = json!({"connection":connection.trim(),"protocol":protocol});

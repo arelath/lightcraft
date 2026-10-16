@@ -570,4 +570,20 @@ mod tests {
             std::fs::remove_dir_all(root).unwrap();
         }
     }
+    #[test]
+    fn causal_receipts_allow_retained_photo_identity_distinct_from_adoption_request() {
+        for protocol in [SyncProtocol::ConditionalHead, SyncProtocol::AppendLog] {
+            let (session, root, _, mut receipt) = fixture(protocol);
+            receipt.imported.photo_id = "existing-photo-identity".into();
+            receipt.validate().unwrap();
+            receipt.version = 2;
+            receipt.protocol = SyncProtocol::ConditionalHead;
+            receipt.library = None;
+            receipt.publication_intent.clear();
+            receipt.append_proof.clear();
+            assert!(receipt.validate().is_err(), "legacy initial-import identity constraints remain");
+            drop(session);
+            cleanup(root);
+        }
+    }
 }

@@ -792,6 +792,8 @@ pub enum Dialog {
         profile: String,
     },
     CloudImport {
+        #[serde(default)]
+        adopt_ids: Vec<u64>,
         connections: Vec<String>,
         connection: String,
     },
