@@ -168,7 +168,7 @@ impl Provider {
         } else if let Some(root) = &self.connection.bucket_root {
             let root = url(root)?;
             let root_path = String::from(js_sys::decode_uri_component(&root.pathname()).map_err(js_error)?);
-            if String::from(path) != format!("{root_path}{key}") {
+            if path != format!("{root_path}{key}") {
                 return Err("signer returned another bucket or object key".into());
             }
         } else if !String::from(path).ends_with(&format!("/{key}")) {
@@ -354,10 +354,12 @@ impl Provider {
         if blob.size > MAX_BROWSER_BLOB {
             return Err("blob exceeds the browser's 512 MiB transfer limit".into());
         }
-        let key = cache_key(blob);
-        if let Some(bytes) = backend.read(&key).await?
+        if let Ok(Some(bytes)) = super::cache::storage::read_verified(backend, blob).await
             && verify_blob(blob, &bytes).is_ok()
         {
+            if let Err(error) = super::cache::storage::touch(backend, blob).await {
+                log::warn!("cache index: {error}");
+            }
             return Ok(bytes);
         }
         let reply = self.request("GET", &blob.remote.key, blob.remote.version.as_deref(), None, None, blob.size as usize).await?;
@@ -365,7 +367,9 @@ impl Provider {
             return Err(format!("cloud download returned HTTP {}; cached/pending data retained", reply.status));
         }
         verify_blob(blob, &reply.bytes)?;
-        backend.write(&key, &reply.bytes).await.map_err(|_| "browser cache save failed (quota or storage unavailable); free space and retry")?;
+        if let Err(error) = super::cache::storage::store(backend, blob, &reply.bytes).await {
+            super::cache::storage::temporary(blob, error);
+        }
         Ok(reply.bytes)
     }
 }

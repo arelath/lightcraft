@@ -247,3 +247,46 @@ specified in [cloud-sync-protocol.md](cloud-sync-protocol.md#cr10-append-discove
 Ordinary polls discover new checkpoint keys and author tails; historical integrity work runs in
 bounded slices and its device-local cursor is saved in OPFS/IndexedDB with append progress.
 `cloud.syncStatus.appendAudit` distinguishes a partial audit from a completed round.
+
+## Verified cache, offline selections and quota recovery
+
+Settings → Cache exposes a 128 MiB default cache budget (0–4096 MiB), Clear cache,
+keep-all originals/previews, quota usage and offline errors. Photo and album offline
+selections retain owner and quality, including empty albums; membership and immutable
+source revisions are resolved again after catalog changes. `cloud.pin`, `cloud.unpin`,
+`cloud.clearCache`, and `cloud.cache {"budgetMb":64}` use this policy in the browser.
+Per-library `browser-offline.json` travels in library backups. Global derived protection
+also retains dependencies of closed libraries. Offline readiness requires saved intent,
+a saved catalog and verified persistent bytes; a successful temporary export is insufficient.
+
+Only SHA-256-verified, indexed `cloud/blobs/` entries are eviction candidates, in least
+recently used order. Imported originals, library snapshots/logs/outbox/acknowledgements,
+unknown files and every library's pinned dependencies are excluded. Pins can exceed the
+soft cache budget. Clear cache and a zero budget preserve them. Explicit unpinning can
+release space while unrelated catalog saves are blocked; other retained owners keep
+both old and current dependencies until their catalog save completes.
+
+Media admission leaves at least 64 MiB plus known snapshot/journal work for catalog saves
+and accounts for replacement copies. Origin-wide Web Locks serialize policy changes,
+eviction and writes across tabs and renderer workers. Storage estimates are hints;
+actual quota errors trigger bounded eligible-cache reclamation and one retry. Catalog
+write failure retains the dirty queue and pending edits. Retry follows normal save
+recovery after space is freed. No estimate can guarantee a future write will succeed.
+See [StorageManager estimates](https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/estimate)
+and [Web Locks](https://www.w3.org/TR/web-locks/).
+
+A verified download that cannot be cached remains available for session viewing/export
+through the shared byte admission queue. Renderer workers receive verified bytes on a
+source cache miss, so temporary viewing does not depend on a successful disk write.
+The UI distinguishes session-only bytes from saved offline selections, reports failed
+pin downloads, and offers retry. Browser persistence permission can be denied, and
+clearing site data or browser eviction can still remove storage: keep independent backups.
+Missing coordination or malformed policy disables cache mutation and reports repair
+instead of guessing which stored data is disposable. Browser original upload/adoption
+remains unsupported.
+
+## Revision history
+
+| Date | Change |
+| --- | --- |
+| 2026-10-17 | CR.17: verified cache eviction, catalog headroom, live offline intent, temporary source delivery and quota recovery. |

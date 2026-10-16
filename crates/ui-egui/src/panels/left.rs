@@ -1516,8 +1516,7 @@ fn folder_menu(app: &mut LightcraftApp, resp: &egui::Response, a: &Album) {
             }
             ui.separator();
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        if !a.folder && app.session.media.asset_resolver.is_some() {
+        if !a.folder && (cfg!(target_arch = "wasm32") || app.session.media.asset_resolver.is_some()) {
             ui.menu_button(crate::i18n::tr("Offline cloud copies"), |ui| {
                 for (label, command, quality) in [
                     ("Keep originals offline", "cloud.pin", "original"),
@@ -1530,7 +1529,7 @@ fn folder_menu(app: &mut LightcraftApp, resp: &egui::Response, a: &Album) {
                         app.toast(ui.ctx(), error);
                     }
                 }
-                ui.label(crate::i18n::tr("Pins keep the album's current cloud photos. Repeat after adding photos."));
+                ui.label(crate::i18n::tr("Offline copies follow the album's current cloud photos."));
             });
             ui.separator();
         }

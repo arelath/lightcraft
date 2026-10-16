@@ -14,6 +14,7 @@ pub(crate) fn needs_attention(data: &Value) -> bool {
         || health["uploads"]["failedImports"].as_u64().unwrap_or(0) > 0
         || health["uploads"]["activity"]["failedResources"].as_u64().unwrap_or(0) > 0
         || health["media"]["failedResources"].as_u64().unwrap_or(0) > 0
+        || health["offline"]["offlineErrors"].as_object().is_some_and(|errors| !errors.is_empty())
         || health["receipts"]["failed"].as_u64().unwrap_or(0) > 0
         || health["conflicts"]["fields"].as_u64().unwrap_or(0) > 0
         || health["conflicts"]["structural"].as_u64().unwrap_or(0) > 0
@@ -154,6 +155,14 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     }
     if let Some(n) = data["health"]["sync"]["secondsSinceLastRemoteScan"].as_u64() {
         ui.label(egui::RichText::new(crate::i18n::tr_format!("Last remote check: {n} s ago", n = n)).size(11.).color(t.text_dim));
+    }
+    if data["health"]["offline"]["persistentCache"]["temporaryBlobs"].as_u64().unwrap_or(0) > 0 {
+        ui.colored_label(t.caution, crate::i18n::tr("Some downloads are available for this session only."));
+    }
+    if let Some(errors) = data["health"]["offline"]["offlineErrors"].as_object() {
+        for error in errors.values().filter_map(Value::as_str).take(3) {
+            ui.colored_label(t.caution, error);
+        }
     }
     if receipts > 0 {
         ui.label(format!("{}: {receipts}", crate::i18n::tr("Local upload records waiting")));

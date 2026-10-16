@@ -19,7 +19,23 @@ pub enum Backend {
 }
 
 fn err(e: JsValue) -> String {
-    e.as_string().or_else(|| e.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message()))).unwrap_or_else(|| format!("{e:?}"))
+    let name = Reflect::get(&e, &"name".into()).ok().and_then(|v| v.as_string());
+    let message = Reflect::get(&e, &"message".into()).ok().and_then(|v| v.as_string()).or_else(|| e.as_string()).unwrap_or_else(|| format!("{e:?}"));
+    match name {
+        Some(name) => format!("{name}: {message}"),
+        None => message,
+    }
+}
+pub fn quota_error(error: &str) -> bool {
+    error.starts_with("QuotaExceededError:")
+}
+fn failure(event: JsValue, fallback: &JsValue) -> JsValue {
+    Reflect::get(&event, &"target".into())
+        .ok()
+        .and_then(|target| Reflect::get(&target, &"error".into()).ok())
+        .filter(|value| !value.is_null() && !value.is_undefined())
+        .or_else(|| Reflect::get(fallback, &"error".into()).ok().filter(|value| !value.is_null() && !value.is_undefined()))
+        .unwrap_or(event)
 }
 
 /// `navigator.storage` in a window or a worker.
@@ -54,8 +70,9 @@ async fn idb_req(req: &web_sys::IdbRequest) -> Result<JsValue, String> {
         let ok = Closure::once_into_js(move || {
             let _ = resolve.call1(&JsValue::NULL, &r2.result().unwrap_or(JsValue::UNDEFINED));
         });
+        let failed = r1.clone();
         let fail = Closure::once_into_js(move |e: JsValue| {
-            let _ = reject.call1(&JsValue::NULL, &e);
+            let _ = reject.call1(&JsValue::NULL, &failure(e, failed.as_ref()));
         });
         r1.set_onsuccess(Some(ok.unchecked_ref()));
         r1.set_onerror(Some(fail.unchecked_ref()));
@@ -71,11 +88,13 @@ async fn idb_done(tx: &web_sys::IdbTransaction) -> Result<(), String> {
             let _ = resolve.call0(&JsValue::NULL);
         });
         let rej = reject.clone();
+        let failed = t1.clone();
         let fail = Closure::once_into_js(move |e: JsValue| {
-            let _ = rej.call1(&JsValue::NULL, &e);
+            let _ = rej.call1(&JsValue::NULL, &failure(e, failed.as_ref()));
         });
+        let aborted = t1.clone();
         let abort = Closure::once_into_js(move |e: JsValue| {
-            let _ = reject.call1(&JsValue::NULL, &e);
+            let _ = reject.call1(&JsValue::NULL, &failure(e, aborted.as_ref()));
         });
         t1.set_oncomplete(Some(ok.unchecked_ref()));
         t1.set_onerror(Some(fail.unchecked_ref()));
@@ -164,10 +183,16 @@ impl Backend {
 
     /// A whole file, or `None` if it doesn't exist.
     pub async fn read(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
+        self.read_limited(path, u64::MAX).await
+    }
+    pub async fn read_limited(&self, path: &str, limit: u64) -> Result<Option<Vec<u8>>, String> {
         match self {
             Backend::Opfs(root) => {
                 let Some(h) = Self::opfs_file(root, path, false).await? else { return Ok(None) };
                 let file: web_sys::File = JsFuture::from(h.get_file()).await.map_err(err)?.unchecked_into();
+                if !file.size().is_finite() || file.size() < 0. || file.size() > limit as f64 {
+                    return Err("browser stored file exceeds its verified size limit; retained".into());
+                }
                 let buf = JsFuture::from(file.array_buffer()).await.map_err(err)?;
                 Ok(Some(Uint8Array::new(&buf).to_vec()))
             }
@@ -177,7 +202,11 @@ impl Backend {
                 if v.is_undefined() || v.is_null() {
                     return Ok(None);
                 }
-                Ok(Some(Uint8Array::new(&v).to_vec()))
+                let bytes = Uint8Array::new(&v);
+                if u64::from(bytes.length()) > limit {
+                    return Err("browser stored file exceeds its verified size limit; retained".into());
+                }
+                Ok(Some(bytes.to_vec()))
             }
         }
     }

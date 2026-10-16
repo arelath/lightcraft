@@ -21,7 +21,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.14 — Consolidate current behavior/limitations, protocol specification, and dated acceptance evidence. Remove obsolete current-status claims and distinguish historical verification.
 - [x] CR.15 — Persist live offline owner-plus-quality policy, derive dependencies after membership/content changes, and allow empty albums to be pinned. Test new members and asset revisions.
 - [x] CR.16 — Add a command to move existing local photos into managed cloud storage while preserving photo IDs, virtual copies, edits, albums, and history. Test identity/history preservation and restart.
-- [ ] CR.17 — Handle browser cache exhaustion with safe verified-blob eviction, catalog/outbox space reservation, and temporary viewing versus guaranteed offline retention. Test quota failures and pinned data preservation.
+- [x] CR.17 — Handle browser cache exhaustion with safe verified-blob eviction, catalog/outbox space reservation, and temporary viewing versus guaranteed offline retention. Test quota failures and pinned data preservation.
 - [ ] CR.18 — Make cloud deletion retention prominent and add explicit previewable retention/reclamation tooling with safe reference checks.
 - [ ] CR.19 — Align and expose native input, pixel, and blob limits; validate representative large `.3fr` inputs before migration and test actionable limit errors.
 - [ ] CR.20 — Provide supported browser signer deployment instructions and a desktop/browser capability matrix; verify the deployment workflow and stated scope.
@@ -1353,3 +1353,38 @@ in `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr16-native/native-e88cf2f0/
 large-library performance. Full final-source repository CI passed all eight gates
 (fmt, strict Clippy, HEIF, workspace tests, parity, layers, assets and WASM):
 `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-reliability-target/cr16-ci-final.log`.
+
+2026-10-17 — CR.17: browser persistent caching now has a verified-entry LRU index,
+origin-wide Web Lock coordination, catalog/outbox headroom, live photo/album offline
+intent and closed-library protection. Only indexed cloud blobs are disposable; imported
+originals, unknown files, catalog/ACK/outbox data and pinned dependencies are excluded.
+A cache write failure retains verified session bytes for viewing/export. Offline readiness
+requires durable intent/catalog and verified persistent bytes. Renderer source misses use
+the shared admission queue and receive bytes without depending on a successful disk write;
+unchanged decoded sources are not transferred again on each edit. Explicit unpinning can
+release space while another catalog save is blocked, conservatively retaining other owners.
+
+All 42 web library tests passed, including generated eviction/protection cases, future/
+malformed policy rejection and backed-up empty-album owner/quality intent. Explicit web
+WASM Clippy passed. Full `cargo +1.95.0 xtask ci` passed all eight stages; final log:
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-reliability-target/cr17-ci.log`.
+Final Chromium acceptance passed OPFS and IndexedDB with both protocols: 265 independently
+SigV4-verified fixture requests. It covered failed cache writes with successful worker
+viewing/export, pin repair without another original GET, empty-album membership changes,
+zero-budget/clear protection, closed-library pins, eligible-cache eviction on catalog quota
+failure, original/library sentinel preservation, source-transfer counts across edits,
+unpinning during failed saves, offline export after reload, retained pending mutations and
+native-peer convergence. Actual OPFS quota reduction and a fresh IndexedDB database under
+an 8 KiB quota exercised browser quota enforcement; IndexedDB reported asynchronous
+`QuotaExceededError` and retained unsaved albums. Controlled write failures provide the
+repeatable recovery tests: Chromium caches admission for already-open IndexedDB buckets,
+so reducing their quota is not a reliable way to force a later small write to fail.
+
+Evidence: `target/cloud-reliability/cr17-browser-final7.log`, `cr17-browser-results.json`,
+`cr17-web-tests.log`, `cr17-wasm-clippy.log`; inspected screenshots and PNG exports in
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr17-browser/browser-4dc625c2/`.
+Earlier fixture attempts incorrectly expected dynamic IndexedDB quota changes to reject
+already-admitted writes; those runs were not counted as passes. This is procedural fixture
+acceptance, not fresh live-provider or large-library acceptance. Browser persistence can
+still be denied or site data removed externally. Backup intent is codec-tested; fresh
+backup/restore UI acceptance was not run for this task.

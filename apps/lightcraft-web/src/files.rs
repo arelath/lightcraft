@@ -75,6 +75,14 @@ impl Files {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Conservative temporary space for known catalog rewrites/appends, without
+    /// cloning file payloads. Media admission leaves this in addition to its floor.
+    pub fn save_headroom(&self) -> u64 {
+        let g = self.lock();
+        let largest = g.files.values().map(|bytes| bytes.len() as u64).max().unwrap_or(0);
+        let dirty = g.dirty.iter().filter_map(|(name, _)| g.files.get(name)).fold(0u64, |sum, bytes| sum.saturating_add(bytes.len() as u64));
+        (64u64 << 20).saturating_add(largest.saturating_mul(2)).saturating_add(dirty.saturating_mul(2))
+    }
     /// Set a file's stored content (start-up; not dirty).
     pub fn preload(&self, name: &str, data: Vec<u8>) {
         self.lock().files.insert(name.to_string(), data);
@@ -196,8 +204,17 @@ impl Store for FilesStore {
 }
 
 /// Names of the library files read at start-up.
-pub const LIBRARY_FILES: [&str; 8] =
-    ["catalog.snap", "catalog.log", "presets.json", "view.json", "prefs.json", "ui.json", "browser-cloud.json", "browser-cloud-ack.json"];
+pub const LIBRARY_FILES: [&str; 9] = [
+    "catalog.snap",
+    "catalog.log",
+    "presets.json",
+    "view.json",
+    "prefs.json",
+    "ui.json",
+    "browser-cloud.json",
+    "browser-cloud-ack.json",
+    "browser-offline.json",
+];
 
 #[cfg(test)]
 mod tests {

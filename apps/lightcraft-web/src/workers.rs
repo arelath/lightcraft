@@ -87,7 +87,7 @@ async fn handle(scope: &web_sys::DedicatedWorkerGlobalScope, backend: Option<Bac
     let job: Result<WireJob, String> =
         get(&msg, "job").as_string().ok_or("no job".to_string()).and_then(|j| serde_json::from_str(&j).map_err(|e| e.to_string()));
     let mut transfer = Array::new();
-    let result: Result<(Rendered, u32), String> = async {
+    let result: Result<Option<(Rendered, u32)>, String> = async {
         let job = job?;
         let mut cache_miss = false;
         // cached thumbnail?
@@ -97,37 +97,55 @@ async fn handle(scope: &web_sys::DedicatedWorkerGlobalScope, backend: Option<Bac
             match b.read(&key).await.ok().flatten().and_then(|bytes| lightcraft_preview::decode_jpeg(&bytes)) {
                 Some(image) => {
                     let histogram = Histogram::of_srgb8(&image);
-                    return Ok((Rendered { image, histogram, deep: None }, 0));
+                    return Ok(Some((Rendered { image, histogram, deep: None }, 0)));
                 }
                 None => cache_miss = true,
             }
         }
         set(&out, "cacheMiss", &cache_miss.into());
-        let original = match CORE.with(|c| c.borrow_mut().needs_original(&job)) {
-            Some(hash) => match &backend {
-                Some(b) => {
-                    let key = hash.strip_prefix("cloud:").map_or_else(|| crate::store::storage_key(&hash), |hash| format!("cloud/blobs/{hash}"));
-                    b.read(&key).await?
-                }
+        let supplied = get(&msg, "original");
+        let needed = CORE.with(|c| c.borrow_mut().needs_original(&job));
+        if needed.is_some() && job.managed.is_some() && supplied.is_undefined() {
+            return Ok(None);
+        }
+        let original = if needed.is_none() {
+            None
+        } else if !supplied.is_undefined() {
+            let source = job.managed.as_ref().ok_or("unexpected worker source payload")?;
+            let data = Uint8Array::new(&supplied);
+            if u64::from(data.length()) != source.blob.size || source.blob.size > crate::cloud::MAX_BROWSER_BLOB {
+                return Err("invalid worker source payload length".into());
+            }
+            Some(data.to_vec())
+        } else {
+            match needed {
+                Some(hash) => match &backend {
+                    Some(b) => b.read(&crate::store::storage_key(&hash)).await?,
+                    None => None,
+                },
                 None => None,
-            },
-            None => None,
+            }
         };
         let rendered = CORE.with(|c| c.borrow_mut().render(&job, original.as_deref()))?;
         let mut stored = 0;
         if let (Some(b), Some(key)) = (&backend, job.thumb_key())
             && let Some(jpeg) = lightcraft_preview::encode_jpeg(&rendered.image)
         {
-            match b.write(&key, &jpeg).await {
+            match crate::cloud::cache::storage::auxiliary(b, &key, &jpeg).await {
                 Ok(()) => stored = jpeg.len() as u32,
                 Err(e) => log::warn!("thumbnail cache write: {e}"),
             }
         }
-        Ok((rendered, stored))
+        Ok(Some((rendered, stored)))
     }
     .await;
     match result {
-        Ok((r, stored)) => {
+        Ok(None) => {
+            set(&out, "needOriginal", &true.into());
+            let _ = scope.post_message(&out);
+            return;
+        }
+        Ok(Some((r, stored))) => {
             let rgba = Uint8Array::from(r.image.as_bytes().as_ref());
             let h = &r.histogram;
             let hist = Uint32Array::from(h.to_words().as_slice());
@@ -154,6 +172,9 @@ async fn handle(scope: &web_sys::DedicatedWorkerGlobalScope, backend: Option<Bac
 // main side
 
 struct Busy {
+    wire: String,
+    blob: Option<lightcraft_engine::catalog::assets::Blob>,
+    need_source: bool,
     disk_key: Option<String>,
     namespace: u64,
     request_id: u64,
@@ -186,6 +207,7 @@ struct Inner {
     /// worker message, where the session is out of reach; the app refreshes it every frame.
     budget: u64,
     backend: Option<Backend>,
+    managed: crate::cloud::memory::ManagedBytes,
     ctx: egui::Context,
     /// Jobs finished by workers / inline (for diagnostics).
     remote_done: u64,
@@ -223,6 +245,7 @@ impl Workers {
         index: ThumbIndex,
         cache: &Arc<PreviewCache>,
         budget: u64,
+        managed: crate::cloud::memory::ManagedBytes,
         ctx: egui::Context,
     ) -> Workers {
         let w = Workers(Rc::new(RefCell::new(Inner {
@@ -234,6 +257,7 @@ impl Workers {
             index,
             budget,
             backend,
+            managed,
             ctx,
             remote_done: 0,
             inline_done: 0,
@@ -319,6 +343,12 @@ impl Workers {
             return;
         }
         let id = get(&data, "id").as_f64().unwrap_or(-1.0) as u32;
+        if get(&data, "needOriginal").is_truthy() {
+            if let Some(b) = w.busy.as_mut().filter(|b| b.id == id) {
+                b.need_source = true;
+            }
+            return;
+        }
         let Some(b) = w.busy.take_if(|b| b.id == id) else { return };
         let ms = get(&data, "ms").as_f64().unwrap_or(0.0);
         let rendered = if get(&data, "ok").is_truthy() {
@@ -478,7 +508,7 @@ impl RenderOffload for Workers {
         let id = g.next_id;
         let msg = Object::new();
         set(&msg, "id", &id.into());
-        set(&msg, "job", &text.into());
+        set(&msg, "job", &text.as_str().into());
         let namespace = g.index.namespace();
         let w = &mut g.workers[i];
         if let Err(e) = w.worker.post_message(&msg) {
@@ -486,6 +516,9 @@ impl RenderOffload for Workers {
             return Some(job);
         }
         w.busy = Some(Busy {
+            wire: text,
+            blob: wire.managed.as_ref().map(|source| source.blob.clone()),
+            need_source: false,
             disk_key,
             namespace,
             request_id: job.request_id,
@@ -507,6 +540,49 @@ impl RenderOffload for Workers {
             g.observe_cache(&cache, cache.generation());
         }
         g.inline_this_frame = false;
+        let memory = g.managed.clone();
+        let mut failed = Vec::new();
+        for worker in &mut g.workers {
+            let Some(busy) = worker.busy.as_mut().filter(|b| b.need_source) else { continue };
+            let Some(blob) = &busy.blob else { continue };
+            let result = match memory.get(blob) {
+                Ok(bytes) => {
+                    let msg = Object::new();
+                    set(&msg, "id", &busy.id.into());
+                    set(&msg, "job", &busy.wire.clone().into());
+                    let data = Uint8Array::from(bytes.as_ref());
+                    set(&msg, "original", &data);
+                    let transfer = Array::new();
+                    transfer.push(&data.buffer());
+                    worker.worker.post_message_with_transfer(&msg, &transfer).map_err(|_| "could not transfer verified source to renderer".to_owned())
+                }
+                Err(_) if memory.pending(blob) => continue,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                if let Some(b) = worker.busy.take() {
+                    failed.push((
+                        b.slot,
+                        RenderResult {
+                            request_id: b.request_id,
+                            source_key: None,
+                            photo: b.photo,
+                            level: b.level,
+                            key: b.key,
+                            rendered: Err(error),
+                            gpu_fallback: None,
+                            loaded: None,
+                            quick: None,
+                            display: None,
+                        },
+                        0.,
+                    ));
+                }
+            } else {
+                busy.need_source = false;
+            }
+        }
+        g.done.extend(failed);
         std::mem::take(&mut g.done)
     }
 }

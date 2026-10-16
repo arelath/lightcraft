@@ -99,7 +99,7 @@ impl Options {
 async fn store_file(originals: Originals, backend: Option<Backend>, name: String, bytes: Vec<u8>, ctx: egui::Context) {
     let hash = content_hash(&bytes);
     if let Some(b) = &backend
-        && let Err(e) = b.write(&storage_key(&hash), &bytes).await
+        && let Err(e) = crate::cloud::cache::storage::auxiliary(b, &storage_key(&hash), &bytes).await
     {
         // a photo whose bytes aren't stored would be gone after a reload: don't add it
         notice(format!("{name} was not added: browser storage refused it ({e}). Free up space or back up and clear old photos."));
@@ -255,8 +255,10 @@ async fn flush(files: Files, backend: Backend, dir: String, flushing: Rc<Cell<bo
         }
         for (i, op) in ops.iter().enumerate() {
             let r = match op {
-                FlushOp::Write { name, data } => backend.write(&library_key(&dir, name), data).await,
-                FlushOp::Append { name, offset, data } => backend.write_at(&library_key(&dir, name), Some(*offset), data).await,
+                FlushOp::Write { name, data } => crate::cloud::cache::storage::critical(&backend, &library_key(&dir, name), None, data).await,
+                FlushOp::Append { name, offset, data } => {
+                    crate::cloud::cache::storage::critical(&backend, &library_key(&dir, name), Some(*offset), data).await
+                }
             };
             if let Err(e) = r {
                 log::error!("saving {} failed: {e}", op.name());
@@ -341,10 +343,23 @@ async fn boot(opts: Options) -> Boot {
             }
         }
         for name in LIBRARY_FILES {
-            match b.read(&library_key(&lib_dir, name)).await {
+            let read = if name == crate::cloud::cache::OWNERS_FILE {
+                b.read_limited(&library_key(&lib_dir, name), crate::cloud::cache::POLICY_LIMIT).await
+            } else {
+                b.read(&library_key(&lib_dir, name)).await
+            };
+            match read {
                 Ok(Some(data)) => files.preload(name, data),
                 Ok(None) => {}
-                Err(e) => log::error!("reading {name}: {e}"),
+                Err(e) => {
+                    log::error!("reading {name}: {e}");
+                    if name == crate::cloud::cache::OWNERS_FILE {
+                        // Preserve unreadable durable intent as an error in memory. Do not
+                        // silently fall back to an older global policy or overwrite the file.
+                        files.preload(name, Vec::new());
+                        notice(format!("Offline selections could not be read: {e}. Stored bytes remain protected."));
+                    }
+                }
             }
         }
         if let Ok(Some(j)) = b.read(THUMB_INDEX).await {
@@ -461,7 +476,7 @@ impl WebApp {
         // previews are large (≤ 2560 px, f32): keep few in a 32-bit address space
         session.media.preview_capacity = 3;
         let frozen = Rc::new(Cell::new(false));
-        let cloud = crate::cloud::host::Host::new(backend.clone(), files.clone(), frozen.clone(), owner);
+        let cloud = crate::cloud::host::Host::new(backend.clone(), files.clone(), frozen.clone(), owner, lib_dir.clone());
         cloud.install(&mut session, &cc.egui_ctx);
         let mut platform = services(originals.clone(), backend.clone(), files.clone(), frozen.clone(), cc.egui_ctx.clone());
         platform.cloud_action = Some(cloud.action());
@@ -485,6 +500,7 @@ impl WebApp {
                 index,
                 &cache,
                 app.session.cache_bytes(),
+                cloud.memory.clone(),
                 cc.egui_ctx.clone(),
             )
         });
@@ -585,7 +601,7 @@ impl WebApp {
             {
                 let b = b.clone();
                 wasm_bindgen_futures::spawn_local(async move {
-                    if let Err(e) = b.write(THUMB_INDEX, &index).await {
+                    if let Err(e) = crate::cloud::cache::storage::auxiliary(&b, THUMB_INDEX, &index).await {
                         log::warn!("saving the thumbnail index: {e}");
                     }
                 });

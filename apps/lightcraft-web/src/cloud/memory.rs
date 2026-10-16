@@ -251,6 +251,13 @@ impl ManagedBytes {
         self.generation.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+    pub fn resident_ids(&self) -> BTreeSet<String> {
+        self.lock().bytes.keys().cloned().collect()
+    }
+    pub fn pending(&self, blob: &Blob) -> bool {
+        let g = self.lock();
+        g.wanted.contains_key(&blob.id.0) || g.loading.contains_key(&blob.id.0)
+    }
     pub fn take_wanted(&self) -> Vec<Download> {
         let mut g = self.lock();
         let mut ids: Vec<_> = g.wanted.keys().cloned().collect();

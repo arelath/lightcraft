@@ -75,6 +75,10 @@ pub fn cache_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
             return;
         }
     };
+    if storage["browser"] == true {
+        browser_cache_tab(app, ui, t, &storage);
+        return;
+    }
     let width = ui.available_width();
     let u = |key: &str| storage[key].as_u64();
     let volume = &storage["volume"];
@@ -297,6 +301,82 @@ fn keep_all(app: &mut LightcraftApp, ui: &egui::Ui, params: Value) {
         app.toast(ui.ctx(), e);
     }
     refetch(ui);
+}
+
+fn browser_cache_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, storage: &Value) {
+    ui.heading(crate::i18n::tr("Browser storage"));
+    ui.label(crate::i18n::tr(
+        "Cloud downloads are disposable unless stored offline. Imported originals, catalog changes and offline copies are protected.",
+    ));
+    let cache = &storage["persistentCache"];
+    if let (Some(usage), Some(quota)) = (cache["usageBytes"].as_u64(), cache["quotaBytes"].as_u64()) {
+        ui.label(format!("{:.1} / {:.1} MB", usage as f64 / (1 << 20) as f64, quota as f64 / (1 << 20) as f64));
+    }
+    ui.label(crate::i18n::tr("Media reserves space for catalog saves. Browser quota estimates can change."));
+    if let Some(reserve) = cache["reservedHeadroomBytes"].as_u64() {
+        ui.label(format!("{} MB", reserve >> 20));
+    }
+    let budget = storage["budgetBytes"].as_u64().unwrap_or(0) >> 20;
+    ui.horizontal(|ui| {
+        ui.label(crate::i18n::tr("Cache size limit"));
+        egui::ComboBox::from_id_salt("browserCacheLimit").selected_text(format!("{budget} MB")).show_ui(ui, |ui| {
+            for mb in [0u64, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
+                let r = ui.selectable_label(budget == mb, format!("{mb} MB"));
+                register(ui.ctx(), format!("button:settingsCacheLimitMb-{mb}"), r.rect);
+                if r.clicked() {
+                    match app.run("cloud.cache", json!({"budgetMb":mb})) {
+                        Ok(_) => refetch(ui),
+                        Err(error) => app.toast(ui.ctx(), error),
+                    }
+                }
+            }
+        });
+    });
+    if cache["temporaryBlobs"].as_u64().unwrap_or(0) > 0 {
+        ui.colored_label(
+            t.caution,
+            crate::i18n::tr("Some verified photos are available only for this session. Store them offline to retain them after reload."),
+        );
+    }
+    if let Some(error) = cache["error"]
+        .as_str()
+        .filter(|error| !storage["offlineErrors"].as_object().is_some_and(|errors| errors.values().any(|value| value.as_str() == Some(*error))))
+    {
+        ui.colored_label(t.caution, error);
+    }
+    if let Some(errors) = storage["offlineErrors"].as_object() {
+        for error in errors.values().filter_map(Value::as_str).take(8) {
+            ui.colored_label(t.caution, error);
+        }
+    }
+    ui.label(crate::i18n::tr(if storage["offlineReady"] == true {
+        "Offline copies are ready."
+    } else {
+        "Offline copies are waiting or need attention."
+    }));
+    ui.horizontal(|ui| {
+        if pill_button(ui, t, "button:settingsClearCache", crate::i18n::tr("Clear cache")).clicked() {
+            match app.run("cloud.clearCache", json!({})) {
+                Ok(_) => refetch(ui),
+                Err(error) => app.toast(ui.ctx(), error),
+            }
+        }
+        if pill_button(ui, t, "button:settingsCacheRetry", crate::i18n::tr("Retry downloads")).clicked() {
+            match app.run("cloud.reconnect", json!({})) {
+                Ok(_) => refetch(ui),
+                Err(error) => app.toast(ui.ctx(), error),
+            }
+        }
+    });
+    let mut previews = storage["keepAll"]["previews"] == true;
+    if super::settings::check(ui, "settingsKeepAllPreviews", &mut previews, "Store a copy of all Smart previews") {
+        keep_all(app, ui, json!({"keepAllPreviews":previews}));
+    }
+    let mut originals = storage["keepAll"]["originals"] == true;
+    if super::settings::check(ui, "settingsKeepAllOriginals", &mut originals, "Store a copy of all originals") {
+        keep_all(app, ui, json!({"keepAllOriginals":originals}));
+    }
+    ui.label(crate::i18n::tr("Offline retention prevents LightCraft cache eviction. Keep backups: clearing site data or browser eviction can still remove browser storage."));
 }
 
 /// An outlined, fully rounded button ("Clear cache").

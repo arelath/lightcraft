@@ -694,12 +694,12 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         if let lightcraft_catalog::Source::Managed { asset_id } = &p.source {
             #[cfg(target_arch = "wasm32")]
             let availability = app.session.catalog.asset(asset_id).and_then(|asset| {
-                app.session.media.managed_reader.as_ref().map(|read| match read(&asset.original) {
+                app.session.media.managed_peek.as_ref().map(|read| match read(&asset.original) {
                     Ok(_) => lightcraft_engine::assets::AssetAvailability::Cached,
                     Err(error) if error.contains("loading asynchronously") => {
                         lightcraft_engine::assets::AssetAvailability::Downloading { done: 0, total: asset.original.size }
                     }
-                    Err(error) => lightcraft_engine::assets::AssetAvailability::Failed { error },
+                    Err(_) => lightcraft_engine::assets::AssetAvailability::Remote,
                 })
             });
             #[cfg(not(target_arch = "wasm32"))]
@@ -711,12 +711,12 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             });
             #[cfg(target_arch = "wasm32")]
             let preview = app.session.catalog.asset(asset_id).and_then(|asset| asset.smart_preview.as_ref()).and_then(|blob| {
-                app.session.media.managed_reader.as_ref().map(|read| match read(blob) {
+                app.session.media.managed_peek.as_ref().map(|read| match read(blob) {
                     Ok(_) => lightcraft_engine::assets::AssetAvailability::Cached,
                     Err(error) if error.contains("loading asynchronously") => {
                         lightcraft_engine::assets::AssetAvailability::Downloading { done: 0, total: blob.size }
                     }
-                    Err(error) => lightcraft_engine::assets::AssetAvailability::Failed { error },
+                    Err(_) => lightcraft_engine::assets::AssetAvailability::Remote,
                 })
             });
             #[cfg(not(target_arch = "wasm32"))]
@@ -882,10 +882,13 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     Err(error) => app.toast(ui.ctx(), error),
                 }
             }
-            #[cfg(not(target_arch = "wasm32"))]
             {
                 use lightcraft_engine::assets::cache::OfflineQuality;
+                #[cfg(not(target_arch = "wasm32"))]
                 let pin = app.session.media.asset_resolver.as_ref().and_then(|r| r.offline_pin(&format!("photo:{}", id.0)));
+                #[cfg(target_arch = "wasm32")]
+                let pin: Option<lightcraft_engine::assets::cache::OfflinePin> =
+                    app.run("cloud.cache", json!({})).ok().and_then(|v| serde_json::from_value(v["pins"][format!("photo:{}", id.0)].clone()).ok());
                 let has_preview = app.session.catalog.asset(asset_id).is_some_and(|a| a.smart_preview.is_some());
                 let label = match pin.as_ref().map(|p| p.quality) {
                     Some(OfflineQuality::Original) => "Keep original offline ✓",
@@ -918,6 +921,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 {
                     app.toast(ui.ctx(), error);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
                 if text_button(ui, "cloudRemoveLocal", crate::i18n::tr("Remove local original copy"), false).clicked() {
                     match app.run("cloud.removeLocalCopy", json!({"ids": [id.0]})) {
                         Ok(result) => {

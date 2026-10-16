@@ -35,9 +35,12 @@ in append mode. LIST discovery and full state validation still have linear costs
   relinks existing photo and virtual-copy records after verified staging; IDs, edits,
   metadata, album memberships and photo history remain. Original files are retained.
   Native photo/album offline intent follows current members and source revisions.
-- Browser original import/upload is unsupported. Its verified persistent cache has
-  quota failure recovery, but automatic eviction/reserved catalog capacity and a
-  guaranteed offline-retention policy remain CR.17. A maintained signer deployment
+- Browser managed import/upload and adoption are unsupported; ordinary file import
+  remains device-local. Its verified persistent cache evicts only unpinned indexed cloud
+  blobs, reserves
+  catalog headroom, retains live photo/album offline intent across reload/backup, and
+  distinguishes temporary session bytes from durably saved offline copies. Browser
+  storage remains subject to browser eviction/site-data removal; see [quota recovery](browser-cloud.md#verified-cache-offline-selections-and-quota-recovery). A maintained signer deployment
   and explicit capability matrix remain CR.20.
 - Deletion retains complete objects, revisions, tombstones and receipt archives.
   Safe previewable reclamation remains CR.18. Multipart cleanup only retires incomplete
@@ -418,6 +421,8 @@ remote seed is retained for safe retry. See [migration operation](cloud-sync-pro
 and [browser requirements](browser-cloud.md).
 
 ## Revision history
+
+CR.17 (2026-10-17): browser verified-cache eviction, catalog headroom, offline intent and temporary source delivery; actual quota/reload acceptance is recorded in the reliability checklist.
 
 | Date | Change |
 |---|---|

@@ -62,6 +62,7 @@ struct Data {
 #[derive(Clone)]
 pub struct Host {
     data: Rc<RefCell<Data>>,
+    cache: super::cache::offline::Offline,
     pub memory: ManagedBytes,
     files: Files,
     backend: Option<Backend>,
@@ -82,10 +83,12 @@ pub(crate) fn random_identity() -> Result<String, String> {
     Ok(lightcraft_engine::assets::sha256(&bytes).0)
 }
 impl Host {
-    pub fn new(backend: Option<Backend>, files: Files, frozen: Rc<Cell<bool>>, owner: Option<String>) -> Self {
+    pub fn new(backend: Option<Backend>, files: Files, frozen: Rc<Cell<bool>>, owner: Option<String>, directory: String) -> Self {
+        let memory = ManagedBytes::default();
         let host = Self {
+            cache: super::cache::offline::Offline::new(backend.clone(), directory, memory.clone(), files.clone()),
             data: Rc::new(RefCell::new(Data { next_poll: js_sys::Date::now() + 5000., ..Data::default() })),
-            memory: ManagedBytes::default(),
+            memory,
             files,
             backend,
             frozen,
@@ -154,6 +157,15 @@ impl Host {
         Box::new(move |session, id, params| host.handle(session, id, params))
     }
     fn handle(&self, s: &mut Session, id: &str, p: &Value) -> Option<Result<Value, String>> {
+        if let Some(result) = self.cache.handle(s, id, p) {
+            if result.is_ok()
+                && (matches!(id, "cloud.pin" | "cloud.unpin" | "cloud.clearCache")
+                    || id == "cloud.cache" && p.as_object().is_some_and(|p| !p.is_empty()))
+            {
+                self.memory.retry();
+            }
+            return Some(result);
+        }
         match id {
             "cloud.configureBrowser" => Some(self.configure(s, p)),
             "cloud.connections" => Some(Ok(json!({"connections":self.data.borrow().providers.values().map(|v|json!({
@@ -191,6 +203,7 @@ impl Host {
             }),
             "cloud.reconnect" => Some({
                 self.memory.retry();
+                self.cache.retry();
                 let mut data = self.data.borrow_mut();
                 data.paused = data.preparing_migration;
                 Ok(json!({"ready":true}))
@@ -293,6 +306,7 @@ impl Host {
         );
         status["health"]["secondsSinceLastRemoteScan"] = json!(data.health.age_seconds(timestamp_ms()));
         status["cache"] = self.memory.status();
+        status["offline"] = self.cache.view(s);
         status["savePending"] = json!(self.files.is_dirty());
         status["saveError"] = json!(self.files.error());
         Ok(status)
@@ -313,6 +327,7 @@ impl Host {
         );
         out["health"]["sync"]["secondsSinceLastRemoteScan"] = json!(data.health.age_seconds(timestamp_ms()));
         out["health"]["media"] = data.media_health.view();
+        out["health"]["offline"] = self.cache.view(s);
         if let Some(message) = out["health"]["sync"]["lastError"]["message"].as_str() {
             out["error"] = json!(message);
         } else if let Some(failures) = out["health"]["media"]["failures"].as_object()
@@ -444,6 +459,10 @@ impl Host {
         Ok(json!({"task":task,"background":true}))
     }
     pub fn tick(&self, app: &mut LightcraftApp, flushing: bool, ctx: &egui::Context) {
+        super::cache::storage::reserve_catalog(self.files.save_headroom());
+        if !self.frozen.get() {
+            self.cache.tick(&mut app.session, &self.memory, &self.files, flushing, ctx);
+        }
         let jobs = std::mem::take(&mut self.data.borrow_mut().jobs);
         let mut remaining = Vec::new();
         for mut job in jobs {
@@ -511,13 +530,14 @@ impl Host {
                 && js_sys::Date::now() >= data.next_poll
                 && app.session.catalog.sync_state().is_some_and(|s| data.providers.contains_key(&s.connection))
         };
-        if poll && !self.frozen.get() {
-            if let Err(error) = self.start(&mut app.session, &json!({"wait":false,"audit":false})) {
-                let mut data = self.data.borrow_mut();
-                data.paused = true;
-                data.health.fail(&error, None);
-                crate::safety::notice(error);
-            }
+        if poll
+            && !self.frozen.get()
+            && let Err(error) = self.start(&mut app.session, &json!({"wait":false,"audit":false}))
+        {
+            let mut data = self.data.borrow_mut();
+            data.paused = true;
+            data.health.fail(&error, None);
+            crate::safety::notice(error);
         }
         if self.data.borrow().sync_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
@@ -696,8 +716,9 @@ impl Host {
                     let bytes = match provider {
                         Some(provider) => provider.with_cancel(download.cancel.clone()).blob(&backend, &blob).await?,
                         None => {
-                            let bytes =
-                                backend.read(&super::cache_key(&blob)).await?.ok_or("configure browser cloud storage to download this photo")?;
+                            let bytes = super::cache::storage::read_verified(&backend, &blob)
+                                .await?
+                                .ok_or("configure browser cloud storage to download this photo")?;
                             super::verify_blob(&blob, &bytes)?;
                             bytes
                         }
