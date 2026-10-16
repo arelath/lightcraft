@@ -160,6 +160,11 @@ pub fn cache_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
         }
     }
     ui.add_space(14.0);
+    if let Some(errors) = storage["offlineErrors"].as_object() {
+        for message in errors.values().filter_map(Value::as_str).take(8) {
+            ui.colored_label(t.caution, message);
+        }
+    }
     let (line, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
     ui.painter().hline(line.x_range(), line.center().y, Stroke::new(1.0, t.divider));
     ui.add_space(18.0);

@@ -639,6 +639,7 @@ impl Session {
                     self.catalog.upload_intents().get(&id).and_then(|intent| self.catalog.asset(&intent.asset_id).map(|asset| (intent, asset)));
                 resolver.note_staging_intent(&id, value, true);
             }
+            resolver.confirm_offline_pins();
         }
         let presets = presets_json(self);
         let Some(lib) = self.library.as_mut() else { return Ok(()) };

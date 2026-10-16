@@ -622,7 +622,10 @@ fn budget_keeps_active_leases_and_independent_persistent_pin_owners() {
     drop(resolver);
     let reopened = AssetResolver::new(scratch.0.clone());
     assert_eq!(reopened.cache_status().budget_bytes, 0);
-    assert_eq!(reopened.offline_pin("album:1").unwrap().blobs, vec![b.id.clone()]);
+    assert_eq!(reopened.offline_pin("album:1").unwrap().quality, OfflineQuality::Original);
+    assert!(reopened.cache_status().resolving_pins);
+    assert!(reopened.offline_pin("album:1").unwrap().blobs.is_empty(), "membership is resolved from the catalog, not saved");
+    assert_eq!(reopened.clear_cache().unwrap(), 0, "reopen defers eviction until owner resolution");
     let offline = reopened.acquire(&b, &AtomicBool::new(false)).unwrap();
     assert_eq!(offline.read_bytes().unwrap(), b"offline original");
     reopened.set_offline_pins(&[("album:1".into(), None)]).unwrap();
@@ -660,7 +663,7 @@ fn decoded_source_clones_keep_the_managed_original_leased() {
 
 #[test]
 fn damaged_or_future_retention_settings_disable_eviction_and_preserve_bytes() {
-    for bytes in [b"broken".as_slice(), br#"{"version":3,"budget_bytes":0,"pins":{},"removed":[]}"#] {
+    for bytes in [b"broken".as_slice(), br#"{"version":4,"budget_bytes":0,"pins":{},"removed":[]}"#] {
         let scratch = Scratch::new();
         let b = blob(b"protected");
         std::fs::write(scratch.0.join(&b.id.0), b"protected").unwrap();
@@ -974,7 +977,7 @@ fn keep_all_protects_library_blobs_downloads_new_arrivals_and_survives_restart()
 }
 
 #[test]
-fn version_1_retention_settings_load_and_are_saved_as_version_2() {
+fn version_1_retention_settings_load_and_are_saved_as_version_3() {
     let scratch = Scratch::new();
     std::fs::write(scratch.0.join("retention.json"), br#"{"version":1,"budget_bytes":1048576,"pins":{},"removed":[]}"#).unwrap();
     let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
@@ -983,7 +986,7 @@ fn version_1_retention_settings_load_and_are_saved_as_version_2() {
     assert_eq!(resolver.keep_all(), super::cache::KeepAll::default());
     resolver.set_keep_all(super::cache::KeepAll { originals: false, previews: true }, BTreeMap::new()).unwrap();
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(scratch.0.join("retention.json")).unwrap()).unwrap();
-    assert_eq!(saved["version"], 2);
+    assert_eq!(saved["version"], 3);
     assert_eq!(saved["budget_bytes"], 1 << 20);
     assert_eq!(saved["keep_all"], serde_json::json!({"originals": false, "previews": true}));
 }
@@ -1062,7 +1065,15 @@ fn moving_the_cloud_cache_copies_verified_files_reopens_on_the_new_folder_and_su
         )
         .unwrap();
     drop(resolver.acquire(&b, &AtomicBool::new(false)).unwrap());
-    session.execute("cloud.cache", &serde_json::json!({"budgetMb": 3})).unwrap();
+    let id = session.selection.active.unwrap();
+    session.execute("cloud.pin", &serde_json::json!({"ids": [id.0], "wait": true})).unwrap();
+    let album = session.execute("album.create", &serde_json::json!({"name": "Offline move", "addSelected": true})).unwrap()["id"].as_u64().unwrap();
+    session.execute("cloud.pin", &serde_json::json!({"albumId": album, "wait": true})).unwrap();
+    session.execute("cloud.cache", &serde_json::json!({"budgetMb": 0})).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !session.activity.list().is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let old_root = resolver.root().to_path_buf();
     drop(resolver);
 
@@ -1083,7 +1094,10 @@ fn moving_the_cloud_cache_copies_verified_files_reopens_on_the_new_folder_and_su
     let resolver = session.media.asset_resolver.clone().unwrap();
     assert_eq!(resolver.root(), target.as_path());
     assert_eq!(std::fs::read(target.join(&b.id.0)).unwrap(), bytes);
-    assert_eq!(resolver.cache_status().budget_bytes, 3 << 20, "retention settings moved too");
+    assert_eq!(resolver.cache_status().budget_bytes, 0, "retention settings moved too");
+    assert_eq!(resolver.offline_pin(&format!("photo:{}", id.0)).unwrap().blobs, vec![b.id.clone()]);
+    assert_eq!(resolver.offline_pin(&format!("album:{album}")).unwrap().blobs, vec![b.id.clone()]);
+    assert_eq!(resolver.clear_cache().unwrap(), 0, "live owners resolve before eviction at the new root");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while old_root.join(&b.id.0).exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1206,3 +1220,5 @@ fn bound_destinations_reject_retargeting_before_settings_or_resolver_changes_in_
         session.close_library().unwrap();
     }
 }
+
+mod live_pins;

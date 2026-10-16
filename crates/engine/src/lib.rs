@@ -643,6 +643,8 @@ impl Session {
             cmd::cloud::refresh_keep_all(self);
         }
         #[cfg(not(target_arch = "wasm32"))]
+        cmd::cloud::refresh_offline_pins(self, false);
+        #[cfg(not(target_arch = "wasm32"))]
         self.notice_staging(&op);
         self.pending_log.push(op);
         Ok(inv)

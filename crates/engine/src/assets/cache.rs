@@ -31,6 +31,8 @@ mod managed_tests;
 #[serde(deny_unknown_fields)]
 pub struct OfflinePin {
     pub quality: OfflineQuality,
+    /// Derived dependencies; version-3 policy files persist only owner and quality.
+    #[serde(default)]
     pub blobs: Vec<BlobId>,
 }
 
@@ -44,9 +46,9 @@ pub struct KeepAll {
     pub previews: bool,
 }
 
-/// Version 2 adds `keep_all`. Version 1 files load unchanged and are written as version 2 on
-/// the next policy change.
-const POLICY_VERSION: u32 = 2;
+/// Version 3 stores live owner/quality intent, with no authoritative saved blob membership.
+/// Older snapshot pins are resolved against the catalog before eviction as well.
+const POLICY_VERSION: u32 = 3;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,7 +67,7 @@ impl Default for Policy {
 }
 impl Policy {
     fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1 | POLICY_VERSION)
+        if !matches!(self.version, 1 | 2 | POLICY_VERSION)
             || self.budget_bytes > (1 << 50)
             || self.pins.len() > MAX_RECORDS
             || self.removed.len() > MAX_RECORDS
@@ -80,7 +82,7 @@ impl Policy {
                 return Err(AssetError::Invalid("invalid offline pin owner".into()));
             }
             count = count.saturating_add(pin.blobs.len());
-            if pin.blobs.is_empty() || count > MAX_RECORDS || pin.blobs.iter().any(|id| !valid_id(id)) {
+            if (self.version < 3 && pin.blobs.is_empty()) || count > MAX_RECORDS || pin.blobs.iter().any(|id| !valid_id(id)) {
                 return Err(AssetError::Invalid("invalid or oversized offline pins".into()));
             }
         }
@@ -92,6 +94,7 @@ impl Policy {
 }
 fn recompute_pins(state: &mut State) {
     state.pinned_ids = state.policy.pins.values().flat_map(|pin| pin.blobs.iter().cloned()).collect();
+    state.pinned_ids.extend(state.pending_pin_ids.iter().cloned());
     if state.policy.keep_all != KeepAll::default() {
         state.pinned_ids.extend(state.library_ids.iter().cloned());
     }
@@ -107,6 +110,8 @@ pub struct CacheStatus {
     pub used_bytes: u64,
     pub pinned_bytes: u64,
     pub pins: BTreeMap<String, OfflinePin>,
+    pub offline_errors: BTreeMap<String, String>,
+    pub resolving_pins: bool,
     pub removed: BTreeSet<BlobId>,
     /// Library-wide offline copies, and how many blobs they currently protect.
     pub keep_all: KeepAll,
@@ -120,6 +125,11 @@ type Entries = Mutex<BTreeMap<BlobId, Arc<Entry>>>;
 struct State {
     policy: Policy,
     pinned_ids: BTreeSet<BlobId>,
+    /// Previous dependencies remain protected until the catalog mutation is durable.
+    pending_pin_ids: BTreeSet<BlobId>,
+    unresolved_pins: bool,
+    unresolved_library: bool,
+    offline_errors: BTreeMap<String, String>,
     /// Blobs protected by [`Policy::keep_all`], supplied by the session from its catalog.
     library_ids: BTreeSet<BlobId>,
     error: Option<String>,
@@ -167,6 +177,8 @@ impl Cache {
         #[cfg(not(target_arch = "wasm32"))]
         let (sender, receiver) = mpsc::sync_channel(1);
         let pinned_ids = policy.pins.values().flat_map(|pin| pin.blobs.iter().cloned()).collect();
+        let unresolved_pins = !policy.pins.is_empty();
+        let unresolved_library = policy.keep_all != KeepAll::default();
         let cache = Arc::new(Self {
             root,
             durable_root: Mutex::new(None),
@@ -174,6 +186,10 @@ impl Cache {
             state: Mutex::new(State {
                 policy,
                 pinned_ids,
+                pending_pin_ids: BTreeSet::new(),
+                unresolved_pins,
+                unresolved_library,
+                offline_errors: BTreeMap::new(),
                 library_ids: BTreeSet::new(),
                 error,
                 access: BTreeMap::new(),
@@ -225,7 +241,8 @@ impl Cache {
         }
     }
     pub(super) fn removed(&self, id: &BlobId) -> bool {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).policy.removed.contains(id)
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.policy.removed.contains(id) && !state.pinned_ids.contains(id)
     }
     pub(super) fn status(&self) -> CacheStatus {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -234,6 +251,8 @@ impl Cache {
             used_bytes: state.used,
             pinned_bytes: state.pinned,
             pins: state.policy.pins.clone(),
+            offline_errors: state.offline_errors.clone(),
+            resolving_pins: state.unresolved_pins || state.unresolved_library,
             removed: state.policy.removed.clone(),
             keep_all: state.policy.keep_all,
             keep_all_blobs: if state.policy.keep_all == KeepAll::default() { 0 } else { state.library_ids.len() },
@@ -252,7 +271,7 @@ impl Cache {
     pub(super) fn pin(&self, owner: &str) -> Option<OfflinePin> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner).policy.pins.get(owner).cloned()
     }
-    fn save(&self, state: &mut State, policy: Policy) -> Result<()> {
+    fn save(&self, state: &mut State, mut policy: Policy) -> Result<()> {
         self.validate_root()?;
         if let Some(error) = &state.error {
             return Err(AssetError::Disk(format!(
@@ -260,8 +279,15 @@ impl Cache {
                 self.root.join(POLICY).display()
             )));
         }
-        policy.validate()?;
-        let bytes = serde_json::to_vec(&policy).map_err(|e| AssetError::Invalid(e.to_string()))?;
+        policy.version = POLICY_VERSION;
+        let mut durable = policy.clone();
+        // Reopen resolves owners against the saved catalog before trimming. Blob arrays
+        // are runtime dependencies, never an authoritative saved membership snapshot.
+        for pin in durable.pins.values_mut() {
+            pin.blobs.clear();
+        }
+        durable.validate()?;
+        let bytes = serde_json::to_vec(&durable).map_err(|e| AssetError::Invalid(e.to_string()))?;
         if bytes.len() as u64 > MAX_POLICY_BYTES {
             return Err(AssetError::Invalid("cache retention settings exceed 16 MiB".into()));
         }
@@ -285,6 +311,7 @@ impl Cache {
         policy.removed.retain(|id| !ids.contains(id));
         self.save(&mut state, policy)?;
         state.library_ids = ids;
+        state.unresolved_library = false;
         recompute_pins(&mut state);
         drop(state);
         self.schedule_trim();
@@ -293,6 +320,7 @@ impl Cache {
     /// Refresh the blobs [`KeepAll`] protects (in memory only: they are derived from the catalog).
     pub(super) fn set_library_ids(&self, ids: BTreeSet<BlobId>) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.unresolved_library = false;
         if state.library_ids != ids {
             state.library_ids = ids;
             recompute_pins(&mut state);
@@ -308,13 +336,18 @@ impl Cache {
         Ok(())
     }
     pub(super) fn set_pins(&self, pins: &[(String, Option<OfflinePin>)]) -> Result<()> {
-        if pins.len() > MAX_RECORDS {
+        if pins.len() > MAX_RECORDS
+            || pins.iter().filter_map(|(_, pin)| pin.as_ref()).fold(0usize, |n, pin| n.saturating_add(pin.blobs.len())) > MAX_RECORDS
+        {
             return Err(AssetError::Invalid("too many offline pin changes".into()));
         }
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut policy = state.policy.clone();
         for (owner, pin) in pins {
             if let Some(pin) = pin {
+                if pin.blobs.iter().any(|id| !valid_id(id)) {
+                    return Err(AssetError::Invalid("invalid offline blob identity".into()));
+                }
                 for id in &pin.blobs {
                     policy.removed.remove(id);
                 }
@@ -324,14 +357,67 @@ impl Cache {
             }
         }
         self.save(&mut state, policy)?;
+        if state.policy.pins.is_empty() {
+            state.unresolved_pins = false;
+            state.pending_pin_ids.clear();
+            state.offline_errors.clear();
+            recompute_pins(&mut state);
+        }
         drop(state);
         self.schedule_trim();
         Ok(())
+    }
+    pub(super) fn owners(&self) -> BTreeMap<String, OfflinePin> {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .policy
+            .pins
+            .iter()
+            .map(|(owner, pin)| (owner.clone(), OfflinePin { quality: pin.quality, blobs: Vec::new() }))
+            .collect()
+    }
+    /// No disk I/O: the owner/quality policy is durable. Unsaved catalog changes add
+    /// protection immediately and retain earlier dependencies through journal failure/retry.
+    pub(super) fn resolve_pins(&self, pins: BTreeMap<String, OfflinePin>, errors: BTreeMap<String, String>) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let resolved = state.unresolved_pins;
+        if !resolved && state.policy.pins == pins && state.offline_errors == errors {
+            return;
+        }
+        if state.policy.pins != pins {
+            let previous: Vec<_> = state.policy.pins.values().flat_map(|pin| pin.blobs.iter().cloned()).collect();
+            state.pending_pin_ids.extend(previous);
+            for (owner, pin) in pins {
+                if let Some(current) = state.policy.pins.get_mut(&owner).filter(|current| current.quality == pin.quality) {
+                    current.blobs = pin.blobs;
+                }
+            }
+        }
+        state.unresolved_pins = false;
+        state.offline_errors = errors;
+        recompute_pins(&mut state);
+        drop(state);
+        if resolved {
+            self.schedule_trim();
+        }
+    }
+    pub(super) fn confirm_pins(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.pending_pin_ids.is_empty() {
+            state.pending_pin_ids.clear();
+            recompute_pins(&mut state);
+            drop(state);
+            self.schedule_trim();
+        }
     }
     /// Called under the blob gate; concurrent pin changes are serialized by the policy mutex.
     pub(super) fn remove_local(&self, id: &BlobId) -> Result<()> {
         self.validate_root()?;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.unresolved_pins || state.unresolved_library {
+            return Err(AssetError::Invalid("offline policy is awaiting its library; open the catalog before removing copies".into()));
+        }
         if state.pinned_ids.contains(id) {
             return Err(AssetError::Invalid("offline copy is pinned; unpin all photos/albums using it first".into()));
         }
@@ -382,6 +468,12 @@ impl Cache {
         let _maintenance = self.maintenance.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(error) = &self.state.lock().unwrap_or_else(PoisonError::into_inner).error {
             return Err(AssetError::Disk(error.clone()));
+        }
+        {
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.unresolved_pins || state.unresolved_library {
+                return Ok(0);
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {

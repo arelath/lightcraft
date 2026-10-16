@@ -19,7 +19,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.12 — Replace subtractive catalog JSON projection/materialization with explicit portable photo, content, album, and reference types and typed boundary conversions; retain wire compatibility tests.
 - [x] CR.13 — Extract testable upload readiness, transfer, verification, dependency waiting, publication, acknowledgement, and failure transitions; test deletion/restart behavior.
 - [x] CR.14 — Consolidate current behavior/limitations, protocol specification, and dated acceptance evidence. Remove obsolete current-status claims and distinguish historical verification.
-- [ ] CR.15 — Persist live offline owner-plus-quality policy, derive dependencies after membership/content changes, and allow empty albums to be pinned. Test new members and asset revisions.
+- [x] CR.15 — Persist live offline owner-plus-quality policy, derive dependencies after membership/content changes, and allow empty albums to be pinned. Test new members and asset revisions.
 - [ ] CR.16 — Add a command to move existing local photos into managed cloud storage while preserving photo IDs, virtual copies, edits, albums, and history. Test identity/history preservation and restart.
 - [ ] CR.17 — Handle browser cache exhaustion with safe verified-blob eviction, catalog/outbox space reservation, and temporary viewing versus guaranteed offline retention. Test quota failures and pinned data preservation.
 - [ ] CR.18 — Make cloud deletion retention prominent and add explicit previewable retention/reclamation tooling with safe reference checks.
@@ -1283,3 +1283,39 @@ Markdown file and heading targets resolve. Full repository CI passed all eight g
 (`target/cloud-reliability/cr14-ci.log`); no executable source changed. CR.14 is
 complete and checked off. CR.15–CR.21 remain open. This documentation consolidation
 adds no provider, camera or scale acceptance claim.
+
+
+2026-10-17 — CR.15 implementation, verification pending: native retention policy v3
+persists photo/album owners and quality, with current blob dependencies derived from
+the catalog rather than saved membership snapshots. Empty albums retain intent.
+The central session boundary covers received changes, smart rules/metadata, source
+revisions and undo/redo. Prior and new dependencies remain protected until catalog
+append succeeds; reopen defers eviction until owner and library-wide policy resolve.
+One offline worker handles live owners and library-wide copies; explicit reconnect
+retries failed transfers. Missing preview renditions retain policy and expose a
+recovery reason in cache/storage status and Settings → Cache. CR.15 remains unchecked.
+
+
+2026-10-17 — CR.15 final verification: 41 focused asset/cache tests passed
+(`target/cloud-reliability/cr15-tests-verified.log`). Six new regressions cover empty
+albums, membership and smart-rule/metadata changes, original/preview revisions,
+failed journal append/retry, undo, restart, missing preview recovery, and restoring
+an evicted member while another download is held. The final-source full CI also
+passes live photo/album pins through cache relocation with a zero-byte budget.
+All eight repository CI gates passed (`target/cloud-reliability/cr15-ci.log`).
+Native-only WASM helpers retain platform dead-code warnings; native strict Clippy
+passed. No executable source changed after the final CI build started.
+
+Actual desktop control-channel acceptance pinned an empty album, added an original
+without a preview, inspected the explicit missing-preview reason in Settings →
+Cache, changed the policy to original quality, and retained it through Clear cache.
+With storage stopped, process restart resolved the live owner and exported 32×24
+from verified offline bytes. The version-3 policy retained only owner/quality and
+empty dependency arrays. All 17 signed-fixture requests verified. Warning/recovered/
+offline screenshots were inspected in
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr15-native/native-6345d8c7/`;
+results are `target/cloud-reliability/cr15-native-results.json`. Sampled Settings
+updates were 40.6/43.8 ms with no queued/in-flight renders while CI was running;
+this tiny procedural fixture is not a performance or live-provider benchmark.
+Owned app/fixture processes were stopped. CR.15 is complete and checked off.
+CR.16–CR.21 remain open.

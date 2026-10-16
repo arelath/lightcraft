@@ -241,6 +241,15 @@ pub(crate) fn refresh_keep_all(s: &Session) {
     }
 }
 
+/// Resolve live owner/quality intent after a complete catalog batch. Before journal
+/// acknowledgement the cache retains both prior and new dependencies.
+pub(crate) fn refresh_offline_pins(s: &Session, durable: bool) {
+    if let Some(resolver) = &s.media.asset_resolver {
+        let owners = resolver.offline_owners();
+        resolver.resolve_offline_pins(crate::assets::offline::resolve(&s.catalog, &owners), durable);
+    }
+}
+
 /// Settings → Cache: the drive the cache is on and what uses it.
 fn storage(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "cloud.storage";
@@ -269,6 +278,7 @@ fn storage(s: &mut Session, p: &Value) -> Result<Value> {
         "offlineBytes": status.pinned_bytes,
         "budgetBytes": status.budget_bytes,
         "keepAll": status.keep_all,
+        "offlineErrors": status.offline_errors,
         "error": status.error,
         "stagingError": status.staging_error,
     }))
@@ -313,8 +323,9 @@ fn clear_cache(s: &mut Session, p: &Value) -> Result<Value> {
 fn pin_targets(s: &Session, p: &Value, command: &str) -> Result<(Option<String>, Vec<lightcraft_catalog::PhotoId>)> {
     if let Some(value) = p.get("albumId") {
         let id = lightcraft_catalog::AlbumId(value.as_u64().filter(|id| *id > 0).ok_or_else(|| bad(command, "invalid albumId"))?);
-        if s.catalog.album(id).is_none() {
-            return Err(bad(command, "album does not exist"));
+        let album = s.catalog.album(id).ok_or_else(|| bad(command, "album does not exist"))?;
+        if command == "cloud.pin" && album.folder {
+            return Err(bad(command, "choose a regular or smart album; folders contain albums rather than photos"));
         }
         return Ok((Some(format!("album:{}", id.0)), s.catalog.album_photos(id)));
     }
@@ -328,7 +339,7 @@ fn pin(s: &mut Session, p: &Value) -> Result<Value> {
     let quality: OfflineQuality =
         serde_json::from_value(p.get("quality").cloned().unwrap_or(json!("original"))).map_err(|_| bad(C, "quality must be original or preview"))?;
     let (album, ids) = pin_targets(s, p, C)?;
-    if ids.is_empty() || ids.len() > 100_000 {
+    if (ids.is_empty() && album.is_none()) || ids.len() > 100_000 {
         return Err(bad(C, "select between 1 and 100,000 photos"));
     }
     let mut changes = Vec::new();
@@ -356,12 +367,10 @@ fn pin(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     if let Some(owner) = album {
-        if album_blobs.is_empty() {
-            return Err(bad(C, "album has no managed cloud photos"));
-        }
         changes.push((owner, Some(OfflinePin { quality, blobs: album_blobs.into_iter().collect() })));
     }
     resolver.set_offline_pins(&changes).map_err(|e| bad(C, e.to_string()))?;
+    refresh_offline_pins(s, false);
     let task = start_offline_pins(s, wait).map_err(|e| bad(C, e))?;
     Ok(json!({"savedLocally": true, "pins": changes.len(), "quality": quality, "background": task.is_some(), "task": task}))
 }
@@ -383,6 +392,7 @@ fn unpin(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let changes: Vec<_> = owners.into_iter().map(|owner| (owner, None)).collect();
     resolver.set_offline_pins(&changes).map_err(|e| bad(C, e.to_string()))?;
+    refresh_offline_pins(s, false);
     Ok(json!({"unpinned": changes.len()}))
 }
 
@@ -429,6 +439,7 @@ pub(crate) fn remove_local_copy_impl(s: &mut Session, p: &Value, observer: Optio
 
 /// Reconnecting/reopening retries durable offline intent. It never mutates the catalog.
 pub(crate) fn resume_offline_pins(s: &Session) {
+    refresh_offline_pins(s, s.pending_log.is_empty());
     if let Err(error) = start_offline_pins(s, false) {
         log::warn!("offline copy recovery: {error}");
     }
@@ -442,6 +453,9 @@ fn start_offline_pins(s: &Session, wait: bool) -> std::result::Result<Option<u64
     let status = resolver.cache_status();
     if let Some(error) = status.error {
         return Err(error);
+    }
+    if !wait {
+        return resolver.retry_offline_pins().map_err(|error| error.to_string());
     }
     let wanted: std::collections::BTreeSet<_> = status.pins.values().flat_map(|pin| pin.blobs.iter().cloned()).collect();
     if wanted.is_empty() {
@@ -457,7 +471,6 @@ fn start_offline_pins(s: &Session, wait: bool) -> std::result::Result<Option<u64
         .collect();
     let task = s.activity.start("download", "Download Offline Copies", crate::activity::Cancel::Yes);
     let cancel = task.cancel_flag().ok_or("offline download could not create cancellation flag")?;
-    let id = task.id();
     task.set_unit(crate::activity::Unit::Bytes);
     let handle = task.handle();
     let run = move || {
@@ -475,19 +488,8 @@ fn start_offline_pins(s: &Session, wait: bool) -> std::result::Result<Option<u64
             failure.map_or(Ok(()), Err)
         })
     };
-    if wait {
-        run()?;
-        return Ok(None);
-    }
-    std::thread::Builder::new()
-        .name("cloud-offline".into())
-        .spawn(move || {
-            if let Err(error) = run() {
-                log::warn!("offline copy: {error}");
-            }
-        })
-        .map_err(|error| format!("could not start offline copy worker: {error}"))?;
-    Ok(Some(id))
+    run()?;
+    Ok(None)
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -554,7 +556,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "cloud.cacheLocation", "Cloud Cache Location", [], None, "{path? | reset?, wait?}; where this device keeps the cloud cache; a new folder gets verified copies of every cached file and the retention settings, then the library reopens on it and the old copies are deleted; desktop returns a cancellable activity task", always, cache_location),
         cmd!(query "cloud.clearCache",
  "Clear Cloud Cache", [], None, "{wait?}; evict every eligible downloaded original/preview now; offline copies, files in use and staged or unsynchronized data are kept; desktop returns an activity task", always, clear_cache),
-        cmd!(query "cloud.pin", "Keep Cloud Photos Offline", [], None, "{ids? or albumId?, quality?: original|preview, wait?: false}; persist pin intent and return download task; wait only headless; album pins snapshot current members", always, pin),
+        cmd!(query "cloud.pin", "Keep Cloud Photos Offline", [], None, "{ids? or albumId?, quality?: original|preview, wait?: false}; persist live owner/quality policy; follow membership and asset revisions, including empty albums; wait only headless", always, pin),
         cmd!(query "cloud.unpin", "Release Offline Pins", [], None, "{ids? or albumId? or owner?}; release only these owners' pins", always, unpin),
         cmd!(query "cloud.removeLocalCopy", "Remove Local Original Copy", [], None, "{ids? or albumId?, wait?}; preserve library/remote objects/previews; uploaded staging migration runs in background on desktop (headless waits); inspect completion with cloud.uploadStatus; refuse pending, pinned or in-use bytes", always, remove_local_copy),
     ]

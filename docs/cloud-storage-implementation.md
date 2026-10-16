@@ -32,7 +32,7 @@ in append mode. LIST discovery and full state validation still have linear costs
 ## Current limits and remaining work
 
 - Native local files stay local until managed import; adopting existing photo records
-  is CR.16. Native album offline pins currently snapshot members (CR.15).
+  is CR.16. Native photo/album offline intent follows current members and source revisions.
 - Browser original import/upload is unsupported. Its verified persistent cache has
   quota failure recovery, but automatic eviction/reserved catalog capacity and a
   guaranteed offline-retention policy remain CR.17. A maintained signer deployment
@@ -242,7 +242,7 @@ Native commands use the shared engine registry, CLI, control channel and MCP:
 | `cloud.storage` | `{wait?}` | The cache's drive (label, total, free), library app data, photo cache and offline bytes, size limit and keep-all choices (Settings → Cache). |
 | `cloud.clearCache` | `{wait?}` | Evict every eligible download now without changing the limit; desktop returns an activity task. |
 | `cloud.cacheLocation` | `{path? or reset?, wait?}` | Inspect or change the cache folder: verified copy, reopen on the new folder, then delete the old copies. Desktop returns a cancellable activity task. |
-| `cloud.pin` | `{ids? or albumId?, quality?: "original" or "preview", wait?: false}` | Persist offline intent and return a download task; headless `wait` finishes before return. Album pins retain current managed members; repeat after membership changes. |
+| `cloud.pin` | `{ids? or albumId?, quality?: "original" or "preview", wait?: false}` | Persist offline intent and return a download task; headless `wait` finishes before return. Live album pins follow managed membership, including initially empty albums. |
 | `cloud.unpin` | `{ids? or albumId? or owner?}` | Release those owners' pins, preserving other photos/albums that share the blob. `owner` can release a deleted photo/album's retained pin. |
 | `cloud.removeLocalCopy` | `{ids? or albumId?, wait?}` | Remove eligible original cache bytes; preserve library records, remote objects and previews. Desktop returns a cancellable activity task; CLI/MCP wait by default. Inspect completion in `cloud.uploadStatus`. |
 
@@ -318,7 +318,7 @@ My Photos. These operations never move immutable cloud keys or staged blobs. Mix
 still moves local files and sidecars where appropriate. Undo, redo and restart preserve both behaviors.
 Physical folder moves reject managed photos and direct the user to albums and logical folders.
 
-`assets-cache/retention.json` stores a versioned policy, a 20 GiB default budget, pin owners and explicitly removed originals. It is not catalog data. Zero budget retains only pinned or actively leased bytes. Original, smart-preview and thumbnail blobs share the asset budget; the existing rendered-thumbnail cache has its own budget. Pins and active operations may exceed the soft limit, and usage is measured asynchronously.
+`assets-cache/retention.json` version 3 stores live owner/quality policy (versions 1/2 remain readable), a 20 GiB default budget, pin owners and explicitly removed originals. It is not catalog data. Zero budget retains only pinned or actively leased bytes. Original, smart-preview and thumbnail blobs share the asset budget; the existing rendered-thumbnail cache has its own budget. Pins and active operations may exceed the soft limit, and usage is measured asynchronously.
 
 A bounded maintenance worker evicts least recently used eligible flat SHA-256 cache files. Acquisitions and eviction share per-blob gates; decoded-source clones retain an `Arc<AssetLease>` throughout their memory-cache/job lifetime. Downloads, decoding and exports therefore keep their source bytes protected. Cache bytes are verified downloads or verified copies of safely uploaded staging data.
 
@@ -338,7 +338,17 @@ migration becomes eligible. It does not republish a matching mutation. Missing s
 to repair a missing remote object produce a recovery error rather than discarding local data.
 `Managed/working/` and unsynchronized originals never become cache eviction candidates.
 
-Photo and album pin owners are independent even when virtual copies share bytes. Preview pinning requires an editable `.lcsp` rendition and returns an actionable error if one is absent. The pin intent is atomically saved before downloading, retried when reopening or reconnecting, and retained after failed/cancelled transfers. Album pins snapshot their current cloud members; local-file members are already local and are skipped. Repeating a pin updates that owner's snapshot.
+Photo and album pin owners are independent even when virtual copies share bytes. Preview pinning requires an editable `.lcsp` rendition and returns an actionable error if one is absent. The pin intent is atomically saved before downloading, retried when reopening or reconnecting, and retained after failed/cancelled transfers. Album pins follow current managed members, including changes to smart rules or matching metadata; local-file members are already local and are skipped. Empty albums retain owner/quality intent. Photo pins follow the current immutable source revision. Deleted or temporarily missing owners retain empty intent for undo/restoration.
+
+Blob dependencies are derived after complete catalog operation batches, including received
+changes, undo and redo. New dependencies are protected immediately; earlier dependencies
+remain protected until the catalog append succeeds. Automatic new-dependency downloads begin after durability,
+using one offline worker shared with library-wide copies. A failed save keeps both sets
+protected; a later save finishes the transition. Reopen resolves every saved owner before
+allowing eviction, including with a zero-byte budget. Policy files contain no authoritative
+blob membership lists. Missing requested previews remain explicit policy with recovery in
+`cloud.cache.offlineErrors`, `cloud.storage.offlineErrors` and Settings → Cache. Reconnect
+retries transfers without discarding the saved choice.
 
 Removing an original first releases decoded sources for every photo sharing it. Active workers and persistent pins still block removal. Removed originals are not automatically downloaded again for preview-allowed browsing; previews and disposable rendered thumbnails remain usable. Explicit download, metadata and original-required export can reacquire them. This operation never deletes the photo or the remote object.
 
@@ -405,6 +415,7 @@ and [browser requirements](browser-cloud.md).
 | 2026-10-14 | Settings → Cache: drive usage, size limit, Clear cache, library-wide offline copies and verified cache relocation. |
 | 2026-10-16 | Preserve and apply supporting XMP on managed import; retain foreign properties through XMP, DNG and external-editor revisions with explicit rendered-recipe semantics. |
 | 2026-10-17 | Separate current behavior/limits, normative protocol and dated acceptance; remove superseded current claims (CR.14). |
+| 2026-10-17 | Live owner/quality offline policy, empty albums, current dependencies and save/restart eviction protection (CR.15). |
 
 ## Cloud queue UX
 
