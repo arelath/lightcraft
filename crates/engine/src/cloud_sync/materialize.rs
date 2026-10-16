@@ -1,9 +1,11 @@
 //! Validate and install portable documents without echoing them into the local outbox.
+use super::portable::decode as decoded;
 use super::shared_projection::{fields, stacks as shared_stacks};
 use super::*;
+#[cfg(test)]
 use lightcraft_catalog::assets::{Asset, AssetId};
 use lightcraft_catalog::replication::Mutation;
-use lightcraft_catalog::{Album, AlbumId, Meta, Photo, PhotoId, Stack, StackId, Version};
+use lightcraft_catalog::{Album, AlbumId, Photo, PhotoId, Stack, StackId, Version};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -12,9 +14,6 @@ thread_local! { static PROJECTED_PHOTOS: std::cell::Cell<usize> = const { std::c
 #[cfg(test)]
 mod tests;
 
-fn decoded<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
-    serde_json::from_value(value).map_err(|e| error(format!("unsupported or malformed cloud metadata: {e}")))
-}
 fn local(catalog: &Catalog, kind: &str, global: &str) -> Option<u64> {
     catalog.cloud_local_identity(global)?.strip_prefix(kind)?.strip_prefix(':')?.parse().ok()
 }
@@ -23,14 +22,7 @@ fn apply(catalog: &mut Catalog, ops: &mut Vec<Op>, op: Op) -> Result<()> {
     ops.push(op);
     Ok(())
 }
-fn photo_reference(catalog: &Catalog, value: &Value) -> Result<Option<PhotoId>> {
-    if value.is_null() {
-        return Ok(None);
-    }
-    let global = value.as_str().ok_or_else(|| error("invalid global photo reference"))?;
-    Ok(local(catalog, "photo", global).map(PhotoId))
-}
-fn album_reference(catalog: &mut Catalog, ops: &mut Vec<Op>, global: &str) -> Result<AlbumId> {
+pub(super) fn album_reference(catalog: &mut Catalog, ops: &mut Vec<Op>, global: &str) -> Result<AlbumId> {
     if let Some(id) = local(catalog, "album", global) {
         return Ok(AlbumId(id));
     }
@@ -39,55 +31,6 @@ fn album_reference(catalog: &mut Catalog, ops: &mut Vec<Op>, global: &str) -> Re
     let id = catalog.alloc_album_id();
     apply(catalog, ops, Op::SetCloudIdentity { entity: format!("album:{}", id.0), id: Some(global.into()) })?;
     Ok(id)
-}
-fn filter_to_local(value: &mut Value, catalog: &mut Catalog, ops: &mut Vec<Op>, depth: usize) -> Result<()> {
-    if depth > 64 {
-        return Err(error("cloud smart filter exceeds 64 nesting levels"));
-    }
-    if let Some(map) = value.as_object_mut() {
-        if map.contains_key("folder") || map.contains_key("libraryFolder") {
-            return Err(error("cloud smart filter contains a device-local path"));
-        }
-        if let Some(only) = map.get_mut("only").and_then(Value::as_array_mut) {
-            let restricted = !only.is_empty();
-            *only = only
-                .iter()
-                .map(|value| photo_reference(catalog, value))
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .flatten()
-                .map(|id| json!(id))
-                .collect();
-            if restricted && only.is_empty() {
-                map.insert("onlyRestricted".into(), json!(true));
-            } else if !only.is_empty() {
-                // Nonempty legacy selections already constrain matching. Preserve
-                // their original local representation on self-synchronization.
-                map.remove("onlyRestricted");
-            }
-        }
-        if let Some(album) = map.get_mut("album")
-            && let Some(global) = album.as_str()
-        {
-            let id = album_reference(catalog, ops, global)?;
-            *album = json!(id);
-        }
-        if map.get("field").and_then(Value::as_str) == Some("album")
-            && let Some(value) = map.get_mut("value")
-            && let Some(global) = value.as_str()
-        {
-            let id = album_reference(catalog, ops, global)?;
-            *value = json!(id);
-        }
-        for child in map.values_mut() {
-            filter_to_local(child, catalog, ops, depth + 1)?;
-        }
-    } else if let Some(values) = value.as_array_mut() {
-        for child in values {
-            filter_to_local(child, catalog, ops, depth + 1)?;
-        }
-    }
-    Ok(())
 }
 fn merged_array(state: &SyncState, entity: &str, field: &str) -> Result<Value> {
     let mut values = Vec::new();
@@ -296,10 +239,10 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
         #[cfg(test)]
         PROJECTED_PHOTOS.with(|count| count.set(count.get() + 1));
         let values = fields(state, entity);
-        let content = values.get("content").and_then(Value::as_object).ok_or_else(|| error("cloud photo has no immutable content description"))?;
-        let asset_id: AssetId = decoded(content.get("assetId").cloned().ok_or_else(|| error("cloud photo has no asset identity"))?)?;
-        let asset: Asset = decoded(content.get("asset").cloned().ok_or_else(|| error("cloud photo has no asset record"))?)?;
-        let asset = asset.rebound(&state.connection).map_err(error)?;
+        let content: super::portable::Content =
+            decoded(values.get("content").cloned().ok_or_else(|| error("cloud photo has no immutable content description"))?)?;
+        let asset_id = content.asset_id.clone();
+        let asset = content.asset.rebound(&state.connection).map_err(error)?;
         if next.asset(&asset_id).is_some_and(|old| !old.same_manifest(&asset)) {
             return Err(error("remote immutable asset identity describes different data; local data retained"));
         }
@@ -310,68 +253,15 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
             .photo(*id)
             .map(|p| (**p).clone())
             .unwrap_or_else(|| Photo::new(*id, Source::Managed { asset_id: asset_id.clone() }, "cloud-photo", "RAW", 1, 1, ""));
-        let mut value = encode(&seed)?;
-        let map = value.as_object_mut().ok_or_else(|| error("invalid photo document"))?;
-        map.insert("source".into(), encode(&Source::Managed { asset_id })?);
-        map.insert("local".into(), json!(false));
-        map.remove("local_baseline");
-        for field in ["content_hash", "preview_only", "embedded_lens", "as_shot_wb", "duration"] {
-            map.remove(field);
+        let mut photo = seed;
+        content.apply(&mut photo);
+        let mut shared = values.clone();
+        for field in ["versions", "history"] {
+            if shared.contains_key(field) {
+                shared.insert(field.into(), merged_array(state, entity, field)?);
+            }
         }
-        for (field, value) in content {
-            if matches!(field.as_str(), "assetId" | "asset") {
-                continue;
-            }
-            if !matches!(
-                field.as_str(),
-                "format" | "kind" | "width" | "height" | "file_size" | "content_hash" | "preview_only" | "embedded_lens" | "as_shot_wb" | "duration"
-            ) {
-                return Err(error("unsupported cloud content field"));
-            }
-            map.insert(field.clone(), value.clone());
-        }
-        let mut meta = map.remove("meta").and_then(|v| v.as_object().cloned()).ok_or_else(|| error("invalid photo metadata"))?;
-        let meta_schema = encode(&Meta::default())?;
-        for (field, value) in &values {
-            if let Some(field) = field.strip_prefix("meta.") {
-                if meta_schema.get(field).is_none() && !matches!(field, "copyright_status" | "usage_terms" | "copyright_url" | "regions") {
-                    return Err(error("unsupported cloud metadata field"));
-                }
-                meta.insert(field.into(), value.clone());
-                continue;
-            }
-            if field == "content" {
-                continue;
-            }
-            if !matches!(
-                field.as_str(),
-                "file_name"
-                    | "captured"
-                    | "imported"
-                    | "rating"
-                    | "flag"
-                    | "label"
-                    | "develop"
-                    | "edited"
-                    | "versions"
-                    | "history"
-                    | "deleted"
-                    | "copy_of"
-                    | "copy_name"
-                    | "import_look"
-                    | "analysis"
-            ) {
-                return Err(error("unsupported cloud photo field"));
-            }
-            let value = match field.as_str() {
-                "copy_of" => encode(&photo_reference(&next, value)?)?,
-                "versions" | "history" => merged_array(state, entity, field)?,
-                _ => value.clone(),
-            };
-            map.insert(field.clone(), value);
-        }
-        map.insert("meta".into(), Value::Object(meta));
-        let mut photo: Photo = decoded(value)?;
+        super::portable::apply_photo(&mut photo, &shared, &next)?;
         if photo.id != *id
             || photo.rating > 5
             || photo.width == 0
@@ -427,13 +317,13 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
     }
     for (entity, id) in &album_ids {
         let values = fields(state, entity);
-        let mut value = encode(next.album(*id).ok_or_else(|| error("cloud album disappeared"))?)?;
-        let map = value.as_object_mut().ok_or_else(|| error("invalid cloud album document"))?;
+        let mut desired = next.album(*id).ok_or_else(|| error("cloud album disappeared"))?.clone();
         let mut photos = Vec::new();
         for (field, value) in &values {
             if let Some(global) = field.strip_prefix("member:") {
+                let reference = super::portable::PhotoRef::try_from(global.to_owned()).map_err(error)?;
                 if value.as_bool().ok_or_else(|| error("invalid album membership operation"))?
-                    && let Some(id) = local(&next, "photo", global).map(PhotoId)
+                    && let Some(id) = reference.resolve(&next)
                     && next.photo(id).is_some()
                 {
                     photos.push(id);
@@ -446,19 +336,28 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
             if !matches!(field.as_str(), "name" | "parent" | "folder" | "cover" | "smart" | "quick" | "order") {
                 return Err(error("unsupported cloud album field"));
             }
-            let mut value = value.clone();
             match field.as_str() {
+                "name" => desired.name = decoded(value.clone())?,
+                "folder" => desired.folder = decoded(value.clone())?,
+                "quick" => desired.quick = decoded(value.clone())?,
+                "order" => desired.order = decoded(value.clone())?,
                 "parent" => {
-                    value = encode(&parents.get(id).copied().flatten())?;
+                    // Decode the proposed reference even when structural reconciliation severs it.
+                    let _: Option<super::portable::AlbumRef> = decoded(value.clone())?;
+                    desired.parent = parents.get(id).copied().flatten();
                 }
-                "cover" => value = encode(&photo_reference(&next, &value)?)?,
-                "smart" if !value.is_null() => filter_to_local(&mut value, &mut next, &mut ops, 0)?,
-                _ => {}
+                "cover" => {
+                    desired.cover = decoded::<Option<super::portable::PhotoRef>>(value.clone())?.and_then(|reference| reference.resolve(&next))
+                }
+                "smart" => {
+                    desired.smart = decoded::<Option<super::portable::PortableFilter>>(value.clone())?
+                        .map(|filter| filter.to_local(&mut next, &mut ops).map(Box::new))
+                        .transpose()?
+                }
+                _ => return Err(error("unsupported cloud album field")),
             }
-            map.insert(field.clone(), value);
         }
-        map.insert("photos".into(), json!(photos));
-        let desired: Album = decoded(value)?;
+        desired.photos = photos;
         let current = next.album(*id).ok_or_else(|| error("cloud album disappeared"))?.clone();
         if desired.folder != current.folder || desired.quick != current.quick {
             return Err(error("cloud album kind changed; data retained for resolution"));

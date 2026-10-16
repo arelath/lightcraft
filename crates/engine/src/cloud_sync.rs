@@ -142,6 +142,8 @@ pub(crate) fn device_local_smart_albums(catalog: &Catalog, connection: &str) -> 
         let references = filter.albums_tested();
         if filter.folder.is_some()
             || filter.library_folder.is_some()
+            || filter.sync_status.is_some()
+            || portable::has_local_rules(filter.rule_set.as_ref())
             || filter.only.iter().any(|id| !shared_selection(catalog, connection, *id))
             || references.iter().any(|id| catalog.album(*id).is_none() && catalog.cloud_identity(&format!("album:{}", id.0)).is_none())
         {
@@ -161,88 +163,14 @@ pub(crate) fn device_local_smart_albums(catalog: &Catalog, connection: &str) -> 
     }
     excluded
 }
-// Smart filters contain local photo/album IDs at their schema-defined reference positions.
-// Paths such as a Local filesystem folder are device-local and cannot be portable filters.
-fn portable_filter(value: &mut Value, catalog: &Catalog, ids: &Catalog, connection: &str, depth: usize) -> Result<()> {
-    if depth > 64 {
-        return Err(error("smart-album cloud filter exceeds 64 nesting levels"));
-    }
-    if let Some(map) = value.as_object_mut() {
-        for key in ["folder", "libraryFolder"] {
-            map.remove(key);
-        }
-        if let Some(only) = map.get_mut("only").and_then(Value::as_array_mut) {
-            let restricted = !only.is_empty();
-            *only = only
-                .iter()
-                .map(|value| {
-                    let id = value.as_u64().ok_or_else(|| error("invalid local selection reference"))?;
-                    if !shared_selection(catalog, connection, lightcraft_catalog::PhotoId(id)) {
-                        return Err(error("a device-local smart selection cannot be published"));
-                    }
-                    Ok(Value::String(global(ids, "photo", id)?))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            if restricted {
-                map.insert("onlyRestricted".into(), json!(true));
-            }
-        }
-        if let Some(album) = map.get_mut("album")
-            && let Some(id) = album.as_u64()
-        {
-            *album = Value::String(global(ids, "album", id)?);
-        }
-        if map.get("field").and_then(Value::as_str) == Some("album")
-            && let Some(value) = map.get_mut("value")
-            && let Some(id) = lightcraft_catalog::rules::album_rule_id(value)
-        {
-            *value = Value::String(global(ids, "album", id.0)?);
-        }
-        for child in map.values_mut() {
-            portable_filter(child, catalog, ids, connection, depth + 1)?;
-        }
-    } else if let Some(values) = value.as_array_mut() {
-        for child in values {
-            portable_filter(child, catalog, ids, connection, depth + 1)?;
-        }
-    }
-    Ok(())
-}
+mod portable;
 fn project(catalog: &Catalog, ids: &Catalog, state: &SyncState, scope: Option<&Scope>) -> Result<Documents> {
     let mut docs = Documents::new();
     let photos: Vec<_> = scope.map_or_else(|| catalog.photos().collect(), |s| s.photos.iter().filter_map(|id| catalog.photo(*id)).collect());
     for photo in photos {
         let Source::Managed { asset_id } = &photo.source else { continue };
         let Some(asset) = catalog.asset(asset_id).filter(|a| a.original.remote.connection == state.connection) else { continue };
-        let mut value = encode(photo)?;
-        let map = value.as_object_mut().ok_or_else(|| error("photo metadata is not an object"))?;
-        map.remove("id");
-        map.remove("local");
-        map.remove("local_baseline");
-        map.remove("source");
-        let mut content = serde_json::Map::new();
-        content.insert("assetId".into(), encode(asset_id)?);
-        let portable_asset = asset.rebound("library").map_err(error)?;
-        content.insert("asset".into(), encode(&portable_asset)?);
-        for key in ["format", "kind", "width", "height", "file_size", "content_hash", "preview_only", "embedded_lens", "as_shot_wb", "duration"] {
-            if let Some(value) = map.remove(key) {
-                content.insert(key.into(), value);
-            }
-        }
-        map.insert("content".into(), Value::Object(content));
-        if let Some(id) = photo.copy_of {
-            map.insert("copy_of".into(), mapped_photo(catalog, ids, &state.connection, id.0).map_or(Value::Null, Value::String));
-        }
-        let mut meta = map.remove("meta").and_then(|v| v.as_object().cloned()).ok_or_else(|| error("photo metadata is not an object"))?;
-        for field in ["usage_terms", "copyright_url"] {
-            meta.entry(field).or_insert_with(|| json!(""));
-        }
-        meta.entry("regions").or_insert_with(|| json!([]));
-        meta.entry("copyright_status").or_insert(encode(&lightcraft_catalog::Meta::default().copyright_status)?);
-        let mut fields: BTreeMap<_, _> = map.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
-        for (key, value) in meta {
-            fields.insert(format!("meta.{key}"), value);
-        }
+        let fields = portable::PortablePhoto::from_local(photo, asset_id, asset, catalog, ids, &state.connection)?.fields()?;
         docs.insert(format!("photo:{}", global(ids, "photo", photo.id.0)?), fields);
     }
     let albums: Vec<_> = scope.map_or_else(|| catalog.albums().collect(), |s| s.albums.iter().filter_map(|id| catalog.album(*id)).collect());
@@ -251,20 +179,11 @@ fn project(catalog: &Catalog, ids: &Catalog, state: &SyncState, scope: Option<&S
         if excluded.contains(&album.id) {
             continue;
         }
-        let mut value = encode(album)?;
-        let map = value.as_object_mut().ok_or_else(|| error("album metadata is not an object"))?;
-        map.remove("id");
-        map.remove("photos");
-        map.insert("parent".into(), album.parent.map(|id| global(ids, "album", id.0)).transpose()?.map_or(Value::Null, Value::String));
-        map.insert("cover".into(), album.cover.and_then(|id| mapped_photo(catalog, ids, &state.connection, id.0)).map_or(Value::Null, Value::String));
-        if let Some(smart) = map.get_mut("smart") {
-            portable_filter(smart, catalog, ids, &state.connection, 0)?;
-        }
-        let mut fields: BTreeMap<_, _> = map.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
-        fields.insert("deleted".into(), json!(false));
+        let album_document = portable::PortableAlbum::from_local(album, catalog, ids, &state.connection)?;
+        let mut fields = portable::fields(&album_document)?;
         for id in &album.photos {
-            if let Some(id) = mapped_photo(catalog, ids, &state.connection, id.0) {
-                fields.insert(format!("member:{id}"), json!(true));
+            if let Some(reference) = portable::PhotoRef::from_local(catalog, ids, &state.connection, *id) {
+                fields.insert(format!("member:{}", reference.id()), json!(true));
             }
         }
         docs.insert(format!("album:{}", global(ids, "album", album.id.0)?), fields);
@@ -275,14 +194,14 @@ fn project(catalog: &Catalog, ids: &Catalog, state: &SyncState, scope: Option<&S
             .photos
             .iter()
             .filter(|id| catalog.photo(**id).is_some_and(|photo| !photo.deleted))
-            .filter_map(|id| mapped_photo(catalog, ids, &state.connection, id.0))
+            .filter_map(|id| portable::PhotoRef::from_local(catalog, ids, &state.connection, *id))
             .collect();
         if photos.len() < 2 {
             continue;
         }
         docs.insert(
             format!("stack:{}", global(ids, "stack", stack.id.0)?),
-            BTreeMap::from([("photos".into(), json!(photos)), ("collapsed".into(), json!(stack.collapsed)), ("deleted".into(), json!(false))]),
+            portable::fields(&portable::PortableStack { photos, collapsed: stack.collapsed, deleted: false })?,
         );
     }
     let labels: BTreeMap<_, _> = ColorLabel::ALL

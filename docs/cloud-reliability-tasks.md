@@ -16,7 +16,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.9 — Index global-to-local identities once, materialize changed entities, and persist synchronization deltas. Measure unchanged 10,000- and 50,000-photo request counts, journal growth, state size, and owner-thread latency.
 - [x] CR.10 — Track consumed append checkpoints and avoid downloading unchanged covered history. Separate budgeted integrity audits from ordinary polls; test remote request counts.
 - [x] CR.11 — Enforce one immutable published asset-manifest contract with device-local connection binding; test permitted/rejected descriptor changes and extract shared blob rebinding.
-- [ ] CR.12 — Replace subtractive catalog JSON projection/materialization with explicit portable photo, content, album, and reference types and typed boundary conversions; retain wire compatibility tests.
+- [x] CR.12 — Replace subtractive catalog JSON projection/materialization with explicit portable photo, content, album, and reference types and typed boundary conversions; retain wire compatibility tests.
 - [ ] CR.13 — Extract testable upload readiness, transfer, verification, dependency waiting, publication, acknowledgement, and failure transitions; test deletion/restart behavior.
 - [ ] CR.14 — Consolidate current behavior/limitations, protocol specification, and dated acceptance evidence. Remove obsolete current-status claims and distinguish historical verification.
 - [ ] CR.15 — Persist live offline owner-plus-quality policy, derive dependencies after membership/content changes, and allow empty albums to be pinned. Test new members and asset revisions.
@@ -1200,3 +1200,41 @@ were inspected in scratch
 This is loopback-provider correctness acceptance, not a live-provider or scale claim.
 No source changes followed the passing CI run. CR.11 is complete and checked off;
 CR.12–CR.21 remain open.
+
+
+2026-10-16 — CR.12 implementation, final gate pending: explicit portable Photo,
+Content, Meta, Album, Stack, Filter, rule-group and global-reference types replace
+whole catalog Photo/Album serialization and JSON subtraction/reconstruction.
+Incoming materialization applies only typed shared fields to local seeds. Named
+photo/album reference slots handle deferred delivery and retained tombstones;
+arbitrary rule payload properties are no longer recursively rewritten. Valid
+wire names, field omissions, flattened metadata defaults, sparse content fallback
+and restricted empty selections retain their previous representation. Unknown
+smart-filter fields and malformed global references now fail explicitly. File-path
+rules and device-local sync-status filters, plus dependent smart albums, remain
+local under the existing nonportable-smart-album policy.
+
+Focused verification: Clippy passed with warnings denied (`cr12-clippy.log`);
+46 synchronization tests passed, with one explicit scale benchmark ignored
+(`cr12-engine-final.log`). New tests compare typed output with the frozen legacy
+projection (including exact serialized photo bytes), cover sparse/default/optional
+fields and album/stack wire shapes, reject private incoming fields atomically,
+retain unresolved/negated references, bound nested rule decoding, and preserve
+literal payload properties outside reference slots. Existing convergence, undo,
+smart-album bootstrap and delivery-order regressions passed. Full repository CI
+and browser compatibility acceptance remain pending; CR.12 is unchecked.
+
+
+CR.12 final acceptance: all eight repository CI gates passed on the final source
+(`target/cloud-reliability/cr12-ci.log`), followed by a successful optimized WASM
+build (`cr12-web.log`). Actual Chromium passed conditional-head and append
+publication on both OPFS and IndexedDB against the frozen CR.11 CLI binary as
+producer and receiver (`cr12-browser.log`, `cr12-browser-results.json`). This checks
+old payloads arriving at the typed codec and new typed payloads returning to the
+previous codec, including all four media dependencies, virtual copies and reload.
+All 175 fixture requests were signed; no browser page errors occurred. Rendered
+OPFS/append and IndexedDB/head states were inspected under
+`C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr12-browser/browser-e40f7089/`.
+No source changes followed the passing CI run. CR.12 is complete and checked off.
+This is fixture interoperability evidence; it does not assert live-provider or
+large-library performance. CR.13–CR.21 remain open.

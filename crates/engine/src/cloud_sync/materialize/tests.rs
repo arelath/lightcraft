@@ -64,6 +64,24 @@ fn fixture(count: usize) -> Catalog {
     Catalog::from_snapshot(&value.to_string()).unwrap()
 }
 #[test]
+fn unsupported_private_fields_fail_incoming_materialization_atomically() {
+    let catalog = fixture(1);
+    for (field, value) in [
+        ("source", json!({"type":"file","path":"private.raw"})),
+        ("id", json!(999)),
+        ("local", json!(true)),
+        ("local_baseline", json!(123)),
+        ("meta.privateCache", json!("private")),
+    ] {
+        let mut state = catalog.sync_state().unwrap().clone();
+        state.enqueue(vec![Change { entity: "photo:p000000".into(), field: field.into(), base: None, value }]).unwrap();
+        let before = catalog.to_snapshot();
+        assert!(install(&catalog, &state).is_err(), "{field}");
+        assert_eq!(catalog.to_snapshot(), before);
+    }
+}
+
+#[test]
 fn shared_manifest_rebinds_locally_and_rejects_changed_renditions_atomically() {
     let catalog = fixture(1);
     let mut state = catalog.sync_state().unwrap().clone();

@@ -27,10 +27,8 @@ pub(super) fn album_parents(state: &SyncState) -> Result<BTreeMap<String, Option
     let mut parents = BTreeMap::new();
     for (entity, values) in &live {
         let value = values.get("parent").cloned().unwrap_or(Value::Null);
-        if !value.is_null() && !value.is_string() {
-            return Err(error("invalid cloud album parent"));
-        }
-        let parent = value.as_str().map(|global| format!("album:{global}")).filter(|parent| live.contains_key(parent));
+        let reference: Option<super::portable::AlbumRef> = super::portable::decode(value)?;
+        let parent = reference.map(|reference| format!("album:{}", reference.id())).filter(|parent| live.contains_key(parent));
         if parent.as_ref().is_some_and(|parent| !folders.contains(parent)) {
             return Err(error("cloud album parent is not a folder"));
         }
@@ -94,6 +92,7 @@ pub(super) fn stacks(state: &SyncState) -> Result<BTreeMap<String, SharedStack>>
         if let Some(value) = values.get("photos") {
             for value in value.as_array().ok_or_else(|| error("cloud stack membership is not a list"))? {
                 let global = value.as_str().ok_or_else(|| error("invalid global stack photo reference"))?;
+                let _: super::portable::PhotoRef = super::portable::decode(value.clone())?;
                 if live.contains(global) && !claimed.contains(global) && unique.insert(global) {
                     photos.push(global.to_owned());
                 }

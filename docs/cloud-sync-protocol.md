@@ -914,3 +914,23 @@ newer audit positions. A failed audit retains the prior durable cursor and pendi
 poll after an audit completes performs no covered-operation, checkpoint or archive GETs, though
 manifest reads and LIST discovery remain. Checkpoint listings, state validation/merging and discovery
 of many authors are still bounded linear work; this is not a general large-library latency claim.
+
+
+### Explicit metadata schema boundary (2026-10-16, CR.12)
+
+`crates/engine/src/cloud_sync/portable.rs` and its filter codec explicitly define
+shared photo, immutable content, descriptive metadata, album, stack and global
+reference representations. Projection never serializes a complete catalog photo
+or album and removes private fields afterward. Incoming materialization applies
+named, typed shared fields to local records; catalog IDs, paths, local flags,
+working-copy bindings, upload intents and cache state have no incoming field slots.
+Existing wire names, flattened `meta.*` registers, optional omissions, sparse
+legacy content defaults and explicit empty-selection semantics are retained.
+Valid existing wire payloads are unchanged. Previously ignored unknown smart-filter fields and malformed global-reference strings now produce actionable errors rather than receiving an accidental local interpretation.
+
+Photo and album references occupy schema-defined slots, including nested smart
+rules. Missing photo targets remain unavailable, and album targets reserve local
+identity mappings without creating live albums. Arbitrary rule payload properties
+are not recursively rewritten. Smart albums containing filesystem path rules or
+per-device synchronization-status criteria, together with their dependent smart
+albums, remain device-local under the existing nonportable-rule policy.
