@@ -504,11 +504,11 @@ pub fn specs() -> Vec<CommandSpec> {
             "Import Cloud Photos",
             [],
             None,
-            "{connection, paths: [originalFile], wait?}; durable staging, photo plus upload intent; headless waits by default, desktop prepares in background",
+            "{connection, paths?: [originalFile], requestId?, newRequest?: false, duplicatePolicy?: skip|allow, wait?}; retries reuse a durable request (requestId alone resumes); newRequest starts a new attempt; skip reuses matching managed originals in this connection, allow permits intentional duplicate photo records; returns per-item failed/skipped results; headless waits by default, desktop prepares in background",
             always,
             crate::cloud_import::start
         ),
-        cmd!(query "cloud.importStatus", "Cloud Import Status", [], None, "{}; recent completed import results and durable upload intent", always, |s, _| Ok(json!({"reports": s.cloud_imports.reports, "preparing": s.cloud_imports.preparing(), "uploads": s.catalog.upload_intents()}))),
+        cmd!(query "cloud.importStatus", "Cloud Import Status", [], None, "{}; recent results, durable preparation failures with retry actions, and upload intents", always, |s, _| Ok(json!({"reports": s.cloud_imports.reports, "failed":s.cloud_imports.failures,"preparing": s.cloud_imports.preparing(), "uploads": s.catalog.upload_intents()}))),
         cmd!(
             "cloud.recoverImports",
             "Recover Staged Cloud Imports",

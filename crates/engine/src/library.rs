@@ -519,6 +519,8 @@ impl Session {
                 resolver.set_durable_root(dir.join("Managed"));
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.cloud_imports.reload(self.media.asset_resolver.as_deref(), &self.catalog);
         if let Some(cache_dir) = &cache_dir {
             self.media.attach_disk_cache(&cache_dir.join("thumbs"), self.cache_bytes());
         }

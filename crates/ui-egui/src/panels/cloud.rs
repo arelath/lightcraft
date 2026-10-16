@@ -127,6 +127,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             "Sync needs attention"
         } else if waiting > 0
             || active > 0
+            || data["preparingFiles"].as_u64().unwrap_or(0) > 0
             || receipts > 0
             || data["health"]["remoteHistoryWaiting"] == true
             || summary["pendingChanges"].as_u64().unwrap_or(0) > 0
@@ -142,6 +143,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         .font(t.semibold(14.)),
     );
     ui.label(format!("{waiting} files waiting · {active} uploading"));
+    if let Some(n) = data["preparingFiles"].as_u64().filter(|n| *n > 0) {
+        ui.label(format!("{n} import batches preparing"));
+    }
     if halted {
         ui.label(egui::RichText::new(crate::i18n::tr("Automatic checking stopped after an error.")).color(t.caution));
     }
@@ -159,6 +163,23 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     }
     if failed > 0 {
         ui.label(egui::RichText::new(format!("{failed} files need upload retry")).color(t.caution));
+    }
+    if let Some(issues) = data["health"]["imports"]["failed"].as_array() {
+        for issue in issues.iter().take(3) {
+            ui.label(egui::RichText::new(issue["name"].as_str().unwrap_or("Staged import")).size(11.));
+            ui.label(egui::RichText::new(issue["reason"].as_str().unwrap_or("Import recovery needs attention")).size(11.).color(t.caution));
+            if let Some(command @ ("cloud.import" | "cloud.recoverImports")) = issue["command"].as_str() {
+                action(
+                    app,
+                    ui,
+                    &format!("button:cloudRecoverImport:{}", issue["id"].as_str().unwrap_or("unknown")),
+                    "Retry import",
+                    data["canResume"] == true,
+                    command,
+                    issue["retry"].clone(),
+                );
+            }
+        }
     }
     if let Some(blocked) = blocked {
         for item in blocked.iter().take(3) {

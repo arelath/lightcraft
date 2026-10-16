@@ -8,7 +8,7 @@ pub use health::{PollHealth, ResourceHealth};
 
 pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
     let summary = s.catalog.sync_overview();
-    let tasks: Vec<_> = s.activity.list().into_iter().filter(|t| matches!(t.kind, "upload" | "cloudSync")).collect();
+    let tasks: Vec<_> = s.activity.list().into_iter().filter(|t| matches!(t.kind, "upload" | "cloudSync" | "import")).collect();
     let done = tasks.iter().filter(|t| t.unit == crate::activity::Unit::Bytes).fold(0_u64, |n, t| n.saturating_add(t.done.min(t.total)));
     let total = tasks.iter().filter(|t| t.unit == crate::activity::Unit::Bytes).fold(0_u64, |n, t| n.saturating_add(t.total));
     let mut out = json!({"summary":&*summary,"paused":s.cloud_paused,"userPaused":s.cloud_paused,"syncEnabled":s.catalog.sync_state().is_some(),"tasks":tasks,"doneBytes":done,"totalBytes":total,"canResume":tasks.is_empty(),"uploadingFiles":0,"waitingFiles":summary.queued_files.saturating_sub(summary.failed_files),"preparingMigration":false,"migrating":false});
@@ -20,8 +20,13 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
         out["preparingMigration"] = json!(s.cloud_replication_jobs.preparing_migration());
         out["migrating"] = json!(s.cloud_replication_jobs.migrating());
         out["paused"] = json!(s.cloud_paused || s.cloud_replication_jobs.preparing_migration());
-        out["canResume"] = json!(s.cloud_uploads.running() == 0 && !s.cloud_replication_jobs.running());
+        out["canResume"] = json!(s.cloud_uploads.running() == 0 && !s.cloud_replication_jobs.running() && s.cloud_imports.preparing() == 0);
+        out["preparingFiles"] = json!(s.cloud_imports.preparing());
         out["health"]["uploads"]["activity"] = s.cloud_uploads.health();
+        out["health"]["imports"]["failed"] = json!(s.cloud_imports.failures);
+        if let Some(reason) = s.cloud_imports.failures.first().and_then(|issue| issue["reason"].as_str()) {
+            out["error"] = json!(reason);
+        }
     }
     let sync = crate::cmd::cloud_sync_status(s, &Value::Null)?;
     out["health"]["sync"] = sync["health"].clone();

@@ -213,3 +213,37 @@ fn zero_budget_evicts_only_uploaded_blobs_and_restart_keeps_pending_working_data
     assert_eq!(std::fs::read(working).unwrap(), b"pending editor revision");
     assert!(fixture.managed().join("imports").join(format!("{id}.json")).is_file());
 }
+
+#[test]
+fn skipped_duplicate_does_not_keep_a_verified_original_protected_as_uncommitted_staging() {
+    let mut fixture = Fixture::new();
+    let resolver = fixture.resolver.clone();
+    let _maintenance = resolver.cache.maintenance.lock().unwrap();
+    let id = fixture.id.clone();
+    let asset = fixture.asset(&id);
+    fixture.mark(&id, true);
+    let result = fixture
+        .session
+        .execute("cloud.import", &json!({"connection":"personal","paths":[fixture.root.join("source.png")],"newRequest":true}))
+        .unwrap();
+    assert_eq!(result["ids"], json!([1]));
+    assert_eq!(result["uploadPending"], false);
+    assert_eq!(result["skipped"].as_array().unwrap().len(), 1);
+    let skipped = result["skipped"][0]["id"].as_str().unwrap();
+    assert!(!fixture.managed().join("imports").join(format!("{skipped}.json")).exists());
+    assert!(fixture.managed().join("skipped-imports").join(format!("{skipped}.json")).is_file());
+    resolver.cache.promote_staging().unwrap();
+    assert!(!fixture.managed().join("blobs").join(&asset.original.id.0).exists(), "only the acknowledged import now governs its bytes");
+    assert!(resolver.acquire_cached(&asset.original, &AtomicBool::new(false)).unwrap().is_some());
+    // Simulate a crash after saving the decision, before retiring its active
+    // manifest. The shared original is already promoted and the source is gone.
+    let archived: Value =
+        serde_json::from_slice(&std::fs::read(fixture.managed().join("skipped-imports").join(format!("{skipped}.json"))).unwrap()).unwrap();
+    let active = fixture.managed().join("imports").join(format!("{skipped}.json"));
+    lightcraft_catalog::safe_file::write_atomic(&active, &serde_json::to_vec(&archived["manifest"]).unwrap()).unwrap();
+    std::fs::remove_file(fixture.root.join("source.png")).unwrap();
+    let retry = fixture.session.execute("cloud.import", &json!({"connection":"personal","requestId":result["requestId"]})).unwrap();
+    assert_eq!(retry["ids"], result["ids"]);
+    assert!(!active.exists(), "retry finishes retirement without acquiring the original again");
+    assert_eq!(fixture.session.catalog.upload_intents().len(), 1);
+}

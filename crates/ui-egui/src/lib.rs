@@ -784,6 +784,8 @@ impl LightcraftApp {
             let editor = self.ui.cloud_preparations.remove(&task).flatten();
             if report["ok"] != true {
                 self.toast_error(ctx, report["error"].as_str().unwrap_or("Managed preparation failed; durable data was retained"));
+            } else if report["result"]["failed"].as_array().is_some_and(|items| !items.is_empty()) {
+                self.toast_error(ctx, "Some imports need attention. Open the cloud status for retained data and retry actions.");
             } else if let Some(editor) = editor {
                 menus::open_edit_result(self, ctx, &report["result"], &editor);
             } else {

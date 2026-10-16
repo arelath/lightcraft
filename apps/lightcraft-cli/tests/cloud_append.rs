@@ -304,7 +304,7 @@ fn bulk_import_verifies_all_assets_before_publishing_shared_mutation_and_handles
     large.resize(9 << 20, 0);
     let path = f.dir.join("large.dng");
     std::fs::write(&path, large).unwrap();
-    ok(&f, &a, &[("cloud.import", json!({"connection":"personal","paths":[small,path]})), ("cloud.upload", json!({}))]);
+    ok(&f, &a, &[("cloud.import", json!({"connection":"personal","paths":[small,path],"duplicatePolicy":"allow"})), ("cloud.upload", json!({}))]);
     let c = catalog(&a);
     assert_eq!(c.len(), 3);
     assert!(c.upload_intents().values().all(|i| i.state == lightcraft_engine::catalog::uploads::UploadState::Synchronized));

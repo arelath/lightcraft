@@ -271,7 +271,11 @@ impl Fixture {
             json!({"id":"personal", "bucket":"photos", "region":"us-east-1", "prefix":"library", "endpoint":self.endpoint, "profile":"acceptance"});
         let (output, rows) = self.run(
             library,
-            &[("cloud.configure", config), ("cloud.import", json!({"connection":"personal", "paths":[source]})), ("cloud.importStatus", json!({}))],
+            &[
+                ("cloud.configure", config),
+                ("cloud.import", json!({"connection":"personal", "paths":[source],"duplicatePolicy":"allow"})),
+                ("cloud.importStatus", json!({})),
+            ],
         );
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert!(rows.iter().all(|row| row["ok"] == true), "{rows:?}");

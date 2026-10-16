@@ -13,6 +13,36 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 
+mod issues;
+mod requests;
+mod settled;
+use issues::Issue;
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Recipe {
+    now: String,
+    defaults: crate::import::ImportDefaults,
+    presets: Vec<lightcraft_develop::Preset>,
+    metadata_presets: Vec<crate::cmd::metadata::MetadataPreset>,
+    naming: crate::sidecar::SidecarNaming,
+    labels: Vec<(lightcraft_catalog::ColorLabel, String)>,
+}
+
+struct Completed {
+    value: Value,
+    skipped: Vec<settled::Skipped>,
+}
+
+struct Prepared {
+    order: Vec<String>,
+    skipped: Vec<settled::Skipped>,
+    manifests: Vec<Manifest>,
+    failed: Vec<Issue>,
+    request: Option<String>,
+    duplicate_policy: requests::DuplicatePolicy,
+}
+
 const MAX_BYTES: u64 = 512 << 20;
 const MAX_DOCUMENT_BYTES: u64 = 16 << 20;
 const MAX_MANIFEST_BYTES: u64 = 2 << 20;
@@ -42,6 +72,8 @@ pub struct Manifest {
     pub stack_with: Option<PhotoId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_asset: Option<AssetId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duplicate_policy: Option<requests::DuplicatePolicy>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -54,7 +86,8 @@ pub struct RevisionTarget {
 
 impl Manifest {
     fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1 | 2)
+        if !matches!(self.version, 1..=3)
+            || (self.version < 3 && self.duplicate_policy.is_some())
             || (self.version == 1 && (self.target.is_some() || self.working.is_some() || self.stack_with.is_some() || self.origin_asset.is_some()))
             || !lightcraft_catalog::assets::identifier(&self.id)
             || !lightcraft_catalog::assets::identifier(&self.asset_id.0)
@@ -196,6 +229,11 @@ fn make_blob(bytes: &[u8], connection: &str, key: String) -> Blob {
     Blob { id: sha256(bytes), size: bytes.len() as u64, remote: RemoteLocation { connection: connection.into(), key, version: None } }
 }
 
+struct RequestOptions {
+    requested: Option<String>,
+    fresh: bool,
+    policy: Option<requests::DuplicatePolicy>,
+}
 struct Job {
     paths: Vec<PathBuf>,
     root: PathBuf,
@@ -212,6 +250,10 @@ struct Job {
     selected: Option<std::collections::BTreeSet<String>>,
     revisions: Vec<(Photo, Asset, RevisionTarget, RevisionWork)>,
     edits: Vec<std::sync::Mutex<Option<EditPlan>>>,
+    request: Option<requests::Request>,
+    request_options: Option<RequestOptions>,
+    failed: std::sync::Mutex<Vec<Issue>>,
+    skipped: std::sync::Mutex<Vec<settled::Skipped>>,
 }
 
 struct EditPlan {
@@ -329,7 +371,7 @@ impl Job {
             .into_iter()
             .find(|connection| connection.id == connection_id)
             .ok_or_else(|| error("storage connection is not configured"))?;
-        let paths = if recover {
+        let paths = if recover || (p.get("requestId").is_some() && p.get("paths").is_none()) {
             Vec::new()
         } else {
             p.get("paths")
@@ -376,7 +418,7 @@ impl Job {
                 labels.apply(Op::SetLabelName { label, name: Some(name.into()) })?;
             }
         }
-        Ok(Self {
+        let mut job = Self {
             paths,
             root,
             connection,
@@ -392,10 +434,113 @@ impl Job {
             selected,
             revisions: Vec::new(),
             edits: Vec::new(),
+            request: None,
+            request_options: None,
+            failed: Default::default(),
+            skipped: Default::default(),
+        };
+        if !recover {
+            let requested = p.get("requestId").map(|v| v.as_str().ok_or_else(|| error("requestId must be a string"))).transpose()?;
+            let fresh =
+                p.get("newRequest").map(|v| v.as_bool().ok_or_else(|| error("newRequest must be true or false"))).transpose()?.unwrap_or(false);
+            let policy = p
+                .get("duplicatePolicy")
+                .map(|v| serde_json::from_value(v.clone()).map_err(|_| error("duplicatePolicy must be skip or allow")))
+                .transpose()?;
+            job.request_options = Some(RequestOptions { requested: requested.map(str::to_owned), fresh, policy });
+        }
+        Ok(job)
+    }
+
+    fn initialize_request(&mut self, cancel: &AtomicBool) -> Result<()> {
+        if self.request.is_some() {
+            return Ok(());
+        }
+        let Some(options) = &self.request_options else {
+            return Ok(());
+        };
+        let requested = options.requested.as_deref();
+        let fresh = options.fresh;
+        let policy = options.policy;
+        let recipe = Recipe {
+            now: self.now.clone(),
+            defaults: self.defaults.clone(),
+            presets: self.presets.clone(),
+            metadata_presets: self.metadata_presets.clone(),
+            naming: self.naming,
+            labels: lightcraft_catalog::ColorLabel::ALL
+                .into_iter()
+                .filter_map(|label| self.labels.custom_label_name(label).map(|name| (label, name.to_owned())))
+                .collect(),
+        };
+        let request = {
+            let _guard = self.resolver.durable_guard(cancel).map_err(|e| error(e.to_string()))?;
+            requests::register(
+                &self.root,
+                &self.connection,
+                &self.paths,
+                requested,
+                fresh,
+                policy,
+                serde_json::to_value(recipe).map_err(|e| error(e.to_string()))?,
+            )?
+        };
+        let recipe: Recipe = serde_json::from_value(request.recipe.clone()).map_err(|_| error("invalid saved import recipe; request preserved"))?;
+        self.paths = request.candidates.iter().map(|candidate| PathBuf::from(&candidate.path)).collect();
+        self.now = recipe.now;
+        self.defaults = recipe.defaults;
+        self.presets = recipe.presets;
+        self.metadata_presets = recipe.metadata_presets;
+        self.naming = recipe.naming;
+        self.labels = lightcraft_catalog::Catalog::new();
+        for (label, name) in recipe.labels {
+            self.labels.apply(Op::SetLabelName { label, name: Some(name) })?;
+        }
+        self.request = Some(request);
+        Ok(())
+    }
+
+    fn failure(&self, id: &str, name: &str, reason: String, cancel: &AtomicBool) -> Result<()> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(error("import cancelled; staged data and request retained"));
+        }
+        let (command, retry) = match &self.request {
+            Some(request) => ("cloud.import", json!({"connection":self.connection.id,"requestId":request.id,"wait":false})),
+            None => ("cloud.recoverImports", json!({"connection":self.connection.id,"imports":[id],"wait":false})),
+        };
+        let issue = Issue { id: id.into(), name: name.into(), reason, command: command.into(), retry };
+        let _guard = self.resolver.durable_guard(cancel).map_err(|e| error(e.to_string()))?;
+        issues::update(&self.root, std::slice::from_ref(&issue), &[])?;
+        self.failed.lock().map_err(|_| error("import failure state unavailable"))?.push(issue);
+        Ok(())
+    }
+
+    fn persist_completion(&self, result: Result<Completed>) -> Result<Value> {
+        let Completed { value, skipped } = result?;
+        let failed: Vec<Issue> = serde_json::from_value(value["failed"].clone()).map_err(|e| error(e.to_string()))?;
+        let completed: Vec<String> = serde_json::from_value(value["completedImports"].clone()).map_err(|e| error(e.to_string()))?;
+        let _guard = self.resolver.durable_guard(&AtomicBool::new(false)).map_err(|e| error(e.to_string()))?;
+        for record in &skipped {
+            settled::save(&self.root, record)?;
+        }
+        issues::update(&self.root, &failed, &completed)?;
+        Ok(value)
+    }
+
+    fn run(&mut self, cancel: &AtomicBool, progress: &crate::activity::TaskHandle) -> Result<Prepared> {
+        let manifests = self.prepare(cancel, progress)?;
+        Ok(Prepared {
+            order: self.request.as_ref().map_or_else(Vec::new, |request| request.candidates.iter().map(|candidate| candidate.id.clone()).collect()),
+            skipped: self.skipped.lock().map_err(|_| error("settled import state unavailable"))?.clone(),
+            manifests,
+            failed: self.failed.lock().map_err(|_| error("import failure state unavailable"))?.clone(),
+            request: self.request.as_ref().map(|r| r.id.clone()),
+            duplicate_policy: self.request.as_ref().map_or(requests::DuplicatePolicy::Allow, |r| r.duplicate_policy),
         })
     }
 
-    fn prepare(&self, cancel: &AtomicBool, progress: &crate::activity::TaskHandle) -> Result<Vec<Manifest>> {
+    fn prepare(&mut self, cancel: &AtomicBool, progress: &crate::activity::TaskHandle) -> Result<Vec<Manifest>> {
+        self.initialize_request(cancel)?;
         if self.recover {
             return self.recover_prepared(cancel, progress);
         }
@@ -405,68 +550,122 @@ impl Job {
         if !self.edits.is_empty() {
             return self.prepare_edits(cancel, progress);
         }
+        let request = self.request.as_ref().ok_or_else(|| error("import request is missing"))?;
         let mut prepared = Vec::new();
-        for (index, path) in self.paths.iter().enumerate() {
+        for (index, candidate) in request.candidates.iter().enumerate() {
             self.resolver.validate_storage().map_err(|e| error(e.to_string()))?;
             if cancel.load(Ordering::Relaxed) {
-                return Err(error("cloud import cancelled; staged bytes remain recoverable"));
+                return Err(error("cloud import cancelled; request and staged bytes remain recoverable"));
             }
-            progress.detail(&path.to_string_lossy());
-            let bytes = read_bounded(path, MAX_BYTES)?;
-            if cancel.load(Ordering::Relaxed) {
-                return Err(error("cloud import cancelled; original source preserved"));
+            progress.detail(&candidate.path);
+            let result = (|| -> Result<Option<Manifest>> {
+                if let Some(record) = settled::read(&self.root, &candidate.id)? {
+                    self.connection.validate_blob(&record.manifest.asset.original).map_err(|e| error(e.to_string()))?;
+                    self.skipped.lock().map_err(|_| error("settled import state unavailable"))?.push(record);
+                    return Ok(None);
+                }
+                self.prepare_candidate(candidate, cancel).map(Some)
+            })();
+            match result {
+                Ok(Some(manifest)) => prepared.push(manifest),
+                Ok(None) => {}
+                Err(e) => self.failure(&candidate.id, &candidate.path, e.to_string(), cancel)?,
             }
-            let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| error("original filename must be valid UTF-8"))?.to_owned();
-            let info = crate::files::probe_bytes(&file_name, &bytes).map_err(error)?;
-            let packet = if let Some(sidecar) = crate::sidecar::find_sidecar(&path.to_string_lossy(), self.naming) {
-                Some(read_bounded(&sidecar, MAX_DOCUMENT_BYTES)?)
-            } else {
-                info.xmp.clone().filter(|_| info.kind == lightcraft_catalog::MediaKind::Raw).map(String::into_bytes)
-            };
-            let source = sha256(&bytes);
-            let mut random = [0u8; 32];
-            getrandom::fill(&mut random).map_err(|e| error(format!("could not create an import identity: {e}")))?;
-            let id = sha256(&random).0;
-            let original = make_blob(
-                &bytes,
-                &self.connection.id,
-                keys::in_library(&self.connection.prefix, &keys::original(&source).map_err(|e| error(e.to_string()))?)
-                    .map_err(|e| error(e.to_string()))?,
-            );
-            let mut manifest = Manifest {
-                version: 1,
-                id: id.clone(),
-                asset_id: AssetId(id),
-                asset: Asset { associated: Default::default(), original, smart_preview: None, thumbnail: None },
-                file_name,
-                photo: None,
-                prepared: false,
-                target: None,
-                working: None,
-                stack_with: None,
-                origin_asset: None,
-            };
-            if let Some(packet) = &packet {
-                manifest.asset.associated.insert("xmp".into(), self.document("xmp", packet)?);
-            }
-            // Freeze defaults and sidecar interpretation before publishing the
-            // manifest. Recovery never rereads a changed neighboring sidecar.
-            manifest.photo = Some(Box::new(self.describe(&manifest, info, packet.as_deref())?));
-            // The identity and intended original precede its immutable copy. A crash here
-            // preserves the user's source; recovery reports a missing staged copy.
-            self.write_manifest(&manifest, cancel)?;
-            self.stage(&manifest.asset.original, &bytes, cancel)?;
-            if let Some(packet) = &packet
-                && let Some(blob) = manifest.asset.associated.get("xmp")
-            {
-                self.stage(blob, packet, cancel)?;
-            }
-            drop(bytes);
-            self.finish(&mut manifest, cancel)?;
-            prepared.push(manifest);
-            progress.progress(index as u64 + 1, self.paths.len() as u64);
+            progress.progress(index as u64 + 1, request.candidates.len() as u64);
         }
         Ok(prepared)
+    }
+
+    fn prepare_candidate(&self, candidate: &requests::Candidate, cancel: &AtomicBool) -> Result<Manifest> {
+        let path = Path::new(&candidate.path);
+        let record = self.root.join("imports").join(format!("{}.json", candidate.id));
+        match std::fs::symlink_metadata(&record) {
+            Ok(meta) => {
+                if !meta.is_file() || meta.file_type().is_symlink() {
+                    return Err(error("staged manifest is redirected; preserved"));
+                }
+                let mut manifest = read_manifest(&self.root, &candidate.id)?;
+                if self.known.contains(&candidate.id) {
+                    return Ok(manifest);
+                }
+                // A crash may precede any of the immutable writes. Only bytes
+                // matching this frozen manifest may fill those missing copies.
+                let source_path = self.root.join("blobs").join(&manifest.asset.original.id.0);
+                if !source_path.try_exists().map_err(io)? {
+                    self.stage(&manifest.asset.original, &read_bounded(path, MAX_BYTES)?, cancel)?;
+                }
+                for (name, blob) in &manifest.asset.associated {
+                    if !self.root.join("blobs").join(&blob.id.0).try_exists().map_err(io)? {
+                        if name != "xmp" {
+                            return Err(error("supporting document is not staged; restore its matching immutable copy and retry"));
+                        }
+                        let bytes = if let Some(source) = crate::sidecar::find_sidecar(&candidate.path, self.naming) {
+                            read_bounded(&source, MAX_DOCUMENT_BYTES)?
+                        } else {
+                            let original = read_bounded(&source_path, MAX_BYTES)?;
+                            crate::files::probe_bytes(&manifest.file_name, &original)
+                                .map_err(error)?
+                                .xmp
+                                .ok_or_else(|| {
+                                    error("supporting document is not staged; restore the original matching sidecar and retry this request")
+                                })?
+                                .into_bytes()
+                        };
+                        self.stage(blob, &bytes, cancel)?;
+                    }
+                }
+                self.finish(&mut manifest, cancel)?;
+                return Ok(manifest);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io(e)),
+        }
+        let bytes = read_bounded(path, MAX_BYTES)?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(error("cloud import cancelled; original source preserved"));
+        }
+        let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| error("original filename must be valid UTF-8"))?.to_owned();
+        let info = crate::files::probe_bytes(&file_name, &bytes).map_err(error)?;
+        let packet = if let Some(sidecar) = crate::sidecar::find_sidecar(&candidate.path, self.naming) {
+            Some(read_bounded(&sidecar, MAX_DOCUMENT_BYTES)?)
+        } else {
+            info.xmp.clone().filter(|_| info.kind == lightcraft_catalog::MediaKind::Raw).map(String::into_bytes)
+        };
+        let source = sha256(&bytes);
+        let original = make_blob(
+            &bytes,
+            &self.connection.id,
+            keys::in_library(&self.connection.prefix, &keys::original(&source).map_err(|e| error(e.to_string()))?)
+                .map_err(|e| error(e.to_string()))?,
+        );
+        let mut manifest = Manifest {
+            version: 3,
+            id: candidate.id.clone(),
+            asset_id: AssetId(candidate.id.clone()),
+            asset: Asset { associated: Default::default(), original, smart_preview: None, thumbnail: None },
+            file_name,
+            photo: None,
+            prepared: false,
+            target: None,
+            working: None,
+            stack_with: None,
+            origin_asset: None,
+            duplicate_policy: self.request.as_ref().map(|r| r.duplicate_policy),
+        };
+        if let Some(packet) = &packet {
+            manifest.asset.associated.insert("xmp".into(), self.document("xmp", packet)?);
+        }
+        manifest.photo = Some(Box::new(self.describe(&manifest, info, packet.as_deref())?));
+        self.write_manifest(&manifest, cancel)?;
+        self.stage(&manifest.asset.original, &bytes, cancel)?;
+        if let Some(packet) = &packet
+            && let Some(blob) = manifest.asset.associated.get("xmp")
+        {
+            self.stage(blob, packet, cancel)?;
+        }
+        drop(bytes);
+        self.finish(&mut manifest, cancel)?;
+        Ok(manifest)
     }
 
     fn prepare_revisions(&self, cancel: &AtomicBool, progress: &crate::activity::TaskHandle) -> Result<Vec<Manifest>> {
@@ -535,6 +734,7 @@ impl Job {
                 },
                 stack_with: None,
                 origin_asset: None,
+                duplicate_policy: None,
             };
             let xmp = packet.into_bytes();
             manifest.asset.associated.insert("xmp".into(), self.document("xmp", &xmp)?);
@@ -587,6 +787,7 @@ impl Job {
                 working: Some(format!("working/{id}/{name}")),
                 stack_with: Some(parent),
                 origin_asset: Some(base_asset),
+                duplicate_policy: None,
             };
             manifest.asset.associated.insert("xmp".into(), self.document("xmp", &packet)?);
             documents.insert("xmp".into(), packet);
@@ -602,43 +803,52 @@ impl Job {
 
     fn recover_prepared(&self, cancel: &AtomicBool, progress: &crate::activity::TaskHandle) -> Result<Vec<Manifest>> {
         let dir = self.root.join("imports");
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(io(error)),
-        };
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+            Ok(_) => return Err(error("staging manifest directory is redirected; data preserved")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(io(e)),
+        }
         let mut manifests = Vec::new();
-        for (count, entry) in entries.enumerate() {
+        for (count, entry) in std::fs::read_dir(&dir).map_err(io)?.enumerate() {
             if count >= 100_000 {
                 return Err(error("too many staging manifests to recover safely"));
             }
             let entry = entry.map_err(io)?;
-            if !entry.file_type().map_err(io)?.is_file() {
-                continue;
-            }
             let name = entry.file_name().to_string_lossy().to_string();
             let Some(id) = name.strip_suffix(".json").filter(|id| lightcraft_catalog::assets::identifier(id)) else { continue };
             if self.known.contains(id) || self.selected.as_ref().is_some_and(|selected| !selected.contains(id)) {
                 continue;
             }
+            if manifests.len() >= 1000 {
+                return Err(error("recover at most 1000 imports at once; select their import identities"));
+            }
             if cancel.load(Ordering::Relaxed) {
                 return Err(error("import recovery cancelled; staged data retained"));
             }
-            let bytes = read_bounded(&entry.path(), MAX_MANIFEST_BYTES)?;
-            let mut manifest: Manifest =
-                serde_json::from_slice(&bytes).map_err(|e| error(format!("{}: {e}; manifest preserved", entry.path().display())))?;
-            manifest.validate()?;
-            if manifest.id != id {
-                return Err(error("staged import identity does not match its filename"));
-            }
-            if manifest.asset.original.remote.connection != self.connection.id {
-                continue;
-            }
-            progress.detail(&manifest.file_name);
-            self.finish(&mut manifest, cancel)?;
-            manifests.push(manifest);
-            if manifests.len() > 1000 {
-                return Err(error("recover at most 1000 imports at once; select their import identities"));
+            let result = (|| -> Result<Option<Manifest>> {
+                if !entry.file_type().map_err(io)?.is_file() {
+                    return Err(error("staged manifest is not a regular file; preserved"));
+                }
+                let mut manifest = read_manifest(&self.root, id)?;
+                if manifest.asset.original.remote.connection != self.connection.id {
+                    return Ok(None);
+                }
+                for blob in std::iter::once(&manifest.asset.original).chain(manifest.asset.associated.values()) {
+                    self.connection.validate_blob(blob).map_err(|e| error(e.to_string()))?;
+                }
+                if let Some(record) = settled::read(&self.root, id)? {
+                    self.skipped.lock().map_err(|_| error("settled import state unavailable"))?.push(record);
+                    return Ok(None);
+                }
+                progress.detail(&manifest.file_name);
+                self.finish(&mut manifest, cancel)?;
+                Ok(Some(manifest))
+            })();
+            match result {
+                Ok(Some(manifest)) => manifests.push(manifest),
+                Ok(None) => {}
+                Err(e) => self.failure(id, &name, e.to_string(), cancel)?,
             }
             progress.progress(manifests.len() as u64, 0);
         }
@@ -762,105 +972,195 @@ impl Job {
     }
 }
 
+#[derive(Default)]
+struct Plan {
+    ids: Vec<u64>,
+    ops: Vec<Op>,
+    copies: Vec<Value>,
+    stacks: Vec<(PhotoId, Option<PhotoId>, Op)>,
+    skipped: Option<settled::Skipped>,
+}
+fn plan_candidate(catalog: &mut lightcraft_catalog::Catalog, root: Option<&Path>, manifest: Manifest, duplicate: Option<PhotoId>) -> Result<Plan> {
+    let mut plan = Plan::default();
+    manifest.validate()?;
+    if !manifest.prepared {
+        return Err(error("import has not finished staging its renditions"));
+    }
+    if let Some(existing) = catalog.upload_intents().get(&manifest.id) {
+        plan.ids.push(existing.photo_id.0);
+        return Ok(plan);
+    }
+    if let Some(id) = duplicate {
+        plan.ids.push(id.0);
+        plan.skipped = Some(settled::Skipped::new(manifest, id));
+        return Ok(plan);
+    }
+    if let (Some(parent), Some(base)) = (manifest.stack_with, &manifest.origin_asset)
+        && catalog.photo(parent).is_none_or(|photo| photo.deleted || photo.source != (Source::Managed { asset_id: base.clone() }))
+    {
+        return Err(error("external-edit source changed or was deleted; durable working data was retained"));
+    }
+    let mut photo = *manifest.photo.ok_or_else(|| error("staged photo is missing"))?;
+    let global_id = if let Some(target) = &manifest.target {
+        let current = catalog.photo(target.photo_id).ok_or_else(|| error("revision photo no longer exists; staged data preserved"))?;
+        if current.deleted || current.source != (Source::Managed { asset_id: target.base_asset.clone() }) {
+            return Err(error("photo changed while preparing its revision; staged data preserved"));
+        }
+        photo.id = target.photo_id;
+        target.global_id.clone()
+    } else {
+        photo.id = catalog.alloc_photo_id();
+        manifest.id.clone()
+    };
+    let intent = UploadIntent {
+        asset_id: manifest.asset_id.clone(),
+        photo_id: photo.id,
+        state: UploadState::SavedLocally,
+        verified: Default::default(),
+        error: None,
+        finalization: None,
+        blocked: None,
+    };
+    if let Some(relative) = &manifest.working {
+        let root = root.ok_or_else(|| error("working storage is unavailable"))?;
+        let path = root.join(relative).to_string_lossy().to_string();
+        let binding = Op::SetWorkingCopy {
+            id: photo.id,
+            working: Some(Box::new(lightcraft_catalog::managed::WorkingCopy {
+                connection: manifest.asset.original.remote.connection.clone(),
+                path: path.clone(),
+                asset_id: manifest.asset_id.clone(),
+                ingested: manifest.asset.original.id.clone(),
+            })),
+        };
+        plan.copies.push(json!({"path":path,"id":photo.id.0,"original":manifest.stack_with.map(|id|id.0)}));
+        plan.stacks.push((photo.id, manifest.stack_with, binding));
+    }
+    plan.ids.push(photo.id.0);
+    plan.ops.push(Op::SetAsset { id: manifest.asset_id, asset: Some(Box::new(manifest.asset)) });
+    if manifest.target.is_some() {
+        let copies: Vec<_> = catalog
+            .photos()
+            .filter(|copy| {
+                copy.id == photo.id
+                    || (copy.copy_of == Some(photo.id)
+                        && manifest.target.as_ref().is_some_and(|target| copy.source == (Source::Managed { asset_id: target.base_asset.clone() })))
+            })
+            .map(|copy| copy.id)
+            .collect();
+        for id in copies {
+            plan.ops.push(Op::Relink { id, file_name: photo.file_name.clone(), source: photo.source.clone(), format: Some(photo.format.clone()) });
+            plan.ops.push(Op::SetContent {
+                id,
+                width: photo.width,
+                height: photo.height,
+                file_size: photo.file_size,
+                content_hash: photo.content_hash.clone(),
+                preview_only: photo.preview_only.clone(),
+            });
+        }
+    } else {
+        plan.ops.push(Op::AddPhoto { photo: Box::new(photo.clone()) });
+    }
+    plan.ops.push(Op::SetCloudIdentity { entity: format!("photo:{}", photo.id.0), id: Some(global_id) });
+    plan.ops.push(Op::SetUploadIntent { id: manifest.id, intent: Some(Box::new(intent)) });
+    catalog.apply(Op::Batch { ops: plan.ops.clone() })?;
+    Ok(plan)
+}
+
+#[cfg(test)]
 fn commit(s: &mut Session, manifests: Vec<Manifest>) -> Result<Value> {
-    let mut ids = Vec::new();
+    complete(
+        s,
+        Prepared {
+            order: Vec::new(),
+            skipped: Vec::new(),
+            manifests,
+            failed: Vec::new(),
+            request: None,
+            duplicate_policy: requests::DuplicatePolicy::Allow,
+        },
+    )
+    .map(|done| done.value)
+}
+
+fn complete(s: &mut Session, mut prepared: Prepared) -> Result<Completed> {
+    // A different worker may already have committed this candidate. Preparation
+    // failures concern uncommitted records; upload integrity has its own status.
+    let already_complete: Vec<_> =
+        prepared.failed.iter().filter(|issue| s.catalog.upload_intents().contains_key(&issue.id)).map(|issue| issue.id.clone()).collect();
+    prepared.failed.retain(|issue| !s.catalog.upload_intents().contains_key(&issue.id));
+    let mut skipped = prepared.skipped;
+    let mut ids: Vec<u64> = skipped.iter().filter(|record| record.target_matches(&s.catalog)).map(|record| record.photo_id.0).collect();
+    ids.extend(already_complete.iter().filter_map(|id| s.catalog.upload_intents().get(id).map(|intent| intent.photo_id.0)));
+    let mut resolved: std::collections::BTreeMap<String, u64> =
+        skipped.iter().filter(|record| record.target_matches(&s.catalog)).map(|record| (record.manifest.id.clone(), record.photo_id.0)).collect();
+    for id in &already_complete {
+        if let Some(intent) = s.catalog.upload_intents().get(id) {
+            resolved.insert(id.clone(), intent.photo_id.0);
+        }
+    }
+    let mut completed = already_complete;
+    completed.extend(skipped.iter().map(|record| record.manifest.id.clone()));
+    if prepared.manifests.is_empty() {
+        let ids = ordered_ids(&prepared.order, &resolved, ids);
+        return Ok(completed_result(s, ids, Vec::new(), prepared.failed, prepared.request, skipped, completed));
+    }
+    let resolver = s.media.asset_resolver.clone().ok_or_else(|| error("managed storage is unavailable"))?;
+    let root = resolver.durable_root().ok_or_else(|| error("working storage is unavailable"))?;
+    let mut staged = s.catalog.clone();
+    let mut hashes = std::collections::BTreeMap::new();
+    for photo in staged.photos().filter(|photo| !photo.deleted) {
+        if let Source::Managed { asset_id } = &photo.source
+            && let Some(asset) = staged.asset(asset_id)
+        {
+            hashes.entry((asset.original.remote.connection.clone(), asset.original.id.clone())).or_insert(photo.id);
+        }
+    }
     let mut ops = Vec::new();
     let mut copies = Vec::new();
     let mut stacks = Vec::new();
-    for manifest in manifests {
-        manifest.validate()?;
-        if !manifest.prepared {
-            return Err(error("import has not finished staging its renditions"));
-        }
-        if let Some(existing) = s.catalog.upload_intents().get(&manifest.id) {
-            ids.push(existing.photo_id.0);
-            continue;
-        }
-        if let (Some(parent), Some(base)) = (manifest.stack_with, &manifest.origin_asset)
-            && s.catalog.photo(parent).is_none_or(|photo| photo.deleted || photo.source != (Source::Managed { asset_id: base.clone() }))
+    for manifest in prepared.manifests {
+        let id = manifest.id.clone();
+        let name = manifest.file_name.clone();
+        let connection = manifest.asset.original.remote.connection.clone();
+        let hash = manifest.asset.original.id.clone();
+        let duplicate = if manifest.duplicate_policy.unwrap_or(prepared.duplicate_policy) == requests::DuplicatePolicy::Skip
+            && manifest.target.is_none()
+            && manifest.stack_with.is_none()
         {
-            return Err(error("external-edit source changed or was deleted; durable working data was retained"));
-        }
-        let mut photo = *manifest.photo.ok_or_else(|| error("staged photo is missing"))?;
-        let global_id = if let Some(target) = &manifest.target {
-            let current = s.catalog.photo(target.photo_id).ok_or_else(|| error("revision photo no longer exists; staged data preserved"))?;
-            if current.deleted || current.source != (Source::Managed { asset_id: target.base_asset.clone() }) {
-                return Err(error("photo changed while preparing its revision; staged data preserved"));
-            }
-            photo.id = target.photo_id;
-            target.global_id.clone()
+            hashes.get(&(connection.clone(), hash.clone())).copied()
         } else {
-            photo.id = s.catalog.alloc_photo_id();
-            manifest.id.clone()
+            None
         };
-        let intent = UploadIntent {
-            asset_id: manifest.asset_id.clone(),
-            photo_id: photo.id,
-            state: UploadState::SavedLocally,
-            verified: Default::default(),
-            error: None,
-            finalization: None,
-            blocked: None,
-        };
-        if let Some(relative) = &manifest.working {
-            let root = s
-                .media
-                .asset_resolver
-                .as_ref()
-                .and_then(|resolver| resolver.durable_root())
-                .ok_or_else(|| error("working storage is unavailable"))?;
-            let path = root.join(relative).to_string_lossy().to_string();
-            let binding = Op::SetWorkingCopy {
-                id: photo.id,
-                working: Some(Box::new(lightcraft_catalog::managed::WorkingCopy {
-                    connection: manifest.asset.original.remote.connection.clone(),
-                    path: path.clone(),
-                    asset_id: manifest.asset_id.clone(),
-                    ingested: manifest.asset.original.id.clone(),
-                })),
-            };
-            copies.push(json!({"path":path,"id":photo.id.0,"original":manifest.stack_with.map(|id|id.0)}));
-            stacks.push((photo.id, manifest.stack_with, binding));
-        }
-        ids.push(photo.id.0);
-        ops.push(Op::SetAsset { id: manifest.asset_id, asset: Some(Box::new(manifest.asset)) });
-        if manifest.target.is_some() {
-            let copies: Vec<_> = s
-                .catalog
-                .photos()
-                .filter(|copy| {
-                    copy.id == photo.id
-                        || (copy.copy_of == Some(photo.id)
-                            && manifest
-                                .target
-                                .as_ref()
-                                .is_some_and(|target| copy.source == (Source::Managed { asset_id: target.base_asset.clone() })))
-                })
-                .map(|copy| copy.id)
-                .collect();
-            for id in copies {
-                ops.push(Op::Relink { id, file_name: photo.file_name.clone(), source: photo.source.clone(), format: Some(photo.format.clone()) });
-                ops.push(Op::SetContent {
-                    id,
-                    width: photo.width,
-                    height: photo.height,
-                    file_size: photo.file_size,
-                    content_hash: photo.content_hash.clone(),
-                    preview_only: photo.preview_only.clone(),
-                });
+        match plan_candidate(&mut staged, Some(&root), manifest, duplicate) {
+            Ok(plan) => {
+                if let Some(photo) = plan.ids.first() {
+                    resolved.insert(id.clone(), *photo);
+                    hashes.entry((connection, hash)).or_insert(PhotoId(*photo));
+                }
+                if let Some(record) = plan.skipped {
+                    skipped.push(record);
+                }
+                ids.extend(plan.ids);
+                ops.extend(plan.ops);
+                copies.extend(plan.copies);
+                stacks.extend(plan.stacks);
+                completed.push(id);
             }
-        } else {
-            ops.push(Op::AddPhoto { photo: Box::new(photo.clone()) });
+            Err(e) => prepared.failed.push(Issue {
+                id: id.clone(),
+                name,
+                reason: e.to_string(),
+                command: "cloud.recoverImports".into(),
+                retry: json!({"connection":connection,"imports":[id],"wait":false}),
+            }),
         }
-        ops.push(Op::SetCloudIdentity { entity: format!("photo:{}", photo.id.0), id: Some(global_id) });
-        ops.push(Op::SetUploadIntent { id: manifest.id, intent: Some(Box::new(intent)) });
     }
     for (_, _, binding) in &stacks {
         ops.push(binding.clone());
     }
     if stacks.iter().any(|(_, parent, _)| parent.is_some()) {
-        let mut staged = s.catalog.clone();
-        staged.apply(Op::Batch { ops: ops.clone() })?;
         for (id, parent, _) in &stacks {
             if let Some(parent) = parent
                 && staged.photo(*parent).is_some()
@@ -876,12 +1176,43 @@ fn commit(s: &mut Session, manifests: Vec<Manifest>) -> Result<Value> {
         s.commit("Import cloud photos", Op::Batch { ops })?;
         s.cloud_uploads.request_resume(false);
     }
-    if let Some(id) = ids.first() {
+    let ids = ordered_ids(&prepared.order, &resolved, ids);
+    Ok(completed_result(s, ids, copies, prepared.failed, prepared.request, skipped, completed))
+}
+fn ordered_ids(order: &[String], resolved: &std::collections::BTreeMap<String, u64>, ids: Vec<u64>) -> Vec<u64> {
+    if order.is_empty() { ids } else { order.iter().filter_map(|id| resolved.get(id).copied()).collect() }
+}
+
+fn completed_result(
+    s: &mut Session,
+    ids: Vec<u64>,
+    copies: Vec<Value>,
+    failed: Vec<Issue>,
+    request: Option<String>,
+    skipped: Vec<settled::Skipped>,
+    completed: Vec<String>,
+) -> Completed {
+    if let Some(id) = ids.first().filter(|id| s.catalog.photo(PhotoId(**id)).is_some()) {
         s.selection = Selection::single(PhotoId(*id));
     }
+    let selected: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+    let pending =
+        s.catalog.upload_intents().values().any(|intent| selected.contains(&intent.photo_id.0) && intent.state != UploadState::Synchronized);
     let first = copies.first().cloned().unwrap_or(Value::Null);
-    Ok(json!({"ids": ids, "savedLocally": true, "uploadPending": true, "copies":copies,
-        "path":first["path"],"id":first["id"],"original":first["original"]}))
+    let summaries: Vec<_> = skipped
+        .iter()
+        .map(|record| {
+            let available = record.target_matches(&s.catalog);
+            json!({"id":record.manifest.id,"name":record.manifest.file_name,
+                "reason":if available {"duplicate original"} else {"previously skipped target is unavailable or changed; start a new request for another photo"},
+                "photoId":available.then_some(record.photo_id.0),"previousPhotoId":record.photo_id.0})
+        })
+        .collect();
+    Completed {
+        value: json!({"ids":ids,"savedLocally":!ids.is_empty(),"uploadPending":pending,"copies":copies,
+        "path":first["path"],"id":first["id"],"original":first["original"],"requestId":request,"failed":failed,"skipped":summaries,"completedImports":completed}),
+        skipped,
+    }
 }
 
 fn new_identity() -> Result<String> {
@@ -1015,7 +1346,10 @@ pub(crate) fn edit_external(s: &mut Session, ids: &[PhotoId], options: &crate::e
 }
 
 struct Pending {
-    receiver: mpsc::Receiver<Result<Vec<Manifest>>>,
+    receiver: mpsc::Receiver<Result<Prepared>>,
+    applied: bool,
+    acknowledge: mpsc::SyncSender<Result<Completed>>,
+    finalized: mpsc::Receiver<Result<Value>>,
     library: Arc<()>,
     guard: crate::activity::TaskGuard,
     cancel: Arc<AtomicBool>,
@@ -1030,9 +1364,21 @@ impl Drop for Pending {
 #[derive(Default)]
 pub struct Imports {
     pending: Vec<Pending>,
+    coordinator: Arc<std::sync::Mutex<()>>,
     pub reports: Vec<Value>,
+    pub failures: Vec<Value>,
 }
 impl Imports {
+    pub(crate) fn reload(&mut self, resolver: Option<&AssetResolver>, catalog: &lightcraft_catalog::Catalog) {
+        self.failures = resolver.and_then(|r| r.durable_root()).map_or_else(Vec::new, |root| match issues::load(&root) {
+            Ok(issues) => issues
+                .into_values()
+                .filter(|issue| !catalog.upload_intents().contains_key(&issue.id))
+                .filter_map(|issue| serde_json::to_value(issue).ok())
+                .collect(),
+            Err(e) => vec![json!({"id":"recovery-status","name":"Import recovery status","reason":e.to_string()})],
+        });
+    }
     pub fn preparing(&self) -> usize {
         self.pending.iter().filter(|pending| !pending.done.load(Ordering::Relaxed)).count()
     }
@@ -1050,7 +1396,20 @@ fn launch(s: &mut Session, p: &Value, recover: bool) -> Result<Value> {
     launch_job(s, p, job)
 }
 
-fn launch_job(s: &mut Session, p: &Value, job: Job) -> Result<Value> {
+fn preparation_guard<'a>(coordinator: &'a std::sync::Mutex<()>, cancel: &AtomicBool) -> Result<std::sync::MutexGuard<'a, ()>> {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(error("import cancelled; retained requests remain recoverable"));
+        }
+        match coordinator.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Ok(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+}
+
+fn launch_job(s: &mut Session, p: &Value, mut job: Job) -> Result<Value> {
     let wait = p
         .get("wait")
         .map(|value| value.as_bool().ok_or_else(|| error("wait must be true or false")))
@@ -1062,15 +1421,26 @@ fn launch_job(s: &mut Session, p: &Value, job: Job) -> Result<Value> {
     if s.cloud_imports.pending.len() >= 4 {
         return Err(error("too many cloud imports; wait for or cancel an import first"));
     }
+    if wait && !s.cloud_imports.pending.is_empty() {
+        return Err(error("wait for background imports to finish before a blocking import"));
+    }
+    let coordinator = s.cloud_imports.coordinator.clone();
     let task = s.activity.start("import", "Stage Cloud Originals", crate::activity::Cancel::Yes);
     let cancel = task.cancel_flag().ok_or_else(|| error("could not create import cancellation flag"))?;
     let id = task.id();
     let progress = task.handle();
     if wait {
-        let prepared = crate::assets::transfers::with_progress(progress.clone(), || job.prepare(&cancel, &progress))?;
-        return commit(s, prepared);
+        let _coordinator = preparation_guard(&coordinator, &cancel)?;
+        let result =
+            crate::assets::transfers::with_progress(progress.clone(), || job.run(&cancel, &progress)).and_then(|prepared| complete(s, prepared));
+        let result = job.persist_completion(result);
+        s.cloud_imports.reload(s.media.asset_resolver.as_deref(), &s.catalog);
+        return result;
     }
+    let request_id = job.request_options.as_ref().and_then(|options| options.requested.clone());
     let (sender, receiver) = mpsc::sync_channel(1);
+    let (acknowledge, accepted) = mpsc::sync_channel(1);
+    let (finished, finalized) = mpsc::sync_channel(1);
     let flag = cancel.clone();
     let done = Arc::new(AtomicBool::new(false));
     let worker_done = done.clone();
@@ -1084,37 +1454,87 @@ fn launch_job(s: &mut Session, p: &Value, job: Job) -> Result<Value> {
                 }
             }
             let _finished = Finished(worker_done);
-            let result = crate::assets::transfers::with_progress(progress.clone(), || job.prepare(&flag, &progress));
-            let _ = sender.send(result); // Abandoned results retain their manifests and originals.
+            let _coordinator = match preparation_guard(&coordinator, &flag) {
+                Ok(guard) => guard,
+                Err(e) => {
+                    let _ = sender.send(Err(e));
+                    return;
+                }
+            };
+            let result = crate::assets::transfers::with_progress(progress.clone(), || job.run(&flag, &progress));
+            if sender.send(result).is_ok() {
+                loop {
+                    match accepted.recv_timeout(std::time::Duration::from_millis(20)) {
+                        Ok(result) => {
+                            let _ = finished.send(job.persist_completion(result));
+                            break;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) if flag.load(Ordering::Relaxed) => break,
+                        Err(_) => {}
+                    }
+                }
+            }
             job.resolver.assets_changed();
         })
         .map_err(io)?;
-    s.cloud_imports.pending.push(Pending { receiver, library: s.library_token(), guard: task, cancel, done });
-    Ok(json!({"background": true, "task": id}))
+    s.cloud_imports.pending.push(Pending { receiver, applied: false, acknowledge, finalized, library: s.library_token(), guard: task, cancel, done });
+    Ok(json!({"background": true, "task": id,"requestId":request_id}))
 }
 
 impl Session {
     pub fn poll_cloud_imports(&mut self) {
         let mut imports = std::mem::take(&mut self.cloud_imports);
-        imports.pending.retain(|pending| {
-            let result = match pending.receiver.try_recv() {
+        let mut changed = false;
+        imports.pending.retain_mut(|pending| {
+            if !pending.applied {
+                let result = match pending.receiver.try_recv() {
+                    Ok(result) => result,
+                    Err(mpsc::TryRecvError::Empty) => return true,
+                    Err(mpsc::TryRecvError::Disconnected) => Err(error("import worker stopped; staged originals remain recoverable")),
+                };
+                let result = if !Arc::ptr_eq(&pending.library, &self.library_token()) || pending.cancel.load(Ordering::Relaxed) {
+                    Err(error("library changed or import cancelled; staged originals remain recoverable"))
+                } else {
+                    result.and_then(|prepared| {
+                        let mut skipped = Vec::new();
+                        self.execute_fn("cloud.import", |s| {
+                            let completed = complete(s, prepared)?;
+                            skipped = completed.skipped;
+                            Ok(completed.value)
+                        })
+                        .map(|value| Completed { value, skipped })
+                    })
+                };
+                pending.applied = true;
+                // The worker owns request/status IO and waits without the staging
+                // lock while the library owner performs the single bulk commit.
+                if pending.acknowledge.send(result).is_ok() {
+                    return true;
+                }
+            }
+            let result = match pending.finalized.try_recv() {
                 Ok(result) => result,
-                Err(mpsc::TryRecvError::Empty) => return true,
-                Err(mpsc::TryRecvError::Disconnected) => Err(error("import worker stopped; staged originals remain recoverable")),
+                Err(mpsc::TryRecvError::Empty) if !pending.done.load(Ordering::Relaxed) => return true,
+                Err(_) => Err(error("import finalization stopped; retained requests can be retried safely")),
             };
-            let result = if !Arc::ptr_eq(&pending.library, &self.library_token()) || pending.cancel.load(Ordering::Relaxed) {
-                Err(error("library changed or import cancelled; staged originals remain recoverable"))
-            } else {
-                result.and_then(|prepared| self.execute_fn("cloud.import", |s| commit(s, prepared)))
-            };
+            changed = true;
             imports.reports.push(match result {
-                Ok(value) => json!({"task": pending.guard.id(), "ok": true, "result": value}),
-                Err(e) => json!({"task": pending.guard.id(), "ok": false, "error": e.to_string()}),
+                Ok(mut value) => {
+                    if let Some(failed) = value["failed"].as_array_mut() {
+                        failed.retain(|issue| issue["id"].as_str().is_none_or(|id| !self.catalog.upload_intents().contains_key(id)));
+                    }
+                    json!({"task":pending.guard.id(),"ok":true,"result":value})
+                }
+                Err(e) => json!({"task":pending.guard.id(),"ok":false,"error":e.to_string()}),
             });
             false
         });
         if imports.reports.len() > 32 {
             imports.reports.drain(..imports.reports.len() - 32);
+        }
+        if changed {
+            imports.reload(self.media.asset_resolver.as_deref(), &self.catalog);
         }
         self.cloud_imports = imports;
     }
@@ -1307,7 +1727,8 @@ mod tests {
         std::fs::write(&sidecar, b"\xffinvalid packet").unwrap();
         let original = std::fs::read(&fixture.original).unwrap();
         let mut session = fixture.session();
-        assert!(session.execute("cloud.import", &fixture.params()).unwrap_err().to_string().contains("supporting XMP"));
+        let result = session.execute("cloud.import", &fixture.params()).unwrap();
+        assert!(result["failed"][0]["reason"].as_str().unwrap().contains("supporting XMP"));
         assert_eq!(std::fs::read(&fixture.original).unwrap(), original);
         assert_eq!(std::fs::read(&sidecar).unwrap(), b"\xffinvalid packet");
         assert_eq!(session.catalog.photos().count(), 0);
@@ -1442,7 +1863,7 @@ mod tests {
         for boundary in [0, 1, 2, 3] {
             let fixture = Fixture::new();
             let mut session = fixture.session();
-            let job = Job::new(&mut session, &fixture.params(), false).unwrap();
+            let mut job = Job::new(&mut session, &fixture.params(), false).unwrap();
             let task = session.activity.start("import", "Crash boundary", crate::activity::Cancel::Yes);
             let mut manifest = job.prepare(&AtomicBool::new(false), &task.handle()).unwrap().remove(0);
             let original = job.root.join("blobs").join(&manifest.asset.original.id.0);
@@ -1519,7 +1940,7 @@ mod tests {
         let working = job.root.join(manifests[0].working.as_ref().unwrap());
         let before = std::fs::read(&working).unwrap();
         session.execute("photo.delete", &json!({"ids":[id.0]})).unwrap();
-        assert!(commit(&mut session, manifests).unwrap_err().to_string().contains("source changed or was deleted"));
+        assert!(commit(&mut session, manifests).unwrap()["failed"][0]["reason"].as_str().unwrap().contains("source changed or was deleted"));
         assert_eq!(session.catalog.photos().count(), 1);
         assert_eq!(std::fs::read(working).unwrap(), before);
     }
@@ -1668,7 +2089,7 @@ mod tests {
     fn abandoned_preparation_recovers_once_without_the_source_file() {
         let fixture = Fixture::new();
         let mut session = fixture.session();
-        let job = Job::new(&mut session, &fixture.params(), false).unwrap();
+        let mut job = Job::new(&mut session, &fixture.params(), false).unwrap();
         let task = session.activity.start("import", "Prepare test", crate::activity::Cancel::Yes);
         let prepared = job.prepare(&AtomicBool::new(false), &task.handle()).unwrap();
         let import_id = prepared[0].id.clone();
@@ -1690,7 +2111,7 @@ mod tests {
     fn failed_journal_append_keeps_staged_data_and_upload_intent_for_save_retry() {
         let fixture = Fixture::new();
         let mut session = fixture.session();
-        let job = Job::new(&mut session, &fixture.params(), false).unwrap();
+        let mut job = Job::new(&mut session, &fixture.params(), false).unwrap();
         let task = session.activity.start("import", "Prepare test", crate::activity::Cancel::Yes);
         let prepared = job.prepare(&AtomicBool::new(false), &task.handle()).unwrap();
         let stage_file = job.root.join("blobs").join(&prepared[0].asset.original.id.0);
@@ -1760,5 +2181,293 @@ mod tests {
         assert!(done.load(Ordering::Relaxed));
         assert!(session.catalog.upload_intents().is_empty());
         assert_eq!(session.catalog.photos().count(), 0);
+    }
+    fn original_at(fixture: &Fixture, name: &str, color: u8) -> PathBuf {
+        let path = fixture.root.join(name);
+        let image = lightcraft_raster::Rgba8::from_fn(16, 12, |x, y| [color, x as u8, y as u8, 255]);
+        std::fs::write(&path, lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&image), &Default::default()).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn interrupted_bulk_request_reuses_frozen_candidates_after_restart_and_recovery() {
+        let fixture = Fixture::new();
+        let b = original_at(&fixture, "B.png", 90);
+        let c = fixture.root.join("C.png");
+        let params = json!({"connection":"personal","paths":[fixture.original,b,c]});
+        let mut session = fixture.session();
+        session.import_defaults.creator = "Frozen recipe".into();
+        let mut job = Job::new(&mut session, &params, false).unwrap();
+        job.initialize_request(&AtomicBool::new(false)).unwrap();
+        let request = job.request.as_ref().unwrap().id.clone();
+        let task = session.activity.start("import", "Interrupted request", crate::activity::Cancel::Yes);
+        let abandoned = job.run(&AtomicBool::new(false), &task.handle()).unwrap();
+        assert_eq!(abandoned.manifests.len(), 2);
+        assert_eq!(abandoned.failed.len(), 1);
+        let identities: Vec<_> = abandoned.manifests.iter().map(|m| m.id.clone()).collect();
+        assert!(session.catalog.upload_intents().is_empty());
+        drop(abandoned);
+        drop(task);
+        drop(job);
+        std::fs::remove_file(&fixture.original).unwrap();
+        std::fs::remove_file(&b).unwrap();
+        original_at(&fixture, "C.png", 150);
+        session.close_library().unwrap();
+        drop(session);
+        let mut session = fixture.session();
+        assert_eq!(session.cloud_imports.failures.len(), 1, "preparation failures survive the abandoned reply");
+        session.import_defaults.creator = "Changed after interruption".into();
+        let result = session.execute("cloud.import", &params).unwrap();
+        assert_eq!(result["requestId"], request);
+        assert_eq!(result["failed"], json!([]));
+        assert_eq!(session.catalog.photos().count(), 3);
+        assert_eq!(session.catalog.upload_intents().len(), 3);
+        for id in identities {
+            assert!(session.catalog.upload_intents().contains_key(&id));
+        }
+        assert!(session.catalog.photos().all(|photo| photo.meta.creator == "Frozen recipe"));
+        assert!(session.cloud_imports.failures.is_empty());
+        let repeat = session.execute("cloud.import", &json!({"connection":"personal","requestId":request})).unwrap();
+        assert_eq!(repeat["ids"], result["ids"]);
+        session.execute("cloud.recoverImports", &json!({"connection":"personal"})).unwrap();
+        assert_eq!(session.catalog.photos().count(), 3);
+        assert_eq!(std::fs::read_dir(fixture.root.join("library/Managed/imports")).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn corrupt_manifest_does_not_block_healthy_recovery_and_stays_visible_until_repaired() {
+        let fixture = Fixture::new();
+        let b = original_at(&fixture, "B.png", 90);
+        let mut session = fixture.session();
+        let mut job = Job::new(&mut session, &json!({"connection":"personal","paths":[fixture.original,b]}), false).unwrap();
+        let task = session.activity.start("import", "Prepare recovery", crate::activity::Cancel::Yes);
+        let prepared = job.prepare(&AtomicBool::new(false), &task.handle()).unwrap();
+        let path = job.root.join("imports").join(format!("{}.json", prepared[0].id));
+        let saved = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"damaged manifest").unwrap();
+        let root = job.root.clone();
+        drop(task);
+        drop(job);
+        let result = session.execute("cloud.recoverImports", &json!({"connection":"personal"})).unwrap();
+        assert_eq!(result["ids"].as_array().unwrap().len(), 1);
+        assert_eq!(result["failed"].as_array().unwrap().len(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), b"damaged manifest");
+        assert!(visit_staging(&root, |_| Ok(())).is_err(), "cache staging protection remains strict");
+        session.close_library().unwrap();
+        drop(session);
+        let mut session = fixture.session();
+        assert_eq!(session.execute("cloud.importStatus", &json!({})).unwrap()["failed"].as_array().unwrap().len(), 1);
+        let overview = crate::cloud_status::overview(&mut session, &Value::Null).unwrap();
+        assert!(overview["error"].is_string());
+        assert_eq!(overview["health"]["imports"]["failed"][0]["command"], "cloud.recoverImports");
+        std::fs::write(&path, saved).unwrap();
+        let result = session.execute("cloud.recoverImports", &json!({"connection":"personal"})).unwrap();
+        assert_eq!(result["failed"], json!([]));
+        assert_eq!(session.catalog.photos().count(), 2);
+        assert!(session.cloud_imports.failures.is_empty());
+    }
+
+    #[test]
+    fn duplicate_policy_preserves_retry_identity_and_allows_explicit_new_photo_records() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let original = session.execute("cloud.import", &fixture.params()).unwrap();
+        assert_eq!(session.execute("cloud.import", &fixture.params()).unwrap()["ids"], original["ids"]);
+        let copy = fixture.root.join("same-bytes.png");
+        std::fs::copy(&fixture.original, &copy).unwrap();
+        let skipped = session.execute("cloud.import", &json!({"connection":"personal","paths":[copy]})).unwrap();
+        assert_eq!(skipped["ids"], original["ids"]);
+        assert_eq!(skipped["skipped"].as_array().unwrap().len(), 1);
+        session.execute("cloud.recoverImports", &json!({"connection":"personal"})).unwrap();
+        assert_eq!(session.catalog.photos().count(), 1, "recovery retains the saved skip policy");
+        let params = json!({"connection":"personal","paths":[fixture.original],"newRequest":true,"duplicatePolicy":"allow"});
+        let duplicate = session.execute("cloud.import", &params).unwrap();
+        assert_ne!(duplicate["requestId"], original["requestId"]);
+        assert_ne!(duplicate["ids"], original["ids"]);
+        assert_eq!(session.catalog.photos().count(), 2);
+        let resume = json!({"connection":"personal","requestId":duplicate["requestId"]});
+        assert_eq!(session.execute("cloud.import", &resume).unwrap()["ids"], duplicate["ids"]);
+        assert_eq!(session.catalog.photos().count(), 2);
+        assert!(
+            session.execute("cloud.import", &json!({"connection":"personal","requestId":duplicate["requestId"],"duplicatePolicy":"skip"})).is_err()
+        );
+    }
+
+    #[test]
+    fn request_pointer_survives_interruption_before_request_file_and_candidate_ids_are_stable() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let mut job = Job::new(&mut session, &fixture.params(), false).unwrap();
+        job.initialize_request(&AtomicBool::new(false)).unwrap();
+        let request = job.request.as_ref().unwrap();
+        let group = request.id.split('-').next().unwrap();
+        let record = job.root.join("requests").join(group).join(format!("{}.json", request.id));
+        std::fs::remove_file(&record).unwrap();
+        let mut retry = Job::new(&mut session, &fixture.params(), false).unwrap();
+        retry.initialize_request(&AtomicBool::new(false)).unwrap();
+        assert_eq!(request.id, retry.request.as_ref().unwrap().id);
+        assert_eq!(request.candidates[0].id, retry.request.as_ref().unwrap().candidates[0].id);
+        assert!(record.is_file());
+    }
+    #[test]
+    fn stale_revision_is_reported_without_blocking_an_independent_candidate() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let initial = session.execute("cloud.import", &fixture.params()).unwrap();
+        let id = PhotoId(initial["ids"][0].as_u64().unwrap());
+        let before = session.catalog.photo(id).unwrap().source.clone();
+        let b = original_at(&fixture, "B.png", 90);
+        let mut job = Job::new(&mut session, &json!({"connection":"personal","paths":[b]}), false).unwrap();
+        let task = session.activity.start("import", "Prepare independent candidate", crate::activity::Cancel::Yes);
+        let mut candidates = job.prepare(&AtomicBool::new(false), &task.handle()).unwrap();
+        let mut stale = candidates[0].clone();
+        stale.id = new_identity().unwrap();
+        stale.asset_id = AssetId(stale.id.clone());
+        stale.photo.as_mut().unwrap().source = Source::Managed { asset_id: stale.asset_id.clone() };
+        stale.target = Some(RevisionTarget {
+            photo_id: id,
+            base_asset: AssetId("f".repeat(64)),
+            global_id: session.catalog.cloud_identity(&format!("photo:{}", id.0)).unwrap().into(),
+        });
+        candidates.insert(0, stale);
+        let result = commit(&mut session, candidates).unwrap();
+        assert_eq!(result["ids"].as_array().unwrap().len(), 1);
+        assert_eq!(result["failed"].as_array().unwrap().len(), 1);
+        assert!(result["failed"][0]["reason"].as_str().unwrap().contains("photo changed"));
+        assert_eq!(session.catalog.photo(id).unwrap().source, before);
+        assert_eq!(session.catalog.photos().count(), 2);
+    }
+    #[test]
+    fn late_preparation_failure_cannot_undo_a_committed_import_or_hide_upload_integrity_errors() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session.execute("cloud.import", &fixture.params()).unwrap();
+        let (id, intent) = session.catalog.upload_intents().iter().next().map(|(id, intent)| (id.clone(), intent.clone())).unwrap();
+        let resolver = session.media.asset_resolver.as_ref().unwrap().clone();
+        let root = resolver.durable_root().unwrap();
+        let late = Issue {
+            id: id.clone(),
+            name: "old attempt".into(),
+            reason: "obsolete missing source".into(),
+            command: "cloud.recoverImports".into(),
+            retry: json!({"connection":"personal","imports":[id]}),
+        };
+        // Worker A's local write arrives after worker B has durably committed.
+        {
+            let _guard = resolver.durable_guard(&AtomicBool::new(false)).unwrap();
+            issues::update(&root, std::slice::from_ref(&late), &[]).unwrap();
+        }
+        session.close_library().unwrap();
+        drop(session);
+        let mut session = fixture.session();
+        assert_eq!(session.execute("cloud.importStatus", &json!({})).unwrap()["failed"], json!([]));
+        let result = complete(
+            &mut session,
+            Prepared {
+                order: Vec::new(),
+                skipped: Vec::new(),
+                manifests: Vec::new(),
+                failed: vec![late],
+                request: None,
+                duplicate_policy: requests::DuplicatePolicy::Skip,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.value["failed"], json!([]));
+        let job = Job::new(&mut session, &json!({"connection":"personal"}), true).unwrap();
+        job.persist_completion(Ok(result)).unwrap();
+        assert!(issues::load(&root).unwrap().is_empty());
+        let mut failed = intent;
+        failed.state = UploadState::Failed;
+        failed.error = Some("Later verification found missing remote bytes".into());
+        session.apply_system(Op::SetUploadIntent { id, intent: Some(Box::new(failed)) }).unwrap();
+        let overview = crate::cloud_status::overview(&mut session, &Value::Null).unwrap();
+        assert!(overview["error"].as_str().unwrap().contains("missing remote bytes"));
+    }
+    #[test]
+    fn overlapping_request_aliases_wait_for_owner_ack_and_commit_one_photo() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let mut job = Job::new(&mut session, &fixture.params(), false).unwrap();
+        job.initialize_request(&AtomicBool::new(false)).unwrap();
+        let request = job.request.as_ref().unwrap().id.clone();
+        drop(job);
+        session.execute("cloud.import", &json!({"connection":"personal","paths":[fixture.original],"wait":false})).unwrap();
+        session.execute("cloud.import", &json!({"connection":"personal","requestId":request,"wait":false})).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (index, prepared) = loop {
+            if let Some(result) = session
+                .cloud_imports
+                .pending
+                .iter()
+                .enumerate()
+                .find_map(|(index, pending)| pending.receiver.try_recv().ok().map(|result| (index, result)))
+            {
+                break (result.0, result.1.unwrap());
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let other = if index == 0 { 1 } else { 0 };
+        let held = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < held {
+            assert!(
+                matches!(session.cloud_imports.pending.get(other).unwrap().receiver.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "another preparation cannot race the held owner acknowledgement"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            session
+                .execute("cloud.import", &json!({"connection":"personal","requestId":request,"wait":true}))
+                .unwrap_err()
+                .to_string()
+                .contains("background imports")
+        );
+        let pending = session.cloud_imports.pending.get_mut(index).unwrap();
+        pending.applied = true;
+        let acknowledge = pending.acknowledge.clone();
+        assert!(acknowledge.send(complete(&mut session, prepared)).is_ok());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !session.cloud_imports.pending.is_empty() && std::time::Instant::now() < deadline {
+            session.poll_cloud_imports();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(session.cloud_imports.pending.is_empty());
+        assert_eq!(session.cloud_imports.reports.len(), 2);
+        assert!(session.cloud_imports.reports.iter().all(|report| report["ok"] == true && report["result"]["ids"] == json!([1])));
+        assert_eq!(session.catalog.photos().count(), 1);
+        assert_eq!(session.catalog.upload_intents().len(), 1);
+        assert!(session.cloud_imports.failures.is_empty());
+    }
+    #[test]
+    fn a_settled_skip_never_selects_a_reused_photo_id_with_different_original_bytes() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session.execute("cloud.import", &fixture.params()).unwrap();
+        let skipped = session.execute("cloud.import", &json!({"connection":"personal","paths":[fixture.original],"newRequest":true})).unwrap();
+        let other = original_at(&fixture, "other.png", 180);
+        let added = session.execute("cloud.import", &json!({"connection":"personal","paths":[other]})).unwrap();
+        let source = session.catalog.photo(PhotoId(added["ids"][0].as_u64().unwrap())).unwrap().source.clone();
+        session.apply_system(Op::Relink { id: PhotoId(1), source, file_name: "restored-other.png".into(), format: None }).unwrap();
+        let retry = session.execute("cloud.import", &json!({"connection":"personal","requestId":skipped["requestId"]})).unwrap();
+        assert_eq!(retry["ids"], json!([]));
+        assert!(retry["skipped"][0]["photoId"].is_null());
+        assert!(retry["skipped"][0]["reason"].as_str().unwrap().contains("unavailable or changed"));
+        assert_eq!(session.catalog.photos().count(), 2, "settled retry neither resurrects nor creates a new record");
+    }
+    #[test]
+    fn mixed_new_and_settled_candidates_keep_request_order_on_retry() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session.execute("cloud.import", &fixture.params()).unwrap();
+        let different = original_at(&fixture, "different.png", 190);
+        let params = json!({"connection":"personal","paths":[different,fixture.original],"newRequest":true});
+        let first = session.execute("cloud.import", &params).unwrap();
+        assert_eq!(first["ids"], json!([2, 1]));
+        assert_eq!(first["skipped"].as_array().unwrap().len(), 1);
+        let retry = session.execute("cloud.import", &json!({"connection":"personal","requestId":first["requestId"]})).unwrap();
+        assert_eq!(retry["ids"], first["ids"]);
+        assert_eq!(session.catalog.photos().count(), 2);
     }
 }

@@ -59,7 +59,7 @@ outcomes. Check items only after implementation and relevant acceptance.
 - [x] CR.36 — Distinguish library creation from joining. Learn existing immutable identity before authoring join changes; preserve frozen mutation IDs/contexts. Test 129 fresh writers without accumulating identical initialization heads, and reject predictable append capacity failures before PUT.
 - [x] CR.37 — Lease browser export originals through deferred command completion, sharing download admission/reservations with renderer loads. Add cache-only lookup; release reservations on cancellation/failure. Test acquisition paused between A/B while unrelated C churns the cache, export without reacquiring A, and total in-flight bounds.
 - [x] CR.38 — Preserve supporting XMP throughout managed import and original revisions. Reuse ordinary sidecar discovery/application, durably stage packets and preserve foreign properties. Define explicit carry/transform policy for external-editor/DNG/XMP-write operations; compare local/cloud RAW+XMP import and foreign-property access after revision.
-- [ ] CR.39 — Make interrupted managed import retry idempotent through durable request/session identity and explicit duplicate policy. Recover independent candidates with per-item errors while preserving invalid manifests and prior-asset consistency. Test interruption after staging A/B, retry/recovery producing one intended set, and corrupt manifest alongside healthy imports.
+- [x] CR.39 — Make interrupted managed import retry idempotent through durable request/session identity and explicit duplicate policy. Recover independent candidates with per-item errors while preserving invalid manifests and prior-asset consistency. Test interruption after staging A/B, retry/recovery producing one intended set, and corrupt manifest alongside healthy imports.
 - [ ] CR.40 — Bind storage destination independently of protocol. Reject bucket/prefix/endpoint retargeting before settings/resolver changes; permit credential/profile rotation for the same destination. Share destination identity across configuration, receipts and publication evidence. Test both protocols and actionable deliberate-migration guidance.
 - [ ] CR.41 — Separate incremental archive proof planning from final merge. Batch missing hashes, verify immutable nodes once, avoid repeated state merges/forest rebuilds per node, and retain exact-proof safety. Add counters for full merges, forest construction, witness checks and archive GETs across small/large compacted histories.
 
@@ -884,3 +884,54 @@ clippy, HEIF, workspace tests (including the new two-protocol fresh-device XMP
 regression), parity references, layers, assets and WASM. The item is complete and
 checked off. Browser original import remains unsupported; no new live-provider
 or large-library performance result is claimed.
+
+
+2026-10-16 - CR.39 implementation: device-local requests precede staging and retain
+candidate identities plus frozen recipes across interrupted replies/restart.
+Explicit new requests and content duplicate policy distinguish deliberate copies
+from retries; manifests retain that policy during later recovery. Independent
+preparation/recovery errors persist with per-item retry actions, while healthy
+candidates share one bulk journal commit and prior-asset checks remain enforced.
+Desktop request/status IO uses a worker/owner acknowledgement handshake. The first
+focused run exposed an owner-thread staging-lock attempt; registration/finalization
+were moved to workers. Expanded regressions, rebuilt native acceptance and full
+repository CI remain pending. CR.39 stays unchecked.
+
+
+CR.39 verification found two deliberate-duplicate fixture assumptions: the shared
+CLI helper and multipart bulk fixture now explicitly request allow. A separate
+existing retention test caught cross-connection duplicate skipping; skipping now
+matches both original hash and connection. All eight stages passed on the
+pre-retirement revision (`cr39-ci-verified.log`). Final review then found skipped
+manifests could indefinitely protect otherwise acknowledged shared originals.
+Skipped decisions now retain their exact manifests outside active staging, before
+retiring only the redundant ownership record; no media bytes are deleted. The
+retention/crash-boundary regression passed, as did 27 focused import tests including
+serialized overlapping aliases, stale-result suppression and changed skip targets.
+Request result ordering has an additional mixed new/skipped regression. Final
+native acceptance and a complete final-source CI gate remain pending; CR.39 is
+still unchecked.
+
+
+Final CR.39 focused verification passed: all 28 import regressions plus the staging
+retention/crash-boundary regression (`cr39-accepted-focused.log`,
+`cr39-accepted-retention.log`), with workspace clippy and rebuilt native binaries.
+Native control-channel acceptance passed in both protocols (`cr39-native-head.log`,
+`cr39-native-append.log`): partial success, retained error after restart, source-free
+retry with stable request/result IDs, independent corrupt-manifest recovery,
+skipped-record retirement, intentional duplicates and automatic publication.
+Screenshots of both error popups and the recovered library were inspected; errors
+are visible with retry actions and final healthy publication shows Up to date.
+All 147 fixture requests verified (67 head / 80 append). Evidence: ignored
+`cr39-native-results-*.json`, C: scratch
+`lightcraft-cr39-native/native-ba3309c7/` and `native-74666b9b/`.
+The complete final-source gate (`cr39-ci-complete.log`) is running; CR.39 remains
+unchecked until it passes. No browser original-import or live-provider claim is
+added.
+
+
+CR.39 final source passed all eight repository CI stages (`cr39-ci-complete.log`):
+fmt, clippy, HEIF, workspace tests, parity references, layers, assets and WASM.
+Together with all 28 focused import regressions, the staging-retention regression,
+and native acceptance in both protocols, the item is complete and checked off.
+CR.40-CR.41 and the separate scale backlog remain open.

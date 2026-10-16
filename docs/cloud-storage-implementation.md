@@ -537,3 +537,43 @@ Revision policy:
 Every carried document is staged and verified before a revision becomes ready,
 including when the previous bytes must first be acquired on a new device. Earlier
 immutable assets and their packets remain available to retained revisions.
+
+
+## Managed import requests and partial recovery
+
+`cloud.import` saves a device-local request before staging any candidate. Repeating
+its paths and destination resumes that request, including after restart; `requestId`
+can resume without source paths. The saved recipe freezes defaults, presets, label
+names and sidecar naming for siblings not yet prepared. Finished manifests reuse
+their identities and frozen descriptions; missing immutable copies can only be
+restaged with bytes matching the saved hashes. Source paths never enter cloud data.
+
+`newRequest:true` explicitly starts another attempt. The default `duplicatePolicy:
+"skip"` reuses a managed photo in that connection with the same original SHA-256; `"allow"` permits an
+intentional separate photo record. Resume a deliberately new attempt using its
+returned request ID, rather than repeating `newRequest:true`. Manifests retain the
+policy so unfiltered recovery cannot turn skipped content into new records.
+A skipped decision retains its exact manifest under `Managed/skipped-imports`,
+then retires its active staging manifest. It deletes no media bytes and cannot
+weaken the existing import's proof requirements. A retry reuses that decision even
+if the source or staged original is gone; a crash between saving the decision and
+retiring the manifest is completed by retry/recovery. Results preserve request order.
+A settled retry never selects a reused local photo ID whose original bytes changed;
+it reports the previous target as unavailable and requires a new request for another
+photo record.
+
+Preparation and recovery return independent `failed` and `skipped` arrays alongside
+successful `ids`. Healthy candidates share one catalog/journal commit; revision
+candidates still require their recorded prior asset. Global publication-capacity
+or journal failures remain atomic and leave all staged data recoverable. Malformed
+manifests remain untouched and continue blocking staging maintenance.
+
+Per-candidate failures and retry actions persist in `Managed/import-issues.json`,
+appear in `cloud.importStatus` and the cloud popup, and clear only after successful
+owner acknowledgement and worker status finalization. Request registration, original
+preparation and status-file writes run on workers in desktop use; the owner alone
+commits the catalog. Preparation through acknowledgement is serialized per library;
+media uploads remain independent. Committed upload intents suppress obsolete
+preparation failures on restart, while upload-integrity failures remain visible.
+A library switch cancels waiting workers without applying a
+result to the replacement library.
