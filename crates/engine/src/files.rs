@@ -132,6 +132,7 @@ fn ext_upper(name: &str) -> String {
 /// ([`lightcraft_codecs::read_header`], which refuses truncated files but can't see damage inside
 /// compressed data that is all there: such a file imports and shows as unreadable when rendered).
 pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
+    crate::input_limits::bytes(bytes.len() as u64)?;
     let content_hash = Some(lightcraft_preview::hash_bytes(bytes).to_string());
     let m = lightcraft_meta::extract(bytes);
     let (meta, captured) = meta_of(&m);
@@ -158,6 +159,7 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
             }
             Err(Err(e)) => return Err(e),
         };
+        crate::input_limits::dimensions(raw.width as u64, raw.height as u64, crate::input_limits::DECODE_PIXELS)?;
         let (mut w, mut h) = (raw.crop.width.max(1) as u32, raw.crop.height.max(1) as u32);
         if w <= 1 || h <= 1 {
             (w, h) = (raw.active_area.width as u32, raw.active_area.height as u32);
@@ -190,6 +192,7 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
     }
     // headers only (issue #367: decoding the pixels was nearly all of an import's CPU time)
     let header = lightcraft_codecs::read_header(bytes).map_err(|e| e.to_string())?;
+    crate::input_limits::dimensions(u64::from(header.width), u64::from(header.height), crate::input_limits::DECODE_PIXELS)?;
     let o = Orientation::from_exif(header.orientation);
     let (mut w, mut h) = (header.width, header.height);
     if o.swaps_axes() {
@@ -343,6 +346,21 @@ pub fn load_bytes(bytes: &[u8], max_edge: usize) -> Result<(Rgb32f, SourceInfo),
     rayon::scope(|_| load_bytes_now(std::borrow::Cow::Borrowed(bytes), max_edge, None).map(|(img, _, info)| (img, info)))
 }
 
+/// Admission shared by render, merge, DNG conversion and denoise. RAW geometry
+/// includes borders; unsupported RAW variants retain their embedded-preview fallback.
+pub(crate) fn check_input(bytes: &[u8]) -> Result<(), String> {
+    crate::input_limits::bytes(bytes.len() as u64)?;
+    if lightcraft_raw::probe(bytes).is_some() {
+        if let Ok(info) = lightcraft_raw::probe_info(bytes) {
+            crate::input_limits::dimensions(info.width as u64, info.height as u64, crate::input_limits::DECODE_PIXELS)?;
+        }
+    } else {
+        let header = lightcraft_codecs::read_header(bytes).map_err(|e| e.to_string())?;
+        crate::input_limits::dimensions(u64::from(header.width), u64::from(header.height), crate::input_limits::DECODE_PIXELS)?;
+    }
+    Ok(())
+}
+
 /// [`load_bytes`] taking the file's bytes: a raw file's bytes are freed as soon as it is decoded
 /// (less memory held while it is developed).
 pub fn load_vec(bytes: Vec<u8>, max_edge: usize) -> Result<(Rgb32f, SourceInfo), String> {
@@ -383,6 +401,7 @@ fn load_bytes_now(
     max_edge: usize,
     denoise: Option<&DenoiseSpec>,
 ) -> Result<(Rgb32f, Option<Rgb32f>, SourceInfo), String> {
+    check_input(&bytes)?;
     if lightcraft_raw::probe(&bytes).is_some() {
         let mut raw = match lightcraft_raw::decode(&bytes).map_err(|e| preview_reason(&bytes, e)) {
             Ok(r) => r,
@@ -675,7 +694,7 @@ pub fn embedded_preview_srgb(bytes: &[u8], max_edge: usize) -> Option<lightcraft
 /// `u32::MAX` asks for the largest box rather than wrapping to a small one.
 fn fit_box(max_edge: usize) -> lightcraft_codecs::DecodeOptions {
     let e = u32::try_from(max_edge).unwrap_or(u32::MAX);
-    lightcraft_codecs::DecodeOptions::fit(e, e)
+    lightcraft_codecs::DecodeOptions { max_pixels: crate::input_limits::DECODE_PIXELS, ..lightcraft_codecs::DecodeOptions::fit(e, e) }
 }
 
 /// Filesystem-backed embedded-preview hook (native).
@@ -692,7 +711,7 @@ pub fn fs_preview_loader() -> PreviewLoader {
         if let Some(image) = preview_window(path).ok().flatten().and_then(|(header, window, _)| quick_image_srgb(&header, &window, max_edge)) {
             return Some(image);
         }
-        embedded_preview_srgb(&std::fs::read(path).ok()?, max_edge)
+        embedded_preview_srgb(&read_source(path).ok()?, max_edge)
     })
 }
 
@@ -822,11 +841,11 @@ fn quick_image_srgb(header: &[u8], window: &[u8], max_edge: usize) -> Option<lig
 /// denoised picture. It holds two pictures at once, so it counts for more at the memory gate than a plain load.
 pub fn fs_pair_loader() -> PairLoader {
     Arc::new(|path: &str, max_edge: usize, spec: &DenoiseSpec| {
-        let len = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
-        let weight = len * if max_edge <= crate::media::SourceLevel::Thumb.max_edge() { 4 } else { 10 };
+        let len = std::fs::metadata(path).map(|m| usize::try_from(m.len()).unwrap_or(usize::MAX)).unwrap_or(0);
+        let weight = len.saturating_mul(if max_edge <= crate::media::SourceLevel::Thumb.max_edge() { 4 } else { 10 });
         let gate = crate::memory::work_gate();
         let _permit = if crate::memory::is_background() { gate.acquire(weight) } else { gate.acquire_urgent(weight) };
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = read_source(path)?;
         let r = load_vec_pair(bytes, max_edge, spec);
         crate::memory::release();
         r
@@ -843,10 +862,10 @@ pub fn fs_pair_loader() -> PairLoader {
 pub fn fs_hooks() -> (FileLoader, FileProbe) {
     let loader: FileLoader = Arc::new(|path: &str, max_edge: usize| {
         let len = std::fs::metadata(path).map(|m| usize::try_from(m.len()).unwrap_or(usize::MAX)).unwrap_or(0);
-        let weight = len * if max_edge <= crate::media::SourceLevel::Thumb.max_edge() { 3 } else { 6 };
+        let weight = len.saturating_mul(if max_edge <= crate::media::SourceLevel::Thumb.max_edge() { 3 } else { 6 });
         let gate = crate::memory::work_gate();
         let _permit = if crate::memory::is_background() { gate.acquire(weight) } else { gate.acquire_urgent(weight) };
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = read_source(path)?;
         let r = load_vec(bytes, max_edge);
         // the file, the samples and the intermediate images are gone: give their pages back
         crate::memory::release();
@@ -855,10 +874,25 @@ pub fn fs_hooks() -> (FileLoader, FileProbe) {
     let probe: FileProbe = Arc::new(|path: &str| {
         let len = std::fs::metadata(path).map(|m| usize::try_from(m.len()).unwrap_or(usize::MAX)).unwrap_or(0);
         let _permit = crate::memory::work_gate().acquire(len);
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = read_source(path)?;
         probe_bytes(path, &bytes)
     });
     (loader, probe)
+}
+
+/// Check metadata before reserving memory, and detect growth/shrinkage during the read.
+pub(crate) fn read_source(path: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let size = file.metadata().map_err(|e| e.to_string())?.len();
+    crate::input_limits::bytes(size).map_err(|e| format!("{path}: {e}"))?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(usize::try_from(size).map_err(|_| "input exceeds address space")?).map_err(|_| "not enough memory to read input")?;
+    file.take(size.saturating_add(1)).read_to_end(&mut bytes).map_err(|e| format!("{path}: {e}"))?;
+    if bytes.len() as u64 != size {
+        return Err(format!("{path}: input changed while reading; retry with a stable original"));
+    }
+    Ok(bytes)
 }
 
 impl crate::Session {
@@ -895,6 +929,36 @@ mod tests {
 
     use super::*;
     use lightcraft_codecs::{ChromaSubsampling, EncodeImage, EncodeMeta, Samples, encode_jpeg};
+
+    #[test]
+    fn oversized_native_sources_fail_preflight_without_reading_or_decoding_the_payload() {
+        let dir = crate::tests_xmp::temp_dir("input-limits");
+        let path = dir.join("oversized.raw");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::input_limits::ORIGINAL_BYTES + 1).unwrap();
+        drop(file);
+        let (load, probe) = fs_hooks();
+        for message in [load(path.to_str().unwrap(), 32).unwrap_err(), probe(path.to_str().unwrap()).unwrap_err()] {
+            assert!(message.contains("512 MiB") && message.contains("smaller lossless derivative"), "{message}");
+        }
+        let read = crate::Session::new().original_reader_for(&[]);
+        assert!(read(path.to_str().unwrap()).unwrap_err().contains("512 MiB"));
+        assert!(crate::cmd::convert::write_dng_with(None, path.to_str().unwrap(), String::new()).unwrap_err().contains("512 MiB"));
+        std::fs::remove_dir_all(dir).unwrap();
+
+        // A small JPEG payload declaring 200 MP: header admission must run before decoding.
+        let rgb = vec![100; 16 * 16 * 3];
+        let mut jpeg = encode_jpeg(&EncodeImage::new(16, 16, 3, Samples::U8(&rgb)), 90, ChromaSubsampling::S420, &EncodeMeta::default()).unwrap();
+        let frame = jpeg.windows(2).position(|w| w == [0xff, 0xc0]).unwrap();
+        jpeg.get_mut(frame + 5..frame + 7).unwrap().copy_from_slice(&10000u16.to_be_bytes());
+        jpeg.get_mut(frame + 7..frame + 9).unwrap().copy_from_slice(&20000u16.to_be_bytes());
+        for message in [probe_bytes("large.jpg", &jpeg).unwrap_err(), load_bytes(&jpeg, 32).unwrap_err()] {
+            assert!(
+                message.contains("128000000") && message.contains("20000 x 10000") && message.contains("smaller lossless derivative"),
+                "{message}"
+            );
+        }
+    }
 
     /// Which white-balance scale a raw gets (issue #730): a file with matrices of its own is absolute from them; a
     /// fitted-look file is absolute through its camera's measured matrices, which only read the as-shot

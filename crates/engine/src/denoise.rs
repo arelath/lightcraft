@@ -895,7 +895,7 @@ pub(crate) fn make_product(spec: &JobSpec, progress: Option<&Progress>) -> Resul
     }
     let bytes = match &spec.read {
         Some(r) => r(&spec.path).map_err(MakeError::Failed)?,
-        None => std::fs::read(&spec.path).map_err(|e| MakeError::Failed(format!("{}: {e}", spec.path)))?,
+        None => crate::files::read_source(&spec.path).map_err(MakeError::Failed)?,
     };
     // the decode and the normalised mosaic wait their turn at the process-wide memory gate, as every decode does
     let (mosaic, layout) = {
@@ -903,6 +903,7 @@ pub(crate) fn make_product(spec: &JobSpec, progress: Option<&Progress>) -> Resul
         if lightcraft_raw::probe(&bytes).is_none() {
             return Err(MakeError::Unsupported("not a raw file".into()));
         }
+        crate::files::check_input(&bytes).map_err(MakeError::Unsupported)?;
         let raw = match lightcraft_raw::decode(&bytes) {
             Ok(r) => r,
             Err(lightcraft_raw::RawError::Unsupported(why)) => return Err(MakeError::Unsupported(why)),

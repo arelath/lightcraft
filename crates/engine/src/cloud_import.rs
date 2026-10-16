@@ -47,7 +47,7 @@ struct Prepared {
     duplicate_policy: requests::DuplicatePolicy,
 }
 
-const MAX_BYTES: u64 = 512 << 20;
+const MAX_BYTES: u64 = crate::input_limits::ORIGINAL_BYTES;
 const MAX_DOCUMENT_BYTES: u64 = 16 << 20;
 const MAX_MANIFEST_BYTES: u64 = 2 << 20;
 
@@ -130,11 +130,7 @@ impl Manifest {
         if let Some(photo) = &self.photo
             && (photo.source != (Source::Managed { asset_id: self.asset_id.clone() })
                 || photo.file_name != self.file_name
-                || photo.width == 0
-                || photo.height == 0
-                || photo.width > 65_535
-                || photo.height > 65_535
-                || u64::from(photo.width).saturating_mul(u64::from(photo.height)) > 100_000_000)
+                || !crate::input_limits::shared_dimensions(photo.width, photo.height))
         {
             return Err(error("invalid staged photo description; manifest preserved"));
         }
@@ -157,6 +153,9 @@ impl Manifest {
 fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let file = std::fs::File::open(path).map_err(io)?;
     let size = file.metadata().map_err(io)?.len();
+    if limit == MAX_BYTES {
+        crate::input_limits::bytes(size).map_err(|e| error(format!("{}: {e}", path.display())))?;
+    }
     if size == 0 || size > limit {
         return Err(error(format!("{}: empty file or larger than the {} MiB safety limit", path.display(), limit >> 20)));
     }

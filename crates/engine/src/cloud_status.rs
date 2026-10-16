@@ -12,6 +12,7 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
     let done = tasks.iter().filter(|t| t.unit == crate::activity::Unit::Bytes).fold(0_u64, |n, t| n.saturating_add(t.done.min(t.total)));
     let total = tasks.iter().filter(|t| t.unit == crate::activity::Unit::Bytes).fold(0_u64, |n, t| n.saturating_add(t.total));
     let mut out = json!({"summary":&*summary,"paused":s.cloud_paused,"userPaused":s.cloud_paused,"syncEnabled":s.catalog.sync_state().is_some(),"tasks":tasks,"doneBytes":done,"totalBytes":total,"canResume":tasks.is_empty(),"uploadingFiles":0,"waitingFiles":summary.queued_files.saturating_sub(summary.failed_files),"preparingMigration":false,"migrating":false});
+    out["inputLimits"] = crate::input_limits::view();
     #[cfg(not(target_arch = "wasm32"))]
     {
         let active = s.cloud_uploads.active_files(&s.catalog) as u64;

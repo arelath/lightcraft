@@ -20,26 +20,37 @@ pub fn resolve(catalog: &Catalog, owners: &BTreeMap<String, OfflinePin>) -> Depe
         let ids = match owner.split_once(':') {
             Some(("photo", id)) => id.parse::<u64>().ok().map(PhotoId).into_iter().collect(),
             Some(("album", id)) => id.parse::<u64>().ok().map(AlbumId).map(|id| catalog.album_photos(id)).unwrap_or_default(),
+            Some(("all", "originals" | "previews")) => catalog.photos().filter(|p| !p.deleted).map(|p| p.id).collect(),
             _ => Vec::new(),
         };
         let mut selected = BTreeSet::new();
         for id in ids {
             let Some(photo) = catalog.photo(id).filter(|p| !p.deleted) else { continue };
             let Source::Managed { asset_id } = &photo.source else { continue };
-            let blob = catalog.asset(asset_id).and_then(|asset| match pin.quality {
-                OfflineQuality::Original => Some(&asset.original),
-                OfflineQuality::Preview => asset.smart_preview.as_ref(),
-            });
-            match blob {
-                Some(blob) => {
-                    selected.insert(blob.id.clone());
-                    result.blobs.insert(blob.id.clone(), blob.clone());
-                }
-                None => {
+            let Some(asset) = catalog.asset(asset_id) else {
+                result.errors.entry(owner.clone()).or_insert_with(|| format!("{} has no asset record; repair the asset", photo.file_name));
+                continue;
+            };
+            let mut blobs = Vec::new();
+            if pin.quality == OfflineQuality::Original {
+                blobs.push(&asset.original);
+            }
+            if pin.quality == OfflineQuality::Preview || crate::input_limits::prefers_preview(photo.width, photo.height, asset.original.size) {
+                if let Some(preview) = &asset.smart_preview {
+                    blobs.push(preview);
+                } else {
                     result.errors.entry(owner.clone()).or_insert_with(|| {
-                        format!("{} has no available {:?} rendition; choose original quality or repair the asset", photo.file_name, pin.quality)
+                        if pin.quality == OfflineQuality::Preview {
+                            format!("{} has no Preview rendition; repair it by publishing a smart preview from desktop, or choose originals", photo.file_name)
+                        } else {
+                            format!("{} needs a smart preview for offline viewing at this platform's decode limit; publish one from desktop or use a smaller original", photo.file_name)
+                        }
                     });
                 }
+            }
+            for blob in blobs {
+                selected.insert(blob.id.clone());
+                result.blobs.insert(blob.id.clone(), blob.clone());
             }
         }
         result.pins.insert(owner.clone(), OfflinePin { quality: pin.quality, blobs: selected.into_iter().collect() });

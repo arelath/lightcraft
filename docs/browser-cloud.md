@@ -85,8 +85,11 @@ and [preflight behavior](https://docs.aws.amazon.com/AmazonS3/latest/developergu
 The authorization endpoint separately allows POST, Content-Type and Authorization from the
 browser origin. CORS does not grant bucket access: the signer/bucket policies enforce it.
 
-Browser transfers are bounded to 512 MiB per blob. Larger originals require the desktop app;
-an available smart preview can still support browser editing. A fetched blob is usable only
+Browser transfers are bounded to 512 MiB per blob and original decoding to 32 MP.
+Shared photo descriptions accept 128 MP; a published smart preview supports browser
+editing of larger photos, even with a cached original. Native input/decode remains
+bounded to 512 MiB / 128 MP. See [input limits](cloud-input-limits.md); streamed cloud
+blob bounds are separate from decoder admission. A fetched blob is usable only
 after length/SHA-256 verification. Quota or storage failures retain local pending work and
 report an error; they do not authorize eviction of unsynchronized data.
 
@@ -290,3 +293,5 @@ remains unsupported.
 | Date | Change |
 | --- | --- |
 | 2026-10-17 | CR.17: verified cache eviction, catalog headroom, live offline intent, temporary source delivery and quota recovery. |
+
+| 2026-10-17 | CR.19: explicit original decode budgets, shared descriptor limits and oversized-photo proxy selection after original caching. |

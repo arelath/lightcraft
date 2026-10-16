@@ -82,10 +82,10 @@ impl WireJob {
             level: job.level,
             origin: job.origin.clone(),
             managed: match &job.source {
-                SourceRef::Managed { asset: Some(asset), reader, peek, requirement, .. } => {
+                SourceRef::Managed { asset: Some(asset), reader, peek, requirement, prefer_preview, .. } => {
                     let original = *requirement == lightcraft_engine::assets::SourceRequirement::OriginalRequired
-                        || peek.as_ref().or(reader.as_ref()).is_some_and(|read| read(&asset.original).is_ok())
-                        || asset.smart_preview.is_none();
+                        || asset.smart_preview.is_none()
+                        || !*prefer_preview && peek.as_ref().or(reader.as_ref()).is_some_and(|read| read(&asset.original).is_ok());
                     let blob = if original { Some(&asset.original) } else { asset.smart_preview.as_ref() };
                     blob.map(|blob| {
                         if let Some(read) = reader {
@@ -665,5 +665,21 @@ mod tests {
         assert_eq!(core.needs_original(&updated_wire), Some(format!("cloud:{}", original.id.0)));
         assert_eq!(core.render(&updated_wire, Some(&bytes)).unwrap().image.width, 32);
         assert_eq!(read(&path).unwrap(), bytes);
+        // A platform limit can require the proxy even after the original is cached.
+        let mut limited = updated.clone();
+        if let SourceRef::Managed { prefer_preview, .. } = &mut limited.source {
+            *prefer_preview = true;
+        }
+        assert!(limited.source.load_source().unwrap().proxy);
+        let limited_wire = WireJob::from_job(&limited, false, "Main");
+        assert!(limited_wire.managed.as_ref().unwrap().proxy);
+        assert!(memory.take_wanted().is_empty());
+        assert_eq!(core.render(&limited_wire, Some(&preview)).unwrap().image.width, 32);
+        let mut export = limited.clone();
+        if let SourceRef::Managed { requirement, .. } = &mut export.source {
+            *requirement = lightcraft_engine::assets::SourceRequirement::OriginalRequired;
+        }
+        assert!(!WireJob::from_job(&export, false, "Export").managed.unwrap().proxy);
+        assert!(WireJob::from_job(&export.allow_proxy_export(), false, "Export").managed.unwrap().proxy);
     }
 }

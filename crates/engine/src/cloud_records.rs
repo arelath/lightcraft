@@ -122,11 +122,7 @@ impl Batch {
                 || imported.photo.file_name.contains(['/', '\\'])
                 || imported.photo.file_name.chars().any(char::is_control)
                 || imported.photo.deleted
-                || imported.photo.width == 0
-                || imported.photo.height == 0
-                || imported.photo.width > 65535
-                || imported.photo.height > 65535
-                || u64::from(imported.photo.width).saturating_mul(u64::from(imported.photo.height)) > 100_000_000
+                || !crate::input_limits::shared_dimensions(imported.photo.width, imported.photo.height)
                 || imported.asset.smart_preview.is_none()
                 || imported.asset.thumbnail.is_none()
                 || imported.base_asset.as_ref().is_some_and(|base| !identifier(&base.0) || base == &imported.asset_id)

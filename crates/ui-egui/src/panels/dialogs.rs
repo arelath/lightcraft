@@ -1014,6 +1014,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 Dialog::CloudImport { connections, connection, adopt_ids } => {
                     if !adopt_ids.is_empty() { ui.label(crate::i18n::tr("Existing photo IDs, edits, albums and history are preserved. Original files remain on disk.")); }
                     ui.label(crate::i18n::tr("Choose where to upload these photos. You can edit as soon as their originals are saved locally; upload continues in the background."));
+                    ui.label(crate::i18n::tr("Original input limit: 512 MiB, 128 megapixels, 65,535 pixels per edge. RAW limits include the full sensor before cropping. Smaller previews do not bypass original decode limits."));
                     egui::ComboBox::from_id_salt("cloudImportConnection").selected_text(connection.as_str()).show_ui(ui, |ui| {
                         for saved in connections { ui.selectable_value(connection, saved.clone(), saved.as_str()); }
                     });
@@ -1034,6 +1035,11 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 }
                 Dialog::CloudSync { connection, library,protocol } => {
                     ui.strong(crate::i18n::tr("Deleting cloud photos retains their uploaded originals, previous revisions and history. It does not free bucket space."));
+                    if cfg!(target_arch = "wasm32") {
+                        ui.label(crate::i18n::tr("Browser original rendering: 512 MiB and 32 megapixels. Larger shared photos need a smart preview for editing; render full originals on desktop."));
+                    } else {
+                        ui.label(crate::i18n::tr("Native original input: 512 MiB and 128 megapixels. Browser rendering is limited to 32 megapixels; publish smart previews for larger photos."));
+                    }
                     ui.label(crate::i18n::tr("Use the same storage prefix and library ID on each device. Leave Library ID empty only when creating a shared library."));
                     ui.label(crate::i18n::tr("Smart albums with local folders or local photo selections stay on this device."));
                     ui.label(crate::i18n::tr_format!("Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.", limit = lightcraft_engine::cloud_sync::MAX_ENTITY_CHANGES));

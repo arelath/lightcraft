@@ -28,11 +28,7 @@ impl Imported {
             || self.photo.file_name.len() > 1024
             || self.photo.file_name.contains(['/', '\\'])
             || self.photo.file_name.chars().any(char::is_control)
-            || self.photo.width == 0
-            || self.photo.height == 0
-            || self.photo.width > 65535
-            || self.photo.height > 65535
-            || u64::from(self.photo.width).saturating_mul(u64::from(self.photo.height)) > 100_000_000
+            || !crate::input_limits::shared_dimensions(self.photo.width, self.photo.height)
             || self.photo.deleted
             || self.asset.smart_preview.is_none()
             || self.asset.thumbnail.is_none()

@@ -47,9 +47,10 @@ in append mode. LIST discovery and full state validation still have linear costs
   unversioned orphan media; AWS S3 apply requires a reviewed token and stopped writers.
   Custom endpoints/B2 remain preview-only. Multipart cleanup only retires incomplete
   uploads. Never expire history or supporting objects independently of this protocol.
-- Native managed import is bounded to 512 MiB per input; browser source admission
-  has a 512 MiB aggregate payload/reservation budget. Other decode/dimension limits differ. Unified limit reporting and representative
-  large Hasselblad validation remain CR.19.
+- [Original limits](cloud-input-limits.md) are reported by `cloud.overview.inputLimits`:
+  native input is 512 MiB / 128 MP; browser original decoding is 32 MP with 512 MiB
+  aggregate source admission. Shared descriptors accept 128 MP; larger browser photos
+  use published smart previews. The 4 GiB blob wire bound does not imply decode capacity.
 - A synchronization failure halts automatic polling until explicit retry. Transient
   classification/backoff remains CR.21. Resource-specific errors and last successful
   remote scan are exposed separately from user pause and pending publication.
@@ -75,7 +76,7 @@ remain authoritative. Selecting a live virtual copy adopts its matching live par
 independent duplicate records stay independent. Existing source files are never removed.
 
 `cloud.adopt` accepts at most 1,000 selected IDs and uses the same 512 MiB input and
-100 MP rendition limits as managed import. Missing, changed or unsupported originals
+128 MP rendition limits as managed import. Missing, changed or unsupported originals
 produce per-photo retry actions; healthy siblings can finish. Reload a changed original
 before starting a new request. Retrying the same selection resumes its durable request;
 `requestId` resumes without source selection, and `newRequest:true` starts another attempt.
@@ -425,6 +426,8 @@ remote seed is retained for safe retry. See [migration operation](cloud-sync-pro
 and [browser requirements](browser-cloud.md).
 
 ## Revision history
+
+CR.19 (2026-10-17): shared original input/geometry checks across render, conversion, merge and denoise; explicit native/browser decode budgets and quantitative status reporting.
 
 CR.18 (2026-10-17): explicit retained-deletion notices and native orphan retention preview/apply; historical, staged and versioned content stays protected.
 

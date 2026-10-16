@@ -179,10 +179,7 @@ impl AssetLease {
     pub fn read_bytes(&self) -> Result<Vec<u8>> {
         let file = std::fs::File::open(&self.path).map_err(disk)?;
         let size = file.metadata().map_err(disk)?.len();
-        const MAX_DECODE_BYTES: u64 = 512 << 20;
-        if size > MAX_DECODE_BYTES {
-            return Err(AssetError::Unsupported("original exceeds the 512 MiB decode limit".into()));
-        }
+        crate::input_limits::bytes(size).map_err(AssetError::Unsupported)?;
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(usize::try_from(size).map_err(|_| AssetError::Invalid("original is too large".into()))?)
@@ -826,16 +823,20 @@ impl crate::Session {
             if let Some(id) = path.strip_prefix("lcasset:\0") {
                 let blob = assets.get(&lightcraft_catalog::assets::AssetId(id.into())).ok_or("managed asset record is missing")?;
                 if let Some(reader) = &resident {
-                    return reader(blob).map(|bytes| bytes.to_vec());
+                    let bytes = reader(blob)?;
+                    crate::input_limits::bytes(bytes.len() as u64)?;
+                    return Ok(bytes.to_vec());
                 }
                 let resolver = resolver.as_ref().ok_or("cloud storage is not configured on this device")?;
                 let lease = resolver.source_transfer(|cancel| resolver.acquire(blob, cancel)).map_err(|e| e.to_string())?;
                 return lease.read_bytes().map_err(|e| e.to_string());
             }
-            match &local {
+            let bytes = match &local {
                 Some(read) => read(path),
-                None => std::fs::read(path).map_err(|e| format!("{path}: {e}")),
-            }
+                None => crate::files::read_source(path),
+            }?;
+            crate::input_limits::bytes(bytes.len() as u64)?;
+            Ok(bytes)
         })
     }
 }

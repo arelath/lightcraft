@@ -1,6 +1,9 @@
 use super::*;
+use crate::assets::cache::{OfflinePin, OfflineQuality};
+use lightcraft_catalog::assets::AssetId;
 use lightcraft_catalog::{AlbumId, Op, PhotoId, Source};
 use serde_json::json;
+use std::collections::BTreeSet;
 
 struct FailingAppend {
     inner: lightcraft_catalog::FsStore,
@@ -56,6 +59,61 @@ fn idle(s: &crate::Session) {
     assert!(!s.media.asset_resolver.as_ref().unwrap().keep_all_running.load(Ordering::Acquire));
 }
 
+#[test]
+fn oversized_original_pins_protect_required_preview_and_missing_preview_reports_unready() {
+    let original = blob(b"original");
+    let preview = blob(b"preview");
+    let fixture = |with_preview: bool| {
+        let mut s = crate::Session::new();
+        s.commit(
+            "oversized offline fixture",
+            Op::Batch {
+                ops: vec![
+                    Op::SetAsset {
+                        id: AssetId("large".into()),
+                        asset: Some(Box::new(Asset {
+                            original: original.clone(),
+                            smart_preview: with_preview.then(|| preview.clone()),
+                            thumbnail: None,
+                            associated: Default::default(),
+                        })),
+                    },
+                    Op::AddPhoto {
+                        photo: Box::new(lightcraft_catalog::Photo::new(
+                            PhotoId(1),
+                            Source::Managed { asset_id: AssetId("large".into()) },
+                            "large.raw",
+                            "RAW",
+                            20000,
+                            10000,
+                            "",
+                        )),
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        s
+    };
+    let owners = BTreeMap::from([
+        ("photo:1".into(), OfflinePin { quality: OfflineQuality::Original, blobs: Vec::new() }),
+        ("all:originals".into(), OfflinePin { quality: OfflineQuality::Original, blobs: Vec::new() }),
+        ("all:previews".into(), OfflinePin { quality: OfflineQuality::Preview, blobs: Vec::new() }),
+    ]);
+    let s = fixture(true);
+    let result = super::super::offline::resolve(&s.catalog, &owners);
+    assert!(result.errors.is_empty());
+    for owner in ["photo:1", "all:originals"] {
+        assert_eq!(result.pins[owner].blobs.iter().cloned().collect::<BTreeSet<_>>(), [original.id.clone(), preview.id.clone()].into());
+    }
+    assert_eq!(result.pins["all:previews"].blobs, vec![preview.id.clone()]);
+    let s = fixture(false);
+    let result = super::super::offline::resolve(&s.catalog, &owners);
+    assert_eq!(result.errors.len(), 3);
+    assert_eq!(result.pins["photo:1"].blobs, vec![original.id.clone()], "a missing preview cannot relax original protection");
+    assert_eq!(result.pins["all:originals"].blobs, vec![original.id]);
+    assert!(result.errors["all:originals"].contains("publish one from desktop"));
+}
 #[test]
 fn empty_album_policy_follows_membership_undo_and_reopen_without_saved_blob_lists() {
     let scratch = Scratch::new();

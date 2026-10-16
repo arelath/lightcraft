@@ -8,7 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-const BUDGET: u64 = 512 << 20;
+const BUDGET: u64 = super::MAX_BROWSER_BLOB;
 #[derive(Clone)]
 pub struct Download {
     pub blob: Blob,

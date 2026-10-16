@@ -1698,8 +1698,9 @@ impl PreparedExport {
             Work::File { path, read, packet, dng, label, size, remove_location } => {
                 let bytes = match &read {
                     Some(r) => r(&path)?,
-                    None => std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?,
+                    None => crate::files::read_source(&path)?,
                 };
+                crate::input_limits::bytes(bytes.len() as u64)?;
                 let Some(dng) = dng else {
                     // the file is copied byte for byte: refuse rather than leak a location it embeds
                     if remove_location && lightcraft_meta::extract(&bytes).gps.is_some() {
@@ -1719,6 +1720,7 @@ impl PreparedExport {
                 if lightcraft_raw::probe(&bytes).is_none() {
                     return Err(format!("{label}: DNG export needs a raw photo"));
                 }
+                crate::files::check_input(&bytes)?;
                 let raw = lightcraft_raw::decode(&bytes).map_err(|e| format!("{label}: {e}"))?;
                 drop(bytes);
                 let compression = match dng {

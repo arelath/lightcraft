@@ -646,6 +646,7 @@ fn decoded_source_clones_keep_the_managed_original_leased() {
         reader: None,
         peek: None,
         requirement: SourceRequirement::OriginalRequired,
+        prefer_preview: false,
         max_edge: 4,
         denoise: None,
         loader: Some(Arc::new(|_, _| Ok((lightcraft_raster::Rgb32f::from_fn(4, 3, |_, _| [0.1; 3]), Default::default())))),

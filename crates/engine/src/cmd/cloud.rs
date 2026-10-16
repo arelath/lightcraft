@@ -63,17 +63,9 @@ fn attach(s: &mut Session, p: &Value) -> Result<Value> {
     if name.is_empty() || name.len() > 1024 || name.contains(['/', '\\']) || name.chars().any(char::is_control) {
         return Err(bad(C, "invalid fileName"));
     }
-    let dimension = |key| {
-        p.get(key)
-            .and_then(Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok())
-            .filter(|v| *v > 0 && *v <= 100_000)
-            .ok_or_else(|| bad(C, format!("invalid {key}")))
-    };
+    let dimension = |key| p.get(key).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).ok_or_else(|| bad(C, format!("invalid {key}")));
     let (width, height) = (dimension("width")?, dimension("height")?);
-    if width > 65_535 || height > 65_535 || u64::from(width).saturating_mul(u64::from(height)) > 100_000_000 {
-        return Err(bad(C, "managed photo dimensions exceed the 100 MP / 65,535-pixel safety limit"));
-    }
+    crate::input_limits::dimensions(u64::from(width), u64::from(height), crate::input_limits::SHARED_PIXELS).map_err(|e| bad(C, e))?;
     let kind: MediaKind = serde_json::from_value(p.get("kind").cloned().unwrap_or(json!("image"))).map_err(|_| bad(C, "invalid media kind"))?;
     if kind == MediaKind::Video {
         return Err(bad(C, "managed video is not supported"));

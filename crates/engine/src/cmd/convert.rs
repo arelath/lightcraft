@@ -33,7 +33,7 @@ pub(crate) fn write_dng_for(s: &Session, path: &str, packet: String) -> std::res
 pub(crate) fn write_dng_with(file_bytes: Option<&crate::merge::ByteReader>, path: &str, packet: String) -> std::result::Result<String, String> {
     let bytes = match file_bytes {
         Some(r) => r(path)?,
-        None => std::fs::read(path).map_err(|e| format!("{path}: {e}"))?,
+        None => crate::files::read_source(path)?,
     };
     let dng = encode_dng(&bytes, packet).map_err(|e| format!("{path}: {e}"))?;
     let out = lightcraft_catalog::safe_file::write_new_unique(&mut dng_names(path), &dng)
@@ -43,6 +43,7 @@ pub(crate) fn write_dng_with(file_bytes: Option<&crate::merge::ByteReader>, path
 
 /// Encode and verify before either a local path or an immutable managed revision is published.
 pub(crate) fn encode_dng(bytes: &[u8], packet: String) -> std::result::Result<Vec<u8>, String> {
+    crate::files::check_input(bytes)?;
     let raw = lightcraft_raw::decode(bytes).map_err(|e| e.to_string())?;
     let dng = lightcraft_raw::write_dng(&raw, &lightcraft_raw::DngWriteOptions { xmp: (!packet.is_empty()).then_some(packet), ..Default::default() })
         .map_err(|e| e.to_string())?;

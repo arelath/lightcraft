@@ -267,11 +267,7 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
         super::portable::apply_photo(&mut photo, &shared, &next)?;
         if photo.id != *id
             || photo.rating > 5
-            || photo.width == 0
-            || photo.height == 0
-            || photo.width > 65535
-            || photo.height > 65535
-            || u64::from(photo.width).saturating_mul(u64::from(photo.height)) > 100_000_000
+            || !crate::input_limits::shared_dimensions(photo.width, photo.height)
             || photo.file_name.is_empty()
             || photo.file_name.len() > 1024
             || photo.file_name.contains(['/', '\\'])

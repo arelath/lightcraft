@@ -236,6 +236,9 @@ pub enum SourceRef {
         reader: Option<BlobReader>,
         peek: Option<BlobReader>,
         requirement: crate::assets::SourceRequirement,
+        /// Prefer a proxy when the photo exceeds this platform's original decode budget.
+        /// Explicit OriginalRequired operations still request the original and enforce limits.
+        prefer_preview: bool,
         max_edge: usize,
         loader: Option<FileLoader>,
         denoise: Option<(DenoiseSpec, PairLoader)>,
@@ -268,10 +271,13 @@ impl SourceRef {
 
     pub fn load_source(&self) -> Result<DecodedSource, String> {
         let image = match self {
-            SourceRef::Managed { asset, resolver, reader, peek, requirement, max_edge, loader, denoise } => {
+            SourceRef::Managed { asset, resolver, reader, peek, requirement, prefer_preview, max_edge, loader, denoise } => {
                 let asset = asset.as_ref().ok_or("managed asset record is missing from the catalog")?;
+                let force_preview = *prefer_preview && *requirement == crate::assets::SourceRequirement::PreviewAllowed;
                 if let Some(reader) = reader {
-                    let original = if *requirement == crate::assets::SourceRequirement::PreviewAllowed && asset.smart_preview.is_some() {
+                    let original = if force_preview {
+                        Err("original exceeds this platform's pixel limit; publish a smart preview from desktop".into())
+                    } else if *requirement == crate::assets::SourceRequirement::PreviewAllowed && asset.smart_preview.is_some() {
                         peek.as_ref().unwrap_or(reader)(&asset.original)
                     } else {
                         reader(&asset.original)
@@ -295,8 +301,20 @@ impl SourceRef {
                     return Ok(DecodedSource::new(Arc::new(image), Some(info)));
                 }
                 let resolver = resolver.as_ref().ok_or("cloud storage is not configured on this device")?;
-                let (lease, preview) =
-                    resolver.source_transfer(|cancel| resolver.acquire_asset(asset, *requirement, cancel)).map_err(|e| e.to_string())?;
+                let (lease, preview) = resolver
+                    .source_transfer(|cancel| {
+                        if force_preview {
+                            let preview = asset.smart_preview.as_ref().ok_or_else(|| {
+                                crate::assets::AssetError::Unsupported(
+                                    "original exceeds this platform's pixel limit; publish a smart preview from desktop".into(),
+                                )
+                            })?;
+                            crate::assets::TransferManager::acquire(resolver.as_ref(), preview, cancel).map(|lease| (lease, true))
+                        } else {
+                            resolver.acquire_asset(asset, *requirement, cancel)
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
                 if preview {
                     let bytes = lease.read_bytes().map_err(|e| e.to_string())?;
                     let (image, tone) = crate::smart::decode(&bytes)?;
@@ -742,7 +760,12 @@ impl MediaCache {
             }
             return r;
         }
-        self.origin_ref(&p.source, max_edge)
+        let mut source = self.origin_ref(&p.source, max_edge);
+        if let SourceRef::Managed { prefer_preview, asset, .. } = &mut source {
+            *prefer_preview =
+                crate::input_limits::prefers_preview(p.width, p.height, asset.as_ref().map_or(p.file_size, |asset| asset.original.size));
+        }
+        source
     }
 
     /// How to load `origin` at most `max_edge` pixels long, ignoring decoded sources in memory (a
@@ -754,6 +777,7 @@ impl MediaCache {
                 resolver: self.asset_resolver.clone(),
                 reader: self.managed_reader.clone(),
                 peek: self.managed_peek.clone(),
+                prefer_preview: false,
                 requirement: if max_edge > SourceLevel::Preview.max_edge() {
                     crate::assets::SourceRequirement::OriginalRequired
                 } else {

@@ -354,25 +354,7 @@ impl Offline {
             return;
         }
         d.attempted = Some(key);
-        let normal = d.owners.iter().filter(|(owner, _)| !owner.starts_with("all:")).map(|(k, v)| (k.clone(), v.clone())).collect();
-        let mut dependencies = lightcraft_engine::assets::offline::resolve(&s.catalog, &normal);
-        for (owner, pin) in d.owners.iter().filter(|(owner, _)| owner.starts_with("all:")) {
-            let mut ids = Vec::new();
-            for photo in s.catalog.photos().filter(|p| !p.deleted) {
-                let Source::Managed { asset_id } = &photo.source else { continue };
-                let blob = s.catalog.asset(asset_id).and_then(|asset| match pin.quality {
-                    OfflineQuality::Original => Some(&asset.original),
-                    OfflineQuality::Preview => asset.smart_preview.as_ref(),
-                });
-                if let Some(blob) = blob {
-                    ids.push(blob.id.clone());
-                    dependencies.blobs.insert(blob.id.clone(), blob.clone());
-                } else {
-                    dependencies.errors.insert(owner.clone(), "a managed photo has no preview; choose originals or repair its rendition".into());
-                }
-            }
-            dependencies.pins.insert(owner.clone(), OfflinePin { quality: pin.quality, blobs: ids });
-        }
+        let dependencies = lightcraft_engine::assets::offline::resolve(&s.catalog, &d.owners);
         d.errors = dependencies.errors;
         let owners: BTreeMap<_, _> = dependencies
             .pins

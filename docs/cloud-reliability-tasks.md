@@ -23,7 +23,7 @@ this checkout. Work in the order below, preserving unrelated changes.
 - [x] CR.16 — Add a command to move existing local photos into managed cloud storage while preserving photo IDs, virtual copies, edits, albums, and history. Test identity/history preservation and restart.
 - [x] CR.17 — Handle browser cache exhaustion with safe verified-blob eviction, catalog/outbox space reservation, and temporary viewing versus guaranteed offline retention. Test quota failures and pinned data preservation.
 - [x] CR.18 — Make cloud deletion retention prominent and add explicit previewable retention/reclamation tooling with safe reference checks.
-- [ ] CR.19 — Align and expose native input, pixel, and blob limits; validate representative large `.3fr` inputs before migration and test actionable limit errors.
+- [x] CR.19 — Align and expose native input, pixel, and blob limits; validate representative large `.3fr` inputs before migration and test actionable limit errors.
 - [ ] CR.20 — Provide supported browser signer deployment instructions and a desktop/browser capability matrix; verify the deployment workflow and stated scope.
 - [ ] CR.21 — Classify sync failures and retry transient connectivity with bounded backoff; pause authentication, integrity, schema, and identity failures with actionable status. Test native/browser recovery.
 
@@ -1419,3 +1419,52 @@ screenshots in `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr18-native/nati
 and `native-1f95eeb6/`. This verifies the procedural fixture workflow, not fresh live
 AWS/B2 acceptance. Bounds and stopped-writer requirements are documented in
 [cloud-retention.md](cloud-retention.md).
+
+2026-10-17 — CR.19: `cloud.overview.inputLimits`, managed-import/adoption and
+synchronization dialogs now expose shared byte/pixel boundaries. Native original input
+is bounded to 512 MiB before file allocation and 128 MP / 65,535 per edge before full
+development; RAW admission counts sensor borders before crop. Managed descriptors use
+the same 128 MP boundary. Browser originals retain the 512 MiB transfer/admission limit
+and use a 32 MP decode budget. The 4 GiB streamed wire bound is explicitly separate.
+Render, probe, merge, DNG conversion, denoise and original-reader paths share guards.
+Custom/resident readers are checked on return. Some vendor RAW header probes unpack
+CFA samples; these limits do not promise allocation-free probing or bounded render latency.
+
+Oversized shared photos use smart previews for ordinary browser rendering even when
+the original is cached. Full-quality export reports an actionable original-limit error;
+explicit preview export stays at preview resolution. Original-quality offline selections
+also protect the required preview, including whole-library policy. Missing required
+previews keep readiness false without relaxing protection of the original. A focused
+regression covers photo/all-original/all-preview owners, and the seven live-pin tests pass
+(`target/cloud-reliability/cr19-pin-tests-final2.log`). Existing missing-Preview repair
+diagnostics were preserved after an initial CI assertion caught their changed wording.
+All 42 browser library tests passed (`cr19-web-tests-final.log`).
+
+The SHA-256-pinned CC0 Hasselblad X2D 100C 16-bit `.3fr` is 213,311,488 bytes,
+11,904 × 8,842 sensor pixels and a 11,656 × 8,742 developed crop. The corpus manifest
+and [input-limit contract](cloud-input-limits.md) identify its source/license/hash; no
+media is committed. Before these changes, a 1,600 × 1,200 CLI render took 3.031 seconds
+with a sampled peak process working set of 647,430,144 bytes (one process/input, not a
+capacity or speed guarantee). Native control-channel acceptance then exercised the real
+adoption confirmation, preserved original hash, IDs, virtual-copy family, edits, metadata,
+album and prior named history, restart/retry identity and fresh-peer export with both
+protocols. All 143 fixture requests were independently SigV4 verified (70 head / 73 append).
+Evidence: `target/cloud-reliability/cr19-native-head-verified.log`,
+`cr19-native-append-verified.log`, `cr19-native-results-conditional-head-v1.json` and
+`cr19-native-results-append-log-v1.json`. Screenshots/exports were inspected.
+
+Final Chromium acceptance passed both protocols with 177 independently verified fixture
+requests: ordinary preview did not fetch the 213 MB original, explicitly cached originals
+still respected the 32 MP decode budget, explicit preview export succeeded, browser edits
+converged on desktop, and original/all-original pins retained both bytes through zero
+budget/cache clearing and offline preview export after reload. No page errors occurred;
+the final limit dialog and rendered export were inspected. Evidence:
+`target/cloud-reliability/cr19-browser-offline-final2.log`, `cr19-browser-results.json`;
+screenshots/exports in `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-cr19-browser/
+browser-2d068077/`. Sparse 513 MiB input and a tiny JPEG declaring 200 MP fail admission
+with quantitative recovery errors, before payload decoding. Full final-source repository
+CI passed all eight gates (fmt, strict Clippy, HEIF, workspace tests, parity, layers,
+assets and WASM): `C:/Users/pdykstra/AppData/Local/Temp/lightcraft-reliability-target/
+cr19-ci-final2.log`. This is procedural-fixture and one representative real-file acceptance,
+not fresh live-provider, every compression variant, camera-colour or large-library parity.
+CR.19 is complete. CR.20–CR.21 remain open.

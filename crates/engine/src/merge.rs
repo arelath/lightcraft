@@ -114,6 +114,7 @@ impl MergeJob {
             .par_iter()
             .map(|(_, path)| {
                 let bytes = (self.read)(path)?;
+                crate::files::check_input(&bytes).map_err(|e| format!("{path}: {e}"))?;
                 let f = lightcraft_merge::load_frame(&bytes, self.preview, orient).map_err(|e| format!("{path}: {e}"));
                 let k = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 progress(span.0 + (span.1 - span.0) * k as f32 / n as f32, "Reading photos");

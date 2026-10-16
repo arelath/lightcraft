@@ -63,6 +63,7 @@ pub mod fonts;
 pub mod guard;
 pub mod import;
 mod import_move;
+pub mod input_limits;
 pub mod lens_profiles;
 pub mod library;
 mod lightroom_archive;

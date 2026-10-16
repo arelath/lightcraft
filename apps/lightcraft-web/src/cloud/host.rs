@@ -430,7 +430,8 @@ impl Host {
             sources.push((*id, photo.source.clone()));
             let Source::Managed { asset_id } = &photo.source else { continue };
             let asset = s.catalog.asset(asset_id).ok_or("managed asset record is missing")?;
-            let blob = if allow_preview && self.memory.peek(&asset.original).is_err() {
+            let oversized = lightcraft_engine::input_limits::prefers_preview(photo.width, photo.height, asset.original.size);
+            let blob = if allow_preview && (oversized || self.memory.peek(&asset.original).is_err()) {
                 asset.smart_preview.as_ref().unwrap_or(&asset.original)
             } else {
                 &asset.original

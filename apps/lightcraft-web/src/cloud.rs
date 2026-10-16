@@ -4,7 +4,7 @@ use lightcraft_engine::catalog::assets::{Blob, identifier};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const MAX_BROWSER_BLOB: u64 = 512 << 20;
+pub const MAX_BROWSER_BLOB: u64 = lightcraft_engine::input_limits::ORIGINAL_BYTES;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Connection {
