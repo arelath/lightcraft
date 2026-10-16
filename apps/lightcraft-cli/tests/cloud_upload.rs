@@ -645,12 +645,9 @@ fn cleanup_preserves_receipts_when_authorization_or_destination_is_wrong() {
     let requests_before = fixture.state.lock().unwrap().requests.len();
     let (_, rows) = fixture.run(&library, &[
         ("cloud.configure", json!({"id":"personal","bucket":"other-photos","region":"us-east-1","prefix":"library","endpoint":fixture.endpoint,"profile":"acceptance"})),
-        ("cloud.cleanupUploads", json!({"connection":"personal","apply":true})),
-        ("cloud.upload", json!({"imports":[id]})),
     ]);
-    assert_eq!(rows[0]["ok"], true);
-    assert_eq!(rows[1]["ok"], false);
-    assert_eq!(rows[2]["ok"], false);
+    assert_eq!(rows[0]["ok"], false);
+    assert!(rows[0]["error"].as_str().unwrap().contains("cannot be retargeted"));
     assert_eq!(fixture.state.lock().unwrap().requests.len(), requests_before, "old multipart identities cannot be sent to another bucket");
     assert_eq!(std::fs::read(path).unwrap(), saved);
 }

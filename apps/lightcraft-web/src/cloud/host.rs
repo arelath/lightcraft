@@ -218,13 +218,16 @@ impl Host {
         if data.providers.len() >= 64 && !data.providers.contains_key(&config.id) {
             return Err("browser connection limit reached".into());
         }
-        if data.providers.get(&config.id).is_some_and(|old| {
-            old.connection.prefix != config.prefix
-                || old.connection.storage_origin != config.storage_origin
-                || (old.connection.bucket_root.is_some() && old.connection.bucket_root != config.bucket_root)
-        }) && s.catalog.sync_state().is_some_and(|state| state.connection == config.id)
-        {
-            return Err("an enabled library cannot be retargeted; use a separate local library to change its bucket/prefix".into());
+        let bound = s.catalog.sync_state().is_some_and(|state| state.connection == config.id)
+            || s.catalog.assets().values().any(|asset| asset.blobs().any(|blob| blob.remote.connection == config.id));
+        if bound {
+            let old = data
+                .providers
+                .get(&config.id)
+                .ok_or("original browser storage settings are missing; restore them or open a separate local library for a new destination")?;
+            if !old.connection.same_destination(&config) {
+                return Err("this library's storage destination cannot be retargeted; use a separate local library and verified migration for another bucket, origin or prefix. Reauthorization for the same destination is supported".into());
+            }
         }
         let provider = match data.providers.get(&config.id).filter(|old| old.connection == config && token.is_none()) {
             Some(old) => old.clone(),

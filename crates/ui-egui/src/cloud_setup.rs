@@ -408,6 +408,7 @@ pub fn poll(app: &mut LightcraftApp, ctx: &egui::Context) {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn finish(app: &mut LightcraftApp, setup: &Setup) -> Result<Value, String> {
     let params = setup.params()?;
+    lightcraft_engine::cloud_setup::validate_destination(&mut app.session, &params)?;
     if let Some(keys) = typed_keys(setup)? {
         lightcraft_engine::assets::s3::save_profile(&lightcraft_engine::cloud_setup::profile_for(setup.name.trim()), &keys)
             .map_err(|e| e.to_string())?;

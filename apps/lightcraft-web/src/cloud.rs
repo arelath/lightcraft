@@ -16,6 +16,10 @@ pub struct Connection {
     pub bucket_root: Option<String>,
 }
 impl Connection {
+    /// Authorized URL credentials can rotate without changing the object namespace.
+    pub fn same_destination(&self, other: &Self) -> bool {
+        self.id == other.id && self.prefix == other.prefix && self.storage_origin == other.storage_origin && self.bucket_root == other.bucket_root
+    }
     pub fn validate(&self) -> Result<(), String> {
         if !identifier(&self.id)
             || self.prefix.is_empty()
@@ -107,6 +111,34 @@ pub use transport::Provider;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn destination_identity_includes_optional_bucket_root_and_excludes_authorization() {
+        let base = Connection {
+            id: "personal".into(),
+            prefix: "library".into(),
+            storage_origin: "https://objects.example".into(),
+            authorize_endpoint: "https://auth.example/authorize".into(),
+            bucket_root: None,
+        };
+        let mut rotated = base.clone();
+        rotated.authorize_endpoint = "https://new-auth.example/authorize".into();
+        assert!(base.same_destination(&rotated));
+        let mut root = base.clone();
+        root.bucket_root = Some("https://objects.example/photos/".into());
+        assert!(!base.same_destination(&root));
+        assert!(!root.same_destination(&base));
+        for changed in [
+            Connection { prefix: "other".into(), ..root.clone() },
+            Connection { storage_origin: "https://other.example".into(), ..root.clone() },
+            Connection { bucket_root: Some("https://objects.example/other/".into()), ..root.clone() },
+            Connection { id: "other".into(), ..root.clone() },
+        ] {
+            assert!(!root.same_destination(&changed));
+        }
+        let mut root_rotated = root.clone();
+        root_rotated.authorize_endpoint = rotated.authorize_endpoint;
+        assert!(root.same_destination(&root_rotated));
+    }
     #[test]
     fn prefix_scope_and_authorized_headers_are_bounded() {
         let c = Connection {

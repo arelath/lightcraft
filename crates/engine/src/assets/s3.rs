@@ -78,15 +78,36 @@ impl S3Connection {
 
     /// Receipt destination binding excludes device-local credential selection.
     pub(crate) fn storage_snapshot(&self) -> Self {
-        let mut storage = self.clone();
+        let mut storage = self.clone().canonicalized();
         storage.profile = None;
-        storage.prefix = storage.prefix.trim_end_matches('/').to_owned();
-        storage.endpoint = storage.endpoint.map(|endpoint| endpoint.trim_end_matches('/').to_owned());
         storage
+    }
+
+    /// Use the same spelling for live key construction as destination proofs.
+    pub(crate) fn canonicalized(mut self) -> Self {
+        self.prefix = self.prefix.trim_end_matches('/').to_owned();
+        self.endpoint = self.endpoint.map(|endpoint| endpoint.trim_end_matches('/').to_owned());
+        self
     }
 
     pub(crate) fn same_destination(&self, other: &Self) -> bool {
         self.storage_snapshot() == other.storage_snapshot()
+    }
+
+    /// Configuration, upload receipts and publication evidence use the same
+    /// destination identity. Credential/profile selection is device-local.
+    pub(crate) fn validate_replacement(&self, catalog: &lightcraft_catalog::Catalog, configured: &[Self]) -> Result<()> {
+        self.validate()?;
+        let bound = catalog.sync_state().is_some_and(|state| state.connection == self.id)
+            || catalog.assets().values().any(|asset| asset.blobs().any(|blob| blob.remote.connection == self.id));
+        if bound {
+            let previous = configured.iter().find(|previous| previous.id == self.id)
+                .ok_or_else(|| AssetError::Invalid("original storage settings are missing; restore the library's connection settings before reconnecting, or open a separate catalog for a new destination".into()))?;
+            if !previous.same_destination(self) {
+                return Err(AssetError::Invalid("this library's storage destination cannot be retargeted; a storage migration requires a separate catalog and verified transfer of its originals and history. Restore the original destination; credential/profile rotation for it is supported".into()));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_blob(&self, blob: &Blob) -> Result<()> {

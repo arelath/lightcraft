@@ -89,7 +89,21 @@ fn setup_checks_the_typed_keys_then_joins_the_library_it_found() {
         })),
         ..Default::default()
     };
-    let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::with_demo(), services), [1400., 1000.], 1.);
+    // The wizard now checks the library's retained destination before saving
+    // credentials. Keep that real boundary even though command dispatch is mocked.
+    let mut session = lightcraft_engine::Session::new();
+    session
+        .open_library_in(
+            lightcraft_engine::library::LibraryStores {
+                dir: "cloud-setup-fixture".into(),
+                catalog: Box::new(lightcraft_engine::catalog::MemStore::new()),
+                files: Box::new(lightcraft_engine::catalog::MemStore::new()),
+                on_disk: false,
+            },
+            true,
+        )
+        .unwrap();
+    let mut h = Headless::new(LightcraftApp::new(session, services), [1400., 1000.], 1.);
     h.step();
     h.app.run("dialog.cloudSync", json!({})).unwrap();
     for _ in 0..3 {

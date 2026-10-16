@@ -1325,6 +1325,9 @@ mod tests {
     }
 
     fn session(root: &Path) -> (Session, Arc<AtomicBool>) {
+        session_with_connection(root, None)
+    }
+    fn session_with_connection(root: &Path, connection: Option<Value>) -> (Session, Arc<AtomicBool>) {
         let mut session = Session::new().with_fs();
         let fail = Arc::new(AtomicBool::new(false));
         session
@@ -1338,6 +1341,9 @@ mod tests {
                 false,
             )
             .unwrap();
+        if let Some(connection) = connection {
+            session.execute("cloud.configure", &connection).unwrap();
+        }
         let asset_id = AssetId("upload-ack-test".into());
         let asset = Asset {
             associated: Default::default(),
@@ -1531,9 +1537,10 @@ mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let (mut s, _) = session(&root);
-        s.execute("cloud.configure", &json!({"id":"test","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":"http://127.0.0.1:1"}))
-            .unwrap();
+        let (mut s, _) = session_with_connection(
+            &root,
+            Some(json!({"id":"test","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":"http://127.0.0.1:1"})),
+        );
         s.execute("cloud.syncEnable", &json!({"connection":"test"})).unwrap();
         s.cloud_uploads.request_resume(true);
         s.resume_cloud_uploads();
@@ -1575,9 +1582,10 @@ mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let (mut s, _) = session(&root);
-        s.execute("cloud.configure", &json!({"id":"test","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":"http://127.0.0.1:1"}))
-            .unwrap();
+        let (mut s, _) = session_with_connection(
+            &root,
+            Some(json!({"id":"test","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":"http://127.0.0.1:1"})),
+        );
         s.cloud_uploads.request_resume(true);
         s.resume_cloud_uploads();
         assert!(s.cloud_uploads.attempted.contains("upload-ack-test"));
@@ -1650,13 +1658,10 @@ mod tests {
     #[test]
     fn a_transfer_using_old_connection_settings_cannot_be_acknowledged() {
         let root = std::env::temp_dir().join(format!("lightcraft-upload-connection-{}", std::process::id()));
-        let (mut session, _) = session(&root);
-        session
-            .execute(
-                "cloud.configure",
-                &json!({"id":"test","bucket":"photos","region":"us-east-1","prefix":"originals","endpoint":"http://127.0.0.1:9"}),
-            )
-            .unwrap();
+        let (mut session, _) = session_with_connection(
+            &root,
+            Some(json!({"id":"test","bucket":"photos","region":"us-east-1","prefix":"originals","endpoint":"http://127.0.0.1:9"})),
+        );
         let library = session.library_token();
         assert!(acknowledgement_with_revision(&mut session, library, Some(0)).recv().unwrap().is_err());
         assert_eq!(session.catalog.upload_intents()["upload-ack-test"].state, UploadState::Published);

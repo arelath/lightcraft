@@ -60,7 +60,7 @@ outcomes. Check items only after implementation and relevant acceptance.
 - [x] CR.37 — Lease browser export originals through deferred command completion, sharing download admission/reservations with renderer loads. Add cache-only lookup; release reservations on cancellation/failure. Test acquisition paused between A/B while unrelated C churns the cache, export without reacquiring A, and total in-flight bounds.
 - [x] CR.38 — Preserve supporting XMP throughout managed import and original revisions. Reuse ordinary sidecar discovery/application, durably stage packets and preserve foreign properties. Define explicit carry/transform policy for external-editor/DNG/XMP-write operations; compare local/cloud RAW+XMP import and foreign-property access after revision.
 - [x] CR.39 — Make interrupted managed import retry idempotent through durable request/session identity and explicit duplicate policy. Recover independent candidates with per-item errors while preserving invalid manifests and prior-asset consistency. Test interruption after staging A/B, retry/recovery producing one intended set, and corrupt manifest alongside healthy imports.
-- [ ] CR.40 — Bind storage destination independently of protocol. Reject bucket/prefix/endpoint retargeting before settings/resolver changes; permit credential/profile rotation for the same destination. Share destination identity across configuration, receipts and publication evidence. Test both protocols and actionable deliberate-migration guidance.
+- [x] CR.40 — Bind storage destination independently of protocol. Reject bucket/prefix/endpoint retargeting before settings/resolver changes; permit credential/profile rotation for the same destination. Share destination identity across configuration, receipts and publication evidence. Test both protocols and actionable deliberate-migration guidance.
 - [ ] CR.41 — Separate incremental archive proof planning from final merge. Batch missing hashes, verify immutable nodes once, avoid repeated state merges/forest rebuilds per node, and retain exact-proof safety. Add counters for full merges, forest construction, witness checks and archive GETs across small/large compacted histories.
 
 ## Verification log
@@ -935,3 +935,36 @@ fmt, clippy, HEIF, workspace tests, parity references, layers, assets and WASM.
 Together with all 28 focused import regressions, the staging-retention regression,
 and native acceptance in both protocols, the item is complete and checked off.
 CR.40-CR.41 and the separate scale backlog remain open.
+
+
+2026-10-16 - CR.40 implementation: both protocols and existing managed assets bind
+connection configuration to the shared receipt/publication destination identity.
+Rejections precede settings/resolver updates; the wizard checks before saving typed
+credentials. Browser comparison pins the full optional bucket root, while allowing
+authorization/token rotation. Native and browser unit checks and the revised CLI
+receipt-protection regression passed; native/browser builds passed.
+
+Native acceptance exposed an existing mismatch: slash aliases compared as the same
+destination but the live prefix remained unnormalized, so metadata polling halted
+with invalid library object prefix/key. Loading, configuring and probing now use
+the same normalized spelling as proof comparison. The expanded native regression
+also preserves a legacy settings file while normalizing its loaded connection.
+Acceptance reruns and full final-source CI are pending; CR.40 remains unchecked.
+
+CR.40 final verification passed all eight repository CI stages
+(`cr40-ci-accepted.log`). The full gate caught restore/synthetic fixture assumptions:
+restores now retain their original connection file, upload fixtures configure before
+injecting managed assets, and the wizard fixture opens an in-memory library before
+its real destination check. No destination guard was weakened. All 967 engine tests
+passed (five environment-dependent tests ignored), including missing-settings refusal,
+unchanged settings/resolver on rejection, and legacy slash-alias loading.
+
+Native acceptance passed both protocols after profile rotation and removal of the
+old profile (`cr40-native-*-final.log`), with 52 signed requests. Browser acceptance
+passed six OPFS/IndexedDB cases covering both protocols and optional head bucket roots,
+reload after rejection, authorization rotation, and native-peer publication, with
+348 signed requests (`cr40-browser-final.log`). Native and browser screenshots were
+inspected. Evidence: ignored `cr40-*-results*.json`; native scratch `native-399b1d18`
+and `native-702ad363`, browser scratch `browser-f8f455d0`. CR.40 is complete and checked
+off. This verifies configuration workflows, not protection against manual settings-file
+tampering, live-provider acceptance, or a storage-migration tool.

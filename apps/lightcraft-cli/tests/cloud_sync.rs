@@ -16,7 +16,7 @@ fn configure(fixture: &Fixture) -> Value {
 }
 fn copy_catalog_files(source: &Path, destination: &Path) {
     std::fs::create_dir_all(destination).unwrap();
-    for name in ["catalog.snap", "catalog.log"] {
+    for name in ["catalog.snap", "catalog.log", "cloud-connections.json"] {
         std::fs::copy(source.join(name), destination.join(name)).unwrap();
     }
 }

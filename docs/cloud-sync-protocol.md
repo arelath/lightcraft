@@ -1,6 +1,6 @@
 # Direct bucket synchronization
 
-Last updated: 2026-10-15
+Last updated: 2026-10-16
 
 Configure the same bucket and library prefix on each computer. In File → Cloud Synchronization,
 the first computer leaves Library ID blank; subsequent computers enter the first computer's
@@ -17,6 +17,27 @@ work. `cloud.syncStatus` reports the cursor, pending work and retained conflict 
 Managed uploads require synchronization enabled for their connection. Select the protocol
 in Cloud Synchronization (or `cloud.syncEnable`) before uploading; staging an import while
 disabled remains safe and uploading returns an actionable setup error.
+
+## Storage destination binding
+
+`cloud.configure` pins a used connection to its existing bucket, region, prefix
+and endpoint in both protocols, including managed assets staged before enablement.
+It rejects retargeting before changing saved settings or the active resolver. The
+setup wizard runs the same check before saving typed credentials. Credentials and
+profile selection can rotate for the same destination. Prefix/endpoint trailing
+slashes have one normalized spelling for configuration, loading, probing, receipts
+and live object-key construction; loading older aliases does not rewrite their file.
+
+Changing storage requires a separate local catalog and verified transfer of
+originals plus history. The append protocol migration changes the publication
+protocol within a destination; it does not move a library to another bucket.
+
+Browser configuration pins storage origin, prefix and the exact optional
+`bucketRoot`. Adding or removing a root after enablement is also a destination
+change. Configure the complete bucket root before joining when append migration
+will be needed. Authorization endpoints and ephemeral tokens can rotate without
+changing that object namespace. Rejected edits leave both provider and persisted
+configuration intact.
 
 ## Retained smart-album references
 

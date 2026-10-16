@@ -350,7 +350,9 @@ fn restored_catalog_rotates_author_and_publishes_historical_pending_without_rewr
     let before = catalog(&a).sync_state().unwrap().clone();
     let restored = f.dir.join("restored");
     std::fs::create_dir_all(&restored).unwrap();
-    for name in ["catalog.snap", "catalog.log"] {
+    // A restore must retain the original destination binding. Configuring a
+    // bound catalog without its original storage settings is deliberately refused.
+    for name in ["catalog.snap", "catalog.log", "cloud-connections.json"] {
         let source = a.join(name);
         if source.is_file() {
             std::fs::copy(source, restored.join(name)).unwrap();

@@ -60,6 +60,15 @@ pub fn profile_for(connection: &str) -> String {
     format!("lightcraft-{connection}")
 }
 
+/// Run before the wizard saves typed credentials. Rejecting a destination edit
+/// must leave both the connection and its existing credentials profile untouched.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn validate_destination(session: &mut crate::Session, params: &serde_json::Value) -> Result<(), String> {
+    let connection: S3Connection = serde_json::from_value(params.clone()).map_err(|_| "invalid storage connection settings")?;
+    let configured = session.library.as_mut().ok_or("open a persistent library first")?.cloud_connections().map_err(|e| e.to_string())?;
+    connection.validate_replacement(&session.catalog, &configured).map_err(|e| e.to_string())
+}
+
 /// A library found under the connection's folder.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +93,8 @@ pub struct Probe {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn probe(connection: &S3Connection, cancel: &AtomicBool) -> Result<Probe, String> {
     connection.validate().map_err(|e| e.to_string())?;
+    let normalized = connection.clone().canonicalized();
+    let connection = &normalized;
     let prefix = connection.prefix.trim_end_matches('/');
     let root = if prefix.is_empty() { "sync-v2/".to_owned() } else { format!("{prefix}/sync-v2/") };
     let request = crate::cloud_append::listing::ListRequest { prefix: root.clone(), delimiter: true, continuation: None, start_after: None };

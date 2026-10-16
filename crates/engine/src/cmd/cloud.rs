@@ -18,14 +18,11 @@ fn configure(s: &mut Session, p: &Value) -> Result<Value> {
     let connection: crate::assets::s3::S3Connection =
         serde_json::from_value(p.clone()).map_err(|_| bad(C, "invalid connection settings; credentials must not be supplied in parameters"))?;
     connection.validate().map_err(|e| bad(C, e.to_string()))?;
+    let connection = connection.canonicalized();
     let resolver = resolver(s, C)?;
     let lib = s.library.as_mut().ok_or_else(|| bad(C, "open a library first"))?;
     let mut connections = lib.cloud_connections()?;
-    if s.catalog.sync_state().is_some_and(|state| !state.protocol.is_head() && state.connection == connection.id)
-        && connections.iter().any(|old| old.id == connection.id && !old.same_destination(&connection))
-    {
-        return Err(bad(C, "an append library cannot be retargeted; open a separate catalog for another storage destination"));
-    }
+    connection.validate_replacement(&s.catalog, &connections).map_err(|e| bad(C, e.to_string()))?;
     connections.retain(|c| c.id != connection.id);
     if connections.len() >= 64 {
         return Err(bad(C, "at most 64 cloud connections are supported"));

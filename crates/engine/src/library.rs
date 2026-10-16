@@ -157,7 +157,7 @@ impl Library {
         for c in &connections {
             c.validate().map_err(|e| EngineError::Other(e.to_string()))?;
         }
-        Ok(connections)
+        Ok(connections.into_iter().map(crate::assets::s3::S3Connection::canonicalized).collect())
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -1102,3 +1102,81 @@ fn a_damaged_cache_location_pointer_falls_back_with_a_warning() {
     assert_eq!(session.media.asset_resolver.as_ref().unwrap().root(), scratch.0.join("assets-cache").as_path());
     assert!(session.library.as_ref().unwrap().settings_warnings.iter().any(|w| w.contains("damaged")));
 }
+
+#[test]
+fn bound_destinations_reject_retargeting_before_settings_or_resolver_changes_in_both_protocols() {
+    use serde_json::json;
+    for protocol in [None, Some("conditional-head-v1"), Some("append-log-v1")] {
+        let scratch = Scratch::new();
+        let root = scratch.0.join("library");
+        let mut session = crate::Session::new().with_fs();
+        session.open_library(&root, false).unwrap();
+        let config =
+            json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":"http://127.0.0.1:9","profile":"initial"});
+        session.execute("cloud.configure", &config).unwrap();
+        if let Some(protocol) = protocol {
+            session.execute("cloud.syncEnable", &json!({"connection":"personal","protocol":protocol})).unwrap();
+        } else {
+            session
+                .apply_system(lightcraft_catalog::Op::SetAsset {
+                    id: lightcraft_catalog::assets::AssetId("existing".into()),
+                    asset: Some(Box::new(lightcraft_catalog::assets::Asset {
+                        original: Blob {
+                            id: sha256(b"original"),
+                            size: 8,
+                            remote: RemoteLocation { connection: "personal".into(), key: "library/originals/test".into(), version: None },
+                        },
+                        smart_preview: None,
+                        thumbnail: None,
+                        associated: Default::default(),
+                    })),
+                })
+                .unwrap();
+        }
+        let resolver = session.media.asset_resolver.clone().unwrap();
+        let saved = std::fs::read(root.join("cloud-connections.json")).unwrap();
+        let revision = resolver.connection_revision();
+        let active = resolver.cache.staging.lock().unwrap().connections.get("personal").unwrap().clone();
+        for (field, value) in [
+            ("bucket", json!("other-photos")),
+            ("region", json!("us-west-2")),
+            ("prefix", json!("other")),
+            ("endpoint", json!("http://127.0.0.1:10")),
+        ] {
+            let mut changed = config.clone();
+            changed[field] = value;
+            assert!(crate::cloud_setup::validate_destination(&mut session, &changed).unwrap_err().contains("migration"));
+            assert!(session.execute("cloud.configure", &changed).unwrap_err().to_string().contains("cannot be retargeted"));
+            assert_eq!(std::fs::read(root.join("cloud-connections.json")).unwrap(), saved);
+            assert_eq!(resolver.connection_revision(), revision);
+            assert_eq!(resolver.cache.staging.lock().unwrap().connections.get("personal"), Some(&active));
+        }
+        std::fs::remove_file(root.join("cloud-connections.json")).unwrap();
+        assert!(session.execute("cloud.configure", &config).unwrap_err().to_string().contains("original storage settings are missing"));
+        assert!(!root.join("cloud-connections.json").exists());
+        assert_eq!(resolver.connection_revision(), revision);
+        std::fs::write(root.join("cloud-connections.json"), &saved).unwrap();
+        let mut rotated = config.clone();
+        rotated["profile"] = json!("rotated");
+        rotated["prefix"] = json!("library/");
+        rotated["endpoint"] = json!("http://127.0.0.1:9/");
+        crate::cloud_setup::validate_destination(&mut session, &rotated).unwrap();
+        session.execute("cloud.configure", &rotated).unwrap();
+        assert!(resolver.connection_revision() > revision);
+        let connections = session.library.as_mut().unwrap().cloud_connections().unwrap();
+        assert_eq!(connections[0].profile.as_deref(), Some("rotated"));
+        assert_eq!(connections[0].prefix, "library");
+        assert_eq!(connections[0].endpoint.as_deref(), Some("http://127.0.0.1:9"));
+        assert!(active.same_destination(&connections[0]));
+        assert_eq!(resolver.cache.staging.lock().unwrap().connections.get("personal"), Some(&active));
+        // Older settings may already contain accepted slash aliases. Loading
+        // normalizes the live transport without rewriting that retained file.
+        let legacy = serde_json::to_vec(&vec![rotated.clone()]).unwrap();
+        std::fs::write(root.join("cloud-connections.json"), &legacy).unwrap();
+        let loaded = session.library.as_mut().unwrap().cloud_connections().unwrap();
+        assert_eq!(loaded[0].prefix, "library");
+        assert_eq!(loaded[0].endpoint.as_deref(), Some("http://127.0.0.1:9"));
+        assert_eq!(std::fs::read(root.join("cloud-connections.json")).unwrap(), legacy);
+        session.close_library().unwrap();
+    }
+}
