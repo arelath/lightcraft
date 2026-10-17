@@ -58,6 +58,8 @@ in append mode. LIST discovery and full state validation still have linear costs
   failures halt immediately with a recovery action specific to the cause (update LightCraft,
   rejoin a moved library, check bucket/prefix/region, archive receipt history). Explicit Resume/Sync now resets the
   retry budget; successful polling clears the error. Migration requires explicit recovery.
+  Idle desktop windows and browser tabs wake for each scheduled poll or retry; Reconnect
+  restarts a halted scheduler unless syncing is paused.
   Resource-specific errors and last successful remote scan remain separate from user pause
   and pending publication. Pending edits, staged originals and exact mutation IDs survive
   failures; the runtime retry budget resets on catalog reopen.

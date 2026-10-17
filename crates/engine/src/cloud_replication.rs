@@ -454,5 +454,5 @@ use crate::cloud_control::{Blocked, Control};
 
 mod worker;
 pub(crate) use worker::Coordinator;
-pub(crate) use worker::request_poll;
 pub use worker::{Jobs, pause_publication, prepare_migration, resume_publication, start, start_migration};
+pub(crate) use worker::{request_poll, retry_after_reconnect};

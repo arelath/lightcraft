@@ -5,7 +5,7 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
-Current status (2026-10-17): CR.1–CR.42, CR.46, CR.47 and CR.56 are complete.
+Current status (2026-10-17): CR.1–CR.42, CR.46, CR.47, CR.56 and CR.57 are complete.
 CR.43–CR.45 and CR.48–CR.55 remain open. Dated verification notes below
 describe their original snapshots; current operational limits remain in
 [cloud-storage-implementation.md](cloud-storage-implementation.md).
@@ -85,6 +85,7 @@ honour it. Specification: [cloud-sync-protocol.md](cloud-sync-protocol.md#librar
 Source: static review of `cloud-support` at `a883fbfb`.
 
 - [x] CR.46 — Let people resolve every retained field conflict (not only develop) from Cloud Synchronization and Info; show a refused publication (maintenance, moved library, newer writer) in the popup, Info and attention state on desktop and browser; replace the per-frame, unbounded deleted-photo scan with a cached, capped list; translate the popup's counts and show the last remote check as a readable age.
+- [x] CR.57 — Keep automatic polling alive in an idle window: desktop and browser hosts schedule a repaint for the next poll, retry or maintenance deadline; the browser postpones (rather than halts) automatic polling while its task queue is full; a failing library save postpones polling instead of halting it; native Reconnect restarts a halted scheduler like the browser's.
 - [x] CR.56 — Give every cloud failure advice that matches its cause: per-failure recovery for newer formats (update LightCraft), a moved library (Migrate Cloud Library… to rejoin), maintenance and HTTP 301/307/400/404/413 (check bucket, prefix, region, endpoint); keep catalog failures typed (synchronization limits → capacity, catalog I/O or corruption → local resource, newer catalog → unsupported) instead of invalid history; word advice for the Retry Syncing / Resume Syncing buttons and name buttons, not only command ids, in errors.
 
 ## Follow-up review: upgrade safety and durable cache recovery
@@ -1714,3 +1715,17 @@ name the button and keep the command id for agents. Regressions:
 `recovery_advice_names_the_real_fix_not_the_kinds_general_advice`,
 `wrong_bucket_or_region_is_configuration_not_invalid_history` and
 `catalog_failures_keep_their_kind_through_assets_and_the_engine`.
+
+2026-10-17 — CR.57: polling while idle. egui draws only on input or a requested repaint, and
+automatic polling, retries and the 60 s maintenance poll ran only inside a drawn frame, so an idle
+desktop window or browser tab stopped receiving changes and its "Retrying in N s" countdown froze.
+`Session::cloud_poll_due_in` reports the next automatic deadline (None while paused, halted, preparing
+migration or running, when the activity row already drives frames); the desktop UI and the browser host
+call `request_repaint_after` for it, and the cloud popup refreshes each second while open. The browser
+no longer halts automatic polling with a local-resource error when eight download jobs fill its queue;
+it polls 5 s later. A library save failure (`NotSaved`, already retried by the session) postpones the
+poll. Native `cloud.reconnect` resets the retry budget and polls at once unless the user paused or a
+migration is being prepared. The bounded retry policy itself (five retries over about 60 s, then halt)
+is unchanged. Regression: `idle_hosts_learn_when_polling_is_due_and_reconnect_restarts_a_halted_scheduler`.
+A minimized desktop window may still receive no frames from the platform; that and browser background-tab
+throttling are not addressed.

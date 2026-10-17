@@ -134,6 +134,7 @@ fn reconnect(s: &mut Session, p: &Value) -> Result<Value> {
     // availability generation so failed renders retry, without discarding verified bytes.
     resume_offline_pins(s);
     s.cloud_uploads.request_resume(true);
+    crate::cloud_replication::retry_after_reconnect(s);
     Ok(json!({"connections": connected}))
 }
 

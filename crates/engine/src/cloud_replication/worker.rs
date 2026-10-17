@@ -295,14 +295,36 @@ fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
+/// Reconnecting is an explicit retry: fixed credentials or a returned network restart a halted
+/// scheduler. A user pause or migration preparation still holds it.
+pub(crate) fn retry_after_reconnect(s: &mut Session) {
+    if s.cloud_paused || s.cloud_replication_jobs.preparing_migration {
+        return;
+    }
+    s.cloud_replication_jobs.health.reset_retries();
+    s.cloud_replication_jobs.paused = false;
+    request_poll(s);
+}
 impl Session {
-    pub fn resume_cloud_replication(&mut self) {
-        if self.cloud_paused
+    fn automatic_polling(&self) -> bool {
+        !(self.cloud_paused
             || self.cloud_replication_jobs.preparing_migration()
             || self.catalog.sync_state().is_none()
             || self.cloud_replication_jobs.running()
-            || self.cloud_replication_jobs.paused
-        {
+            || self.cloud_replication_jobs.paused)
+    }
+    /// How long until automatic polling (an ordinary poll, a scheduled retry or the slower
+    /// maintenance poll) is due; None when nothing is scheduled. Hosts that only run while
+    /// they draw must wake for it, or an idle window never polls.
+    pub fn cloud_poll_due_in(&self) -> Option<std::time::Duration> {
+        if !self.automatic_polling() {
+            return None;
+        }
+        let deadline = self.cloud_replication_jobs.next_poll?;
+        Some(deadline.saturating_duration_since(web_time::Instant::now()))
+    }
+    pub fn resume_cloud_replication(&mut self) {
+        if !self.automatic_polling() {
             return;
         }
         let now = web_time::Instant::now();
@@ -313,6 +335,11 @@ impl Session {
         *deadline = now + std::time::Duration::from_secs(5);
         if let Err(error) = start_impl(self, &json!({"wait":false,"audit":false}), None) {
             let failure = crate::cloud_status::CloudFailure::from(&error);
+            if matches!(error, EngineError::NotSaved(_)) {
+                // The library save is already retried; polling waits for it rather than halting.
+                self.cloud_replication_jobs.reports.push(json!({"ok":false,"error":error.to_string(),"failure":failure}));
+                return;
+            }
             let delay = self.cloud_replication_jobs.health.fail_typed(&failure, crate::cloud_status::now_ms(), None);
             self.cloud_replication_jobs.paused = delay.is_none();
             if let Some(seconds) = delay {
@@ -1105,5 +1132,43 @@ mod tests {
         assert!(s.catalog.sync_state().unwrap().append.is_some());
         let (_, loaded, _) = Journal::open(Box::new(files.files)).unwrap();
         assert_eq!(loaded.sync_state(), s.catalog.sync_state());
+    }
+    #[test]
+    fn idle_hosts_learn_when_polling_is_due_and_reconnect_restarts_a_halted_scheduler() {
+        use crate::cloud_status::{CloudFailure, FailureKind};
+        use std::time::Duration;
+        let (mut s, files) = session();
+        s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + Duration::from_secs(5));
+        let due = s.cloud_poll_due_in().unwrap();
+        assert!(due > Duration::from_secs(4) && due <= Duration::from_secs(5), "{due:?}");
+        ready(&mut s);
+        assert_eq!(s.cloud_poll_due_in(), None, "a running sync is drawn by its activity row");
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready = Some(Err(EngineError::Cloud(CloudFailure::connectivity("offline"))));
+        s.poll_cloud_replication();
+        let due = s.cloud_poll_due_in().expect("a scheduled retry wakes the host");
+        assert!(due > Duration::from_secs(1) && due <= Duration::from_secs(2), "{due:?}");
+        ready(&mut s);
+        s.cloud_replication_jobs.pending.as_mut().unwrap().ready =
+            Some(Err(EngineError::Cloud(CloudFailure::new(FailureKind::Authentication, "credentials rejected"))));
+        s.poll_cloud_replication();
+        assert_eq!(s.cloud_replication_jobs.health(true, false)["state"], "halted");
+        assert_eq!(s.cloud_poll_due_in(), None, "a halted scheduler waits for the person");
+        retry_after_reconnect(&mut s);
+        assert_eq!(s.cloud_replication_jobs.health(true, false)["pollingHalted"], false);
+        assert_eq!(s.cloud_poll_due_in(), Some(Duration::ZERO), "reconnecting polls at once");
+        s.cloud_paused = true;
+        s.cloud_replication_jobs.paused = true;
+        retry_after_reconnect(&mut s);
+        assert_eq!(s.cloud_poll_due_in(), None, "reconnecting never overrides a user pause");
+        s.cloud_paused = false;
+        retry_after_reconnect(&mut s);
+        // A library save that is failing (and already retried) postpones polling, never halts it.
+        files.fail.store(true, Ordering::Relaxed);
+        let _ = s.commit("rating", Op::SetRating { id: PhotoId(1), rating: 3 });
+        s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now());
+        s.resume_cloud_replication();
+        assert!(!s.cloud_replication_jobs.running());
+        assert_eq!(s.cloud_replication_jobs.health(true, false)["pollingHalted"], false);
+        assert!(s.cloud_poll_due_in().is_some_and(|due| due > Duration::from_secs(4)));
     }
 }

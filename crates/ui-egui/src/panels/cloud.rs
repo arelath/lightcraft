@@ -126,6 +126,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let t = Tokens::get(ui.ctx());
     let summary = &data["summary"];
     register(ui.ctx(), "popup:cloud", ui.max_rect());
+    // The retry countdown and the last check's age keep moving while the popup is open.
+    ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
     ui.set_min_width(290.);
     ui.set_max_width(320.);
     ui.label(egui::RichText::new(crate::i18n::tr("CLOUD LIBRARY")).font(t.semibold(11.)).color(t.text_label));

@@ -1124,6 +1124,11 @@ impl LightcraftApp {
         self.session.resume_cloud_uploads();
         #[cfg(not(target_arch = "wasm32"))]
         self.session.resume_cloud_replication();
+        // An idle window draws no frames: wake it when automatic polling or a retry is due.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(wait) = self.session.cloud_poll_due_in() {
+            ctx.request_repaint_after(wait.max(std::time::Duration::from_millis(50)));
+        }
         merge::poll(self, ctx);
         import::poll_scan(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]
