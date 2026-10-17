@@ -472,3 +472,31 @@ regressions. The final native build and both-protocol desktop acceptance passed
 `target/cloud-whole-library-native-final.log`). The desktop recheck was run after CI
 released the Windows CLI executable lock. Presented-window screenshots and performance
 inspection are retained per protocol in the artifact folder; no headless fallback was used.
+
+## 2026-10-17: batched enrollment and focused cloud controls (CUX.12)
+
+The deterministic engine regression holds the preparation coordinator and verifies one
+worker reports 0 of 20 photos immediately, with all 20 represented by cloud.overview.
+All 40 import regressions passed, including missing-original isolation and recovery:
+partial automatic batches retain their original request identity instead of stranding
+old failures when healthy siblings have already been adopted.
+
+Shared native/browser cadence tests cover 60-second active scans, the strict greater-than
+60-second inactivity boundary, 15-minute idle scans, renewed activity, and immediate
+explicit requests. The full workspace CI run passed all eight gates
+(`target/cloud-cux12-ci.log`). Final popup tests passed after the submenu width adjustment
+(`target/cloud-cux12-popup-ready.log`); their screenshots in `target/cloud-cux12-ui-final/`
+were inspected, including preparation, conflict routing and guarded deletion via More.
+
+Presented native acceptance passed in 19.49 seconds against the independent signed
+loopback fixture for both conditional-head and append-log protocols
+(`target/cloud-cux12-native-acceptance.log`). Each protocol uploaded 20 initial photos,
+reused an already-remote original without PUT, preserved pause behavior, and uploaded a
+later import after Resume. No DELETE requests or signature errors occurred. The final
+native build is recorded in `target/cloud-cux12-native-ready.log`.
+
+Presented screenshots and ui.inspect results in `target/cloud-cux12-native/` were
+inspected. Both runs used DX12 on NVIDIA RTX 4000 Ada, with no GPU fallback and empty
+render queues. Observed frame times were 1.67/2.40 ms; full update times were 42.77/57.12 ms
+(these acceptance snapshots are not a performance benchmark). The tests used disposable
+procedural photos and storage; no real B2 bucket or personal library was modified.

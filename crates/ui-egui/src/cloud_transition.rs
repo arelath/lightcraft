@@ -434,7 +434,7 @@ mod tests {
         assert!(headless.app.ui.dialog.is_none());
         headless.app.run("dialog.cloudSync", json!({})).unwrap();
         let dialog = headless.app.ui.dialog.clone().unwrap();
-        assert!(matches!(&dialog, Dialog::CloudSync { connection, library, .. } if connection == "personal" && library == "library"));
+        assert!(matches!(&dialog, Dialog::CloudConnect { connection, library, .. } if connection == "personal" && library == "library"));
         frames(&mut headless);
         crate::panels::dialogs::confirm_dialog(&mut headless.app, &dialog).unwrap();
         let calls = calls.lock().unwrap();
@@ -503,7 +503,7 @@ mod tests {
         }
         capture(&mut headless, "off-info");
         click(&mut headless, "button:cloudSyncTurnOn");
-        assert!(matches!(headless.app.ui.dialog, Some(Dialog::CloudSync { .. })));
+        assert!(matches!(headless.app.ui.dialog, Some(Dialog::CloudConnect { .. })));
         assert!(calls.lock().unwrap().is_empty());
     }
 

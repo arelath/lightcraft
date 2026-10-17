@@ -152,21 +152,18 @@ fn cloud_capacity_warning_explains_recovery_and_dispatches_checkpoint_maintenanc
     h.step();
     let state = lightcraft_catalog::replication::SyncState::new("library".into(), "device".into(), "personal".into()).unwrap();
     h.app.session.apply_received(lightcraft_catalog::Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
-    h.app.run("dialog.cloudSync", json!({})).unwrap();
+    h.app.run("dialog.cloudMaintenance", json!({})).unwrap();
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudCapacity"}), T)["ok"], true);
     for _ in 0..4 {
         h.step();
     }
     let text = h.view.painted_text();
-    for label in [
-        "Smart albums with local folders or local photo selections stay on this device.",
-        "Synchronization capacity",
-        "80.0%",
-        "80000 / 100000",
-        "nearing their limit",
-        "remote objects are retained",
-        "Archive receipt history",
-        "4000 changed fields and 1 MiB",
-    ] {
+    for label in
+        ["Synchronization capacity", "80.0%", "80000 / 100000", "nearing their limit", "remote objects are retained", "Archive receipt history"]
+    {
         assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
     }
     assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudCheckpoint"}), T)["ok"], true);
@@ -194,7 +191,7 @@ fn cloud_setup_explains_retained_structural_conflicts() {
     // conflicts come from synchronization: an unsynchronized library opens cloud setup instead
     let state = lightcraft_catalog::replication::SyncState::new("library".into(), "device".into(), "personal".into()).unwrap();
     h.app.session.apply_received(lightcraft_catalog::Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
-    h.app.run("dialog.cloudSync", json!({})).unwrap();
+    h.app.run("dialog.cloudConflicts", json!({})).unwrap();
     for _ in 0..4 {
         h.step();
     }
@@ -428,30 +425,25 @@ fn cloud_sync_dialog_keeps_a_chosen_conflict_value_and_bounds_the_recover_list()
     h.step();
     let state = lightcraft_catalog::replication::SyncState::new("library".into(), "device".into(), "personal".into()).unwrap();
     h.app.session.apply_received(lightcraft_catalog::Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
-    h.app.run("dialog.cloudSync", json!({})).unwrap();
+    h.app.run("dialog.cloudConflicts", json!({})).unwrap();
     for _ in 0..4 {
         h.step();
     }
     let text = h.view.painted_text();
-    for label in ["Conflicting edits", "beach.jpg · Rating", "★★ · This device · shown now", "★★★★★ · Another device", "Deleted cloud photos: 250"]
-    {
+    for label in ["Conflicting edits", "beach.jpg · Rating", "★★ · This device · shown now", "★★★★★ · Another device"] {
         assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
     }
-    let painted = text.iter().filter(|value| value.starts_with("gone-")).count();
-    assert!(painted > 0 && painted < 200, "the Recover list scrolls instead of painting every row: {painted}");
     assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudKeepRevision:photo:p1:rating:dev-b-4"}), T)["ok"], true);
     for _ in 0..4 {
         h.step();
     }
     assert_eq!(*calls.lock().unwrap(), vec![json!({"entity":"photo:p1","field":"rating","revision":"dev-b-4"})]);
-    // Additional maintenance actions can put the recover-list footer below the
-    // initial viewport. Scroll the outer dialog, outside the nested photo list.
-    let action = h.app.widgets.iter().find(|(id, _)| id == "button:cloudDeleteOpen").map(|(_, rect)| *rect).unwrap();
-    assert_eq!(h.request("ui.move", json!({"x":action.center().x,"y":action.center().y}), T)["ok"], true);
+    h.app.run("dialog.cloudMaintenance", json!({})).unwrap();
     for _ in 0..4 {
-        assert_eq!(h.request("ui.scroll", json!({"dy":-400.0}), T)["ok"], true);
         h.step();
     }
     let text = h.view.painted_text();
-    assert!(text.iter().any(|value| value.contains("Not listed here: 50")), "recover footer must be reachable: {text:?}");
+    assert!(text.iter().any(|value| value.contains("Deleted cloud photos: 250")));
+    let painted = text.iter().filter(|value| value.starts_with("gone-")).count();
+    assert!(painted > 0 && painted < 200, "the Recover list scrolls: {painted}");
 }

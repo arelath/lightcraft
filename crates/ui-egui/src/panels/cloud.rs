@@ -208,7 +208,19 @@ fn attention_row(app: &mut LightcraftApp, ui: &mut egui::Ui, icon: Icon, title: 
                     let response = ui.link(crate::i18n::tr(label));
                     register(ui.ctx(), id, response.rect);
                     if response.clicked() {
-                        invoke(app, ui, "dialog.cloudSync", json!({}));
+                        let command = if id == "button:cloudChoose" {
+                            "dialog.cloudConflicts"
+                        } else if id == "button:cloudStorageDetails" || id == "button:cloudErrorDetails" {
+                            "dialog.cloudStorage"
+                        } else {
+                            "dialog.cloudMaintenance"
+                        };
+                        let params = if command == "dialog.cloudStorage" {
+                            json!({"id":app.session.catalog.sync_state().map(|s| &s.connection)})
+                        } else {
+                            json!({})
+                        };
+                        invoke(app, ui, command, params);
                     }
                 }
             });
@@ -260,7 +272,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let summary = &data["summary"];
     let off = data["syncEnabled"] == false;
     let paused = data["paused"] == true;
-    let waiting = data["waitingFiles"].as_u64().unwrap_or(0);
+    let waiting = data["waitingFiles"].as_u64().unwrap_or(0).saturating_add(data["preparingPhotos"].as_u64().unwrap_or(0));
     let active = data["uploadingFiles"].as_u64().unwrap_or(0);
     let changes = summary["pendingChanges"].as_u64().unwrap_or(0);
     let attention = needs_attention(data) || app.session.unsaved().is_some();
@@ -302,9 +314,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                 ui.horizontal(|ui| {
                     ui.label(crate::i18n::tr_format!("{active} of {total} photos", active = active, total = active.saturating_add(waiting)))
                         .on_hover_text(crate::i18n::tr("Photos currently uploading out of all active and waiting photos."));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if total > 0 { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new(crate::i18n::tr_format!("{done} of {total}", done = bytes(done.min(total)).replace(".0 ", " "), total = bytes(total).replace(".0 ", " "))).color(t.text_dim));
-                    });
+                    }); }
                 });
                 if total > 0 {
                     ui.add(egui::ProgressBar::new((done as f64 / total as f64).clamp(0., 1.) as f32).desired_height(6.).fill(t.accent))
@@ -312,9 +324,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                 } else if !paused && active > 0 {
                     ui.horizontal(|ui| { ui.spinner(); ui.label(crate::i18n::tr("Preparing transfer…")); });
                 }
-                if let Some(n) = data["preparingFiles"].as_u64().filter(|n| *n > 0) { ui.label(count("Import batches preparing", n)); }
-                metric(ui, "Changes to publish", &changes.to_string());
-                if active == 0 { metric(ui, "Queued data", &bytes(summary["queuedBytes"].as_u64().unwrap_or(0))); }
+                if let Some(n) = data["preparingPhotos"].as_u64().filter(|n| *n > 0) { ui.label(count("Preparing photos", n)); }
+                if changes > 0 { metric(ui, "Changes to publish", &changes.to_string()); }
+                if active == 0 && let Some(bytes_waiting) = summary["queuedBytes"].as_u64().filter(|n| *n > 0) { metric(ui, "Queued data", &bytes(bytes_waiting)); }
             });
         } else if changes > 0 && !attention && !off {
             divider(ui);
@@ -325,7 +337,21 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             if !off && !attention && (busy(data) || paused) {
                 navigation(app, ui, "button:cloudShowWaiting", "Show waiting photos", "library.filter", json!({"syncStatus":"pending"}));
             }
-            navigation(app, ui, "button:cloudSetup", "Cloud synchronization…", "dialog.cloudSync", json!({}));
+            if off {
+                navigation(app, ui, "button:cloudSetup", "Turn on cloud sync…", "dialog.cloudSync", json!({}));
+            } else {
+                let connection = app.session.catalog.sync_state().map(|s| s.connection.clone());
+                navigation(app, ui, "button:cloudStorage", "Storage connection…", "dialog.cloudStorage", json!({"id":connection}));
+                let more = ui.menu_button(crate::i18n::tr("More…"), |ui| {
+                    ui.set_width(214.);
+                    navigation(app, ui, "button:cloudMaintenance", "Storage tools…", "dialog.cloudMaintenance", json!({}));
+                    if app.session.catalog.sync_state().is_some_and(|state| state.protocol.is_head()) {
+                        navigation(app, ui, "button:cloudSyncMigrate", "Migrate library…", "dialog.cloudMigrate", json!({}));
+                    }
+                    navigation(app, ui, "button:cloudDeleteOpen", "Delete entire cloud library…", "dialog.cloudDelete", json!({}));
+                });
+                register(ui.ctx(), "button:cloudMore", more.response.rect);
+            }
             if !off && data["syncEnabled"] == true && !data["erasure"].is_object() {
                 #[cfg(not(target_arch = "wasm32"))]
                 navigation(app, ui, "button:cloudDisableOpen", "Turn off cloud sync…", "dialog.cloudDisable", json!({}));
@@ -556,14 +582,7 @@ fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         capacity(app, ui, data, false);
     }
     if ui.cursor().top() <= start {
-        attention_row(
-            app,
-            ui,
-            Icon::Warning,
-            "Cloud storage needs attention",
-            crate::i18n::tr("Open Cloud Synchronization for recovery details."),
-            Some(("button:cloudHealthDetails", "Details")),
-        );
+        attention_row(app, ui, Icon::Warning, "Cloud storage needs attention", "", Some(("button:cloudHealthDetails", "Details")));
     }
 }
 
@@ -648,18 +667,45 @@ mod tests {
         {
             text(&h, expected);
         }
-        for id in ["button:cloudSetup", "button:cloudImport", "button:cloudPauseResume"] {
+        for id in ["button:cloudStorage", "button:cloudImport", "button:cloudPauseResume"] {
             assert!(has(&h, id), "{id}");
         }
         assert!(!has(&h, "button:cloudShowWaiting"));
-        assert!(!has(&h, "button:cloudStorage"), "one cloud settings entry point");
+        assert!(!has(&h, "button:cloudSetup"), "no redundant synchronization dialog");
         assert!(!has(&h, "button:cloudRetry"));
         assert!(has(&h, "indicator:cloudFooterCheckCircle"));
         assert!(!h.painted_text().iter().any(|text| text == "UPLOADING" || text == "NEEDS ATTENTION"));
         capture(&mut h, "up-to-date");
-        click(&mut h, "button:cloudSetup");
+        click(&mut h, "button:cloudStorage");
         assert!(h.app.ui.dialog.is_some());
         assert!(!has(&h, "popup:cloud"), "navigation closes the popup");
+    }
+    #[test]
+    fn cloud_popup_keeps_guarded_library_deletion_in_more_menu() {
+        let mut h = open(overview(), [1200., 900.]);
+        click(&mut h, "button:cloudMore");
+        assert!(has(&h, "button:cloudMaintenance"));
+        assert!(has(&h, "button:cloudDeleteOpen"));
+        capture(&mut h, "more-actions");
+        click(&mut h, "button:cloudDeleteOpen");
+        assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudDelete { .. })));
+    }
+    #[test]
+    fn cloud_popup_shows_the_entire_preparing_batch_and_menu_opens_popup() {
+        let mut data = overview();
+        data["preparingPhotos"] = json!(20);
+        data["preparingFiles"] = json!(1);
+        let mut h = open(data, [1200., 900.]);
+        text(&h, "0 of 20 photos");
+        text(&h, "Preparing photos: 20");
+        capture(&mut h, "preparing-twenty");
+        h.app.run("dialog.cloudSync", json!({})).unwrap();
+        for _ in 0..4 {
+            h.step();
+        }
+        assert!(h.app.ui.dialog.is_none());
+        assert!(has(&h, "popup:cloud"));
+        assert!(!h.painted_text().iter().any(|text| text.contains("changed fields")));
     }
     #[test]
     fn cloud_popup_redesign_uploads_show_live_progress_and_waiting_filter() {
@@ -717,7 +763,11 @@ mod tests {
             assert!(!has(&h, "button:cloudImport"));
 
             click(&mut h, id);
-            assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudSync { .. })));
+            if id == "button:cloudChoose" {
+                assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudConflicts)));
+            } else {
+                assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudSetup { .. })));
+            }
             assert!(!has(&h, "popup:cloud"));
         }
     }

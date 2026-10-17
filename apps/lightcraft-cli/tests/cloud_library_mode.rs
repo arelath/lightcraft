@@ -267,11 +267,18 @@ fn enabling_cloud_mode_uploads_existing_and_future_library_photos_automatically(
         let library = f.dir.join("whole-library");
         let (first, bytes, first_key) = photo(&f, "already-remote.png", 70);
         let (second, _, second_key) = photo(&f, "local.png", 120);
+        let mut paths = vec![first.clone(), second.clone()];
+        let mut keys = vec![first_key.clone(), second_key.clone()];
+        for n in 0..18 {
+            let (path, _, key) = photo(&f, &format!("batch-{n}.png"), 121 + n);
+            paths.push(path);
+            keys.push(key);
+        }
         f.state.lock().unwrap().objects.insert(first_key.clone(), bytes);
         let (out, rows) = f.run(
             &library,
             &[
-                ("library.import", json!({"paths":[first,second]})),
+                ("library.import", json!({"paths":paths})),
                 ("photo.rate", json!({"id":1,"rating":4})),
                 (
                     "cloud.configure",
@@ -282,7 +289,7 @@ fn enabling_cloud_mode_uploads_existing_and_future_library_photos_automatically(
         assert!(out.status.success(), "{rows:?} {}", String::from_utf8_lossy(&out.stderr));
         let mut app = Desktop::start(&f, &library, &artifacts);
         app.execute("cloud.syncEnable", json!({"connection":"personal","protocol":protocol}));
-        app.settled(&f, &[first_key.clone(), second_key.clone()]);
+        app.settled(&f, &keys);
         {
             let state = f.state.lock().unwrap();
             assert!(!state.requests.iter().any(|(method, key)| method == "PUT" && key == &first_key), "verified existing originals are reused");
@@ -294,11 +301,13 @@ fn enabling_cloud_mode_uploads_existing_and_future_library_photos_automatically(
         std::thread::sleep(Duration::from_millis(300));
         assert!(!f.state.lock().unwrap().objects.contains_key(&later_key), "pause also stops new-library staging");
         app.execute("cloud.resume", json!({}));
-        app.settled(&f, &[first_key, second_key, later_key]);
+        keys.push(later_key);
+        app.settled(&f, &keys);
         app.ask("ui.clickWidget", json!({"id":"icon:cloud"}));
         std::thread::sleep(Duration::from_millis(150));
         let widgets = app.ask("ui.widgets", json!({"filter":"cloud"}));
-        assert!(!widgets.to_string().contains("button:cloudStorage"), "duplicate action removed: {widgets}");
+        assert!(!widgets.to_string().contains("button:cloudSetup"), "redundant synchronization dialog removed: {widgets}");
+        assert!(widgets.to_string().contains("button:cloudStorage"));
         app.ask("ui.screenshot", json!({"path":artifacts.join("popup.png").to_string_lossy()}));
         std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
         app.execute("cloud.pause", json!({}));

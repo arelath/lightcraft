@@ -74,6 +74,7 @@ pub struct Jobs {
     pending: Option<Pending>,
     pub reports: Vec<Value>,
     next_poll: Option<web_time::Instant>,
+    cadence: crate::cloud_status::PollCadence,
     paused: bool,
     last_audit: Option<web_time::Instant>,
     health: crate::cloud_status::PollHealth,
@@ -280,7 +281,8 @@ fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::
     });
     s.cloud_replication_jobs.paused = false;
     s.cloud_replication_jobs.preparing_migration = false;
-    s.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
+    s.cloud_replication_jobs.cadence.scanned(web_time::Instant::now());
+    s.cloud_replication_jobs.next_poll = None;
     if !wait {
         return Ok(json!({"task":id,"background":true}));
     }
@@ -307,6 +309,9 @@ pub(crate) fn retry_after_reconnect(s: &mut Session) {
     request_poll(s);
 }
 impl Session {
+    pub fn cloud_user_activity(&mut self) {
+        self.cloud_replication_jobs.cadence.activity(web_time::Instant::now());
+    }
     fn automatic_polling(&self) -> bool {
         !(self.cloud_paused
             || self.cloud_transition.local_only()
@@ -323,7 +328,8 @@ impl Session {
         if !self.automatic_polling() {
             return None;
         }
-        let deadline = self.cloud_replication_jobs.next_poll?;
+        let now = web_time::Instant::now();
+        let deadline = self.cloud_replication_jobs.next_poll.unwrap_or_else(|| self.cloud_replication_jobs.cadence.deadline(now));
         Some(deadline.saturating_duration_since(web_time::Instant::now()))
     }
     pub fn resume_cloud_replication(&mut self) {
@@ -331,11 +337,12 @@ impl Session {
             return;
         }
         let now = web_time::Instant::now();
-        let deadline = self.cloud_replication_jobs.next_poll.get_or_insert(now + std::time::Duration::from_secs(5));
-        if now < *deadline {
+        let deadline = self.cloud_replication_jobs.next_poll.unwrap_or_else(|| self.cloud_replication_jobs.cadence.deadline(now));
+        if now < deadline {
             return;
         }
-        *deadline = now + std::time::Duration::from_secs(5);
+        self.cloud_replication_jobs.next_poll = None;
+        self.cloud_replication_jobs.cadence.scanned(now);
         if let Err(error) = start_impl(self, &json!({"wait":false,"audit":false}), None) {
             let failure = crate::cloud_status::CloudFailure::from(&error);
             if matches!(error, EngineError::NotSaved(_)) {
@@ -458,7 +465,7 @@ impl Session {
             value["ownerApplyMs"] = json!(owner_started.elapsed().as_secs_f64() * 1000.0);
             value
         });
-        let mut next_delay = std::time::Duration::from_secs(5);
+        let mut next_delay = None;
         if current_owner {
             let jobs = &mut self.cloud_replication_jobs;
             jobs.paused = jobs.preparing_migration;
@@ -477,7 +484,7 @@ impl Session {
                         jobs.paused = true;
                     } else if !self.cloud_paused && !jobs.preparing_migration {
                         // A quick Pause/Resume cannot let its cancelled old attempt halt the resumed scheduler.
-                        next_delay = std::time::Duration::ZERO;
+                        next_delay = Some(std::time::Duration::ZERO);
                     }
                 }
                 Err(reason) => {
@@ -492,7 +499,7 @@ impl Session {
                     };
                     jobs.paused = delay.is_none() || jobs.preparing_migration;
                     if let Some(seconds) = delay {
-                        next_delay = std::time::Duration::from_secs(seconds);
+                        next_delay = Some(std::time::Duration::from_secs(seconds));
                     }
                 }
                 _ => {}
@@ -502,11 +509,8 @@ impl Session {
         if current_owner && result.is_ok() {
             self.cloud_replication_jobs.publication_blocked = blocked.clone();
         }
-        // Maintenance normally lasts minutes: poll it less often than ordinary changes.
-        if blocked.is_some() {
-            next_delay = std::time::Duration::from_secs(60);
-        }
-        self.cloud_replication_jobs.next_poll = Some(web_time::Instant::now() + next_delay);
+        self.cloud_replication_jobs.cadence.scanned(web_time::Instant::now());
+        self.cloud_replication_jobs.next_poll = next_delay.map(|delay| web_time::Instant::now() + delay);
         if result.as_ref().is_ok_and(|value| value.get("refreshRequired").and_then(Value::as_bool) == Some(true)) {
             request_poll(self);
         }
@@ -1097,7 +1101,7 @@ mod tests {
         assert!(!s.cloud_replication_jobs.running());
         assert!(!s.cloud_replication_jobs.paused);
         assert_eq!(s.cloud_replication_jobs.reports.len(), reports);
-        assert!(s.cloud_replication_jobs.next_poll.unwrap() > web_time::Instant::now());
+        assert!(s.cloud_poll_due_in().is_some_and(|due| due > std::time::Duration::from_secs(59)));
     }
     #[test]
     fn append_publication_proof_incoming_fields_and_outbox_rollback_together_on_full_disk() {
@@ -1135,6 +1139,22 @@ mod tests {
         assert!(s.catalog.sync_state().unwrap().append.is_some());
         let (_, loaded, _) = Journal::open(Box::new(files.files)).unwrap();
         assert_eq!(loaded.sync_state(), s.catalog.sync_state());
+    }
+    #[test]
+    fn ordinary_poll_deadline_tracks_activity_without_delaying_explicit_requests() {
+        use std::time::Duration;
+        let (mut s, _) = session();
+        let now = web_time::Instant::now();
+        s.cloud_replication_jobs.next_poll = None;
+        s.cloud_replication_jobs.cadence.scanned(now);
+        s.cloud_replication_jobs.cadence.activity(now);
+        assert!(s.cloud_poll_due_in().is_some_and(|due| due > Duration::from_secs(59) && due <= Duration::from_secs(60)));
+        s.cloud_replication_jobs.cadence.activity(now - Duration::from_secs(61));
+        assert!(s.cloud_poll_due_in().is_some_and(|due| due > Duration::from_secs(899) && due <= Duration::from_secs(900)));
+        request_poll(&mut s);
+        assert_eq!(s.cloud_poll_due_in(), Some(Duration::ZERO));
+        s.cloud_user_activity();
+        assert_eq!(s.cloud_poll_due_in(), Some(Duration::ZERO));
     }
     #[test]
     fn idle_hosts_learn_when_polling_is_due_and_reconnect_restarts_a_halted_scheduler() {

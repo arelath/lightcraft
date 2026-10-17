@@ -1,4 +1,4 @@
-//! Explicit retention review inside Cloud Synchronization. Preview state is ephemeral;
+//! Explicit retention review inside Cloud Storage Tools. Preview state is ephemeral;
 //! the engine repeats the full audit and validates its token before any deletion.
 use crate::LightcraftApp;
 #[cfg(not(target_arch = "wasm32"))]

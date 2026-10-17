@@ -40,21 +40,47 @@ pub(crate) fn resume(s: &mut Session) {
     if queue.library.as_ref().is_none_or(|old| !Arc::ptr_eq(old, &token)) {
         *queue = Queue { library: Some(token), ..Default::default() };
     }
+    // A partial batch keeps its original request identity, including already
+    // adopted siblings. Retrying a smaller new request would strand its issues.
+    let retry = s.cloud_imports.failures.iter().find_map(|issue| {
+        let params = &issue["retry"];
+        let ids = params["adoptionIds"].as_array()?;
+        (issue["command"] == "cloud.adopt"
+            && params["automatic"] == true
+            && params["connection"] == connection
+            && ids
+                .iter()
+                .filter_map(Value::as_u64)
+                .map(PhotoId)
+                .any(|id| !queue.attempted.contains(&id) && s.catalog.photo(id).is_some_and(|photo| eligible(photo))))
+        .then(|| params.clone())
+    });
+    if let Some(params) = retry {
+        queue.attempted.extend(params["adoptionIds"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(PhotoId));
+        if let Err(reason) = s.execute("cloud.adopt", &params) {
+            log::warn!("automatic cloud batch retry: {reason}");
+        }
+        return;
+    }
     if queue.pending.is_empty() && queue.checked != Some(s.catalog.revision) {
         queue.pending.extend(s.catalog.photos().filter(|photo| eligible(photo) && !queue.attempted.contains(&photo.id)).take(1000).map(|p| p.id));
         // More than one bounded page is allowed. No fixed limit on library size.
         queue.checked = (queue.pending.len() < 1000).then_some(s.catalog.revision);
     }
+    let mut ids = Vec::new();
     while let Some(id) = queue.pending.pop_front() {
         if s.catalog.photo(id).is_none_or(|photo| !eligible(photo)) || !queue.attempted.insert(id) {
             continue;
         }
-        // One stable per-photo request survives partial completion and restart.
-        // Virtual copies sharing this original are relinked by adoption itself.
-        if let Err(reason) = s.execute("cloud.adopt", &json!({"connection":connection,"ids":[id.0],"wait":false,"automatic":true})) {
-            s.cloud_imports.failures.push(json!({"id":format!("library-auto-{}",id.0),"name":"Library cloud synchronization","reason":reason.to_string(),"command":"cloud.adopt","retry":{"connection":connection,"ids":[id.0],"wait":false}}));
-        }
-        return;
+        ids.push(id.0);
+    }
+    // Enroll the bounded page at once so preparation reports the whole batch.
+    // Adoption retains per-candidate failures and deduplicates virtual copies;
+    // its single worker still prepares originals sequentially.
+    if !ids.is_empty()
+        && let Err(reason) = s.execute("cloud.adopt", &json!({"connection":connection,"ids":ids,"wait":false,"automatic":true}))
+    {
+        s.cloud_imports.failures.push(json!({"id":"library-auto","name":"Library cloud synchronization","reason":reason.to_string(),"command":"cloud.adopt","retry":{"connection":connection,"ids":ids,"wait":false,"automatic":true}}));
     }
 }
 

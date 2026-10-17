@@ -177,7 +177,9 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("file.adoptCloud", "Move Selected Photos to Cloud Storage…", None, "File"),
     ("dialog.cloudStorage", "Cloud Storage…", None, "File"),
     ("dialog.cloudDelete", "Delete Entire Cloud Library…", None, ""),
-    ("dialog.cloudSync", "Cloud Synchronization…", None, "File"),
+    ("dialog.cloudSync", "Cloud Library…", None, "File"),
+    ("dialog.cloudConflicts", "Resolve Cloud Conflicts…", None, ""),
+    ("dialog.cloudMaintenance", "Cloud Storage Tools…", None, ""),
     ("dialog.cloudDisable", "Turn Off Cloud Sync…", None, "File"),
     ("dialog.cloudMigrate", "Migrate Cloud Library…", None, "File"),
     ("file.addFolder", "Import from Folder…", None, "File"),
@@ -1347,6 +1349,19 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             None => Err("Enable or join a cloud library before reviewing deletion.".into()),
         },
         "dialog.cloudDisable" => crate::cloud_transition::open(app),
+        "dialog.cloudConflicts" => {
+            app.ui.dialog = Some(Dialog::CloudConflicts);
+            Ok(Value::Null)
+        }
+        "dialog.cloudMaintenance" => {
+            app.ui.dialog = Some(Dialog::CloudMaintenance);
+            Ok(Value::Null)
+        }
+        "dialog.cloudSync" if app.run("cloud.overview", json!({})).ok().is_some_and(|v| v["syncEnabled"] == true) => {
+            app.ui.dialog = None;
+            app.ui.open_cloud_popup = true;
+            Ok(Value::Null)
+        }
         "dialog.cloudSync" => {
             let configured = match app.run("cloud.connections", json!({})) {
                 Ok(value) => value,
@@ -1360,7 +1375,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 .or_else(|| saved.and_then(|c| c.get("id")).and_then(Value::as_str))
                 .unwrap_or("")
                 .to_owned();
-            app.ui.dialog = Some(Dialog::CloudSync {
+            app.ui.dialog = Some(Dialog::CloudConnect {
                 protocol: app.session.catalog.sync_state().map_or(Default::default(), |s| s.protocol),
                 connection,
                 library: p

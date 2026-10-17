@@ -162,6 +162,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 .as_u64()
                 .unwrap_or(0)
                 .saturating_add(cloud["summary"]["syncing"].as_u64().unwrap_or(0))
+                .saturating_add(cloud["preparingPhotos"].as_u64().unwrap_or(0))
                 .saturating_add(cloud["summary"]["issues"].as_u64().unwrap_or(0));
             let attention = super::cloud::needs_attention(&cloud);
             let cloud_text = if cloud["syncEnabled"] == false {
@@ -236,6 +237,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                             );
                         }
                         register(ui.ctx(), "indicator:cloudQueue", r);
+                    }
+                    if std::mem::take(&mut app.ui.open_cloud_popup) {
+                        egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&resp));
                     }
                     egui::Popup::menu(&resp).width(214.).frame(egui::Frame::popup(ui.style()).inner_margin(0).corner_radius(7)).show(|ui| {
                         // Popup areas start with a 400-point layout height. Let the card use

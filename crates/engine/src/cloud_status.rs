@@ -3,10 +3,12 @@ use crate::{EngineError, Result, Session};
 use serde_json::{Value, json};
 mod failure;
 mod health;
+mod polling;
 pub use failure::{CloudFailure, FailureKind, RetryBudget};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use health::now_ms;
 pub use health::{PollHealth, ResourceHealth};
+pub use polling::PollCadence;
 
 pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
     let summary = s.catalog.sync_overview();
@@ -28,6 +30,7 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
         out["paused"] = json!(s.cloud_paused || s.cloud_replication_jobs.preparing_migration());
         out["canResume"] = json!(s.cloud_uploads.running() == 0 && !s.cloud_replication_jobs.running() && s.cloud_imports.preparing() == 0);
         out["preparingFiles"] = json!(s.cloud_imports.preparing());
+        out["preparingPhotos"] = json!(s.cloud_imports.preparing_photos());
         out["health"]["uploads"]["activity"] = s.cloud_uploads.health();
         out["health"]["imports"]["failed"] = json!(s.cloud_imports.failures);
         if let Some(reason) = s.cloud_imports.failures.first().and_then(|issue| issue["reason"].as_str()) {

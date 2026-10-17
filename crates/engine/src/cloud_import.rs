@@ -539,7 +539,12 @@ impl Job {
         let (command, retry) = match &self.request {
             Some(request) => (
                 if self.adoption.is_some() { "cloud.adopt" } else { "cloud.import" },
-                json!({"connection":self.connection.id,"requestId":request.id,"wait":false}),
+                if self.adoption.is_some() {
+                    json!({"connection":self.connection.id,"requestId":request.id,"wait":false,"automatic":self.automatic,
+                        "adoptionIds":self.adoption.as_ref().into_iter().flatten().map(|photo| photo.id.0).collect::<Vec<_>>()})
+                } else {
+                    json!({"connection":self.connection.id,"requestId":request.id,"wait":false})
+                },
             ),
             None => ("cloud.recoverImports", json!({"connection":self.connection.id,"imports":[id],"wait":false})),
         };
@@ -1421,6 +1426,7 @@ pub(crate) fn edit_external(s: &mut Session, ids: &[PhotoId], options: &crate::e
 }
 
 struct Pending {
+    photos: usize,
     receiver: mpsc::Receiver<Result<Prepared>>,
     applied: bool,
     acknowledge: mpsc::SyncSender<Result<Completed>>,
@@ -1457,6 +1463,9 @@ impl Imports {
     }
     pub fn preparing(&self) -> usize {
         self.pending.iter().filter(|pending| !pending.done.load(Ordering::Relaxed)).count()
+    }
+    pub fn preparing_photos(&self) -> usize {
+        self.pending.iter().filter(|pending| !pending.applied).map(|pending| pending.photos).sum()
     }
     pub(crate) fn running(&self) -> bool {
         !self.pending.is_empty()
@@ -1505,6 +1514,8 @@ fn launch_job(s: &mut Session, p: &Value, mut job: Job) -> Result<Value> {
     }
     let coordinator = s.cloud_imports.coordinator.clone();
     let task = s.activity.start("import", "Stage Cloud Originals", crate::activity::Cancel::Yes);
+    let photos = job.paths.len();
+    task.progress(0, photos as u64);
     let cancel = task.cancel_flag().ok_or_else(|| error("could not create import cancellation flag"))?;
     let id = task.id();
     let progress = task.handle();
@@ -1557,7 +1568,17 @@ fn launch_job(s: &mut Session, p: &Value, mut job: Job) -> Result<Value> {
             job.resolver.assets_changed();
         })
         .map_err(io)?;
-    s.cloud_imports.pending.push(Pending { receiver, applied: false, acknowledge, finalized, library: s.library_token(), guard: task, cancel, done });
+    s.cloud_imports.pending.push(Pending {
+        photos,
+        receiver,
+        applied: false,
+        acknowledge,
+        finalized,
+        library: s.library_token(),
+        guard: task,
+        cancel,
+        done,
+    });
     Ok(json!({"background": true, "task": id,"requestId":request_id}))
 }
 
@@ -2565,6 +2586,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn automatic_enrollment_reports_twenty_photos_before_preparation_finishes() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        for n in 0..20 {
+            let id = session.catalog.alloc_photo_id();
+            let photo = Photo::new(id, Source::Demo { scene: 1 }, &format!("photo-{n}.JPG"), "JPEG", 60, 40, "2026-10-17T09:00:00");
+            session.commit("Add photo", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+        }
+        session.execute("cloud.syncEnable", &json!({"connection":"personal"})).unwrap();
+        let coordinator = session.cloud_imports.coordinator.clone();
+        let guard = coordinator.lock().unwrap();
+        resume_library(&mut session);
+        assert_eq!(session.cloud_imports.pending.len(), 1, "one bounded preparation worker");
+        assert_eq!(session.cloud_imports.preparing_photos(), 20);
+        let task = session.activity.list().into_iter().find(|task| task.kind == "import").unwrap();
+        assert_eq!((task.done, task.total), (0, 20));
+        assert_eq!(session.execute("cloud.overview", &json!({})).unwrap()["preparingPhotos"], 20);
+        drop(guard);
+        pump_library_adoption(&mut session, |s| s.catalog.upload_intents().len() == 20);
+        assert_eq!(session.cloud_imports.preparing_photos(), 0);
+    }
     #[test]
     fn cloud_mode_stages_generated_originals_preserving_edits_copies_and_restart() {
         let fixture = Fixture::new();

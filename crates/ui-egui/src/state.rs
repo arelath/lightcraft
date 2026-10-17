@@ -483,6 +483,8 @@ pub enum KeywordingView {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiState {
+    #[serde(skip)]
+    pub open_cloud_popup: bool,
     /// Shared panel arrangement; absent in legacy settings until their first layout.
     pub docking: Option<crate::docking::Workspace>,
     #[serde(default = "crate::i18n::default_language")]
@@ -769,13 +771,16 @@ pub struct NameEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Dialog {
+    CloudConflicts,
+    CloudMaintenance,
     CloudDisable {
         review: crate::cloud_transition::Review,
     },
     CloudMigration {
         writers_stopped: bool,
     },
-    CloudSync {
+    #[serde(alias = "cloudSync")]
+    CloudConnect {
         #[serde(default)]
         protocol: lightcraft_catalog::replication::SyncProtocol,
         connection: String,
@@ -1064,6 +1069,7 @@ impl Default for UiState {
             language: crate::i18n::default_language(),
             preview_build_seen: None,
             unsaved_seen: false,
+            open_cloud_popup: false,
             luminance_map_restore: None,
             view: ViewMode::Detail,
             left_panel: false,

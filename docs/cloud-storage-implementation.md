@@ -301,7 +301,7 @@ A request answered with an HTTP redirect (301/307/308) fails with a hint to chec
 
 ## Cloud setup
 
-File ▸ Cloud Synchronization… on a library that doesn't sync yet opens setup in steps (`crates/ui-egui/src/cloud_setup.rs`); File ▸ Cloud Storage… opens the same flow ending at the connection. A library that already syncs keeps the Cloud Synchronization status dialog. The browser keeps its authorization-service form.
+File ▸ Cloud Library… on a library that doesn't sync yet opens setup in steps (`crates/ui-egui/src/cloud_setup.rs`); File ▸ Cloud Storage… opens the same flow ending at the connection. A library that already syncs opens the compact cloud popup. The browser keeps its authorization-service form.
 
 1. **Where:** Backblaze B2, Amazon S3, or other S3-compatible storage (Wasabi, Cloudflare R2, MinIO…).
 2. **Connect:** the bucket, the provider's location and the keys. B2 asks for the bucket's endpoint as Backblaze shows it (`s3.us-west-004.backblazeb2.com`) and derives the region; AWS asks for the region; other services ask for both. More options holds the folder in the bucket (default `lightcraft`), the connection's name and an AWS profile to sign with instead of typed keys. Next first checks the connection, and the step goes on only when the check passes.
@@ -482,7 +482,7 @@ only where explicitly allowed, and source-generation changes reject stale result
 
 ## Coordinated migration workflow
 
-File → Migrate Cloud Library… and the Cloud Synchronization/Info buttons pause this session's
+File → Migrate Cloud Library… and the cloud popup More menu/Info buttons pause this session's
 automatic publication. The migration (`cloud.upgradeLibrary`, alias `cloud.migrateAppend`) puts
 the conditional head into maintenance, so other current devices stop publishing without manual
 coordination; confirming that every other device is stopped is needed only when storage cannot
@@ -495,7 +495,7 @@ and [browser requirements](browser-cloud.md).
 
 ## Device-local cloud mode
 
-Native Cloud Synchronization and the cloud popup offer explicit on/off actions. Turning on merges local and cloud library state, stages added local originals, and reuses verified identical bytes. Turning off requires confirmation, blocks edits/navigation, stops local writers and downloads a verified live library snapshot to permanent `Local Originals/blobs` storage. It preserves identities, conflicts, local edits and all cloud originals. Progress includes stage, bytes/files, remaining work and destination; Retry, Cancel and safe Quit support interrupted conversions. The atomic `cloud-mode.json` record prevents restart or reconnect from silently enabling sync. Browser users can pause but need desktop for permanent local conversion. See [the transition contract](cloud-sync-protocol.md#turning-synchronization-off-on-this-device) for snapshot semantics, disk checks and hard-link filesystem requirements.
+The native cloud popup offers explicit on/off actions. Turning on merges local and cloud library state, stages added local originals, and reuses verified identical bytes. Turning off requires confirmation, blocks edits/navigation, stops local writers and downloads a verified live library snapshot to permanent `Local Originals/blobs` storage. It preserves identities, conflicts, local edits and all cloud originals. Progress includes stage, bytes/files, remaining work and destination; Retry, Cancel and safe Quit support interrupted conversions. The atomic `cloud-mode.json` record prevents restart or reconnect from silently enabling sync. Browser users can pause but need desktop for permanent local conversion. See [the transition contract](cloud-sync-protocol.md#turning-synchronization-off-on-this-device) for snapshot semantics, disk checks and hard-link filesystem requirements.
 
 ## Revision history
 
@@ -567,7 +567,7 @@ operation. Resume also releases cancelled migration preparation, like explicit S
 When the library refuses publication (another device holds maintenance, the library moved to
 another protocol, or it needs a newer writer), the popup headline reads "Publishing paused by the
 cloud library" with the reason; changes from other devices still arrive and local changes wait.
-Conflicting edits to any synchronized field are listed in Cloud Synchronization (and for the
+Conflicting edits to any synchronized field are listed in Resolve cloud conflicts (and for the
 selected photo in Info) with each retained value and a Keep button (`cloud.resolveConflict`);
 the displayed value is marked. Deleted cloud photos are listed there for recovery, capped at 200
 with the full count.
@@ -661,3 +661,28 @@ recreated. Missing causal publication evidence remains dependency waiting.
 Ordinary obsolete failures cannot revoke a synchronized acknowledgement; explicit
 remote byte damage remains a distinct failure. Receipt completion requires written
 proof covering the queued generation and every queued exact mutation digest.
+
+### CUX.12 — batch progress, polling cadence, focused cloud controls (2026-10-17)
+
+Automatic enrollment submits a bounded page of up to 1,000 photos to one preparation
+worker. The popup and cloud badge include all preparing originals immediately. The
+completed batch enters the upload queue together; four workers retain independent
+per-transfer progress and bounded concurrency.
+Virtual copies still share originals, and individual preparation/upload failures remain
+recoverable. Preparation stays sequential within a worker.
+
+Native and browser ordinary remote scans run every 60 seconds while the user is active.
+After more than 60 seconds without focused input, the interval becomes 15 minutes.
+New input restores the active cadence. New local work, explicit resume/retry and bounded
+connectivity recovery retain their existing immediate or retry deadlines. Repaints alone
+do not count as activity.
+
+File > Cloud Library opens the popup for enabled libraries. The former all-purpose
+Cloud Synchronization dialog is removed: connection editing opens setup, Choose opens
+only conflict resolution, and More exposes storage tools, migration and guarded deletion.
+Capacity details are collapsed in storage tools; deleted-photo recovery and orphan-media
+review remain available there. Setup and re-enabling remain short, explicit workflows.
+
+Validation: all eight workspace CI gates, 40 focused import tests, seven final popup
+tests, and presented native 20-photo batches with both protocols passed. See the
+[dated acceptance record](cloud-acceptance-history.md#2026-10-17-batched-enrollment-and-focused-cloud-controls-cux12).

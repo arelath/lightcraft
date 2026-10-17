@@ -1107,6 +1107,10 @@ impl LightcraftApp {
             self.perf.fps = self.perf.fps * 0.9 + (1.0 / dt).min(240.0) * 0.1;
         }
         self.last_time = now;
+        #[cfg(not(target_arch = "wasm32"))]
+        if ctx.input(|i| i.focused && (!i.events.is_empty() || i.pointer.any_down())) {
+            self.session.cloud_user_activity();
+        }
         self.drain_control(ctx);
         self.apply_settings(ctx);
         if !self.synthetic.is_empty() {

@@ -58,6 +58,7 @@ struct Data {
     sync_running: bool,
     paused: bool,
     next_poll: Option<web_time::Instant>,
+    cadence: lightcraft_engine::cloud_status::PollCadence,
     last_audit: f64,
     health: lightcraft_engine::cloud_status::PollHealth,
     media_health: lightcraft_engine::cloud_status::ResourceHealth,
@@ -93,7 +94,7 @@ impl Host {
         let memory = ManagedBytes::default();
         let host = Self {
             cache: super::cache::offline::Offline::new(backend.clone(), directory, memory.clone(), files.clone()),
-            data: Rc::new(RefCell::new(Data { next_poll: Some(web_time::Instant::now() + std::time::Duration::from_secs(5)), ..Data::default() })),
+            data: Rc::new(RefCell::new(Data::default())),
             memory,
             files,
             backend,
@@ -394,7 +395,8 @@ impl Host {
         data.sync_running = true;
         data.paused = false;
         data.preparing_migration = false;
-        data.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
+        data.cadence.scanned(web_time::Instant::now());
+        data.next_poll = None;
         self.memory.retry();
         Ok(json!({"task":task,"background":true}))
     }
@@ -487,6 +489,9 @@ impl Host {
         Ok(json!({"task":task,"background":true}))
     }
     pub fn tick(&self, app: &mut LightcraftApp, flushing: bool, ctx: &egui::Context) {
+        if ctx.input(|i| i.focused && (!i.events.is_empty() || i.pointer.any_down())) {
+            self.data.borrow_mut().cadence.activity(web_time::Instant::now());
+        }
         super::cache::storage::reserve_catalog(self.files.save_headroom());
         if !self.frozen.get() {
             self.cache.tick(&mut app.session, &self.memory, &self.files, flushing, ctx);
@@ -507,7 +512,7 @@ impl Host {
                     let mut data = self.data.borrow_mut();
                     if sync {
                         data.sync_running = false;
-                        let mut delay = 5;
+                        let mut delay = None;
                         if current_owner {
                             data.paused = data.preparing_migration;
                             match &result {
@@ -523,7 +528,7 @@ impl Host {
                                         );
                                         data.paused = true;
                                     } else if !app.session.cloud_paused && !data.preparing_migration {
-                                        delay = 0;
+                                        delay = Some(0);
                                     }
                                 }
                                 Err(failure) => {
@@ -536,7 +541,7 @@ impl Host {
                                     };
                                     data.paused = retry.is_none() || data.preparing_migration;
                                     if let Some(seconds) = retry {
-                                        delay = seconds;
+                                        delay = Some(seconds);
                                     }
                                 }
                                 _ => {}
@@ -545,11 +550,8 @@ impl Host {
                                 data.publication_blocked = value.get("publicationBlocked").and_then(Value::as_str).map(str::to_owned);
                             }
                         }
-                        // Maintenance normally lasts minutes: poll it less often than ordinary changes.
-                        if data.publication_blocked.is_some() && result.is_ok() {
-                            delay = 60;
-                        }
-                        data.next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(delay));
+                        data.cadence.scanned(web_time::Instant::now());
+                        data.next_poll = delay.map(|seconds| web_time::Instant::now() + std::time::Duration::from_secs(seconds));
                     }
                     if current_owner
                         && !job.guard.is_cancelled()
@@ -586,13 +588,16 @@ impl Host {
                 && !data.paused
                 && !self.frozen.get()
                 && app.session.catalog.sync_state().is_some_and(|s| data.providers.contains_key(&s.connection));
-            let due = data.next_poll.map(|deadline| deadline.saturating_duration_since(web_time::Instant::now()));
+            let now = web_time::Instant::now();
+            let due = Some(data.next_poll.unwrap_or_else(|| data.cadence.deadline(now)).saturating_duration_since(now));
             (scheduled, due, data.jobs.len() >= 8)
         };
         if scheduled && due.is_none_or(|due| due.is_zero()) {
             if queue_full {
                 // Downloads fill the queue for a while: poll after them instead of halting sync.
-                self.data.borrow_mut().next_poll = Some(web_time::Instant::now() + std::time::Duration::from_secs(5));
+                let mut data = self.data.borrow_mut();
+                data.cadence.scanned(web_time::Instant::now());
+                data.next_poll = None;
             } else if let Err(error) = self.start_job(&mut app.session, &json!({"wait":false,"audit":false}), None) {
                 let mut data = self.data.borrow_mut();
                 data.paused = true;
@@ -602,7 +607,10 @@ impl Host {
         }
         if self.data.borrow().sync_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
-        } else if scheduled && let Some(due) = self.data.borrow().next_poll.map(|d| d.saturating_duration_since(web_time::Instant::now())) {
+        } else if scheduled {
+            let data = self.data.borrow();
+            let now = web_time::Instant::now();
+            let due = data.next_poll.unwrap_or_else(|| data.cadence.deadline(now)).saturating_duration_since(now);
             // An idle page draws no frames: wake it when polling or a retry is due.
             ctx.request_repaint_after(due.max(std::time::Duration::from_millis(50)));
         }
