@@ -81,6 +81,8 @@ pub mod lightroom_folder;
 pub mod lightroom_job;
 mod lightroom_sqlite;
 pub mod logging;
+#[cfg(not(target_arch = "wasm32"))]
+mod managed_media;
 pub mod media;
 pub mod memory;
 pub mod merge;

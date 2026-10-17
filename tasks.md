@@ -274,7 +274,8 @@ The supplied 2026-10-17 review is tracked before implementation in
 - [x] **CR.66** Share Info/popup Sync, Retry and Resume commands and migration guards.
 - [x] **CR.67** Reset retention consent on view changes, Resume and library changes; retain task progress separately.
 - [x] **CR.68** Unify control and widget dialog confirmation, preserve failed forms and discard stale cloud dialogs after library changes.
-- [ ] **CR.69–CR.74** Extract managed media; preserve typed failures; refine cloud status; add conflict previews, Recently Deleted conversion and explicit rejoin guidance.
+- [x] **CR.69** Extract verified managed-media preparation and catalog plans from cloud enrollment while retaining durable completion order.
+- [ ] **CR.70–CR.74** Preserve typed failures; refine cloud status; add conflict previews, Recently Deleted conversion and explicit rejoin guidance.
 - [x] **CR.49** Fence successor publication, refuse unsafe cancellation and preserve explicit finish-upgrade recovery.
 - [x] **CR.53** Verify cache destination adoption, honor old byte leases and fence cleanup before folder reuse.
 - [ ] **CR.48, CR.50–CR.52, CR.54–CR.55** Recheck and close the previously tracked epoch, migration, status, lease, browser-cache, relocation, credential-isolation and discovery findings with current evidence. Detailed items remain individually tracked in the reliability checklist.

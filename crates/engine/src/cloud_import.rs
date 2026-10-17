@@ -2,13 +2,13 @@
 //! Prepared manifests and immutable bytes survive cancellation, abandoned replies and failed saves.
 
 use crate::assets::{AssetResolver, TransferManager, keys, sha256};
+use crate::managed_media::{PreparationKind, make_blob, read_bounded, stage, working_name};
 use crate::{EngineError, Result, Selection, Session};
-use lightcraft_catalog::assets::{Asset, AssetId, Blob, RemoteLocation};
+use lightcraft_catalog::assets::{Asset, AssetId, Blob};
 use lightcraft_catalog::uploads::{UploadIntent, UploadState};
 use lightcraft_catalog::{Op, Photo, PhotoId, Source};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -95,6 +95,28 @@ pub struct RevisionTarget {
 }
 
 impl Manifest {
+    fn media(&self) -> crate::managed_media::PreparedMedia {
+        crate::managed_media::PreparedMedia {
+            asset_id: self.asset_id.clone(),
+            asset: self.asset.clone(),
+            file_name: self.file_name.clone(),
+            photo: self.photo.clone(),
+            prepared: self.prepared,
+            target: self
+                .target
+                .as_ref()
+                .map(|target| crate::managed_media::Revision { photo_id: target.photo_id, base_asset: target.base_asset.clone() }),
+            working: self.working.clone(),
+            stack_with: self.stack_with,
+            origin_asset: self.origin_asset.clone(),
+        }
+    }
+    fn accept_media(&mut self, media: &crate::managed_media::PreparedMedia) {
+        self.asset = media.asset.clone();
+        self.photo = media.photo.clone();
+        self.prepared = media.prepared;
+    }
+
     pub(crate) fn adopted_photo(&self) -> Option<PhotoId> {
         self.adoption.as_ref().map(|target| target.photo_id())
     }
@@ -155,26 +177,6 @@ impl Manifest {
     }
 }
 
-fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
-    let file = std::fs::File::open(path).map_err(io)?;
-    let size = file.metadata().map_err(io)?.len();
-    if limit == MAX_BYTES {
-        crate::input_limits::bytes(size).map_err(|e| error(format!("{}: {e}", path.display())))?;
-    }
-    if size == 0 || size > limit {
-        return Err(error(format!("{}: empty file or larger than the {} MiB safety limit", path.display(), limit >> 20)));
-    }
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(usize::try_from(size).map_err(|_| error("file too large"))?)
-        .map_err(|_| error("not enough memory to stage the original"))?;
-    file.take(size.saturating_add(1)).read_to_end(&mut bytes).map_err(io)?;
-    if bytes.len() as u64 != size {
-        return Err(error("file changed while being read; retry the import"));
-    }
-    Ok(bytes)
-}
-
 /// Maintenance reads outside the durable guard and rechecks the namespace epoch
 /// before changing bytes. Every malformed ownership record conservatively stops it.
 pub(crate) fn visit_staging(root: &Path, mut visit: impl FnMut(&Manifest) -> Result<()>) -> Result<()> {
@@ -221,51 +223,15 @@ pub(crate) fn read_manifest(root: &Path, id: &str) -> Result<Manifest> {
     Ok(manifest)
 }
 
-fn stage(root: &Path, blob: &Blob, bytes: &[u8]) -> Result<()> {
-    blob.validate().map_err(error)?;
-    if bytes.len() as u64 != blob.size || sha256(bytes) != blob.id {
-        return Err(error("staged bytes failed verification"));
-    }
-    std::fs::create_dir_all(root.join("blobs")).map_err(io)?;
-    let path = root.join("blobs").join(&blob.id.0);
-    match lightcraft_catalog::safe_file::write_new(&path, bytes) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let previous = read_bounded(&path, MAX_BYTES)?;
-            if sha256(&previous) == blob.id && previous.len() as u64 == blob.size {
-                Ok(())
-            } else {
-                Err(error("an existing durable blob failed verification; it was preserved"))
-            }
-        }
-        Err(e) => Err(io(e)),
-    }
-}
-
-fn make_blob(bytes: &[u8], connection: &str, key: String) -> Blob {
-    Blob { id: sha256(bytes), size: bytes.len() as u64, remote: RemoteLocation { connection: connection.into(), key, version: None } }
-}
-
 struct RequestOptions {
     requested: Option<String>,
     fresh: bool,
     policy: Option<requests::DuplicatePolicy>,
 }
-/// The completion context is frozen when preparation starts. Managed local
-/// revisions use their originating operation, independently of cloud enrollment.
-#[derive(Clone, Copy, Default)]
-enum PreparationKind {
-    #[default]
-    Enrollment,
-    Dng,
-    Xmp,
-    Returned,
-    ExternalCopy,
-}
 impl PreparationKind {
     fn command(self) -> &'static str {
         match self {
-            Self::Enrollment => "cloud.import",
+            Self::NewOriginal => "cloud.import",
             Self::Dng => "photo.convertToDng",
             Self::Xmp => "photo.saveMetadataToFile",
             Self::Returned => "photo.reload",
@@ -274,7 +240,7 @@ impl PreparationKind {
     }
     fn label(self) -> &'static str {
         match self {
-            Self::Enrollment => "Stage Cloud Originals",
+            Self::NewOriginal => "Stage Cloud Originals",
             Self::Dng => "Convert to DNG",
             Self::Xmp => "Save Metadata to File",
             Self::Returned => "Reload External Edit",
@@ -322,16 +288,6 @@ enum RevisionWork {
     Returned(String),
 }
 
-fn working_name(path: &str) -> bool {
-    let parts: Vec<_> = path.split('/').collect();
-    parts.len() == 3
-        && parts.first() == Some(&"working")
-        && parts.get(1).is_some_and(|id| lightcraft_catalog::assets::identifier(id))
-        && parts.get(2).is_some_and(|name| {
-            !name.is_empty() && name.len() <= 1024 && *name != "." && *name != ".." && !name.contains('\\') && !name.chars().any(char::is_control)
-        })
-}
-
 impl Job {
     fn document(&self, name: &str, bytes: &[u8]) -> Result<Blob> {
         if bytes.is_empty() || bytes.len() as u64 > MAX_DOCUMENT_BYTES {
@@ -342,46 +298,21 @@ impl Job {
         Ok(make_blob(bytes, &self.connection.id, key))
     }
 
+    fn preparation(&self) -> crate::managed_media::Preparation<'_> {
+        crate::managed_media::Preparation {
+            root: &self.root,
+            resolver: self.resolver.clone(),
+            connection: &self.connection.id,
+            prefix: &self.connection.prefix,
+            now: &self.now,
+            defaults: &self.defaults,
+            presets: &self.presets,
+            metadata_presets: &self.metadata_presets,
+            labels: &self.labels,
+        }
+    }
     fn describe(&self, manifest: &Manifest, info: crate::media::ProbeInfo, packet: Option<&[u8]>) -> Result<Photo> {
-        if info.kind == lightcraft_catalog::MediaKind::Video || info.preview_only.is_some() {
-            return Err(error("managed import requires a decodable photo original"));
-        }
-        let sidecar = packet
-            .map(|packet| {
-                let packet = std::str::from_utf8(packet).map_err(|e| error(format!("supporting XMP is unreadable; source preserved: {e}")))?;
-                let target = crate::crs::Target::for_file(info.kind, &info.format, info.preview_only.is_some(), &info.meta.camera);
-                crate::sidecar::parse_sidecar(packet, target)
-                    .map(|data| data.resolve_label(&self.labels))
-                    .map_err(|e| error(format!("supporting XMP could not be applied; source preserved: {e}")))
-            })
-            .transpose()?;
-        let mut photo = Photo::new(
-            PhotoId(1),
-            Source::Managed { asset_id: manifest.asset_id.clone() },
-            &manifest.file_name,
-            &info.format,
-            info.width,
-            info.height,
-            &self.now,
-        );
-        photo.kind = info.kind;
-        photo.file_size = info.file_size;
-        photo.captured = info.captured;
-        photo.meta = info.meta;
-        photo.as_shot_wb = info.as_shot_wb;
-        photo.content_hash = info.content_hash;
-        photo.embedded_lens = info.embedded_lens;
-        if manifest.working.is_none() {
-            let mut defaults = Session::new();
-            defaults.import_defaults = self.defaults.clone();
-            defaults.presets = self.presets.clone();
-            defaults.metadata_presets = self.metadata_presets.clone();
-            crate::import::apply_import_defaults(&defaults, &mut photo);
-        }
-        if let Some(sidecar) = sidecar {
-            crate::sidecar::merge_into(&mut photo, &sidecar, &self.now);
-        }
-        Ok(photo)
+        self.preparation().describe(&manifest.media(), info, packet)
     }
 
     /// Read all supporting documents while the previous asset is still reachable.
@@ -471,7 +402,7 @@ impl Job {
             }
         }
         let mut job = Self {
-            kind: PreparationKind::Enrollment,
+            kind: PreparationKind::NewOriginal,
             paths,
             adoption: None,
             adoption_key: None,
@@ -937,112 +868,28 @@ impl Job {
 
     fn finish(&self, manifest: &mut Manifest, cancel: &AtomicBool) -> Result<()> {
         manifest.validate()?;
-        if cancel.load(Ordering::Relaxed) {
-            return Err(error("cloud import cancelled; durable original retained"));
-        }
-        let path = self.root.join("blobs").join(&manifest.asset.original.id.0);
-        let bytes = read_bounded(&path, MAX_BYTES)?;
-        if sha256(&bytes) != manifest.asset.original.id || bytes.len() as u64 != manifest.asset.original.size {
-            return Err(error("durable original failed verification"));
-        }
-        if self::adopt::original_mismatch(manifest, &bytes) {
-            return Err(error("staged adoption original differs from the saved source identity; retained for repair"));
-        }
-        let mut packet = None;
-        for (name, blob) in &manifest.asset.associated {
-            let document = read_bounded(&self.root.join("blobs").join(&blob.id.0), MAX_DOCUMENT_BYTES)?;
-            if sha256(&document) != blob.id || document.len() as u64 != blob.size {
-                return Err(error("associated document failed verification"));
-            }
-            if name == "xmp" {
-                packet = Some(document);
-            }
-        }
-        let mut shadow = Session::new().with_fs();
-        shadow.import_defaults = self.defaults.clone();
-        shadow.presets = self.presets.clone();
-        shadow.metadata_presets = self.metadata_presets.clone();
-        let mut photo = if let Some(photo) = &manifest.photo {
-            (**photo).clone()
-        } else {
-            let info = crate::files::probe_bytes(&manifest.file_name, &bytes).map_err(error)?;
-            self.describe(manifest, info, packet.as_deref())?
-        };
-        photo.id = PhotoId(1);
-        manifest.photo = Some(Box::new(photo.clone()));
-        manifest.prepared = false;
-        self.write_manifest(manifest, cancel)?;
-        photo.copy_of = None; // the render seed does not need its catalog family
-        shadow.media.asset_resolver = Some(self.resolver.clone());
-        shadow.commit(
-            "Prepare cloud import",
-            Op::Batch {
-                ops: vec![
-                    // Recovery always regenerates from the original, even when a
-                    // partial manifest already names a prepared proxy.
-                    Op::SetAsset {
-                        id: manifest.asset_id.clone(),
-                        asset: Some(Box::new(Asset {
-                            associated: Default::default(),
-                            original: manifest.asset.original.clone(),
-                            smart_preview: None,
-                            thumbnail: None,
-                        })),
-                    },
-                    Op::AddPhoto { photo: Box::new(photo.clone()) },
-                ],
+        let policy = manifest.clone();
+        let mut media = manifest.media();
+        let context = self.preparation();
+        context.prepare(
+            &mut media,
+            cancel,
+            &|bytes| {
+                if adopt::original_mismatch(&policy, bytes) {
+                    Err(error("staged adoption original differs from the saved source identity; retained for repair"))
+                } else {
+                    Ok(())
+                }
             },
+            &mut |media, flag| {
+                let mut record = policy.clone();
+                record.accept_media(media);
+                self.write_manifest(&record, flag)
+            },
+            &|blob, bytes, flag| self.stage(blob, bytes, flag),
         )?;
-        let source = shadow.media.source_ref(&photo, crate::SourceLevel::Preview).load_source().map_err(error)?;
-        let tone = source.info.as_ref().and_then(|info| info.camera_tone.as_ref()).or(source.camera_tone.as_ref());
-        let preview = crate::smart::encode(&source.image, tone).map_err(error)?;
-        let preview_blob = make_blob(
-            &preview,
-            &self.connection.id,
-            keys::in_library(
-                &self.connection.prefix,
-                &keys::smart_preview(&manifest.asset.original.id, &sha256(&preview)).map_err(|e| error(e.to_string()))?,
-            )
-            .map_err(|e| error(e.to_string()))?,
-        );
-        manifest.asset.smart_preview = Some(preview_blob.clone());
-        self.write_manifest(manifest, cancel)?;
-        self.stage(&preview_blob, &preview, cancel)?;
-        if cancel.load(Ordering::Relaxed) {
-            return Err(error("cloud import cancelled; durable original and prepared data retained"));
-        }
-        let rendered =
-            shadow.thumb_job(photo.id, 512).ok_or_else(|| error("could not prepare the cloud thumbnail"))?.run().rendered.map_err(error)?;
-        let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&rendered.image), &Default::default())
-            .map_err(|e| error(e.to_string()))?;
-        let key = keys::thumbnail(
-            &manifest.asset.original.id,
-            photo.develop.hash64(),
-            Session::cloud_thumbnail_parameters(&photo, true).0,
-            512,
-            &sha256(&png),
-        )
-        .map_err(|e| error(e.to_string()))?;
-        let thumbnail = make_blob(&png, &self.connection.id, keys::in_library(&self.connection.prefix, &key).map_err(|e| error(e.to_string()))?);
-        manifest.asset.thumbnail = Some(thumbnail.clone());
-        self.write_manifest(manifest, cancel)?;
-        self.stage(&thumbnail, &png, cancel)?;
-        manifest.prepared = true;
-        if let Some(relative) = &manifest.working {
-            let path = self.root.join(relative);
-            let parent = path.parent().ok_or_else(|| error("invalid working-file parent"))?;
-            if !crate::originals::prospective_path(&path).map_err(error)?.starts_with(crate::originals::prospective_path(&self.root).map_err(error)?)
-            {
-                return Err(error("working directory is redirected outside managed storage"));
-            }
-            std::fs::create_dir_all(parent).map_err(io)?;
-            match lightcraft_catalog::safe_file::write_new(&path, &bytes) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {} // editor revisions are never replaced
-                Err(e) => return Err(io(e)),
-            }
-        }
-        self.write_manifest(manifest, cancel)
+        manifest.accept_media(&media);
+        Ok(())
     }
 
     fn write_manifest(&self, manifest: &Manifest, cancel: &AtomicBool) -> Result<()> {
@@ -1082,74 +929,23 @@ fn plan_candidate(catalog: &mut lightcraft_catalog::Catalog, root: Option<&Path>
         plan.skipped = Some(settled::Skipped::new(manifest, id));
         return Ok(plan);
     }
-    if let (Some(parent), Some(base)) = (manifest.stack_with, &manifest.origin_asset)
-        && catalog.photo(parent).is_none_or(|photo| photo.deleted || photo.source != (Source::Managed { asset_id: base.clone() }))
-    {
-        return Err(error("external-edit source changed or was deleted; durable working data was retained"));
-    }
-    let mut photo = *manifest.photo.ok_or_else(|| error("staged photo is missing"))?;
-    let global_id = if let Some(target) = &manifest.target {
-        let current = catalog.photo(target.photo_id).ok_or_else(|| error("revision photo no longer exists; staged data preserved"))?;
-        if current.deleted || current.source != (Source::Managed { asset_id: target.base_asset.clone() }) {
-            return Err(error("photo changed while preparing its revision; staged data preserved"));
-        }
-        photo.id = target.photo_id;
-        target.global_id.clone()
-    } else {
-        photo.id = catalog.alloc_photo_id();
-        manifest.id.clone()
-    };
+    let global_id = manifest.target.as_ref().map_or_else(|| manifest.id.clone(), |target| target.global_id.clone());
+    let media = crate::managed_media::plan(catalog, root, manifest.media())?;
+    let photo_id = media.ids.first().copied().map(PhotoId).ok_or_else(|| error("prepared media plan has no photo identity"))?;
+    plan.ids = media.ids;
+    plan.ops = media.ops;
+    plan.copies = media.copies;
+    plan.stacks = media.stacks;
     let intent = UploadIntent {
-        asset_id: manifest.asset_id.clone(),
-        photo_id: photo.id,
+        asset_id: manifest.asset_id,
+        photo_id,
         state: UploadState::SavedLocally,
         verified: Default::default(),
         error: None,
         finalization: None,
         blocked: None,
     };
-    if let Some(relative) = &manifest.working {
-        let root = root.ok_or_else(|| error("working storage is unavailable"))?;
-        let path = root.join(relative).to_string_lossy().to_string();
-        let binding = Op::SetWorkingCopy {
-            id: photo.id,
-            working: Some(Box::new(lightcraft_catalog::managed::WorkingCopy {
-                connection: manifest.asset.original.remote.connection.clone(),
-                path: path.clone(),
-                asset_id: manifest.asset_id.clone(),
-                ingested: manifest.asset.original.id.clone(),
-            })),
-        };
-        plan.copies.push(json!({"path":path,"id":photo.id.0,"original":manifest.stack_with.map(|id|id.0)}));
-        plan.stacks.push((photo.id, manifest.stack_with, binding));
-    }
-    plan.ids.push(photo.id.0);
-    plan.ops.push(Op::SetAsset { id: manifest.asset_id, asset: Some(Box::new(manifest.asset)) });
-    if manifest.target.is_some() {
-        let copies: Vec<_> = catalog
-            .photos()
-            .filter(|copy| {
-                copy.id == photo.id
-                    || (copy.copy_of == Some(photo.id)
-                        && manifest.target.as_ref().is_some_and(|target| copy.source == (Source::Managed { asset_id: target.base_asset.clone() })))
-            })
-            .map(|copy| copy.id)
-            .collect();
-        for id in copies {
-            plan.ops.push(Op::Relink { id, file_name: photo.file_name.clone(), source: photo.source.clone(), format: Some(photo.format.clone()) });
-            plan.ops.push(Op::SetContent {
-                id,
-                width: photo.width,
-                height: photo.height,
-                file_size: photo.file_size,
-                content_hash: photo.content_hash.clone(),
-                preview_only: photo.preview_only.clone(),
-            });
-        }
-    } else {
-        plan.ops.push(Op::AddPhoto { photo: Box::new(photo.clone()) });
-    }
-    plan.ops.push(Op::SetCloudIdentity { entity: format!("photo:{}", photo.id.0), id: Some(global_id) });
+    plan.ops.push(Op::SetCloudIdentity { entity: format!("photo:{}", photo_id.0), id: Some(global_id) });
     plan.ops.push(Op::SetUploadIntent { id: manifest.id, intent: Some(Box::new(intent)) });
     catalog.apply(Op::Batch { ops: plan.ops.clone() })?;
     Ok(plan)
