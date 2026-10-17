@@ -181,9 +181,9 @@ fn widget_rect(app: &LightcraftApp, id: &str) -> Option<egui::Rect> {
 }
 
 pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
-    crate::cloud_retention::observe_view(app);
+    crate::panels::dialogs::observe(app);
     let outcome = handle_inner(app, ctx, req);
-    crate::cloud_retention::observe_view(app);
+    crate::panels::dialogs::observe(app);
     outcome
 }
 
@@ -388,27 +388,8 @@ fn handle_inner(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlReque
                 Err(e) => err(e),
             }
         }
-        "ui.dialog.confirm" => match app.ui.dialog.take() {
-            Some(d) => {
-                let r = crate::panels::dialogs::confirm_dialog(app, &d);
-                // the import review and the rule editor stay open on an error, as with their buttons
-                if (r.is_err()
-                    && matches!(
-                        d,
-                        crate::state::Dialog::Import { .. } | crate::state::Dialog::SamModel { .. } | crate::state::Dialog::SmartRules { .. }
-                    ))
-                    || (r.is_ok() && crate::panels::dialogs::keeps_open(app, &d))
-                {
-                    app.ui.dialog = Some(d);
-                }
-                wrap(r)
-            }
-            None => err("no dialog open"),
-        },
-        "ui.dialog.cancel" => {
-            app.ui.dialog = None;
-            ok(Value::Null)
-        }
+        "ui.dialog.confirm" => wrap(crate::panels::dialogs::confirm_current(app, ctx)),
+        "ui.dialog.cancel" => wrap(crate::panels::dialogs::cancel_current(app, ctx)),
         "ui.resize" => {
             for name in ["width", "height"] {
                 if p.get(name).is_some() && f(name).is_none() {

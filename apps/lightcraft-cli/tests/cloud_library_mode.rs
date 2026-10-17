@@ -883,3 +883,73 @@ fn enabling_cloud_mode_uploads_existing_and_future_library_photos_automatically(
         assert!(first.is_file() && second.is_file());
     }
 }
+
+#[test]
+#[ignore = "explicit native dialog lifecycle acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn control_confirmation_advances_cloud_setup_and_preserves_a_failed_form() {
+    let f = support::Fixture::new();
+    f.state.lock().unwrap().append_mode = true;
+    let local = f.dir.join("dialog-lifecycle");
+    let (out, rows) = f.run(&local, &[("catalog.query", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("dialog-lifecycle");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    app.execute("dialog.cloudSync", json!({}));
+    app.click_when_ready("radio:cloudSetupProvider:other");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("provider.png"),"headless":true}));
+    app.ask("ui.dialog.confirm", json!({}));
+    for (field, value) in [("cloudSetupBucket", "photos"), ("cloudSetupEndpoint", f.endpoint.as_str()), ("cloudSetupRegion", "us-east-1")] {
+        app.click_when_ready(field);
+        app.ask("ui.key", json!({"key":"A","cmd":true}));
+        app.ask("ui.text", json!({"text":value}));
+        app.ask("ui.screenshot", json!({"path":artifacts.join("input-barrier.png"),"headless":true}));
+    }
+    app.click_when_ready("dropdown:cloudSetupAuthentication");
+    app.click_when_ready("cloudSetupAuthentication:profile");
+    app.wait_widget("cloudSetupProfile");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("input-barrier.png"),"headless":true}));
+    if !app.ask("ui.widgets", json!({"filter":"cloudSetupPrefix"})).to_string().contains("cloudSetupPrefix") {
+        app.click_when_ready("button:cloudSetupMore");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    app.click_when_ready("cloudSetupPrefix");
+    app.ask("ui.key", json!({"key":"A","cmd":true}));
+    app.ask("ui.text", json!({"text":"library"}));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("input-barrier.png"),"headless":true}));
+    assert_eq!(app.raw("ui.dialog.confirm", json!({}))["ok"], false);
+    app.wait_widget("cloudSetupEndpoint");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("failed-form.png"),"headless":true}));
+    app.click_when_ready("cloudSetupProfile");
+    app.ask("ui.text", json!({"text":"acceptance"}));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("input-barrier.png"),"headless":true}));
+    app.ask("ui.dialog.confirm", json!({}));
+    app.wait_widget("radio:cloudSetupNew");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("library-review.png"),"headless":true}));
+    app.ask("ui.dialog.confirm", json!({}));
+    let status = app.execute("cloud.syncStatus", json!({}));
+    assert_eq!(status["enabled"], true);
+    assert_eq!(status["connection"], "storage");
+    assert!(
+        app.execute("cloud.connections", json!({}))["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == "storage" && c["profile"] == "acceptance")
+    );
+    app.settled(&f, &[]);
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.ask("app.quit", json!({}));
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = app.child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < until, "native app did not exit after its settled cloud tasks");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let state = f.state.lock().unwrap();
+    assert_eq!(state.signature_errors, 0);
+    assert!(state.requests.iter().all(|(method, _)| method != "DELETE"));
+}

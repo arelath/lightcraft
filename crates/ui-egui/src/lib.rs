@@ -373,6 +373,7 @@ pub struct LightcraftApp {
     pub cloud_check: Option<cloud_setup::CheckTask>,
     pub(crate) cloud_transition: cloud_transition::Runtime,
     pub(crate) cloud_retention: cloud_retention::Runtime,
+    dialog_library_generation: u64,
     /// A Synchronize Folder scan in progress (feeds its dialog).
     pub sync: Option<sync::SyncTask>,
     /// `session.folder_changes` came from the Synchronize Folder dialog (and goes with it).
@@ -419,6 +420,7 @@ impl LightcraftApp {
     pub fn new(mut session: Session, services: Services) -> Self {
         // AI mask requests run on the model's worker; frames apply their results (never wait)
         session.segmenter.background = true;
+        let dialog_library_generation = session.library_generation();
         Self {
             session,
             ui: UiState::default(),
@@ -492,6 +494,7 @@ impl LightcraftApp {
             model_setup: Default::default(),
             cloud_transition: Default::default(),
             cloud_retention: Default::default(),
+            dialog_library_generation,
         }
     }
 
@@ -512,8 +515,9 @@ impl LightcraftApp {
 
     /// Run a UI or engine command by id. The single entry point for every frontend path.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
-        cloud_retention::observe_view(self);
+        panels::dialogs::observe(self);
         let result = self.run_inner(id, params);
+        panels::dialogs::observe(self);
         cloud_retention::observe_command(self, id, &result);
         result
     }
@@ -1411,7 +1415,7 @@ impl LightcraftApp {
     /// Once per library opened (at launch too): name it in the window title, so nobody edits in
     /// the wrong one, and put it first in File ▸ Open Recent Library.
     pub(crate) fn library_changed(&mut self, ctx: &egui::Context) {
-        cloud_retention::observe_view(self);
+        panels::dialogs::observe(self);
         let generation = self.session.library_generation();
         if self.shown_library == Some(generation) {
             return;

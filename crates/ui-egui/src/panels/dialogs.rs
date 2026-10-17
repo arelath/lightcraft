@@ -7,6 +7,9 @@ use crate::LightcraftApp;
 use crate::state::Dialog;
 use crate::theme::Tokens;
 
+mod lifecycle;
+pub(crate) use lifecycle::{cancel_current, confirm_current, observe};
+
 /// Rows the Rename dialog previews.
 const RENAME_PREVIEW_ROWS: usize = 6;
 
@@ -193,9 +196,9 @@ pub(crate) fn prepare(app: &LightcraftApp, ui: &mut egui::Ui) {
 }
 
 pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
-    crate::cloud_retention::observe_view(app);
+    observe(app);
     show_inner(app, ctx);
-    crate::cloud_retention::observe_view(app);
+    observe(app);
 }
 
 fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
@@ -1418,72 +1421,16 @@ fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
     {
         close = true;
     }
+    let action = if close {
+        lifecycle::Action::Cancel
+    } else if confirm {
+        lifecycle::Action::Confirm
+    } else {
+        lifecycle::Action::Refresh
+    };
     #[cfg(not(target_arch = "wasm32"))]
-    if let Dialog::CloudSetup { setup } = &mut dlg {
-        if back {
-            setup.back();
-        }
-        // a step that doesn't finish goes on (step 2 checks the connection first); a check
-        // that passed for Cloud Storage… saves the connection
-        if confirm && !setup.finishes() {
-            crate::cloud_setup::next(app, setup);
-            confirm = false;
-        }
-        confirm |= std::mem::take(&mut setup.finish);
-    }
-    if confirm {
-        match confirm_dialog(app, &dlg) {
-            // the import review stays open on an error (e.g. an unusable folder template), and so
-            // does Export (e.g. no folder chosen) so the choices aren't lost
-            Err(e)
-                if matches!(
-                    dlg,
-                    Dialog::Import { .. }
-                        | Dialog::CloudStorage { .. }
-                        | Dialog::CloudConnect { .. }
-                        | Dialog::CloudMigration { .. }
-                        | Dialog::CloudImport { .. }
-                        | Dialog::Export { .. }
-                        | Dialog::ContactSheet { .. }
-                        | Dialog::NewAlbum { .. }
-                        | Dialog::NewSmartAlbum { .. }
-                        | Dialog::SmartRules { .. }
-                        | Dialog::KeywordTag { .. }
-                        | Dialog::KeywordSet { .. }
-                        | Dialog::SynchronizeFolder { .. }
-                ) =>
-            {
-                app.toast(ctx, e)
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            Err(e) if matches!(dlg, Dialog::CloudSetup { .. }) => app.toast(ctx, e),
-            // the SAM 3 dialog stays open to show the download (or why it can't start)
-            Err(e) if matches!(dlg, Dialog::SamModel { .. }) => {
-                if let Dialog::SamModel { error, .. } = &mut dlg {
-                    *error = Some(e);
-                }
-            }
-            Ok(r) if matches!(dlg, Dialog::NewAlbum { .. }) && r.get("skipped").and_then(serde_json::Value::as_u64).is_some_and(|n| n > 0) => {
-                // albums hold library photos (issue #684): say which part of the selection stayed out
-                crate::panels::grid::toast_skipped(app, ctx, &r);
-                close = true;
-            }
-            Ok(_) if keeps_open(app, &dlg) => {
-                if let Dialog::SamModel { error, .. } = &mut dlg {
-                    *error = None;
-                }
-            }
-            _ => close = true,
-        }
-    }
-    // a dialog opened from inside this one (a button in Settings that shows a licence) takes its place
-    if app.ui.dialog.as_ref().is_some_and(|now| *now != at_start) {
-        return;
-    }
-    if let Dialog::CloudDisable { review } = &dlg {
-        close = review.dismissed || close && !review.blocking();
-    }
-    app.ui.dialog = if close { None } else { Some(dlg) };
+    let action = if back { lifecycle::Action::Back } else { action };
+    let _ = lifecycle::update(app, ctx, at_start, dlg, action);
 }
 
 /// Room kept free above and below a dialog (#781).

@@ -132,6 +132,9 @@ fn recovery_pages_reset_after_revision_or_library_changes() {
         )
         .unwrap();
     frames(&mut h);
+    assert!(h.app.ui.dialog.is_none(), "switching libraries dismisses the old cloud review");
+    h.app.run("dialog.cloudMaintenance", json!({})).unwrap();
+    frames(&mut h);
     let last = calls.lock().unwrap().iter().rev().find(|(_, p)| p["section"] == "deleted").unwrap().1.clone();
     assert_eq!(last["search"], "", "queries belong to the opened library");
     assert!(last["cursor"].is_null());

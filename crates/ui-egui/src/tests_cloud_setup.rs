@@ -18,6 +18,10 @@ const LIBRARY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef012345678
 /// The first reply waits for `release`, so the test sees the check running. Records each
 /// request line and Authorization header.
 fn s3(requests: usize, release: mpsc::Receiver<()>) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+    s3_response(requests, release, false)
+}
+
+fn s3_response(requests: usize, release: mpsc::Receiver<()>, forbidden: bool) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -43,7 +47,9 @@ fn s3(requests: usize, release: mpsc::Receiver<()>) -> (String, Arc<Mutex<Vec<(S
                 let _ = release.recv_timeout(T);
             }
             log.lock().unwrap().push((line.trim().to_owned(), auth));
-            let (status, body) = if line.contains("list-type=2") {
+            let (status, body) = if forbidden {
+                (403, String::new())
+            } else if line.contains("list-type=2") {
                 (
                     200,
                     format!(
@@ -76,6 +82,23 @@ fn click(h: &mut Headless, id: &str) {
 
 #[test]
 fn setup_checks_the_typed_keys_then_joins_the_library_it_found() {
+    run_wizard(false);
+}
+
+#[test]
+fn control_confirmation_checks_keys_and_advances_the_same_wizard() {
+    run_wizard(true);
+}
+
+fn confirm(h: &mut Headless, control: bool) {
+    if control {
+        assert_eq!(h.request("ui.dialog.confirm", json!({}), T)["ok"], true);
+    } else {
+        click(h, "button:dialogOk");
+    }
+}
+
+fn run_wizard(control: bool) {
     let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
     let recorded = calls.clone();
     let services = Services {
@@ -111,7 +134,7 @@ fn setup_checks_the_typed_keys_then_joins_the_library_it_found() {
     }
     assert!(h.view.painted_text().iter().any(|t| t == "Where do you want to keep your cloud library?"));
     click(&mut h, "radio:cloudSetupProvider:other");
-    click(&mut h, "button:dialogOk");
+    confirm(&mut h, control);
     assert_eq!((setup(&h).step, setup(&h).name.as_str()), (Step::Connect, "storage"));
     let (endpoint, seen) = {
         let (release, wait) = mpsc::channel();
@@ -122,11 +145,13 @@ fn setup_checks_the_typed_keys_then_joins_the_library_it_found() {
             setup.key_id = "AKIDTEST".into();
             setup.secret = Secret("SECRETKEY".into());
         }
-        click(&mut h, "button:dialogOk");
+        confirm(&mut h, control);
         // the check is running: its row in the activity stack and a line in the dialog
         assert_eq!(setup(&h).check, Check::Running);
         assert!(h.app.session.activity.list().iter().any(|task| task.kind == "cloudCheck" && task.label == "Checking cloud storage"));
         assert!(h.view.painted_text().iter().any(|t| t == "Checking the connection…"));
+        assert_eq!(h.request("ui.dialog.confirm", json!({}), T)["ok"], false, "a running check cannot be confirmed twice");
+        assert_eq!(setup(&h).check, Check::Running);
         release.send(()).unwrap();
         server
     };
@@ -145,7 +170,7 @@ fn setup_checks_the_typed_keys_then_joins_the_library_it_found() {
     click(&mut h, "button:cloudSetupBack");
     assert_eq!(setup(&h).step, Step::Connect);
     assert!(setup(&h).passed().is_some(), "going back keeps the passed check");
-    click(&mut h, "button:dialogOk");
+    confirm(&mut h, control);
     assert_eq!(setup(&h).step, Step::Library, "a passed check isn't run again");
     // finish with the keys an earlier setup saved (typed keys would go to the real AWS file)
     if let Some(Dialog::CloudSetup { setup }) = &mut h.app.ui.dialog {
@@ -160,7 +185,7 @@ fn setup_checks_the_typed_keys_then_joins_the_library_it_found() {
     for _ in 0..3 {
         h.step();
     }
-    click(&mut h, "button:dialogOk");
+    confirm(&mut h, control);
     assert!(h.app.ui.dialog.is_none(), "finishing closes the dialog: {:?}", h.app.ui.dialog);
     let calls = calls.lock().unwrap().clone();
     assert_eq!(
@@ -209,4 +234,200 @@ fn a_failed_check_says_what_to_fix_and_cloud_storage_saves_after_a_check() {
     }
     assert!(h.view.painted_text().iter().any(|t| t.contains("endpoint as Backblaze shows it")));
     assert!(matches!(h.app.ui.dialog, Some(Dialog::CloudSetup { .. })), "the dialog stays open to fix it");
+}
+
+#[test]
+fn cloud_confirmation_errors_keep_values_on_both_routes() {
+    let dialogs = vec![
+        Dialog::CloudStorage {
+            id: "personal".into(),
+            bucket: "photos".into(),
+            region: "us-east-1".into(),
+            prefix: "library".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            profile: "acceptance".into(),
+        },
+        Dialog::CloudConnect {
+            connection: "personal".into(),
+            library: LIBRARY.into(),
+            protocol: lightcraft_catalog::replication::SyncProtocol::AppendLog,
+        },
+        Dialog::CloudMigration { writers_stopped: true },
+        Dialog::CloudImport { connection: "personal".into(), connections: vec!["personal".into()], adopt_ids: vec![1] },
+    ];
+    for control in [false, true] {
+        for dialog in &dialogs {
+            let services = Services {
+                cloud_action: Some(Box::new(|_, id, _| match id {
+                    "cloud.configure" | "cloud.syncEnable" | "cloud.upgradeLibrary" | "cloud.adopt" => {
+                        Some(Err("fixture refusal; preserve the review".into()))
+                    }
+                    _ => None,
+                })),
+                ..Default::default()
+            };
+            let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::with_demo(), services), [1400., 1000.], 1.);
+            h.app.ui.dialog = Some(dialog.clone());
+            for _ in 0..4 {
+                h.step();
+            }
+            if control {
+                assert_eq!(h.request("ui.dialog.confirm", json!({}), T)["ok"], false);
+            } else {
+                click(&mut h, "button:dialogOk");
+            }
+            assert_eq!(h.app.ui.dialog.as_ref(), Some(dialog), "control={control}");
+        }
+    }
+}
+
+#[test]
+fn setup_failure_and_invalid_choice_keep_the_review_without_saving_keys() {
+    for control in [false, true] {
+        let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::new(), Services::default()), [1400., 1000.], 1.);
+        let mut source = crate::cloud_setup::Setup {
+            step: Step::Connect,
+            endpoint: "not an endpoint".into(),
+            key_id: "AKIDTEST".into(),
+            secret: Secret("SECRETKEY".into()),
+            ..Default::default()
+        };
+        h.app.ui.dialog = Some(Dialog::CloudSetup { setup: Box::new(source.clone()) });
+        for _ in 0..3 {
+            h.step();
+        }
+        if control {
+            assert_eq!(h.request("ui.dialog.confirm", json!({}), T)["ok"], false);
+        } else {
+            click(&mut h, "button:dialogOk");
+        }
+        let failed = setup(&h);
+        assert!(matches!(failed.check, Check::Failed { .. }));
+        assert_eq!((failed.endpoint, failed.key_id, failed.secret), (source.endpoint.clone(), source.key_id.clone(), source.secret.clone()));
+        source.step = Step::Library;
+        source.choice = Choice::ById;
+        source.join_id = "invalid identifier".into();
+        source.check = Check::Passed { found: Default::default() };
+        source.checked = crate::cloud_setup::fingerprint(&source);
+        h.app.ui.dialog = Some(Dialog::CloudSetup { setup: Box::new(source.clone()) });
+        let before = h.app.ui.dialog.clone();
+        assert_eq!(h.request("ui.dialog.confirm", json!({}), T)["ok"], false);
+        assert_eq!(h.app.ui.dialog, before, "invalid choice must never write credentials");
+    }
+}
+
+#[test]
+fn library_generation_discards_old_migration_consent_before_control_confirmation() {
+    use lightcraft_engine::{Session, catalog::MemStore, library::LibraryStores};
+    let mut h = Headless::new(LightcraftApp::new(Session::new(), Services::default()), [1400., 1000.], 1.);
+    h.app.ui.dialog = Some(Dialog::CloudMigration { writers_stopped: true });
+    h.app
+        .session
+        .open_library_in(
+            LibraryStores { dir: "replacement".into(), catalog: Box::new(MemStore::new()), files: Box::new(MemStore::new()), on_disk: false },
+            false,
+        )
+        .unwrap();
+    assert_eq!(h.request("ui.dialog.confirm", json!({}), T)["ok"], false);
+    assert!(h.app.ui.dialog.is_none());
+    assert!(!h.app.session.activity.list().iter().any(|task| task.kind == "cloudUpgrade"));
+}
+
+#[test]
+fn confirmation_preserves_a_replacement_dialog() {
+    let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::new(), Services::default()), [1400., 1000.], 1.);
+    crate::panels::dialogs::prompt(&mut h.app, "About", "", "", "app.about", json!({}), "unused");
+    assert_eq!(h.request("ui.dialog.confirm", json!({}), T)["ok"], true);
+    assert!(matches!(h.app.ui.dialog, Some(Dialog::About)));
+}
+
+#[test]
+fn asynchronous_probe_failure_keeps_the_same_entered_form_on_both_routes() {
+    for control in [false, true] {
+        let (release, wait) = mpsc::channel();
+        let (endpoint, seen) = s3_response(1, wait, true);
+        let source = crate::cloud_setup::Setup {
+            step: Step::Connect,
+            provider: lightcraft_engine::cloud_setup::Provider::Other,
+            name: "fixture".into(),
+            bucket: "photos".into(),
+            endpoint,
+            region: "us-east-1".into(),
+            prefix: "library".into(),
+            key_id: "AKIDTEST".into(),
+            secret: Secret("SECRETKEY".into()),
+            ..Default::default()
+        };
+        let mut h = Headless::new(LightcraftApp::new(lightcraft_engine::Session::new(), Services::default()), [1400., 1000.], 1.);
+        h.app.ui.dialog = Some(Dialog::CloudSetup { setup: Box::new(source.clone()) });
+        for _ in 0..3 {
+            h.step();
+        }
+        confirm(&mut h, control);
+        assert_eq!(setup(&h).check, Check::Running);
+        release.send(()).unwrap();
+        assert!(h.step_until(T, |h| matches!(setup(h).check, Check::Failed { .. })));
+        let failed = setup(&h);
+        assert_eq!(failed.step, Step::Connect);
+        assert_eq!((failed.endpoint, failed.bucket, failed.key_id, failed.secret), (source.endpoint, source.bucket, source.key_id, source.secret));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn failed_final_setup_configuration_retains_the_successfully_checked_form() {
+    use lightcraft_engine::{Session, catalog::MemStore, library::LibraryStores};
+    for control in [false, true] {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let services = Services {
+            cloud_action: Some(Box::new(move |_, id, _| match id {
+                "cloud.configure" | "cloud.syncEnable" | "cloud.sync" => {
+                    recorded.lock().unwrap().push(id.to_string());
+                    Some(Err("fixture settings write failed".into()))
+                }
+                _ => None,
+            })),
+            ..Default::default()
+        };
+        let mut session = Session::new();
+        session
+            .open_library_in(
+                LibraryStores {
+                    dir: "setup-final-error".into(),
+                    catalog: Box::new(MemStore::new()),
+                    files: Box::new(MemStore::new()),
+                    on_disk: false,
+                },
+                false,
+            )
+            .unwrap();
+        let mut source = crate::cloud_setup::Setup {
+            step: Step::Library,
+            provider: lightcraft_engine::cloud_setup::Provider::Other,
+            name: "fixture".into(),
+            bucket: "photos".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            region: "us-east-1".into(),
+            prefix: "library".into(),
+            authentication: Authentication::SavedKeys,
+            saved_keys: true,
+            check: Check::Passed { found: Default::default() },
+            ..Default::default()
+        };
+        source.checked = crate::cloud_setup::fingerprint(&source);
+        let mut h = Headless::new(LightcraftApp::new(session, services), [1400., 1000.], 1.);
+        let before = Dialog::CloudSetup { setup: Box::new(source) };
+        h.app.ui.dialog = Some(before.clone());
+        for _ in 0..3 {
+            h.step();
+        }
+        if control {
+            assert_eq!(h.request("ui.dialog.confirm", json!({}), T)["ok"], false);
+        } else {
+            click(&mut h, "button:dialogOk");
+        }
+        assert_eq!(h.app.ui.dialog, Some(before));
+        assert_eq!(*calls.lock().unwrap(), vec!["cloud.configure"]);
+    }
 }

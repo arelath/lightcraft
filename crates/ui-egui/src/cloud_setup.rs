@@ -421,6 +421,13 @@ fn typed_keys(setup: &Setup) -> Result<Option<lightcraft_engine::assets::s3::Acc
     }
 }
 
+/// Cancel the view-owned probe when its dialog or library is discarded.
+pub(crate) fn cancel_check(app: &mut LightcraftApp) {
+    if let Some(task) = app.cloud_check.take() {
+        task.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Every frame: take a finished check's result into the dialog. A check whose dialog closed
 /// stops, and one for settings changed since is dropped.
 pub fn poll(app: &mut LightcraftApp, ctx: &egui::Context) {
