@@ -497,6 +497,27 @@ fn set_as_shot_wb_is_undoable_journaled_and_checked() {
     assert_eq!(c.photo(a).unwrap().as_shot_wb, Some((6500.0, 0.0)));
 }
 
+#[test]
+fn media_kind_conversion_is_undoable_and_journaled_without_replacing_photo() {
+    let mut catalog = Catalog::new();
+    let id = catalog.alloc_photo_id();
+    let photo = Photo::new(id, Source::Demo { scene: 1 }, "demo.JPG", "JPEG", 60, 40, "2026-10-16");
+    catalog.apply(Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+    catalog.apply(Op::SetRating { id, rating: 4 }).unwrap();
+    let before = catalog.to_snapshot();
+    let op: Op = serde_json::from_str(&serde_json::to_string(&Op::SetMediaKind { id, kind: MediaKind::Raw }).unwrap()).unwrap();
+    let mut affected = Vec::new();
+    op.photo_ids(&mut |id| affected.push(id));
+    assert_eq!(affected, vec![id]);
+    let inverse = catalog.apply(op).unwrap();
+    assert!(catalog.photo(id).unwrap().develops_raw());
+    assert_eq!(catalog.photo(id).unwrap().rating, 4);
+    let inverse: Op = serde_json::from_str(&serde_json::to_string(&inverse).unwrap()).unwrap();
+    catalog.apply(inverse).unwrap();
+    assert_eq!(catalog.to_snapshot(), before);
+    assert!(catalog.apply(Op::SetMediaKind { id: PhotoId(999), kind: MediaKind::Raw }).is_err());
+}
+
 /// A saved smart album whose rules no longer check (the album a rule tests was deleted) is found,
 /// with its problems; a good one has none; an old album operator is read as it was meant.
 #[test]

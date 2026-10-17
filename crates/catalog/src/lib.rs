@@ -243,6 +243,11 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview_only: Option<String>,
     },
+    /// A source conversion changes its media category without replacing the photo.
+    SetMediaKind {
+        id: PhotoId,
+        kind: MediaKind,
+    },
     /// The lens data a photo's file carries (what Reload finds when it was read after import).
     SetEmbeddedLens {
         id: PhotoId,
@@ -925,6 +930,10 @@ impl Catalog {
                     content_hash: std::mem::replace(&mut p.content_hash, content_hash),
                     preview_only: std::mem::replace(&mut p.preview_only, preview_only),
                 }
+            }
+            Op::SetMediaKind { id, kind } => {
+                let p = self.photo_mut(id)?;
+                Op::SetMediaKind { id, kind: std::mem::replace(&mut p.kind, kind) }
             }
             Op::SetEmbeddedLens { id, lens } => {
                 let p = self.photo_mut(id)?;

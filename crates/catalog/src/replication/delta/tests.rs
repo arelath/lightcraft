@@ -204,7 +204,7 @@ fn version_17_snapshot_upgrades_before_new_delta_records_are_written() {
     let (mut journal, mut loaded, report) = Journal::open(Box::new(store.clone())).unwrap();
     assert_eq!(report.upgraded_from, Some(17));
     let snapshot: serde_json::Value = serde_json::from_slice(&store.get(crate::journal::SNAPSHOT).unwrap()).unwrap();
-    assert_eq!(snapshot["version"], 19);
+    assert_eq!(snapshot["version"], crate::journal::VERSION);
     let op = Op::PatchSyncState { delta: Box::new(SyncDelta::between(&before, &after)) };
     loaded.apply(op.clone()).unwrap();
     journal.append(&[op]).unwrap();

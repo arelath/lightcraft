@@ -78,6 +78,60 @@ fn photo(f: &support::Fixture, name: &str, shade: u8) -> (std::path::PathBuf, Ve
 }
 
 #[test]
+#[ignore = "explicit presented-window generated-original acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn a_new_append_library_uploads_generated_demo_photos_without_manual_import() {
+    use lightcraft_engine::{
+        Session,
+        catalog::{Op, Photo, Source},
+    };
+    let f = support::Fixture::new();
+    f.state.lock().unwrap().append_mode = true;
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("generated-demo");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let library = f.dir.join("demo-library");
+    let (out, rows) = f.run(
+        &library,
+        &[(
+            "cloud.configure",
+            json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"}),
+        )],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    {
+        let mut session = Session::new().with_fs();
+        session.open_library(&library, false).unwrap();
+        let id = session.catalog.alloc_photo_id();
+        let photo = Photo::new(id, Source::Demo { scene: 1 }, "demo.JPG", "JPEG", 60, 40, "2026-10-16T09:00:00");
+        session.commit("Add generated photo", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+        session.close_library().unwrap();
+    }
+    let mut app = Desktop::start(&f, &library, &artifacts);
+    app.execute("cloud.syncEnable", json!({"connection":"personal","protocol":"append-log-v1"}));
+    let until = Instant::now() + Duration::from_secs(45);
+    let key = loop {
+        let key = f.state.lock().unwrap().objects.keys().find(|key| key.starts_with("/photos/library/originals/")).cloned();
+        if let Some(key) = key {
+            break key;
+        }
+        assert!(Instant::now() < until, "no generated original uploaded: {}", app.execute("cloud.overview", json!({})));
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    app.settled(&f, std::slice::from_ref(&key));
+    let bytes = f.state.lock().unwrap().objects.get(&key).unwrap().clone();
+    let raw = lightcraft_raw::decode(&bytes).unwrap();
+    assert_eq!((raw.width, raw.height, raw.bits), (60, 40, 32));
+    app.ask("ui.clickWidget", json!({"id":"icon:cloud"}));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("popup.png").to_string_lossy()}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.execute("cloud.pause", json!({}));
+    app.ask("app.quit", json!({}));
+    assert!(app.child.wait().unwrap().success());
+    let state = f.state.lock().unwrap();
+    assert_eq!(state.signature_errors, 0);
+    assert_eq!(state.objects.keys().filter(|key| key.starts_with("/photos/library/originals/")).count(), 1);
+}
+
+#[test]
 #[ignore = "explicit presented-window cloud-mode acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
 fn enabling_cloud_mode_uploads_existing_and_future_library_photos_automatically() {
     for protocol in ["conditional-head-v1", "append-log-v1"] {

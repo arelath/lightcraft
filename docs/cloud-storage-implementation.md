@@ -55,11 +55,16 @@ uploads remain unsupported.
 
 ## Current limits and remaining work
 
-- Enabling native cloud synchronization automatically queues every file-backed photo
+- Enabling native cloud synchronization automatically queues every file-backed or built-in demo photo
   added to the library, and later imports, for verified staging and upload. Browsed
   Local-folder records are enrolled only after being added to the library. Adoption
   relinks existing photo and virtual-copy records after verified staging; IDs, edits,
   metadata, album memberships and photo history remain. Original files are retained.
+  Demo photos have no on-disk original: background preparation materializes full-resolution
+  linear Rec.2020 originals as 32-bit floating-point DNGs, retaining scene tone mapping,
+  highlight headroom and separate edits. Their actual encoded size replaces the demo estimate.
+  Generated adoption uses manifest version 5 and catalog format 20; older local builds
+  refuse the newer catalog rather than discarding its media-kind conversion operation.
   Existing cloud objects are byte-verified before any upload; matching originals are reused.
   The queue is rediscovered on reopen, bounded to 1,000 candidate IDs per scan, and
   stages one original family at a time without a library-size limit. Missing or unsupported
@@ -316,7 +321,7 @@ Native commands use the shared engine registry, CLI, control channel and MCP:
 |---|---|---|
 | `cloud.configure` | `{id, bucket, region, prefix?, endpoint?, profile?}` | Save and attach a connection; no network request. |
 | `cloud.attach` | `{assetId, asset, fileName, width, height, kind?, format?}` | Add and select a photo referencing already uploaded blobs. The caller supplies its source description. |
-| `cloud.adopt` | `{connection, ids?, requestId?, newRequest?, wait?}` | Move existing file-backed photos and their live virtual copies into managed storage. Durable requests resume staging; relink guards reject changed originals. Undo restores local sources while retaining frozen publication resources. |
+| `cloud.adopt` | `{connection, ids?, requestId?, newRequest?, wait?}` | Move existing file-backed or generated demo photos and their live virtual copies into managed storage. Durable requests resume staging; relink guards reject changed originals. Undo restores local sources while retaining frozen publication resources. |
 | `cloud.import` | `{connection, paths, wait?}` | Stage originals/renditions and atomically save local photos and upload intent. Headless defaults to waiting; desktop returns a background task. |
 | `cloud.importStatus` | `{}` | Return preparation activity, bounded completion reports and durable local upload intents. |
 | `cloud.recoverImports` | `{connection, imports?, wait?}` | Recover validated staged manifests without duplicating recorded imports; optional import IDs limit recovery. |
@@ -489,6 +494,14 @@ remote seed is retained for safe retry. See [migration operation](cloud-sync-pro
 and [browser requirements](browser-cloud.md).
 
 ## Revision history
+
+CUX.10 (2026-10-16): include generated demo originals in automatic cloud staging;
+verify float pixels, appearance, stable identities, staged recovery and append-mode native upload.
+The native acceptance uses an empty signed loopback append-mode bucket, a small generated
+scene, and the ordinary frame pump: no manual adopt/upload command. The uploaded original
+decodes as 32-bit DNG and the inspected popup reaches Synced and backed up. Live B2 data
+was not changed by this acceptance run.
+Validation: all 39 cloud-import engine regressions and all eight `cargo xtask ci` gates passed.
 
 CUX.9 (2026-10-16): native cloud mode automatically stages existing and future added
 library photos, reusing verified cloud originals. Remove the duplicate popup connection action.

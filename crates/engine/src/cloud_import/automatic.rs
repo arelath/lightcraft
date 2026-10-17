@@ -12,7 +12,7 @@ pub(super) struct Queue {
     attempted: BTreeSet<PhotoId>,
 }
 fn eligible(photo: &Photo) -> bool {
-    !photo.deleted && !photo.local && matches!(photo.source, Source::File { .. })
+    !photo.deleted && !photo.local && matches!(photo.source, Source::File { .. } | Source::Demo { .. })
 }
 pub(crate) fn resume(s: &mut Session) {
     if s.cloud_paused || s.cloud_replication_jobs.migrating() || s.cloud_replication_jobs.preparing_migration() {

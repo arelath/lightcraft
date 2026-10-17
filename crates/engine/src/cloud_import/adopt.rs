@@ -9,8 +9,14 @@ pub(super) struct Target {
     path: String,
     content_hash: String,
     size: u64,
+    /// Generated source identity; encoded hash/size describe its staged DNG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    demo: Option<[u32; 3]>,
 }
 impl Target {
+    pub(super) fn generated(&self) -> bool {
+        self.demo.is_some()
+    }
     pub(super) fn photo_id(&self) -> PhotoId {
         self.photo_id
     }
@@ -24,12 +30,18 @@ impl Target {
             && self.content_hash.bytes().all(|b| b.is_ascii_hexdigit())
             && self.size > 0
             && self.size <= MAX_BYTES
+            && self.demo.is_none_or(|[scene, width, height]| scene > 0 && width > 0 && height > 0)
     }
     fn matches(&self, photo: &Photo) -> bool {
         !photo.deleted
-            && photo.source == (Source::File { path: self.path.clone() })
-            && photo.content_hash.as_deref() == Some(self.content_hash.as_str())
-            && photo.file_size == self.size
+            && match self.demo {
+                Some([scene, width, height]) => photo.source == (Source::Demo { scene }) && (photo.width, photo.height) == (width, height),
+                None => {
+                    photo.source == (Source::File { path: self.path.clone() })
+                        && photo.content_hash.as_deref() == Some(self.content_hash.as_str())
+                        && photo.file_size == self.size
+                }
+            }
     }
 }
 
@@ -63,7 +75,7 @@ pub(crate) fn start(s: &mut Session, p: &Value) -> Result<Value> {
             .and_then(|parent| s.catalog.photo(parent))
             .filter(|parent| !parent.deleted && parent.source == photo.source)
             .unwrap_or(photo);
-        if roots.insert(photo.id) && matches!(photo.source, Source::File { .. }) {
+        if roots.insert(photo.id) && matches!(photo.source, Source::File { .. } | Source::Demo { .. }) {
             photos.push((**photo).clone());
         }
     }
@@ -74,6 +86,7 @@ pub(crate) fn start(s: &mut Session, p: &Value) -> Result<Value> {
         .iter()
         .filter_map(|photo| match &photo.source {
             Source::File { path } => Some(PathBuf::from(path)),
+            Source::Demo { .. } => Some(job.root.join("generated-demo").join(format!("{}.dng", photo.id.0))),
             _ => None,
         })
         .collect();
@@ -106,19 +119,21 @@ impl Job {
         Ok(prepared)
     }
     fn prepare_existing(&self, candidate: &requests::Candidate, photo: &Photo, cancel: &AtomicBool) -> Result<Manifest> {
-        let Source::File { path } = &photo.source else {
-            return Err(error("adoption request must describe a file-backed original"));
+        let mut target = if let Source::File { path } = &photo.source {
+            Some(Target {
+                photo_id: photo.id,
+                path: path.clone(),
+                content_hash: photo
+                    .content_hash
+                    .clone()
+                    .ok_or_else(|| error("reload the original to establish its content identity before moving it"))?,
+                size: photo.file_size,
+                demo: None,
+            })
+        } else {
+            None
         };
-        let target = Target {
-            photo_id: photo.id,
-            path: path.clone(),
-            content_hash: photo
-                .content_hash
-                .clone()
-                .ok_or_else(|| error("reload the original to establish its content identity before moving it"))?,
-            size: photo.file_size,
-        };
-        if !target.valid() {
+        if target.as_ref().is_some_and(|target| !target.valid()) {
             return Err(error("reload this photo's original before adopting it; source identity is unavailable"));
         }
         let record = self.root.join("imports").join(format!("{}.json", candidate.id));
@@ -129,28 +144,38 @@ impl Job {
             }
             let mut manifest = read_manifest(&self.root, &candidate.id)?;
             let saved = manifest.adoption.as_ref().ok_or_else(|| error("this staged record is not an adoption; retained for recovery"))?;
-            if saved.photo_id != target.photo_id
-                || saved.path != target.path
-                || saved.content_hash != target.content_hash
-                || saved.size != target.size
-            {
+            if saved.photo_id != photo.id || !saved.matches(photo) {
                 return Err(error("adoption request and staged target differ; retained for recovery"));
             }
             if self.known.contains(&candidate.id) {
                 return Ok(manifest);
             }
             if !self.root.join("blobs").join(&manifest.asset.original.id.0).try_exists().map_err(io)? {
-                self.stage(&manifest.asset.original, &read_bounded(Path::new(&candidate.path), MAX_BYTES)?, cancel)?;
+                let bytes = original_bytes(photo, &candidate.path, cancel)?;
+                if original_mismatch(&manifest, &bytes) {
+                    return Err(error("regenerated original differs from staged identity; retained for recovery"));
+                }
+                self.stage(&manifest.asset.original, &bytes, cancel)?;
             }
             self.finish(&mut manifest, cancel)?;
             return Ok(manifest);
         }
-        let bytes = read_bounded(Path::new(&candidate.path), MAX_BYTES)?;
+        let bytes = original_bytes(photo, &candidate.path, cancel)?;
         let info = crate::files::probe_bytes(&photo.file_name, &bytes).map_err(error)?;
+        if let Source::Demo { scene } = photo.source {
+            target = Some(Target {
+                photo_id: photo.id,
+                path: candidate.path.clone(),
+                content_hash: info.content_hash.clone().ok_or_else(|| error("generated original has no content identity"))?,
+                size: info.file_size,
+                demo: Some([scene, photo.width, photo.height]),
+            });
+        }
+        let target = target.ok_or_else(|| error("adoption requires a file or generated original"))?;
         if info.preview_only.is_some()
             || info.kind == lightcraft_catalog::MediaKind::Video
-            || info.content_hash != photo.content_hash
-            || info.file_size != photo.file_size
+            || info.content_hash.as_deref() != Some(target.content_hash.as_str())
+            || info.file_size != target.size
             || (info.width, info.height) != (photo.width, photo.height)
         {
             return Err(error("original changed or cannot be fully decoded; reload the photo before moving it to cloud storage"));
@@ -173,8 +198,16 @@ impl Job {
         );
         let mut render = photo.clone();
         render.source = Source::Managed { asset_id: AssetId(candidate.id.clone()) };
+        if target.demo.is_some() {
+            render.file_name = Path::new(&photo.file_name).with_extension("dng").to_string_lossy().into_owned();
+            render.format = "DNG".into();
+            render.kind = lightcraft_catalog::MediaKind::Raw;
+            render.content_hash = info.content_hash;
+            render.file_size = info.file_size;
+            render.as_shot_wb = info.as_shot_wb;
+        }
         let mut manifest = Manifest {
-            version: 4,
+            version: if target.demo.is_some() { 5 } else { 4 },
             id: candidate.id.clone(),
             asset_id: AssetId(candidate.id.clone()),
             asset: Asset {
@@ -183,7 +216,7 @@ impl Job {
                 smart_preview: None,
                 thumbnail: None,
             },
-            file_name: photo.file_name.clone(),
+            file_name: render.file_name.clone(),
             photo: Some(Box::new(render)),
             prepared: false,
             target: None,
@@ -205,6 +238,38 @@ impl Job {
         self.finish(&mut manifest, cancel)?;
         Ok(manifest)
     }
+}
+
+/// Procedural sources have no original bytes. Preserve their full linear float
+/// samples, including highlights above one, rather than baking edits into a JPEG.
+fn original_bytes(photo: &Photo, path: &str, cancel: &AtomicBool) -> Result<Vec<u8>> {
+    let Source::Demo { scene } = photo.source else { return read_bounded(Path::new(path), MAX_BYTES) };
+    if cancel.load(Ordering::Relaxed) {
+        return Err(error("cloud import cancelled"));
+    }
+    let scene = lightcraft_scenes::demo_library().into_iter().find(|s| s.id == scene).ok_or_else(|| error("unknown generated photo scene"))?;
+    if photo.width == 0 || photo.height == 0 || photo.width > scene.width || photo.height > scene.height {
+        return Err(error("invalid generated original dimensions"));
+    }
+    let pixels = crate::demo::scene_pixels(&scene, photo.width.max(photo.height) as usize).map_err(error)?;
+    if (pixels.width, pixels.height) != (photo.width as usize, photo.height as usize) {
+        return Err(error("generated original dimensions differ from catalog"));
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(error("cloud import cancelled"));
+    }
+    let color = lightcraft_merge::FrameColor::Linear {
+        to_xyz_d50: lightcraft_color::bradford(lightcraft_color::D65, lightcraft_color::D50).mul(&lightcraft_color::REC2020.to_xyz()),
+    };
+    lightcraft_merge::write_linear_dng(
+        &pixels,
+        &color,
+        lightcraft_geom::Orientation::Normal,
+        &Default::default(),
+        0.0,
+        lightcraft_merge::DngSamples::Float,
+    )
+    .map_err(|e| error(e.to_string()))
 }
 
 pub(super) fn plan(catalog: &mut lightcraft_catalog::Catalog, manifest: Manifest) -> Result<Plan> {
@@ -230,7 +295,26 @@ pub(super) fn plan(catalog: &mut lightcraft_catalog::Catalog, manifest: Manifest
     let mut plan = Plan { ids: family.iter().map(|(id, _, _)| id.0).collect(), ..Default::default() };
     plan.ops.push(Op::SetAsset { id: manifest.asset_id.clone(), asset: Some(Box::new(manifest.asset)) });
     for (id, file_name, local) in family {
-        plan.ops.push(Op::Relink { id, file_name, source: Source::Managed { asset_id: manifest.asset_id.clone() }, format: None });
+        let generated = target.demo.is_some();
+        plan.ops.push(Op::Relink {
+            id,
+            file_name: if generated { Path::new(&file_name).with_extension("dng").to_string_lossy().into_owned() } else { file_name },
+            source: Source::Managed { asset_id: manifest.asset_id.clone() },
+            format: generated.then(|| "DNG".into()),
+        });
+        if generated {
+            let photo = manifest.photo.as_ref().ok_or_else(|| error("generated original metadata missing"))?;
+            plan.ops.push(Op::SetMediaKind { id, kind: lightcraft_catalog::MediaKind::Raw });
+            plan.ops.push(Op::SetContent {
+                id,
+                width: photo.width,
+                height: photo.height,
+                file_size: photo.file_size,
+                content_hash: photo.content_hash.clone(),
+                preview_only: None,
+            });
+            plan.ops.push(Op::SetAsShotWb { id, wb: photo.as_shot_wb });
+        }
         if local {
             plan.ops.push(Op::SetLocal { id, local: false });
         }

@@ -99,8 +99,9 @@ impl Manifest {
         self.adoption.as_ref().map(|target| target.photo_id())
     }
     fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1..=4)
+        if !matches!(self.version, 1..=5)
             || (self.version < 4 && self.adoption.is_some())
+            || (self.version < 5 && self.adoption.as_ref().is_some_and(adopt::Target::generated))
             || (self.adoption.is_some()
                 && (self.target.is_some() || self.working.is_some() || self.stack_with.is_some() || self.origin_asset.is_some()))
             || self.adoption.as_ref().is_some_and(|target| !target.valid())
@@ -2559,6 +2560,92 @@ mod tests {
             resume_library(session);
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn cloud_mode_stages_generated_originals_preserving_edits_copies_and_restart() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let id = session.catalog.alloc_photo_id();
+        let photo = Photo::new(id, Source::Demo { scene: 1 }, "generated.JPG", "JPEG", 60, 40, "2026-10-16T09:00:00");
+        session.commit("Add generated photo", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+        session.selection = Selection::single(id);
+        session.execute("photo.rate", &json!({"ids":[id.0],"rating":4})).unwrap();
+        session.execute("develop.set", &json!({"ids":[id.0],"control":"light.exposure","value":0.7})).unwrap();
+        let edits = session.catalog.photo(id).unwrap().develop.clone();
+        session.selection = Selection::single(id);
+        let copy = PhotoId(session.execute("photo.virtualCopy", &json!({})).unwrap()["ids"][0].as_u64().unwrap());
+        session.execute("cloud.syncEnable", &json!({"connection":"personal"})).unwrap();
+        // The reported library is already enabled: reopening must discover its
+        // previously skipped generated photos without another setup action.
+        session.close_library().unwrap();
+        drop(session);
+        let mut session = fixture.session();
+        let undo_steps = session.undo.len();
+        pump_library_adoption(&mut session, |s| s.catalog.upload_intents().len() == 1);
+        assert_eq!(session.undo.len(), undo_steps);
+        assert_eq!(session.catalog.photos().count(), 2);
+        for id in [id, copy] {
+            let photo = session.catalog.photo(id).unwrap();
+            assert!(matches!(photo.source, Source::Managed { .. }));
+            assert_eq!(photo.format, "DNG");
+            assert!(photo.content_hash.is_some());
+            assert_eq!(photo.develop, edits);
+        }
+        let asset = session.catalog.assets().values().next().unwrap();
+        let root = session.media.asset_resolver.as_ref().unwrap().durable_root().unwrap();
+        let bytes = std::fs::read(root.join("blobs").join(&asset.original.id.0)).unwrap();
+        let decoded = lightcraft_raw::decode(&bytes).unwrap();
+        let scene = lightcraft_scenes::demo_library().remove(0);
+        let expected = crate::demo::scene_pixels(&scene, 60).unwrap();
+        let gain = 2f32.powf(decoded.color.baseline_exposure as f32);
+        let pixels = decoded.develop(lightcraft_raw::Method::Bilinear).unwrap();
+        for (actual, expected) in pixels.data.iter().zip(&expected.data) {
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert!((actual * gain - expected).abs() < expected.abs() * 1e-5 + 1e-6, "original preserves linear pixels without edits");
+            }
+        }
+        assert!(session.source_info(id).raw, "generated original must retain scene-referred tone mapping");
+        let (working, info) = crate::files::load_bytes(&bytes, 60).unwrap();
+        assert!(info.raw);
+        let request = lightcraft_pipeline::RenderRequest::fit(60, 40);
+        let before = lightcraft_pipeline::render(&expected, &lightcraft_pipeline::SourceInfo { raw: true, ..Default::default() }, &edits, &request);
+        let after = lightcraft_pipeline::render(&working, &info, &edits, &request);
+        let error: u64 =
+            before.image.data.iter().zip(&after.image.data).flat_map(|(a, b)| a.iter().zip(b)).map(|(a, b)| u64::from(a.abs_diff(*b))).sum();
+        assert!(error < (60 * 40 * 4 * 2), "materialization changed appearance: total channel error {error}");
+        session.close_library().unwrap();
+        drop(session);
+        let mut reopened = fixture.session();
+        resume_library(&mut reopened);
+        assert!(reopened.cloud_imports.pending.is_empty());
+        assert_eq!(reopened.catalog.upload_intents().len(), 1);
+        assert_eq!(reopened.catalog.photo(copy).unwrap().copy_of, Some(id));
+    }
+
+    #[test]
+    fn generated_adoption_recovers_staged_original_and_rejects_changed_scene() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let id = session.catalog.alloc_photo_id();
+        let photo = Photo::new(id, Source::Demo { scene: 1 }, "generated.JPG", "JPEG", 60, 40, "2026-10-16T09:00:00");
+        session.commit("Add generated photo", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+        session.execute("cloud.adopt", &json!({"connection":"personal","ids":[id.0],"wait":false})).unwrap();
+        let prepared = session.cloud_imports.pending[0].receiver.recv_timeout(std::time::Duration::from_secs(20)).unwrap().unwrap();
+        let import = prepared.manifests[0].id.clone();
+        session.close_library().unwrap();
+        drop(session);
+        let mut session = fixture.session();
+        session.commit("Change scene", Op::Relink { id, file_name: "changed.JPG".into(), source: Source::Demo { scene: 2 }, format: None }).unwrap();
+        let failed = session.execute("cloud.recoverImports", &json!({"connection":"personal","imports":[import]})).unwrap();
+        assert!(!failed["failed"].as_array().unwrap().is_empty());
+        assert!(session.catalog.upload_intents().is_empty());
+        session.undo_step().unwrap();
+        let done = session.execute("cloud.recoverImports", &json!({"connection":"personal","imports":[import]})).unwrap();
+        assert_eq!(done["failed"], json!([]), "{done}");
+        assert_eq!(session.catalog.photos().count(), 1);
+        assert!(matches!(session.catalog.photo(id).unwrap().source, Source::Managed { .. }));
+        assert_eq!(session.catalog.upload_intents().len(), 1);
     }
 
     #[test]

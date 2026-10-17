@@ -215,9 +215,9 @@ fn op_variants_are_versioned() {
             Op::SetCloudIdentity { .. } | Op::SetWorkingCopy { .. } => 10,
             Op::SetAlbumRules { .. } | Op::AddAlbum { .. } => 15,
             Op::SetSyncState { .. } | Op::PatchSyncState { .. } => 19,
+            Op::SetMediaKind { .. } => 20,
         }
     }
-    let state = replication::SyncState::new("library".into(), "author".into(), "connection".into()).unwrap();
-    let newest = since(&Op::PatchSyncState { delta: Box::new(replication::delta::SyncDelta::between(&state, &state)) });
+    let newest = since(&Op::SetMediaKind { id: PhotoId(1), kind: MediaKind::Raw });
     assert_eq!(newest, VERSION, "the newest op shape's version must be the current format version");
 }

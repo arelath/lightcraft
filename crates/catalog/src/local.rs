@@ -284,6 +284,7 @@ impl Op {
             | Op::SetFile { id, .. }
             | Op::Relink { id, .. }
             | Op::SetContent { id, .. }
+            | Op::SetMediaKind { id, .. }
             | Op::SetEmbeddedLens { id, .. }
             | Op::SetAsShotWb { id, .. } => out(*id),
             Op::AddAlbum { album } => {

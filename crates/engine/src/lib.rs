@@ -665,7 +665,9 @@ impl Session {
         let mut assets_changed = false;
         while let Some(op) = pending.pop() {
             match op {
-                Op::SetFile { id, .. } | Op::Relink { id, .. } | Op::SetContent { id, .. } | Op::RemovePhoto { id } => self.media.forget(*id),
+                Op::SetFile { id, .. } | Op::Relink { id, .. } | Op::SetContent { id, .. } | Op::SetMediaKind { id, .. } | Op::RemovePhoto { id } => {
+                    self.media.forget(*id)
+                }
                 Op::AddPhoto { photo } => self.media.forget(photo.id),
                 Op::SetAsset { id, .. } => {
                     if let Some(asset) = self.catalog.asset(id) {
