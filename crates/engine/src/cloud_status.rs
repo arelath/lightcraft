@@ -1,16 +1,30 @@
 //! Shared cloud popup data and device-local publication controls.
 use crate::{EngineError, Result, Session};
 use serde_json::{Value, json};
+mod actions;
 mod diagnostic;
 mod failure;
 mod health;
 mod polling;
+pub use actions::{ActionKind, Actions, DeviceMode, ManualAction};
 pub use diagnostic::{Diagnostic, RetryState};
 pub use failure::{CloudFailure, FailureKind, Recovery, RetryBudget};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use health::now_ms;
 pub use health::{Failure, PollHealth, ResourceHealth};
 pub use polling::PollCadence;
+
+pub(crate) fn can_resume(s: &Session) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        s.cloud_uploads.running() == 0 && !s.cloud_replication_jobs.running() && s.cloud_imports.preparing() == 0
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = s;
+        true
+    }
+}
 
 pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
     let summary = s.catalog.sync_overview();
@@ -30,7 +44,7 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
         out["preparingMigration"] = json!(s.cloud_replication_jobs.preparing_migration());
         out["migrating"] = json!(s.cloud_replication_jobs.migrating());
         out["paused"] = json!(s.cloud_paused || s.cloud_replication_jobs.preparing_migration());
-        out["canResume"] = json!(s.cloud_uploads.running() == 0 && !s.cloud_replication_jobs.running() && s.cloud_imports.preparing() == 0);
+        out["canResume"] = json!(can_resume(s));
         out["preparingFiles"] = json!(s.cloud_imports.preparing());
         out["preparingPhotos"] = json!(s.cloud_imports.preparing_photos());
         out["health"]["uploads"]["activity"] = s.cloud_uploads.health();

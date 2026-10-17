@@ -72,6 +72,27 @@ impl Desktop {
         self.wait_widget(id);
         self.ask("ui.clickWidget", json!({"id":id}));
     }
+    fn reveal_on_right(&mut self, id: &str) {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let widgets = self.ask("ui.widgets", json!({"filter":id}));
+            let window = self.ask("ui.inspect", json!({}))["window"].clone();
+            let height = window[1].as_f64().unwrap();
+            if widgets.as_array().is_some_and(|items| {
+                items.iter().any(|w| {
+                    w["id"] == id
+                        && w["rect"][1].as_f64().unwrap() > 80.
+                        && w["rect"][1].as_f64().unwrap() + w["rect"][3].as_f64().unwrap() < height - 40.
+                })
+            }) {
+                break;
+            }
+            assert!(Instant::now() < until, "Info control did not become visible: {id}: {widgets}");
+            self.ask("ui.move", json!({"x":window[0].as_f64().unwrap()-180.,"y":height/2.}));
+            self.ask("ui.scroll", json!({"dy":-300.}));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     fn settled(&mut self, f: &support::Fixture, originals: &[String]) {
         let until = Instant::now() + Duration::from_secs(45);
         loop {
@@ -111,6 +132,45 @@ fn photo(f: &support::Fixture, name: &str, shade: u8) -> (std::path::PathBuf, Ve
     std::fs::write(&path, &bytes).unwrap();
     let key = format!("/photos/library/originals/{}", support::hash(&bytes));
     (path, bytes, key)
+}
+
+#[test]
+#[ignore = "explicit native Info Resume acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn info_resumes_paused_cloud_uploads_and_publication() {
+    let f = support::Fixture::new();
+    let local = f.dir.join("info-resume");
+    let (_, source) = f.import(&local, false);
+    let key = format!("/photos/library/originals/{}", support::hash(&std::fs::read(&source).unwrap()));
+    let (out, rows) = f.run(&local, &[("cloud.pause", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("info-resume");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    let paused = app.execute("cloud.overview", json!({}));
+    assert_eq!(paused["userPaused"], true);
+    assert!(paused["summary"]["queuedFiles"].as_u64().unwrap_or(0) > 0, "acceptance fixture must have a waiting upload: {paused}");
+    app.execute("library.select", json!({"ids":[1]}));
+    app.execute("panel.info", json!({}));
+    app.reveal_on_right("button:cloudSyncNow");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("paused-info.png")}));
+    app.click_when_ready("button:cloudSyncNow");
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = app.execute("cloud.overview", json!({}));
+        if status["userPaused"] == false {
+            break;
+        }
+        assert!(Instant::now() < until, "Info dispatched Sync instead of Resume: {status}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.settled(&f, std::slice::from_ref(&key));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("resumed-info.png")}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.ask("app.quit", json!({}));
+    assert!(app.child.wait().unwrap().success());
+    let storage = f.state.lock().unwrap();
+    assert_eq!(storage.signature_errors, 0);
+    assert_eq!(storage.objects.get(&key), Some(&std::fs::read(source).unwrap()));
 }
 
 #[test]

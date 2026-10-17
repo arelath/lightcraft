@@ -268,6 +268,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let summary = &data["summary"];
     let off = data["syncEnabled"] == false;
     let paused = data["paused"] == true;
+    let controls = lightcraft_engine::cloud_status::Actions::from_overview(data);
     let waiting = data["waitingFiles"].as_u64().unwrap_or(0).saturating_add(data["preparingPhotos"].as_u64().unwrap_or(0));
     let active = data["uploadingFiles"].as_u64().unwrap_or(0);
     let changes = summary["pendingChanges"].as_u64().unwrap_or(0);
@@ -377,7 +378,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                 };
                 icons::paint(ui.painter(), rect.shrink(2.), icon, if attention { t.caution } else { t.accent });
                 register(ui.ctx(), format!("indicator:cloudFooter{icon:?}"), rect);
-                let status_width = (ui.available_width() - 60.).max(50.);
+                let footer_action = controls.footer;
+                let reserve = if footer_action.is_some_and(|a|matches!(a.kind,lightcraft_engine::cloud_status::ActionKind::SyncNow|lightcraft_engine::cloud_status::ActionKind::ContinueWithoutMigration)) {74.} else {60.};
+                let status_width = (ui.available_width() - reserve).max(50.);
                 ui.allocate_ui_with_layout(egui::vec2(status_width, 24.), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.set_min_width(status_width);
                     ui.add(egui::Label::new(crate::i18n::tr(status)).wrap());
@@ -388,20 +391,17 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                     if response.clicked(){invoke(app,ui,"dialog.cloudDelete",json!({}));}
                     return;
                 }
-                if off {
-                    let response = ui.button(crate::i18n::tr("Turn on"));
-                    register(ui.ctx(), "button:cloudTurnOn", response.rect);
-                    if response.clicked() { invoke(app,ui,"dialog.cloudSync",json!({})); }
-                    return;
+                if let Some(action) = footer_action {
+                    use lightcraft_engine::cloud_status::ActionKind;
+                    let id = match action.kind {ActionKind::Retry=>"button:cloudRetry",ActionKind::Details=>"button:cloudStatusDetails",ActionKind::Enable=>"button:cloudTurnOn",_=>"button:cloudPauseResume"};
+                    let enabled = action.enabled && (action.kind == ActionKind::Enable || app.session.library.is_some());
+                    let mut response = ui.add_enabled(enabled, egui::Button::new(crate::i18n::tr(action.kind.compact_label())).frame(true).stroke(egui::Stroke::new(1., t.button_border)).min_size(egui::vec2(54., 24.)));
+                    register(ui.ctx(), id, response.rect);
+                    if let Some(reason)=action.reason {response=response.on_hover_text(crate::i18n::tr(reason)).on_disabled_hover_text(crate::i18n::tr(reason));}
+                    if response.clicked() && let Err(error) = app.run(action.kind.command(), action.kind.params()) { app.toast(ui.ctx(), error); }
                 }
-                let retry = attention && !paused;
-                let label = if retry { "Retry" } else if paused { "Resume" } else { "Pause" };
-                let id = if retry { "button:cloudRetry" } else { "button:cloudPauseResume" };
-                let response = ui.add_enabled(app.session.library.is_some() && (!(retry || paused) || data["canResume"] == true), egui::Button::new(crate::i18n::tr(label)).frame(true).stroke(egui::Stroke::new(1., t.button_border)).min_size(egui::vec2(54., 24.)));
-                register(ui.ctx(), id, response.rect);
-                if response.clicked() && let Err(error) = app.run(if retry || paused { "cloud.resume" } else { "cloud.pause" }, json!({})) { app.toast(ui.ctx(), error); }
-            }).response.on_hover_text(crate::i18n::tr(if off {"Turn on cloud sync explicitly to merge this local library with cloud storage."} else {"Uploads and library publication pause on this device. Photos remain available for editing."}));
-            if !off && paused && data["canResume"] != true { ui.label(crate::i18n::tr("Stopping current transfers…")); }
+            }).response.on_hover_text(crate::i18n::tr(controls.footer.map_or("Cloud library upgrade is running.",|a|a.kind.description())));
+            if controls.footer.is_some_and(|a|!a.enabled&&matches!(a.kind,lightcraft_engine::cloud_status::ActionKind::Resume|lightcraft_engine::cloud_status::ActionKind::ContinueWithoutMigration)) { ui.label(crate::i18n::tr("Stopping current transfers…")); }
         });
     });
     register(ui.ctx(), "popup:cloud", popup.response.rect);

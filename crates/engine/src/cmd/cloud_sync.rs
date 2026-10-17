@@ -51,7 +51,7 @@ pub fn status(s: &mut Session, params: &Value) -> Result<Value> {
     #[cfg(target_arch = "wasm32")]
     let enabled = true;
     Ok(json!({"enabled":enabled,"library":state.library,"device":state.device,"connection":state.connection,
-        "paused":s.cloud_paused,
+        "paused":s.cloud_paused,"userPaused":s.cloud_paused,"canResume":crate::cloud_status::can_resume(s),
         "health":health,
         "publicationBlocked":publication_blocked,
         "preparingMigration":preparing_migration(s),

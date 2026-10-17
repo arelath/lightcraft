@@ -306,6 +306,9 @@ impl Host {
         status["transportAvailable"] = json!(self.backend.is_some() && !data.providers.is_empty());
         status["running"] = json!(data.sync_running);
         status["paused"] = json!(s.cloud_paused || data.preparing_migration);
+        status["userPaused"] = json!(s.cloud_paused);
+        // Read-only Acquire jobs remain available while publication is paused.
+        status["canResume"] = json!(!data.sync_running);
         status["preparingMigration"] = json!(data.preparing_migration);
         status["migrating"] = json!(data.jobs.iter().any(|job| job.migrating));
         status["reports"] = json!(data.reports);

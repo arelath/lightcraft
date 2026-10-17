@@ -55,6 +55,8 @@ mod tests_appearance;
 #[cfg(test)]
 mod tests_before_after;
 #[cfg(test)]
+mod tests_cloud_actions;
+#[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests_cloud_setup;
 #[cfg(test)]

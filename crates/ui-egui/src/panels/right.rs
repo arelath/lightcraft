@@ -756,6 +756,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             ui.add_space(6.0);
             {
                 if let Some((library, pending, generation)) = sync {
+                    let controls = lightcraft_engine::cloud_status::Actions::from_sync_status(&status);
                     let running = status["running"].as_bool().unwrap_or(false);
                     ui.label(
                         egui::RichText::new(if off {
@@ -789,24 +790,25 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     if !off && let Some(diagnostic) = lightcraft_engine::cloud_status::Diagnostic::from_sync_status(&status) {
                         ui.label(egui::RichText::new(&diagnostic.failure.message).color(t.text_dim));
                         if text_button(ui, "cloudErrorInfoDetails", crate::i18n::tr("Details…"), false).clicked()
-                            && let Err(error) = app.run("dialog.cloudError", json!({}))
+                            && let Err(error) = app.run(lightcraft_engine::cloud_status::ActionKind::Details.command(), json!({}))
                         {
                             app.toast(ui.ctx(), error);
                         }
                     }
-                    // After an error the advice says Retry Syncing: the button says the same.
-                    let label = if off {
-                        "Turn on cloud sync…"
-                    } else if status["health"]["lastError"].is_object() {
-                        "Retry Syncing"
-                    } else {
-                        "Sync now"
-                    };
-                    if !running
-                        && text_button(ui, if off { "cloudSyncTurnOn" } else { "cloudSyncNow" }, crate::i18n::tr(label), false).clicked()
-                        && let Err(error) = app.run(if off { "dialog.cloudSync" } else { "cloud.sync" }, json!({"wait":false}))
-                    {
-                        app.toast(ui.ctx(), error);
+                    // Details already appears beside the diagnostic above.
+                    if let Some(action) = controls.manual.filter(|action| action.kind != lightcraft_engine::cloud_status::ActionKind::Details) {
+                        let mut response = ui
+                            .add_enabled_ui(action.enabled, |ui| {
+                                text_button(ui, if off { "cloudSyncTurnOn" } else { "cloudSyncNow" }, crate::i18n::tr(action.kind.label()), false)
+                            })
+                            .inner;
+                        let reason = action.reason.unwrap_or(action.kind.description());
+                        response = response.on_hover_text(crate::i18n::tr(reason)).on_disabled_hover_text(crate::i18n::tr(reason));
+                        if response.clicked()
+                            && let Err(error) = app.run(action.kind.command(), action.kind.params())
+                        {
+                            app.toast(ui.ctx(), error);
+                        }
                     }
                     if !off
                         && status["protocol"].as_str() == Some("conditional-head-v1")

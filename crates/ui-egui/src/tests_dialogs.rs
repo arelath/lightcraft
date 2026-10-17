@@ -17,7 +17,7 @@ fn cloud_retry_headline_displays_bounded_countdown_and_manual_recovery_actions()
                         "summary":{"cloudPhotos":1,"albums":0,"pendingChanges":1},"paused":false,"syncEnabled":true,"canResume":true,
                         "health":{"sync":{"state":state,"pollingHalted":state=="halted",
                             "retry":{"attempt":2,"maxAttempts":5,"secondsUntilRetry":4,"exhausted":exhausted},
-                            "lastError":{"message":"Storage unavailable","action":"Check connectivity, then Retry Syncing."}}}
+                            "lastError":{"kind":"connectivity","message":"Storage unavailable","action":"Check connectivity, then Retry Syncing."}}}
                     }))
                 })
             })),
