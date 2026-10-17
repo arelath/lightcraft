@@ -258,5 +258,12 @@
   "{n} s ago": "{n} с тому",
   "{n} min ago": "{n} хв тому",
   "{n} h ago": "{n} год тому",
-  "{n} d ago": "{n} дн. тому"
+  "{n} d ago": "{n} дн. тому",
+  "{n} photo": "Фото: {n}",
+  "{n} album": "Альбомів: {n}",
+  "{n} albums": "Альбомів: {n}",
+  "{photos} in {albums}": "{photos}, {albums}",
+  "{n} uploading": "Завантажується: {n}",
+  "{n} waiting": "Очікує: {n}",
+  "Your {n} changes wait here.": "Ваші зміни ({n}) очікують тут."
 }

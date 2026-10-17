@@ -258,5 +258,12 @@
   "{n} s ago": "{n} 秒前",
   "{n} min ago": "{n} 分前",
   "{n} h ago": "{n} 時間前",
-  "{n} d ago": "{n} 日前"
+  "{n} d ago": "{n} 日前",
+  "{n} photo": "{n} 枚の写真",
+  "{n} album": "{n} 個のアルバム",
+  "{n} albums": "{n} 個のアルバム",
+  "{photos} in {albums}": "{albums}に{photos}",
+  "{n} uploading": "{n} 枚をアップロード中",
+  "{n} waiting": "{n} 枚が待機中",
+  "Your {n} changes wait here.": "{n} 件の変更はここで待機します。"
 }

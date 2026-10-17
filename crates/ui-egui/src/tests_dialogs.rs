@@ -32,10 +32,10 @@ fn cloud_retry_headline_displays_bounded_countdown_and_manual_recovery_actions()
             h.step();
         }
         let text = h.view.painted_text();
-        for label in [expected, "Check connectivity, then Retry Syncing.", "Retry Syncing"] {
+        for label in [expected, "Details", "Retry"] {
             assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
         }
-        assert!(!text.iter().any(|value| value == "Up to date"));
+        assert!(!text.iter().any(|value| value == "Synced and backed up"));
     }
 }
 
@@ -67,10 +67,10 @@ fn cloud_health_headline_covers_halted_polling_and_structural_only_conflicts() {
         }
         let text = h.view.painted_text();
         assert!(text.iter().any(|value| value.contains("Sync needs attention")), "{text:?}");
-        assert!(!text.iter().any(|value| value == "Up to date"));
-        let cause = if structural { "Album or stack choices need attention" } else { "Automatic checking stopped after an error." };
+        assert!(!text.iter().any(|value| value == "Synced and backed up"));
+        let cause = if structural { "Album or stack choices need attention" } else { "Remote access failed; polling stopped" };
         assert!(text.iter().any(|value| value.contains(cause)), "{text:?}");
-        assert!(text.iter().any(|value| value.contains("Last remote check: 20 s ago")), "{text:?}");
+        assert!(text.iter().any(|value| value.contains("20 s ago")), "{text:?}");
         let widgets = h.request("ui.widgets", json!({"filter":"indicator:cloudQueue"}), T);
         assert!(!widgets["result"].as_array().unwrap().is_empty());
         {
@@ -85,7 +85,7 @@ fn cloud_health_headline_covers_halted_polling_and_structural_only_conflicts() {
         for _ in 0..4 {
             h.step();
         }
-        assert!(h.view.painted_text().iter().any(|value| value == "Up to date"));
+        assert!(h.view.painted_text().iter().any(|value| value == "Synced and backed up"));
     }
 }
 
@@ -118,7 +118,7 @@ fn cloud_popup_exposes_preflight_reason_and_dispatches_exact_import_retry() {
     for label in ["Sync needs attention", "camera.dng", "invalid revision manifest", "Retry upload"] {
         assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
     }
-    assert!(!text.iter().any(|value| value == "Up to date"));
+    assert!(!text.iter().any(|value| value == "Synced and backed up"));
     assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudRetryImport:blocked-import"}), T)["ok"], true);
     for _ in 0..4 {
         h.step();
@@ -391,17 +391,16 @@ fn cloud_popup_says_publishing_is_blocked_and_counts_field_conflicts() {
     }
     let text = h.view.painted_text();
     for label in [
-        "Publishing paused by the cloud library",
+        "Publishing paused",
         "another device is upgrading this cloud library",
-        "Changes from other devices still arrive.",
-        "Conflicting edits to choose between: 1",
-        "Cloud photos: 3",
-        "Library changes waiting to sync: 2",
-        "Last remote check: 2 h ago",
+        "Your 2 changes wait here.",
+        "1 conflicting edit",
+        "3 photos in 1 album",
+        "2 h ago",
     ] {
         assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
     }
-    assert!(!text.iter().any(|value| value == "Up to date"));
+    assert!(!text.iter().any(|value| value == "Synced and backed up"));
 }
 
 #[test]

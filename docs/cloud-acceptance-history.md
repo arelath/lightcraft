@@ -314,3 +314,31 @@ Three subsequent automatic polls per backend made 12 manifest/LIST requests and 
 checkpoint or receipt-node GETs. All fixture requests were signed; no page errors occurred. See the
 [dated reliability evidence](cloud-reliability-tasks.md). This is loopback acceptance, not a live B2
 or large-photo-library performance result.
+
+
+## 2026-10-16: cloud popup redesign
+
+CUX.6 implements the supplied summary/uploading/attention layout, actionable conflict and
+error links, and the Pause/Resume/Retry footer. Twenty-four focused cloud UI checks passed;
+four new regressions exercise the redesigned states, navigation and a 900×600 window.
+Screenshots under `target/cloud-popup-acceptance/` (`up-to-date.png`, `uploading.png`,
+`needs-attention.png`, `paused-small-window.png`) were inspected. These headless UI fixtures
+supply representative cloud state; they do not perform provider operations.
+
+The final desktop build passed real control-channel pause/resume and storage/synchronization
+navigation with a separate local catalog. Presented-window captures `native-popup-final.png`
+and `native-paused-final.png` were inspected; no headless fallback occurred. Inspection/perf
+and interaction results are retained in `native-final-inspect.json` and
+`native-final-results.json`. The scratch app was closed after verification.
+
+All eight `cargo +1.95.0 xtask ci` stages passed in `target/cloud-popup-ci.log`, including
+774 passing UI tests and the WASM checks. The final UI clippy check passed in
+`target/cloud-popup-final-clippy-verified.log`. The native build log is
+`target/cloud-popup-native-final-build.log`.
+
+To reproduce the representative screenshots from the repository root in PowerShell:
+
+```powershell
+$env:LIGHTCRAFT_POPUP_SNAPSHOTS = "$PWD/target/cloud-popup-acceptance"
+cargo +1.95.0 test -p lightcraft-ui-egui --lib cloud_popup_redesign
+```

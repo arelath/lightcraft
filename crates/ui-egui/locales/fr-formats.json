@@ -258,5 +258,12 @@
   "{n} s ago": "il y a {n} s",
   "{n} min ago": "il y a {n} min",
   "{n} h ago": "il y a {n} h",
-  "{n} d ago": "il y a {n} j"
+  "{n} d ago": "il y a {n} j",
+  "{n} photo": "{n} photo",
+  "{n} album": "{n} album",
+  "{n} albums": "{n} albums",
+  "{photos} in {albums}": "{photos} dans {albums}",
+  "{n} uploading": "{n} en cours d’envoi",
+  "{n} waiting": "{n} en attente",
+  "Your {n} changes wait here.": "Vos {n} modifications attendent ici."
 }

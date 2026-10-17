@@ -265,10 +265,18 @@ Quality gates (2026-10-14): all eight stages of `cargo +1.95.0 xtask ci` passed 
 - [x] **CUX.3** Make the upper-right cloud icon open a status popup with file counts, byte progress, errors and pause/resume; add Sync Status filtering and expose the controls to automation.
 - [x] **CUX.4** Verify queue pause/resume with real native control requests and browser OPFS/IndexedDB workflows; inspect the popup and filters with procedural photos.
 - [x] **CUX.5** Run focused regressions, full CI and native/web builds; update cloud and progress documentation with verified scope and limitations.
+- [x] **CUX.6** Implement the supplied cloud-popup redesign: library summary, live upload progress, grouped attention with Choose/Details, contextual navigation and one Pause/Resume/Retry footer; verify representative states, small-window fit and native interactions.
 
 Workflow verification (2026-10-14): the signed loopback fixture and real desktop control channel passed a six-file queue with a 9 MiB multipart original. Pause kept the queue idle across reconnect, cancelled active transfers while preserving confirmed part 1, the upload ID and durable originals, and allowed a new pending edit. Resume reused that multipart identity, completed all six files and cleared pending mutations. Control inspections stayed below 56 ms during the delayed transfer. Native popup/byte progress/paused-state and Pending filter screenshots were inspected (`target/cloud-ux-acceptance/native-results.json`, `native-*.png`). Chromium OPFS and IndexedDB passed the popup, status picker, persisted pause across reload/reconnect, explicit resume and native-peer metadata convergence (`browser-results.json`, `browser-*.png`). Browser original uploads remain unsupported; these are fixture checks, not a new live-B2 acceptance run.
 
 Quality gates (2026-10-14): all eight stages of `cargo +1.95.0 xtask ci` passed (`target/cloud-ux-ci.log`). Native release and browser builds passed (`target/cloud-ux-native-final.log`, `target/cloud-ux-web-final.log`). The final full suite passed the indexed-status, pause persistence/write-failure and popup/filter regressions. Incomplete setup in concurrent reliability tests was corrected by selecting the slider's photo, supplying the dialog connection response and initializing its first frame, and enabling sync before testing the cleanup reservation. These corrections affect test fixtures only. Owned cloud-UX fixture/static helpers were stopped.
+
+Redesign verification (2026-10-16, CUX.6): 24 focused cloud UI checks passed, including four
+new state/navigation/fit regressions. The up-to-date, uploading, attention and paused screenshots
+were inspected. Native presented-window control checks passed pause, resume, storage navigation
+and synchronization navigation using an isolated local catalog; the app was closed afterward.
+All eight `cargo +1.95.0 xtask ci` stages and a final UI clippy check passed. Evidence and
+reproduction notes: [cloud-acceptance-history.md](docs/cloud-acceptance-history.md#2026-10-16-cloud-popup-redesign).
 
 ## Cache preferences — follow-up
 

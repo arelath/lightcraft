@@ -258,5 +258,12 @@
   "{n} s ago": "vor {n} s",
   "{n} min ago": "vor {n} Min.",
   "{n} h ago": "vor {n} Std.",
-  "{n} d ago": "vor {n} T."
+  "{n} d ago": "vor {n} T.",
+  "{n} photo": "{n} Foto",
+  "{n} album": "{n} Album",
+  "{n} albums": "{n} Alben",
+  "{photos} in {albums}": "{photos} in {albums}",
+  "{n} uploading": "{n} werden hochgeladen",
+  "{n} waiting": "{n} warten",
+  "Your {n} changes wait here.": "Deine {n} Änderungen warten hier."
 }

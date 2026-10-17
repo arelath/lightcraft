@@ -258,5 +258,12 @@
   "{n} s ago": "{n} 秒前",
   "{n} min ago": "{n} 分鐘前",
   "{n} h ago": "{n} 小時前",
-  "{n} d ago": "{n} 天前"
+  "{n} d ago": "{n} 天前",
+  "{n} photo": "{n} 張相片",
+  "{n} album": "{n} 個相簿",
+  "{n} albums": "{n} 個相簿",
+  "{photos} in {albums}": "{albums}中的{photos}",
+  "{n} uploading": "正在上傳 {n} 張",
+  "{n} waiting": "{n} 張等待中",
+  "Your {n} changes wait here.": "您的 {n} 項變更在此等待。"
 }

@@ -234,10 +234,14 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                         }
                         register(ui.ctx(), "indicator:cloudQueue", r);
                     }
-                    egui::Popup::menu(&resp).width(320.).show(|ui| {
+                    egui::Popup::menu(&resp).width(320.).frame(egui::Frame::popup(ui.style()).inner_margin(0).corner_radius(10)).show(|ui| {
+                        // Popup areas start with a 400-point layout height. Let the card use
+                        // the actual window budget before the scroll area measures its viewport.
+                        let height = (ui.ctx().content_rect().height() - 80.).clamp(180., 640.);
+                        ui.set_max_height(height);
                         egui::ScrollArea::vertical()
                             .id_salt("cloud-popup-scroll")
-                            .max_height((ui.ctx().content_rect().height() - 80.).clamp(180., 640.))
+                            .max_height(height)
                             .show(ui, |ui| crate::panels::cloud::show(app, ui, &cloud));
                     });
                 }

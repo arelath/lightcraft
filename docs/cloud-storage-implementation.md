@@ -29,6 +29,22 @@ changed metadata/cursor/generation continue through durable receive. Network dis
 uses durable consumed-checkpoint hints and bounded resumable historical audits
 in append mode. LIST discovery and full state validation still have linear costs.
 
+## Cloud status popup
+
+The cloud icon opens a compact library card: photo/album totals, known original size and
+last successful remote check. Uploads show live transfer bytes, active/waiting photo counts
+and changes awaiting publication. While originals are queued, the size is labelled
+“Managed originals” because it includes data that has not reached storage yet.
+
+Problems appear together under Needs Attention, with publication-blocked changes, a
+conflicting photo/field preview and Choose, and synchronization failures with Details and
+an automatic-retry countdown. Choose and Details open Cloud Synchronization, where the
+full cause, recovery advice, retained choices and maintenance actions remain available.
+Per-import and upload retry actions remain directly accessible. The footer has one main
+action: Pause, Resume, or Retry. Navigation rows close the popup when opening their
+associated view or dialog. Desktop import is offered in the idle state; browser original
+uploads remain unsupported.
+
 ## Current limits and remaining work
 
 - Native local files stay local until managed import or explicit `cloud.adopt`. Adoption
