@@ -57,7 +57,7 @@ impl Desktop {
     fn execute(&mut self, command: &str, params: Value) -> Value {
         self.ask("engine.execute", json!({"command":command,"params":params}))
     }
-    fn click_when_ready(&mut self, id: &str) {
+    fn wait_widget(&mut self, id: &str) {
         let until = Instant::now() + Duration::from_secs(10);
         loop {
             let widgets = self.ask("ui.widgets", json!({"filter":id}));
@@ -67,6 +67,9 @@ impl Desktop {
             assert!(Instant::now() < until, "widget did not appear: {id}: {widgets}");
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+    fn click_when_ready(&mut self, id: &str) {
+        self.wait_widget(id);
         self.ask("ui.clickWidget", json!({"id":id}));
     }
     fn settled(&mut self, f: &support::Fixture, originals: &[String]) {
@@ -108,6 +111,56 @@ fn photo(f: &support::Fixture, name: &str, shade: u8) -> (std::path::PathBuf, Ve
     std::fs::write(&path, &bytes).unwrap();
     let key = format!("/photos/library/originals/{}", support::hash(&bytes));
     (path, bytes, key)
+}
+
+#[test]
+#[ignore = "explicit native profile replacement acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn replacing_saved_keys_with_named_profile_probes_and_saves_the_selected_profile() {
+    let f = support::Fixture::new();
+    let local = f.dir.join("profile-replacement");
+    let mut credentials = std::fs::OpenOptions::new().append(true).open(f.dir.join("credentials")).unwrap();
+    writeln!(credentials, "\n[lightcraft-personal]\naws_access_key_id=EXPIRED_ACCESS\naws_secret_access_key=EXPIRED_SECRET").unwrap();
+    drop(credentials);
+    let (out, rows) = f.run(
+        &local,
+        &[(
+            "cloud.configure",
+            json!({"id":"personal","bucket":"photos","region":"us-east-1",
+        "prefix":"library","endpoint":f.endpoint,"profile":"lightcraft-personal"}),
+        )],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("profile-replacement");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    app.execute("dialog.cloudStorage", json!({"id":"personal"}));
+    app.click_when_ready("dropdown:cloudSetupAuthentication");
+    app.click_when_ready("cloudSetupAuthentication:profile");
+    app.click_when_ready("cloudSetupProfile");
+    app.ask("ui.key", json!({"key":"A","cmd":true}));
+    app.ask("ui.text", json!({"text":"acceptance"}));
+    std::thread::sleep(Duration::from_millis(50));
+    app.click_when_ready("button:cloudSetupTest");
+    app.wait_widget("status:cloudSetupConnected");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("checked.png")}));
+    app.click_when_ready("button:dialogOk");
+    let until = Instant::now() + Duration::from_secs(10);
+    let connections = loop {
+        let value = app.execute("cloud.connections", json!({}));
+        if value["connections"].as_array().unwrap().iter().any(|c| c["id"] == "personal" && c["profile"] == "acceptance") {
+            break value;
+        }
+        assert!(Instant::now() < until, "selected profile was not saved: {value}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    std::fs::write(artifacts.join("connections.json"), serde_json::to_vec_pretty(&connections).unwrap()).unwrap();
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.ask("app.quit", json!({}));
+    assert!(app.child.wait().unwrap().success());
+    let state = f.state.lock().unwrap();
+    assert!(!state.requests.is_empty(), "the selected credentials must actually be probed");
+    assert_eq!(state.signature_errors, 0, "using the expired managed profile must not pass");
+    assert!(state.requests.iter().all(|(method, _)| method == "GET"), "connection editing is read-only against remote storage");
 }
 
 #[test]

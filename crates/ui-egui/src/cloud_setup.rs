@@ -2,8 +2,8 @@
 //! Cloud Storage…, as a dialog in steps.
 //!
 //! 1. **Where**: Backblaze B2, Amazon S3 or another S3-compatible service.
-//! 2. **Connect**: the bucket and its keys (under More options: the folder in the bucket, the
-//!    connection's name, or an AWS profile to sign with instead). Next checks them first: a
+//! 2. **Connect**: the bucket and an explicit authentication source (saved/new keys, a named
+//!    profile or environment/default credentials). Next checks them first: a
 //!    read-only listing on a worker thread, with its row in the activity stack, that also finds
 //!    the libraries already in the folder. Cloud Storage… saves the connection here.
 //! 3. **Library**: start a new cloud library from this catalog, or join one found in the folder
@@ -21,6 +21,34 @@ use lightcraft_catalog::replication::SyncProtocol;
 use lightcraft_engine::cloud_setup::{Probe, Provider};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Authentication {
+    SavedKeys,
+    #[default]
+    NewKeys,
+    Profile,
+    Environment,
+}
+impl Authentication {
+    fn label(self) -> &'static str {
+        match self {
+            Self::SavedKeys => "Saved keys",
+            Self::NewKeys => "New access keys",
+            Self::Profile => "Named AWS profile",
+            Self::Environment => "Environment / default profile",
+        }
+    }
+    fn id(self) -> &'static str {
+        match self {
+            Self::SavedKeys => "savedKeys",
+            Self::NewKeys => "newKeys",
+            Self::Profile => "profile",
+            Self::Environment => "environment",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +116,9 @@ pub struct Setup {
     pub profile: String,
     /// An earlier setup saved this connection's keys: blank key fields keep them.
     pub saved_keys: bool,
+    pub authentication: Authentication,
+    /// The original saved credential binding survives a connection-name edit.
+    pub saved_profile: Option<String>,
     pub check: Check,
     /// What the check checked ([`fingerprint`]): a passed check is for these settings only.
     pub checked: u64,
@@ -176,12 +207,29 @@ impl Setup {
         }
     }
 
-    /// The profile the connection signs with: the typed or saved keys' own, else the one named.
-    fn profile_name(&self) -> Option<String> {
-        if self.saved_keys || !self.key_id.trim().is_empty() || !self.secret.0.trim().is_empty() {
-            Some(lightcraft_engine::cloud_setup::profile_for(self.name.trim()))
-        } else {
-            Some(self.profile.trim().to_owned()).filter(|p| !p.is_empty())
+    /// Only the selected authentication source can supply credentials to probe/save.
+    fn profile_name(&self) -> Result<Option<String>, String> {
+        match self.authentication {
+            Authentication::SavedKeys if self.saved_keys => {
+                Ok(Some(self.saved_profile.clone().unwrap_or_else(|| lightcraft_engine::cloud_setup::profile_for(self.name.trim()))))
+            }
+            Authentication::SavedKeys => {
+                Err(crate::i18n::tr("Choose new keys, a named profile or default credentials; this connection has no saved keys.").into())
+            }
+            Authentication::NewKeys => {
+                if self.key_id.trim().is_empty() || self.secret.0.trim().is_empty() {
+                    return Err(crate::i18n::tr("Enter both the key ID and its secret key.").into());
+                }
+                Ok(Some(lightcraft_engine::cloud_setup::profile_for(self.name.trim())))
+            }
+            Authentication::Profile => {
+                let profile = self.profile.trim();
+                if profile.is_empty() {
+                    return Err(crate::i18n::tr("Enter the AWS profile name.").into());
+                }
+                Ok(Some(profile.into()))
+            }
+            Authentication::Environment => Ok(None),
         }
     }
 
@@ -219,7 +267,7 @@ impl Setup {
         if let Some(endpoint) = endpoint {
             params["endpoint"] = json!(endpoint);
         }
-        if let Some(profile) = self.profile_name() {
+        if let Some(profile) = self.profile_name()? {
             params["profile"] = json!(profile);
         }
         Ok(params)
@@ -259,6 +307,7 @@ pub fn fingerprint(setup: &Setup) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (setup.provider as u8, &setup.name, &setup.bucket, &setup.endpoint, &setup.region, &setup.prefix).hash(&mut hasher);
     (&setup.key_id, &setup.secret.0, &setup.profile, setup.saved_keys).hash(&mut hasher);
+    (setup.authentication as u8, &setup.saved_profile).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -285,6 +334,14 @@ pub fn open(app: &mut LightcraftApp, connection: Option<&str>, storage_only: boo
         setup.provider = Provider::of(&c);
         setup.step = Step::Connect;
         setup.saved_keys = c.profile.as_deref() == Some(lightcraft_engine::cloud_setup::profile_for(&c.id).as_str());
+        setup.authentication = if setup.saved_keys {
+            setup.saved_profile = c.profile.clone();
+            Authentication::SavedKeys
+        } else if c.profile.is_some() {
+            Authentication::Profile
+        } else {
+            Authentication::Environment
+        };
         if !setup.saved_keys {
             setup.profile = c.profile.clone().unwrap_or_default();
         }
@@ -354,9 +411,11 @@ fn spawn_check(_: &LightcraftApp, _: &Setup) -> Result<CheckTask, String> {
 /// The keys typed into step 2, if any.
 #[cfg(not(target_arch = "wasm32"))]
 fn typed_keys(setup: &Setup) -> Result<Option<lightcraft_engine::assets::s3::AccessKeys>, String> {
+    if setup.authentication != Authentication::NewKeys {
+        return Ok(None);
+    }
     let (id, secret) = (setup.key_id.trim(), setup.secret.0.trim());
     match (id.is_empty(), secret.is_empty()) {
-        (true, true) => Ok(None),
         (false, false) => lightcraft_engine::assets::s3::AccessKeys::new(id, secret).map(Some).map_err(|e| e.to_string()),
         _ => Err(crate::i18n::tr("Enter both the key ID and its secret key.").to_string()),
     }
@@ -407,6 +466,9 @@ pub fn poll(app: &mut LightcraftApp, ctx: &egui::Context) {
 /// (Cloud Synchronization…) enable synchronization and start it.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn finish(app: &mut LightcraftApp, setup: &Setup) -> Result<Value, String> {
+    if setup.passed().is_none() {
+        return Err(crate::i18n::tr("Test the current connection and authentication before saving.").into());
+    }
     let params = setup.params()?;
     lightcraft_engine::cloud_setup::validate_destination(&mut app.session, &params)?;
     if let Some(keys) = typed_keys(setup)? {
@@ -500,7 +562,6 @@ fn connect_step(app: &mut LightcraftApp, ui: &mut egui::Ui, setup: &mut Setup) {
     ui.add_space(4.0);
     let (id_label, secret_label) =
         if setup.provider == Provider::Backblaze { ("Key ID", "Application key") } else { ("Access key ID", "Secret access key") };
-    let keep = if setup.saved_keys { "Saved on this computer" } else { "" };
     rows(ui, "cloudSetupFields", |ui| {
         text_row(ui, "Bucket", "cloudSetupBucket", &mut setup.bucket, "my-photos", false);
         match setup.provider {
@@ -511,25 +572,45 @@ fn connect_step(app: &mut LightcraftApp, ui: &mut egui::Ui, setup: &mut Setup) {
                 text_row(ui, "Region", "cloudSetupRegion", &mut setup.region, "us-east-1", false);
             }
         }
-        text_row(ui, id_label, "cloudSetupKeyId", &mut setup.key_id, keep, false);
-        text_row(ui, secret_label, "cloudSetupSecret", &mut setup.secret.0, keep, true);
     });
-    let name = lightcraft_engine::cloud_setup::profile_for(setup.name.trim());
-    dim(
-        ui,
-        crate::i18n::tr_format!(
-            "Keys are saved on this computer in the AWS credentials file, as profile “{profile}”. They are never stored in the catalog or the cloud.",
-            profile = name
-        ),
-    );
+    let t = Tokens::get(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.label(crate::i18n::tr("Authentication"));
+        let response = crate::widgets::dropdown(ui, "cloudSetupAuthentication", crate::i18n::tr(setup.authentication.label()), t.font(12.0), t.text);
+        egui::Popup::menu(&response).show(|ui| {
+            for choice in [Authentication::SavedKeys, Authentication::NewKeys, Authentication::Profile, Authentication::Environment] {
+                if choice == Authentication::SavedKeys && !setup.saved_keys {
+                    continue;
+                }
+                let response = ui.selectable_label(setup.authentication == choice, crate::i18n::tr(choice.label()));
+                crate::widgets::register(ui.ctx(), format!("cloudSetupAuthentication:{}", choice.id()), response.rect);
+                if response.clicked() {
+                    setup.authentication = choice;
+                    ui.close();
+                }
+            }
+        });
+    });
+    match setup.authentication {
+        Authentication::NewKeys => {
+            rows(ui, "cloudSetupKeys", |ui| {
+                text_row(ui, id_label, "cloudSetupKeyId", &mut setup.key_id, "", false);
+                text_row(ui, secret_label, "cloudSetupSecret", &mut setup.secret.0, "", true);
+            });
+            dim(ui, crate::i18n::tr("Keys are saved in this device's credentials file, outside the catalog and cloud."));
+        }
+        Authentication::Profile => rows(ui, "cloudSetupProfileFields", |ui| {
+            text_row(ui, "AWS profile", "cloudSetupProfile", &mut setup.profile, "profile name", false);
+        }),
+        Authentication::SavedKeys => dim(ui, crate::i18n::tr("Using the keys previously saved for this connection.")),
+        Authentication::Environment => dim(ui, crate::i18n::tr("Uses environment credentials or the default AWS profile.")),
+    }
     let more = egui::CollapsingHeader::new(crate::i18n::tr("More options")).id_salt("cloudSetupMore").show(ui, |ui| {
         let default_name = setup.default_name();
         rows(ui, "cloudSetupMoreFields", |ui| {
             text_row(ui, "Folder in bucket", "cloudSetupPrefix", &mut setup.prefix, "lightcraft", false);
             text_row(ui, "Connection name", "cloudSetupName", &mut setup.name, default_name, false);
-            text_row(ui, "AWS profile", "cloudSetupProfile", &mut setup.profile, "optional", false);
         });
-        dim(ui, crate::i18n::tr("Sign with a profile from the AWS credentials file instead of typed keys."));
     });
     crate::widgets::register(ui.ctx(), "button:cloudSetupMore", more.header_response.rect);
     ui.add_space(4.0);
@@ -549,7 +630,8 @@ fn connect_step(app: &mut LightcraftApp, ui: &mut egui::Ui, setup: &mut Setup) {
                 1 => crate::i18n::tr("Connected. Found 1 library in this folder.").to_string(),
                 n => crate::i18n::tr_format!("Connected. Found {n} libraries in this folder.", n = n),
             };
-            ui.label(egui::RichText::new(format!("✓ {text}")).color(t.accent));
+            let response = ui.label(egui::RichText::new(format!("✓ {text}")).color(t.accent));
+            crate::widgets::register(ui.ctx(), "status:cloudSetupConnected", response.rect);
         }
         Check::Failed { error } if current => {
             ui.label(egui::RichText::new(error.as_str()).color(t.caution));
@@ -654,6 +736,7 @@ mod tests {
             key_id: String::new(),
             secret: Secret::default(),
             profile: "work".into(),
+            authentication: Authentication::Profile,
             ..b2()
         };
         assert_eq!(aws.params().unwrap(), json!({"id":"b2","bucket":"my-photos","region":"eu-west-1","prefix":"lightcraft","profile":"work"}));
@@ -674,6 +757,71 @@ mod tests {
         assert!(setup.passed().is_none(), "a changed key needs a new check");
         assert!(!format!("{setup:?}").contains("K004secret"));
         assert!(!serde_json::to_string(&setup).unwrap().contains("K004secret"));
+    }
+
+    #[test]
+    fn selected_authentication_controls_profile_and_ignores_inactive_keys() {
+        let mut setup = Setup { saved_keys: true, saved_profile: Some("lightcraft-b2".into()), profile: "replacement".into(), ..b2() };
+        setup.authentication = Authentication::Profile;
+        // Saved keys and even incomplete leftover replacement keys cannot override a
+        // deliberately selected named profile.
+        setup.secret = Secret::default();
+        assert_eq!(setup.params().unwrap()["profile"], "replacement");
+        assert!(typed_keys(&setup).unwrap().is_none());
+        setup.authentication = Authentication::Environment;
+        assert!(setup.params().unwrap().get("profile").is_none());
+        assert!(typed_keys(&setup).unwrap().is_none());
+        setup.authentication = Authentication::SavedKeys;
+        setup.name = "renamed".into();
+        assert_eq!(setup.params().unwrap()["profile"], "lightcraft-b2", "saved binding survives a connection-name edit");
+        assert!(typed_keys(&setup).unwrap().is_none());
+        setup.authentication = Authentication::NewKeys;
+        assert!(setup.params().is_err(), "incomplete new keys cannot fall back to saved keys");
+        setup.secret = Secret("replacement-secret".into());
+        assert_eq!(setup.params().unwrap()["profile"], "lightcraft-renamed");
+        assert!(typed_keys(&setup).unwrap().is_some());
+    }
+
+    #[test]
+    fn authentication_changes_invalidate_probe_and_missing_sources_never_fall_back() {
+        let mut setup = Setup { saved_keys: true, profile: "replacement".into(), ..b2() };
+        setup.checked = fingerprint(&setup);
+        setup.check = Check::Passed { found: Probe::default() };
+        setup.authentication = Authentication::Profile;
+        assert!(setup.passed().is_none());
+        setup.profile.clear();
+        assert!(setup.params().is_err());
+        setup.authentication = Authentication::SavedKeys;
+        setup.saved_keys = false;
+        assert!(setup.params().is_err());
+        setup.authentication = Authentication::NewKeys;
+        setup.key_id.clear();
+        setup.secret = Secret::default();
+        assert!(setup.params().is_err());
+    }
+
+    #[test]
+    fn finishing_requires_a_successful_probe_for_the_selected_authentication() {
+        let mut session = lightcraft_engine::Session::new();
+        session
+            .open_library_in(
+                lightcraft_engine::library::LibraryStores {
+                    dir: "authentication-save-test".into(),
+                    catalog: Box::new(lightcraft_catalog::MemStore::new()),
+                    files: Box::new(lightcraft_catalog::MemStore::new()),
+                    on_disk: false,
+                },
+                false,
+            )
+            .unwrap();
+        let mut app = LightcraftApp::new(session, crate::Services::default());
+        let mut setup = b2();
+        assert!(finish(&mut app, &setup).unwrap_err().contains("Test the current connection"));
+        setup.checked = fingerprint(&setup);
+        setup.check = Check::Passed { found: Probe::default() };
+        setup.authentication = Authentication::Environment;
+        assert!(finish(&mut app, &setup).unwrap_err().contains("Test the current connection"));
+        assert_eq!(app.run("cloud.connections", json!({})).unwrap()["connections"], json!([]));
     }
 
     #[test]

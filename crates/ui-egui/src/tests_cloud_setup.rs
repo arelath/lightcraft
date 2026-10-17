@@ -2,7 +2,7 @@
 //! loopback S3-shaped server (signed with the typed keys, listed in the activity stack), then
 //! joining the library it found.
 
-use crate::cloud_setup::{Check, Choice, Secret, Step};
+use crate::cloud_setup::{Authentication, Check, Choice, Secret, Step};
 use crate::headless::Headless;
 use crate::state::Dialog;
 use crate::{LightcraftApp, Services};
@@ -152,6 +152,10 @@ fn setup_checks_the_typed_keys_then_joins_the_library_it_found() {
         setup.key_id.clear();
         setup.secret = Secret::default();
         setup.saved_keys = true;
+        setup.authentication = Authentication::SavedKeys;
+        // This test substitutes the same already-probed fixture keys as a saved
+        // binding, avoiding a write to the real credentials file.
+        setup.checked = crate::cloud_setup::fingerprint(setup);
     }
     for _ in 0..3 {
         h.step();
