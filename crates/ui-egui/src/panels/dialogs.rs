@@ -193,6 +193,12 @@ pub(crate) fn prepare(app: &LightcraftApp, ui: &mut egui::Ui) {
 }
 
 pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
+    crate::cloud_retention::observe_view(app);
+    show_inner(app, ctx);
+    crate::cloud_retention::observe_view(app);
+}
+
+fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
     let Some(mut dlg) = app.ui.dialog.clone() else { return };
     let at_start = dlg.clone();
     // Esc with a popup open in the dialog (a dropdown, a date picker's calendar) closes the popup

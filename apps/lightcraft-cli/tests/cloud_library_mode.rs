@@ -72,6 +72,17 @@ impl Desktop {
         self.wait_widget(id);
         self.ask("ui.clickWidget", json!({"id":id}));
     }
+    fn retention_consent(&mut self, confirmed: bool) {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let state = self.ask("ui.inspect", json!({}))["cloudRetention"].clone();
+            if state["confirmed"] == confirmed {
+                return;
+            }
+            assert!(Instant::now() < until, "retention consent did not become {confirmed}: {state}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     fn reveal_on_right(&mut self, id: &str) {
         let until = Instant::now() + Duration::from_secs(10);
         loop {
@@ -132,6 +143,45 @@ fn photo(f: &support::Fixture, name: &str, shade: u8) -> (std::path::PathBuf, Ve
     std::fs::write(&path, &bytes).unwrap();
     let key = format!("/photos/library/originals/{}", support::hash(&bytes));
     (path, bytes, key)
+}
+
+#[test]
+#[ignore = "explicit native retention consent acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn retention_consent_is_fresh_after_reopening_and_resuming() {
+    let f = support::Fixture::new();
+    let local = f.dir.join("retention-consent");
+    f.import(&local, false);
+    let (out, rows) = f.run(&local, &[("cloud.pause", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("retention-consent");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    app.execute("dialog.cloudMaintenance", json!({}));
+    app.click_when_ready("button:cloudRetentionTools");
+    // The collapsing body registers controls before its opening clip is tall
+    // enough to receive a pointer at the checkbox. Then wait for actual state,
+    // since control-channel input is applied on subsequent frames.
+    std::thread::sleep(Duration::from_millis(250));
+    app.click_when_ready("checkbox:cloudRetentionConfirmed");
+    app.retention_consent(true);
+    app.ask("ui.screenshot", json!({"path":artifacts.join("checked-before-close.png")}));
+    app.ask("ui.dialog.cancel", json!({}));
+    app.execute("dialog.cloudMaintenance", json!({}));
+    app.wait_widget("checkbox:cloudRetentionConfirmed");
+    app.retention_consent(false);
+    app.ask("ui.screenshot", json!({"path":artifacts.join("unchecked-after-reopen.png")}));
+    app.click_when_ready("checkbox:cloudRetentionConfirmed");
+    app.retention_consent(true);
+    app.execute("cloud.resume", json!({}));
+    app.retention_consent(false);
+    app.ask("ui.screenshot", json!({"path":artifacts.join("unchecked-after-resume.png")}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.settled(&f, &[]);
+    app.ask("app.quit", json!({}));
+    assert!(app.child.wait().unwrap().success());
+    let storage = f.state.lock().unwrap();
+    assert_eq!(storage.signature_errors, 0);
+    assert!(!storage.requests.iter().any(|(method, _)| method == "DELETE"));
 }
 
 #[test]

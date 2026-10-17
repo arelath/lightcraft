@@ -272,7 +272,8 @@ The supplied 2026-10-17 review is tracked before implementation in
 - [x] **CR.64** Make saved/new keys and named/default profiles explicit; probe and save the selected source.
 - [x] **CR.65** Add bounded recovery pages and search, including Info and structural conflicts.
 - [x] **CR.66** Share Info/popup Sync, Retry and Resume commands and migration guards.
-- [ ] **CR.67–CR.74** Reset retention consent; unify dialog confirmation; extract managed media; preserve typed failures; refine cloud status; add conflict previews, Recently Deleted conversion and explicit rejoin guidance.
+- [x] **CR.67** Reset retention consent on view changes, Resume and library changes; retain task progress separately.
+- [ ] **CR.68–CR.74** Unify dialog confirmation; extract managed media; preserve typed failures; refine cloud status; add conflict previews, Recently Deleted conversion and explicit rejoin guidance.
 - [x] **CR.49** Fence successor publication, refuse unsafe cancellation and preserve explicit finish-upgrade recovery.
 - [x] **CR.53** Verify cache destination adoption, honor old byte leases and fence cleanup before folder reuse.
 - [ ] **CR.48, CR.50–CR.52, CR.54–CR.55** Recheck and close the previously tracked epoch, migration, status, lease, browser-cache, relocation, credential-isolation and discovery findings with current evidence. Detailed items remain individually tracked in the reliability checklist.

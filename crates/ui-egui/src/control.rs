@@ -85,11 +85,12 @@ pub fn inspect(app: &LightcraftApp, ctx: &egui::Context) -> Value {
     json!({
         "ui": serde_json::to_value(&app.ui).unwrap_or_default(),
         // Dialog state can contain credential entry fields and is intentionally not
-        // serialized with UiState. Expose only the already-public cloud diagnostic.
+        // serialized with UiState. Expose only public diagnostics and consent/task state.
         "cloudDiagnostic": match &app.ui.dialog {
             Some(crate::state::Dialog::CloudError { diagnostic, .. }) => Some(diagnostic),
             _ => None,
         },
+        "cloudRetention": crate::cloud_retention::inspect(app),
         "window": [r.width(), r.height()],
         "pixelsPerPoint": ctx.pixels_per_point(),
         "canvasRect": app.canvas_rect.map(rect_json),
@@ -180,6 +181,13 @@ fn widget_rect(app: &LightcraftApp, id: &str) -> Option<egui::Rect> {
 }
 
 pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
+    crate::cloud_retention::observe_view(app);
+    let outcome = handle_inner(app, ctx, req);
+    crate::cloud_retention::observe_view(app);
+    outcome
+}
+
+fn handle_inner(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
     if crate::cloud_transition::blocked(app) && matches!(req.method.as_str(), "ui.set" | "ui.dialog.confirm" | "ui.dialog.cancel") {
         return err(
             "Local preparation is blocking this library. Use cloud.syncDisable with cancel:true to cancel safely, or use Retry in the progress dialog.",

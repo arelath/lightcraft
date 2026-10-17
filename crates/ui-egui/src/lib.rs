@@ -372,6 +372,7 @@ pub struct LightcraftApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub cloud_check: Option<cloud_setup::CheckTask>,
     pub(crate) cloud_transition: cloud_transition::Runtime,
+    pub(crate) cloud_retention: cloud_retention::Runtime,
     /// A Synchronize Folder scan in progress (feeds its dialog).
     pub sync: Option<sync::SyncTask>,
     /// `session.folder_changes` came from the Synchronize Folder dialog (and goes with it).
@@ -490,6 +491,7 @@ impl LightcraftApp {
             activity_expanded: false,
             model_setup: Default::default(),
             cloud_transition: Default::default(),
+            cloud_retention: Default::default(),
         }
     }
 
@@ -510,6 +512,13 @@ impl LightcraftApp {
 
     /// Run a UI or engine command by id. The single entry point for every frontend path.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        cloud_retention::observe_view(self);
+        let result = self.run_inner(id, params);
+        cloud_retention::observe_command(self, id, &result);
+        result
+    }
+
+    fn run_inner(&mut self, id: &str, params: Value) -> Result<Value, String> {
         if cloud_transition::blocked(self) && !cloud_transition::permitted(id) {
             return Err("Local originals are being prepared. Finish or cancel turning cloud sync off before editing or navigating.".into());
         }
@@ -1149,6 +1158,8 @@ impl LightcraftApp {
         cloud_setup::poll(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]
         cloud_transition::poll(self, ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        cloud_retention::poll(self, ctx);
         sync::poll(self, ctx);
         sync::poll_run(self, ctx);
         import::tick(self, ctx);
@@ -1400,6 +1411,7 @@ impl LightcraftApp {
     /// Once per library opened (at launch too): name it in the window title, so nobody edits in
     /// the wrong one, and put it first in File ▸ Open Recent Library.
     pub(crate) fn library_changed(&mut self, ctx: &egui::Context) {
+        cloud_retention::observe_view(self);
         let generation = self.session.library_generation();
         if self.shown_library == Some(generation) {
             return;
