@@ -2087,5 +2087,6 @@
   "Not listed here": "未在此列出",
   "Deleted cloud photo": "已删除的云端照片",
   "Recover": "恢复",
-  "Another device changed this photo at the same time. Choose what to keep:": "其他设备同时修改了这张照片。请选择保留的内容："
+  "Another device changed this photo at the same time. Choose what to keep:": "其他设备同时修改了这张照片。请选择保留的内容：",
+  "Storage space used": "已用存储空间"
 }

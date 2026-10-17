@@ -266,8 +266,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             let album_text = if albums == 1 { crate::i18n::tr_format!("{n} album", n = albums) } else { crate::i18n::tr_format!("{n} albums", n = albums) };
             ui.label(egui::RichText::new(crate::i18n::tr_format!("{photos} in {albums}", photos = photo_text, albums = album_text)).font(t.semibold(12.)).color(t.text));
             ui.add_space(4.);
-            metric(ui, "Originals in the cloud", &bytes(summary["cloudOriginalBytes"].as_u64().unwrap_or(0))).on_hover_text(crate::i18n::tr(
-                "Originals recorded in the cloud catalog or verified after upload; shared originals count once. This is not the storage provider's quota or total bucket usage.",
+            metric(ui, "Storage space used", &bytes(summary["cloudOriginalBytes"].as_u64().unwrap_or(0))).on_hover_text(crate::i18n::tr(
+                "Storage used by cloud originals represented in this catalog; shared originals count once. Previews, sidecars, sync metadata, and other libraries are not included.",
             ));
             if !attention && !busy(data) && let Some(age) = data["health"]["sync"]["secondsSinceLastRemoteScan"].as_u64() {
                 metric(ui, "Last checked", &ago(age));
@@ -593,7 +593,7 @@ mod tests {
     fn cloud_popup_redesign_idle_has_summary_navigation_and_one_footer_action() {
         let mut h = open(overview(), [1200., 900.]);
         for expected in
-            ["CLOUD LIBRARY", "3 photos in 1 album", "Originals in the cloud", "1.2 GB", "Last checked", "2 min ago", "Synced and backed up", "Pause"]
+            ["CLOUD LIBRARY", "3 photos in 1 album", "Storage space used", "1.2 GB", "Last checked", "2 min ago", "Synced and backed up", "Pause"]
         {
             text(&h, expected);
         }

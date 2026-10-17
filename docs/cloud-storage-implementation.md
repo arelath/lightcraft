@@ -31,10 +31,11 @@ in append mode. LIST discovery and full state validation still have linear costs
 
 ## Cloud status popup
 
-The cloud icon opens a compact library card with photo/album totals and original bytes
-recorded remotely (received catalog originals or locally verified uploads), deduplicated
-by remote object identity. Locally staged originals are excluded. The last successful
-remote check appears in the idle state. Uploads show active photos out of active plus
+The cloud icon opens a compact library card with photo/album totals and “Storage space
+used”: original bytes recorded remotely (received catalog originals or locally verified
+uploads), deduplicated by remote object identity. The tooltip states that previews, sidecars, synchronization
+metadata and other libraries are excluded, as are locally staged originals. The last
+successful remote check appears in the idle state. Uploads show active photos out of active plus
 waiting photos alongside current transfer bytes, a progress bar, and changes awaiting
 publication. The photo count describes concurrent work, not completed photos.
 

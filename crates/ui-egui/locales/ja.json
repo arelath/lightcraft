@@ -2051,5 +2051,6 @@
   "Not listed here": "ここに表示されていない数",
   "Deleted cloud photo": "削除されたクラウドの写真",
   "Recover": "復元",
-  "Another device changed this photo at the same time. Choose what to keep:": "別の端末がこの写真を同時に変更しました。残す内容を選んでください:"
+  "Another device changed this photo at the same time. Choose what to keep:": "別の端末がこの写真を同時に変更しました。残す内容を選んでください:",
+  "Storage space used": "使用済みストレージ容量"
 }
