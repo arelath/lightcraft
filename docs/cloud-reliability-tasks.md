@@ -5,8 +5,8 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
-Current status (2026-10-17): CR.1–CR.42, CR.46–CR.47, CR.56–CR.59, CR.62 are complete.
-CR.43–CR.45, CR.48–CR.55, CR.60–CR.61, CR.63–CR.74 remain open.
+Current status (2026-10-17): CR.1–CR.42, CR.46–CR.47, CR.56–CR.59, CR.61–CR.62 are complete.
+CR.43–CR.45, CR.48–CR.55, CR.60, CR.63–CR.74 remain open.
 Dated verification notes below
 describe their original snapshots; current operational limits remain in
 [cloud-storage-implementation.md](cloud-storage-implementation.md).
@@ -46,7 +46,7 @@ existing mutation identities, immutable media, conflict alternatives and offline
 - [x] CR.58 — Carry a typed managed-preparation kind through background completion so local XMP, DNG, external-editor copy and reload revisions commit while sync is off, without authorizing explicit cloud enrollment. Reproduce `wait:false` on a converted library and assert zero network requests.
 - [x] CR.59 — Certify the final cloud-to-local result against the original owner snapshot, retaining all required archive proofs and append publication state across repeated receive-only scans. Exclude transport proofs from stability fingerprints. Test an older device converting after another device compacts receipts.
 - [ ] CR.60 — Separate permanent-local editing from the bounded cloud outbox. Durably preserve the rejoin baseline, pending mutation identities and local changes without eventually blocking local edits at 10,000 pending mutations; explicitly reconcile on re-enable. Test the capacity boundary, restart, rejoin and conflicts.
-- [ ] CR.61 — Drain causally ready append operations during bounded discovery on native and browser; share discovery planning while keeping platform I/O separate. Retain integrity checks and bounds for unresolved dependencies. Test a fresh reader catching up with 300 sequential 256 KiB caption replacements and cross-author ordering.
+- [x] CR.61 — Drain causally ready append operations during bounded discovery on native and browser; share discovery planning while keeping platform I/O separate. Retain integrity checks and bounds for unresolved dependencies. Test a fresh reader catching up with 300 sequential 256 KiB caption replacements and cross-author ordering.
 - [x] CR.62 — Persist a stable absolute permanent-original destination before entering conversion, including relative `--library` paths; retain symlink/junction validation. Test conversion and offline reopening of `./photos`.
 - [ ] CR.63 — Add library-wide error Details with the original diagnostic, affected operation, retry state and cause-specific recovery. Use a typed UI status/action model across popup, Info and focused dialogs; offer Edit connection only for relevant configuration/authentication failures. Test an empty library and integrity/capacity/schema/disk errors.
 - [ ] CR.64 — Make saved keys, replacement keys and AWS profile explicit authentication choices; use the selected source consistently for probing and persistence. Test replacing saved-key credentials with a different profile.
@@ -1787,6 +1787,14 @@ These are disposable loopback/procedural fixtures, not live AWS/B2 acceptance.
 2026-10-17 — CR.62: Stable absolute local-original destinations. Native library binding and the permanent Local Originals destination are resolved to absolute paths. Conversion persists the reviewed destination and verifies that binding again before worker startup; existing symlink/junction and blob validation remain in force.
 
 The real-CLI regression converts `./photos`, verifies absolute destinations in preview and the durable mode record, checks the original bytes, and reopens from another working directory without network requests. Evidence: `target/cloud-cr59-cr62-cli.log` and the final workspace CI run.
+
+Final-source `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF, workspace
+tests, parity, layers, assets and WASM: `target/cloud-review-cr58-cr62-ci-final.log`.
+These are disposable loopback/procedural fixtures, not live AWS/B2 acceptance.
+
+2026-10-17 — CR.61: Incremental append discovery. Native and browser append discovery share stage-and-drain planning. Causally ready operations are applied and their superseded payloads released during discovery; integrity checks and the 64 MiB unresolved-dependency staging bound remain enforced.
+
+A shared-planner regression catches up through 300 sequential 256 KiB replacements (about 75 MiB cumulative payload), with a second author arriving before its dependency. Ready staging returns to zero, both frontiers advance and no gaps remain. Native workspace tests and the browser WASM build cover both adapters; browser runtime and live-provider execution were not repeated. Evidence: `target/cloud-cr61-planner.log`.
 
 Final-source `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF, workspace
 tests, parity, layers, assets and WASM: `target/cloud-review-cr58-cr62-ci-final.log`.

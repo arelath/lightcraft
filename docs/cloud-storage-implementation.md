@@ -698,3 +698,7 @@ Cloud-to-local conversion recertifies the final received state against the uncha
 ### CR.62 — Stable absolute local-original destinations (2026-10-17)
 
 Native library binding and the permanent Local Originals destination are resolved to absolute paths. Conversion persists the reviewed destination and verifies that binding again before worker startup; existing symlink/junction and blob validation remain in force.
+
+### CR.61 — Incremental append discovery (2026-10-17)
+
+Native and browser append discovery share stage-and-drain planning. Causally ready operations are applied and their superseded payloads released during discovery; integrity checks and the 64 MiB unresolved-dependency staging bound remain enforced.

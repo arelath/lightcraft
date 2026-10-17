@@ -238,7 +238,7 @@ fn read_operation(connection: &S3Connection, planner: &mut Planner, key: &str, c
     if lightcraft_catalog::replication::archive::covers(&planner.remote.archives, &mutation.revision.id()) {
         crate::cloud_history::native::prove(connection, &planner.remote, &mutation, &mut planner.proofs, cancel)?;
     }
-    planner.stage(mutation)?;
+    planner.stage_and_drain(mutation)?;
     if planner.proofs.len() > 8192 {
         planner.proofs.clear();
     }

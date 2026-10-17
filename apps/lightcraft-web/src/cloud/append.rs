@@ -195,7 +195,7 @@ async fn read_operation(provider: &Provider, planner: &mut core::Planner, key: &
     if lightcraft_engine::catalog::replication::archive::covers(&planner.remote.archives, &mutation.revision.id()) {
         super::history::prove(provider, &planner.remote, &mutation, &mut planner.proofs).await?;
     }
-    planner.stage(mutation).map_err(ce)?;
+    planner.stage_and_drain(mutation).map_err(ce)?;
     if planner.proofs.len() > 8192 {
         planner.proofs.clear();
     }

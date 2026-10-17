@@ -521,3 +521,10 @@ The real-CLI regression converts `./photos`, verifies absolute destinations in p
 
 All eight final-source CI gates passed (`target/cloud-review-cr58-cr62-ci-final.log`).
 This run used disposable local fixtures; fresh live AWS/B2 acceptance remains open.
+
+## 2026-10-17: CR.61 — Incremental append discovery
+
+A shared-planner regression catches up through 300 sequential 256 KiB replacements (about 75 MiB cumulative payload), with a second author arriving before its dependency. Ready staging returns to zero, both frontiers advance and no gaps remain. Native workspace tests and the browser WASM build cover both adapters; browser runtime and live-provider execution were not repeated. Evidence: `target/cloud-cr61-planner.log`.
+
+All eight final-source CI gates passed (`target/cloud-review-cr58-cr62-ci-final.log`).
+This run used disposable local fixtures; fresh live AWS/B2 acceptance remains open.

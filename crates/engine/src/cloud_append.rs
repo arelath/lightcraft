@@ -193,6 +193,12 @@ impl Planner {
         self.remote.clock.get(&m.revision.device).copied().unwrap_or(0).checked_add(1) == Some(m.revision.sequence)
             && m.context.iter().all(|(author, seq)| self.remote.clock.get(author).copied().unwrap_or(0) >= *seq)
     }
+    /// Discovery releases ready payloads immediately. The staging budget bounds
+    /// unresolved causal dependencies, not the size of an otherwise ready history.
+    pub fn stage_and_drain(&mut self, mutation: Mutation) -> Result<()> {
+        self.stage(mutation)?;
+        self.drain()
+    }
     pub fn drain(&mut self) -> Result<()> {
         loop {
             let ready = self.staged.values().find(|m| self.ready(m)).map(|m| m.revision.id());
@@ -254,6 +260,39 @@ mod tests {
     }
     fn edit(s: &mut SyncState, n: u32) -> Mutation {
         s.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(n) }]).unwrap().unwrap()
+    }
+    #[test]
+    fn discovery_releases_three_hundred_large_replacements_and_unblocks_other_authors() {
+        let mut writer = state("writer");
+        let mut planner = Planner::new(&state("reader")).unwrap();
+        for n in 0..300 {
+            let base = writer.winning("photo:one", "meta.caption").map(|(stamp, _)| stamp.clone());
+            let mutation = writer
+                .enqueue(vec![Change {
+                    entity: "photo:one".into(),
+                    field: "meta.caption".into(),
+                    base,
+                    value: json!(format!("{n:06}:{}", "z".repeat((256 << 10) - 7))),
+                }])
+                .unwrap()
+                .unwrap();
+            writer.pending.clear(); // The writer publishes incrementally, not as a 75 MiB outbox.
+            if n == 0 {
+                let mut dependent = state("dependent");
+                dependent.receive(&mutation).unwrap();
+                planner.stage_and_drain(edit(&mut dependent, 4)).unwrap();
+                assert_eq!(planner.staged.len(), 1, "the missing cross-author predecessor stays staged");
+                assert!(planner.remote.clock.is_empty());
+            }
+            planner.stage_and_drain(mutation).unwrap();
+            assert!(planner.staged.is_empty());
+            assert_eq!(planner.staged_bytes, 0, "ready superseded payloads are released during discovery");
+        }
+        let progress = planner.progress().unwrap();
+        assert_eq!(progress.frontiers.get("writer"), Some(&300));
+        assert_eq!(progress.frontiers.get("dependent"), Some(&1));
+        assert!(progress.gaps.is_empty());
+        assert!(planner.remote.winning("photo:one", "meta.caption").unwrap().1.as_str().unwrap().starts_with("000299:"));
     }
     #[test]
     fn gaps_and_causal_dependencies_never_advance_frontiers_and_forks_fail_atomically() {
