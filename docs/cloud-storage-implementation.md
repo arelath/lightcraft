@@ -570,8 +570,10 @@ another protocol, or it needs a newer writer), the popup headline reads "Publish
 cloud library" with the reason; changes from other devices still arrive and local changes wait.
 Conflicting edits to any synchronized field are listed in Resolve cloud conflicts (and for the
 selected photo in Info) with each retained value and a Keep button (`cloud.resolveConflict`);
-the displayed value is marked. Deleted cloud photos are listed there for recovery, capped at 200
-with the full count.
+the displayed value is marked. Recovery dialogs and Info provide bounded search and page
+controls for retained fields and choices. Storage tools pages all retained deleted cloud
+photos with the full count. The default status response still lists at most 200 deleted
+photos for compatibility; sectioned recovery queries reach the complete retained list.
 
 Sync Status in the filter bar offers Waiting to sync, Syncing, Synced, Sync issues and Local
 only, with a removable chip. Status derives from durable original-upload intent and pending
@@ -723,3 +725,7 @@ Cloud Details opens a focused library-wide diagnostic instead of the connection 
 ### CR.64 — Explicit cloud authentication source (2026-10-17)
 
 Cloud setup makes Saved keys, New access keys, Named AWS profile and Environment/default profile explicit authentication choices. Only the selected source supplies credentials to both probing and persistence; retained inactive key fields cannot override a named profile, nor be saved when another source was selected. Missing or partial replacement keys never fall back silently. A loaded saved-key binding retains its actual profile across a connection-name edit. Source and binding participate in the probe fingerprint, and final saving requires a successful probe of the current settings before any credential write or configuration change. The profile field appears with its selected source instead of being hidden under More options. Public connection parameters remain credentials-free. CR.54 credential-record isolation and CR.68 complete dialog lifecycle unification remain separate open tasks. No remote/catalog format changes.
+
+### CR.65 — Complete recovery navigation (2026-10-17)
+
+Read-only cloud.syncStatus recovery sections provide bounded cursor pages and search across all conflicting fields, retained values, deleted photos and structural conflicts. Cursors bind library identity/generation, catalog revision and normalized query, including page size and selected field. Invalid, stale or cross-query cursors and oversized inputs are refused. Value search covers full retained values beyond shortened previews. The default summary remains compatible. Desktop and browser forward the same query parameters. Conflict dialogs, Storage tools and selected-photo Info use shared search and Previous/Next controls, caching pages until the query, catalog or library changes. Browsing never resolves, restores or publishes. Full conflict metadata/preview remains CR.72. No catalog or remote protocol changes.

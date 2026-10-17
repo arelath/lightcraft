@@ -114,6 +114,127 @@ fn photo(f: &support::Fixture, name: &str, shade: u8) -> (std::path::PathBuf, Ve
 }
 
 #[test]
+#[ignore = "explicit native recovery paging acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn recovery_pages_reach_omitted_records_in_the_native_app() {
+    use lightcraft_engine::{
+        Session,
+        catalog::{Op, PhotoId, replication::Change},
+    };
+    let f = support::Fixture::new();
+    let local = f.dir.join("recovery-pages");
+    f.import(&local, false);
+    let (out, rows) = f.run(&local, &[("cloud.pause", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let before = {
+        let mut s = Session::new().with_fs();
+        s.open_library(&local, false).unwrap();
+        let template = (**s.catalog.photo(PhotoId(1)).unwrap()).clone();
+        for id in 2..=218 {
+            let mut photo = template.clone();
+            photo.id = PhotoId(id);
+            photo.file_name = format!("recovery-photo-{id:03}.png");
+            s.commit("fixture photo", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+        }
+        let base = s.catalog.sync_state().unwrap().clone();
+        let entities: Vec<_> = (1..=17).map(|id| format!("photo:{}", s.catalog.cloud_identity(&format!("photo:{id}")).unwrap())).collect();
+        let mut state = base.clone();
+        for n in 1..=9 {
+            let mut branch = base.clone();
+            branch.pending.clear();
+            branch.device = format!("alternative-{n}");
+            let changes = entities
+                .iter()
+                .map(|entity| Change {
+                    entity: entity.clone(),
+                    field: "caption".into(),
+                    base: base.winning(entity, "caption").map(|(stamp, _)| stamp),
+                    value: json!(format!("Caption from device {n}")),
+                })
+                .collect();
+            state.receive(&branch.enqueue(changes).unwrap().unwrap()).unwrap();
+        }
+        s.apply_received(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+        for id in 18..=218 {
+            s.commit("fixture deletion", Op::RemovePhoto { id: PhotoId(id) }).unwrap();
+        }
+        let before = s.catalog.sync_state().unwrap().clone();
+        s.close_library().unwrap();
+        before
+    };
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("recovery-pages");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let remote = f.state.lock().unwrap().objects.clone();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    let first = app.execute("cloud.syncStatus", json!({"section":"conflicts"}))["page"].clone();
+    let seventeenth = app.execute("cloud.syncStatus", json!({"section":"conflicts","cursor":first["nextCursor"]}))["page"]["items"][0].clone();
+    let entity = seventeenth["entity"].as_str().unwrap();
+    let choices = app.execute("cloud.syncStatus", json!({"section":"choices","entity":entity,"field":"caption"}))["page"].clone();
+    let ninth = app.execute("cloud.syncStatus",json!({"section":"choices","entity":entity,"field":"caption","cursor":choices["nextCursor"]}))["page"]["items"][0]["revision"].as_str().unwrap().to_owned();
+    app.execute("dialog.cloudConflicts", json!({}));
+    app.click_when_ready("button:cloudPageNext:conflicts");
+    app.click_when_ready(&format!("button:cloudPageNext:choices:{entity}:caption"));
+    app.wait_widget(&format!("button:cloudKeepRevision:{entity}:caption:{ninth}"));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("conflict-17-value-9.png")}));
+    app.ask("ui.dialog.cancel", json!({}));
+    app.execute("dialog.cloudMaintenance", json!({}));
+    let omitted = {
+        let mut cursor = Value::Null;
+        let mut last = Value::Null;
+        loop {
+            let page = app.execute("cloud.syncStatus", json!({"section":"deleted","cursor":cursor}))["page"].clone();
+            if let Some(item) = page["items"].as_array().unwrap().last() {
+                last = item.clone();
+            }
+            cursor = page["nextCursor"].clone();
+            if cursor.is_null() {
+                break last;
+            }
+        }
+    };
+    // Search reaches the last retained photo without recovering any earlier one.
+    app.click_when_ready("field:cloudPageSearch:deleted");
+    app.ask("ui.text", json!({"text":omitted["name"]}));
+    app.wait_widget(&format!("button:cloudRecover:{}", omitted["entity"].as_str().unwrap()));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("deleted-201-search.png")}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    assert_eq!(
+        app.execute("cloud.syncStatus", json!({"section":"conflicts"}))["page"]["revision"],
+        first["revision"],
+        "browsing leaves the opened catalog revision unchanged"
+    );
+    app.ask("app.quit", json!({}));
+    assert!(app.child.wait().unwrap().success());
+    // Read persisted data without creating another writing epoch. The app's
+    // initial owner claim may rotate its local author; browsing must preserve
+    // every register, proof, exact pending mutation and publication position.
+    let (_, catalog, _) = lightcraft_engine::catalog::Journal::open(Box::new(lightcraft_engine::catalog::FsStore::open(&local).unwrap())).unwrap();
+    let after = catalog.sync_state().unwrap();
+    assert!(before.portable() == after.portable(), "retained cloud registers or causal proofs changed");
+    assert!(before.pending == after.pending, "exact pending mutations changed");
+    assert!(
+        json!([
+            before.connection,
+            before.protocol,
+            before.append,
+            before.cursor,
+            before.generation,
+            before.migrated_from_head,
+            before.require_existing
+        ]) == json!([
+            after.connection,
+            after.protocol,
+            after.append,
+            after.cursor,
+            after.generation,
+            after.migrated_from_head,
+            after.require_existing
+        ]),
+        "cloud connection or publication progress changed"
+    );
+    assert_eq!(f.state.lock().unwrap().objects, remote, "browsing does not publish or restore");
+}
+
+#[test]
 #[ignore = "explicit native profile replacement acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
 fn replacing_saved_keys_with_named_profile_probes_and_saves_the_selected_profile() {
     let f = support::Fixture::new();

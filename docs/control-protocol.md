@@ -43,6 +43,18 @@ command ID (for example `edit.undo`, `edit.redo`, `view.filmstrip` or `view.left
 their command behavior. That API invokes the app command dispatcher directly; it does not traverse
 Cocoa menu dispatch. Native menu activation and keyboard accelerator delivery require a separate test.
 
+`cloud.syncStatus` accepts optional read-only recovery queries:
+`{"section":"conflicts|choices|deleted|structural","search":"…","cursor":"…","limit":16}`.
+Use one section name, omit `cursor` on the first request, and include `entity` and `field`
+only for `choices`. The response's `page` contains `items`, `total`, `offset`, `limit`,
+`nextCursor` and `previousCursor`. Defaults are 16 fields/structures, eight values and
+50 deleted photos; maximums are 64, 32 and 200 respectively. Search covers the complete
+retained list, including values beyond shortened previews. Cursors are opaque and bound
+to the opened library, catalog revision, section, search and page size. Restart without
+a cursor after changing any of those or receiving a stale-cursor error. Fetching pages
+does not resolve conflicts, restore photos or publish changes. The default `{}` response
+retains its existing bounded summary shape.
+
 `ui.inspect` also reports `cloudDiagnostic` while Cloud error details is open: the public
 failure, operation/resource, captured retry state and typed recovery. It is `null` otherwise.
 Setup and credential-entry dialog state remains excluded from inspection.

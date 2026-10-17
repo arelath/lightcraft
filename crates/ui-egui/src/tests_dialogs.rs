@@ -191,13 +191,13 @@ fn cloud_capacity_warning_explains_recovery_and_dispatches_checkpoint_maintenanc
 #[test]
 fn cloud_setup_explains_retained_structural_conflicts() {
     let services = Services {
-        cloud_action: Some(Box::new(|_, id, _| {
+        cloud_action: Some(Box::new(|_, id, params| {
             if id == "cloud.connections" {
                 return Some(Ok(json!({"connections": []})));
             }
-            (id=="cloud.syncStatus").then(||Ok(json!({
+            (id=="cloud.syncStatus").then(||Ok(crate::cloud_conflicts::fixture_status(&json!({
             "structuralConflicts":[{"entity":"album:A","field":"parent","name":"Folder A","proposed":"B","projected":null},{"entity":"stack:one","field":"photos","proposed":["a","b"],"projected":[]}]
-        })))
+        }), params)))
         })),
         ..Default::default()
     };
@@ -418,16 +418,19 @@ fn cloud_popup_says_publishing_is_blocked_and_counts_field_conflicts() {
 fn cloud_sync_dialog_keeps_a_chosen_conflict_value_and_bounds_the_recover_list() {
     let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let recorded = calls.clone();
-    let deleted: Vec<Value> = (0..200).map(|n| json!({"entity":format!("photo:d{n}"),"name":format!("gone-{n}.jpg")})).collect();
+    let deleted: Vec<Value> = (0..250).map(|n| json!({"entity":format!("photo:d{n}"),"name":format!("gone-{n}.jpg")})).collect();
     let services = Services {
         cloud_action: Some(Box::new(move |_, id, params| match id {
             "cloud.connections" => Some(Ok(json!({"connections":[]}))),
-            "cloud.syncStatus" => Some(Ok(json!({
-                "conflicts":[{"entity":"photo:p1","field":"rating","name":"beach.jpg","choices":[
-                    {"revision":"dev-a-3","current":true,"thisDevice":true,"kind":"value","preview":"2"},
-                    {"revision":"dev-b-4","current":false,"thisDevice":false,"kind":"value","preview":"5"}]}],
-                "deletedPhotos":deleted,"deletedPhotoCount":250
-            }))),
+            "cloud.syncStatus" => Some(Ok(crate::cloud_conflicts::fixture_status(
+                &json!({
+                    "conflicts":[{"entity":"photo:p1","field":"rating","name":"beach.jpg","choices":[
+                        {"revision":"dev-a-3","current":true,"thisDevice":true,"kind":"value","preview":"2"},
+                        {"revision":"dev-b-4","current":false,"thisDevice":false,"kind":"value","preview":"5"}]}],
+                    "deletedPhotos":deleted,"deletedPhotoCount":250
+                }),
+                params,
+            ))),
             "cloud.resolveConflict" => {
                 recorded.lock().unwrap().push(params.clone());
                 Some(Ok(json!({})))

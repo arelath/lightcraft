@@ -270,5 +270,6 @@
   "Estimated: {files} files · {bytes}": "Estimated: {files} files · {bytes}",
   "Files: {done} of {total} · {remaining} remaining": "Files: {done} of {total} · {remaining} remaining",
   "Data: {done} of {total} · {remaining} remaining": "Data: {done} of {total} · {remaining} remaining",
-  "Downloading current file: {done} of {total}": "Downloading current file: {done} of {total}"
+  "Downloading current file: {done} of {total}": "Downloading current file: {done} of {total}",
+  "{first}–{last} of {total}": "共 {total} 项，第 {first}–{last} 项"
 }

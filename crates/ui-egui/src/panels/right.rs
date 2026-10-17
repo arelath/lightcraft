@@ -841,7 +841,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                                 let _ = app.run("panel.versions", json!({}));
                             }
                         }
-                        ui.add_enabled_ui(!off, |ui| crate::cloud_conflicts::choices(app, ui, conflict));
+                        ui.add_enabled_ui(!off, |ui| crate::cloud_conflicts::choices_in_info(app, ui, conflict));
                     }
                 } else if text_button(ui, "cloudSyncSetup", crate::i18n::tr("Enable synchronization…"), false).clicked() {
                     let connection = app.session.catalog.asset(asset_id).map(|asset| asset.original.remote.connection.clone());

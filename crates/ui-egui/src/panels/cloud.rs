@@ -614,13 +614,13 @@ mod tests {
             })
             .unwrap();
         let services = Services {
-            cloud_action: Some(Box::new(move |_, id, _| match id {
+            cloud_action: Some(Box::new(move |_, id, params| match id {
                 "cloud.overview" => Some(Ok(data.clone())),
                 "cloud.connections" => Some(Ok(json!({"connections":[]}))),
                 "cloud.syncStatus" => {
                     let mut status = data.clone();
                     status["health"] = data["health"]["sync"].clone();
-                    Some(Ok(status))
+                    Some(Ok(crate::cloud_conflicts::fixture_status(&status, params)))
                 }
                 _ => None,
             })),

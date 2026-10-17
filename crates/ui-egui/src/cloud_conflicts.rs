@@ -2,9 +2,9 @@
 //! `cloud.syncStatus` view, whose lists the engine bounds and caches per catalog revision.
 use crate::{LightcraftApp, theme::Tokens, widgets::register};
 use serde_json::{Value, json};
-
-/// Conflicts listed in Cloud Synchronization; the rest are counted.
-const LISTED: usize = 16;
+mod pages;
+#[cfg(test)]
+mod tests;
 
 /// A synchronized field's name as people know it.
 pub(crate) fn field_label(field: &str) -> &str {
@@ -45,9 +45,19 @@ fn choice_text(field: &str, choice: &Value) -> String {
 /// shown now is marked; keeping it still records the choice so other devices stop showing the
 /// conflict.
 pub(crate) fn choices(app: &mut LightcraftApp, ui: &mut egui::Ui, conflict: &Value) {
+    choices_at(app, ui, conflict, None);
+}
+
+/// Info may remain visible behind the recovery dialog. Its text fields and page
+/// state need a separate identity so the dialog cannot consume its input.
+pub(crate) fn choices_in_info(app: &mut LightcraftApp, ui: &mut egui::Ui, conflict: &Value) {
+    choices_at(app, ui, conflict, Some("info"));
+}
+
+fn choices_at(app: &mut LightcraftApp, ui: &mut egui::Ui, conflict: &Value, surface: Option<&str>) {
     let t = Tokens::get(ui.ctx());
     let (Some(entity), Some(field)) = (conflict["entity"].as_str(), conflict["field"].as_str()) else { return };
-    for choice in conflict["choices"].as_array().into_iter().flatten() {
+    for choice in &pages::rows_in(app, ui, "choices", Some((entity, field)), surface) {
         let Some(revision) = choice["revision"].as_str() else { continue };
         ui.horizontal(|ui| {
             let origin = if choice["thisDevice"] == true { "This device" } else { "Another device" };
@@ -65,21 +75,18 @@ pub(crate) fn choices(app: &mut LightcraftApp, ui: &mut egui::Ui, conflict: &Val
             }
         });
     }
-    if let Some(more) = conflict["moreChoices"].as_u64().filter(|n| *n > 0) {
-        ui.label(egui::RichText::new(crate::panels::cloud::count("More retained values", more)).small().color(t.text_dim));
-    }
 }
 
 /// Every conflicting field in the library (Cloud Synchronization).
 pub(crate) fn list(app: &mut LightcraftApp, ui: &mut egui::Ui, status: &Value) {
-    let Some(conflicts) = status["conflicts"].as_array().filter(|conflicts| !conflicts.is_empty()) else { return };
+    let Some(_conflicts) = status["conflicts"].as_array().filter(|conflicts| !conflicts.is_empty()) else { return };
     let t = Tokens::get(ui.ctx());
     ui.separator();
     ui.strong(crate::i18n::tr("Conflicting edits"));
     ui.label(crate::i18n::tr(
         "Two devices changed the same thing before seeing each other's change. LightCraft shows one and keeps the others; choose which to keep.",
     ));
-    for conflict in conflicts.iter().take(LISTED) {
+    for conflict in &pages::rows(app, ui, "conflicts", None) {
         let kind = conflict["entity"].as_str().and_then(|entity| entity.split_once(':')).map(|(kind, _)| kind);
         let fallback = match kind {
             Some("photo") => crate::i18n::tr("Photo"),
@@ -93,8 +100,44 @@ pub(crate) fn list(app: &mut LightcraftApp, ui: &mut egui::Ui, status: &Value) {
         }
         choices(app, ui, conflict);
     }
-    if conflicts.len() > LISTED {
-        ui.label(crate::panels::cloud::count("More conflicts", conflicts.len() - LISTED));
+}
+
+pub(crate) fn structure(app: &mut LightcraftApp, ui: &mut egui::Ui, status: &Value) {
+    if status["structuralConflicts"].as_array().is_none_or(Vec::is_empty) {
+        return;
+    }
+    ui.separator();
+    ui.strong(crate::i18n::tr("Conflicting folder or stack moves"));
+    ui.label(crate::i18n::tr("Move the affected folder or regroup a stack to resolve. The original choices remain retained."));
+    for conflict in pages::rows(app, ui, "structural", None) {
+        if conflict["field"] == "parent" {
+            ui.strong(conflict["name"].as_str().unwrap_or_else(|| crate::i18n::tr("Folder")));
+            for (label, key) in [("Requested parent", "proposed"), ("Currently shown under", "projected")] {
+                let parent = conflict[key].as_str().and_then(|global| {
+                    app.session
+                        .catalog
+                        .sync_state()
+                        .and_then(|state| state.winning(&format!("album:{global}"), "name"))
+                        .and_then(|(_, name)| name.as_str())
+                });
+                let fallback = if conflict[key].is_null() { crate::i18n::tr("Library root") } else { crate::i18n::tr("Unavailable folder") };
+                ui.horizontal(|ui| {
+                    ui.label(crate::i18n::tr(label));
+                    ui.label(parent.unwrap_or(fallback));
+                });
+            }
+        } else {
+            ui.label(crate::i18n::tr("Stack membership"));
+        }
+        if let Some(entity) = conflict["entity"].as_str() {
+            let response = ui.button(crate::i18n::tr("Keep current structure"));
+            register(ui.ctx(), format!("button:cloudAcceptStructure:{entity}"), response.rect);
+            if response.clicked()
+                && let Err(error) = app.run("cloud.acceptStructure", json!({"entity":entity}))
+            {
+                app.toast(ui.ctx(), error);
+            }
+        }
     }
 }
 
@@ -105,8 +148,9 @@ pub(crate) fn deleted(app: &mut LightcraftApp, ui: &mut egui::Ui, status: &Value
     ui.separator();
     ui.label(crate::i18n::tr("Recover deleted cloud photos and their retained edits:"));
     ui.label(egui::RichText::new(crate::panels::cloud::count("Deleted cloud photos", total)).small());
+    let rows = pages::rows(app, ui, "deleted", None);
     egui::ScrollArea::vertical().id_salt("cloudDeletedPhotos").max_height(180.).show(ui, |ui| {
-        for photo in photos {
+        for photo in rows {
             let Some(entity) = photo["entity"].as_str() else { continue };
             ui.horizontal(|ui| {
                 ui.label(photo["name"].as_str().unwrap_or_else(|| crate::i18n::tr("Deleted cloud photo")));
@@ -120,11 +164,40 @@ pub(crate) fn deleted(app: &mut LightcraftApp, ui: &mut egui::Ui, status: &Value
             });
         }
     });
-    if total > photos.len() as u64 {
-        ui.label(
-            egui::RichText::new(crate::panels::cloud::count("Not listed here", total - photos.len() as u64))
-                .small()
-                .color(Tokens::get(ui.ctx()).text_dim),
-        );
-    }
+}
+
+/// UI fixtures supply complete retained rows, while engine tests independently
+/// verify real revision/query-bound cursors and omitted values.
+#[cfg(test)]
+pub(crate) fn fixture_status(data: &Value, params: &Value) -> Value {
+    let Some(section) = params["section"].as_str() else { return data.clone() };
+    let source = match section {
+        "conflicts" => &data["conflicts"],
+        "deleted" => &data["deletedPhotos"],
+        "structural" => &data["structuralConflicts"],
+        "choices" => data["conflicts"]
+            .as_array()
+            .and_then(|items| items.iter().find(|c| c["entity"] == params["entity"] && c["field"] == params["field"]))
+            .map(|conflict| &conflict["choices"])
+            .unwrap_or(&Value::Null),
+        _ => &Value::Null,
+    };
+    let search = params["search"].as_str().unwrap_or_default().trim().to_lowercase();
+    let rows: Vec<_> = source.as_array().into_iter().flatten().filter(|value| value.to_string().to_lowercase().contains(&search)).cloned().collect();
+    let offset = params["cursor"]
+        .as_str()
+        .and_then(|cursor| cursor.strip_prefix("fixture-"))
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(rows.len());
+    let limit = match section {
+        "choices" => 8,
+        "deleted" => 50,
+        _ => 16,
+    };
+    let items: Vec<_> = rows.iter().skip(offset).take(limit).cloned().collect();
+    let next = offset.saturating_add(items.len());
+    json!({"page":{"items":items,"total":rows.len(),"offset":offset,"limit":limit,
+        "nextCursor":(next<rows.len()).then(||format!("fixture-{next}")),
+        "previousCursor":(offset>0).then(||format!("fixture-{}",offset.saturating_sub(limit)))}})
 }

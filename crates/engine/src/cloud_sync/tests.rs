@@ -1332,3 +1332,108 @@ fn deleted_photo_list_is_computed_once_per_revision_and_capped_with_a_full_count
     s.execute("cloud.restoreDeleted", &json!({"entity":entity})).unwrap();
     assert_eq!(s.execute("cloud.syncStatus", &json!({})).unwrap()["deletedPhotoCount"], extra - 1);
 }
+
+#[test]
+fn recovery_pages_reach_field_seventeen_value_nine_and_deleted_two_hundred_one_without_changes() {
+    use lightcraft_catalog::replication::Change;
+    let (mut s, _) = session();
+    let template = (**s.catalog.photo(PhotoId(1)).unwrap()).clone();
+    for id in 2..=218 {
+        let mut photo = template.clone();
+        photo.id = PhotoId(id);
+        photo.file_name = format!("recovery-photo-{id:03}.jpg");
+        s.commit("add fixture", Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+    }
+    let base = s.catalog.sync_state().unwrap().clone();
+    let entities: Vec<_> = (1..=17).map(|id| format!("photo:{}", s.catalog.cloud_identity(&format!("photo:{id}")).unwrap())).collect();
+    let mut state = base.clone();
+    for n in 1..=9 {
+        let mut branch = base.clone();
+        // A peer has received this baseline; the original author's outbox stays
+        // with the original session, not in the peer's new author identity.
+        branch.pending.clear();
+        branch.device = format!("alternative-{n}");
+        let changes = entities
+            .iter()
+            .map(|entity| Change {
+                entity: entity.clone(),
+                field: "caption".into(),
+                base: base.winning(entity, "caption").map(|(stamp, _)| stamp),
+                value: json!(format!("{} unique-alternative-{n}", "same preview ".repeat(10))),
+            })
+            .collect();
+        let mutation = branch.enqueue(changes).unwrap().unwrap();
+        state.receive(&mutation).unwrap();
+    }
+    s.apply_system(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+    for id in 18..=218 {
+        s.commit("delete fixture", Op::RemovePhoto { id: PhotoId(id) }).unwrap();
+    }
+    let before = serde_json::to_value(s.catalog.sync_state()).unwrap();
+    let revision = s.catalog.revision;
+    let original = s.execute("cloud.syncStatus", &json!({})).unwrap();
+    assert_eq!(original["conflicts"].as_array().unwrap().len(), 17);
+    assert_eq!(original["deletedPhotos"].as_array().unwrap().len(), 200, "legacy response remains bounded");
+    let first = s.execute("cloud.syncStatus", &json!({"section":"conflicts"})).unwrap()["page"].clone();
+    assert_eq!(first["items"].as_array().unwrap().len(), 16);
+    assert_eq!(first["total"], 17);
+    let next = s.execute("cloud.syncStatus", &json!({"section":"conflicts","cursor":first["nextCursor"]})).unwrap()["page"].clone();
+    assert_eq!(next["items"].as_array().unwrap().len(), 1);
+    let field = next["items"][0].clone();
+    let choices = s.execute("cloud.syncStatus", &json!({"section":"choices","entity":field["entity"],"field":"caption"})).unwrap()["page"].clone();
+    assert_eq!(choices["items"].as_array().unwrap().len(), 8);
+    let ninth = s
+        .execute("cloud.syncStatus", &json!({"section":"choices","entity":field["entity"],"field":"caption","cursor":choices["nextCursor"]}))
+        .unwrap()["page"]
+        .clone();
+    assert_eq!(ninth["items"].as_array().unwrap().len(), 1);
+    let ninth_id = ninth["items"][0]["revision"].as_str().unwrap();
+    assert!(!choices["items"].as_array().unwrap().iter().any(|choice| choice["revision"] == ninth_id));
+    let search = s
+        .execute("cloud.syncStatus", &json!({"section":"choices","entity":field["entity"],"field":"caption","search":"unique-alternative-9"}))
+        .unwrap();
+    assert_eq!(search["page"]["total"], 1, "search reads the value beyond the shortened preview");
+    let legacy: BTreeSet<_> = original["deletedPhotos"].as_array().unwrap().iter().map(|item| item["entity"].as_str().unwrap().to_owned()).collect();
+    let mut cursor = Value::Null;
+    let mut all = Vec::new();
+    loop {
+        let page = s.execute("cloud.syncStatus", &json!({"section":"deleted","cursor":cursor})).unwrap()["page"].clone();
+        assert!(page["items"].as_array().unwrap().len() <= 50);
+        all.extend(page["items"].as_array().unwrap().iter().cloned());
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    assert_eq!(all.len(), 201);
+    let omitted = all.iter().find(|item| !legacy.contains(item["entity"].as_str().unwrap())).unwrap();
+    let found = s.execute("cloud.syncStatus", &json!({"section":"deleted","search":omitted["name"]})).unwrap();
+    assert_eq!(found["page"]["total"], 1);
+    assert_eq!(found["page"]["items"][0]["entity"], omitted["entity"]);
+    assert_eq!(s.catalog.revision, revision);
+    assert_eq!(serde_json::to_value(s.catalog.sync_state()).unwrap(), before, "browsing never resolves or restores earlier items");
+    assert!(s.execute("cloud.syncStatus", &json!({"section":"conflicts","search":"different","cursor":first["nextCursor"]})).is_err());
+    assert!(s.execute("cloud.syncStatus", &json!({"section":"deleted","cursor":first["nextCursor"]})).is_err());
+    s.commit("new revision", Op::SetRating { id: PhotoId(1), rating: 3 }).unwrap();
+    assert!(s.execute("cloud.syncStatus", &json!({"section":"conflicts","cursor":first["nextCursor"]})).is_err());
+}
+
+#[test]
+fn recovery_pages_reject_hostile_requests_before_allocating_rows() {
+    let (mut s, _) = session();
+    for request in [
+        json!({"section":"unknown"}),
+        json!({"section":"choices"}),
+        json!({"section":"deleted","limit":0}),
+        json!({"section":"deleted","limit":u64::MAX}),
+        json!({"section":"deleted","limit":-1}),
+        json!({"section":"deleted","cursor":"x".repeat(257)}),
+        json!({"section":"deleted","cursor":"cp1.0.ffffffffffffffff.invalid"}),
+        json!({"section":"conflicts","search":"a".repeat(1025)}),
+        json!({"section":"conflicts","search":"line\nbreak"}),
+        json!({"section":"deleted","entity":"photo:x"}),
+        json!({"section":"deleted","unexpected":true}),
+    ] {
+        assert!(s.execute("cloud.syncStatus", &request).is_err(), "{request}");
+    }
+}

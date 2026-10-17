@@ -2,8 +2,12 @@
 use super::{CommandSpec, always, bad, cmd};
 use crate::{Result, Session};
 use serde_json::{Value, json};
+mod recovery;
 
-pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
+pub fn status(s: &mut Session, params: &Value) -> Result<Value> {
+    if params.get("section").is_some() {
+        return recovery::page(s, params);
+    }
     let token = s.library_token();
     let Some(state) = s.catalog.sync_state() else {
         return Ok(json!({"enabled":false}));
@@ -199,7 +203,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "cloud.overview", "Cloud Library Status", [], None, "{}; managed file counts, known data size, queue and live publication progress", always, crate::cloud_status::overview),
         cmd!(query "cloud.pause", "Pause Syncing", [], None, "{}; persist device-local pause; stop uploads and catalog publication, retaining durable work", always, crate::cloud_status::pause),
         cmd!(query "cloud.resume", "Resume Syncing", [], None, "{}; resume durable uploads and catalog publication after paused jobs drain", always, crate::cloud_status::resume),
-        cmd!(query "cloud.syncStatus","Cloud synchronization status",[],None,"{} → protocol, pending count, cursor/frontiers, gaps, conflicts, exact metadata utilization and early capacity warnings",always,status),
+        cmd!(query "cloud.syncStatus","Cloud synchronization status",[],None,"{} → status; {section: conflicts|choices|deleted|structural, search?, cursor?, limit?, entity?, field?} → bounded recovery page; choices requires entity/field",always,status),
     ];
     #[cfg(not(target_arch = "wasm32"))]
     specs.extend([

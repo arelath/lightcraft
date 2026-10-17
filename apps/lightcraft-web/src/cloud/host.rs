@@ -182,7 +182,7 @@ impl Host {
             "cloud.sync" => Some(self.start(s, p)),
             "cloud.migrateAppend" | "cloud.upgradeLibrary" => Some(self.migrate(s, p)),
             "cloud.prepareMigration" => Some(self.prepare_migration(s)),
-            "cloud.syncStatus" => Some(self.status(s)),
+            "cloud.syncStatus" => Some(self.status(s, p)),
             "cloud.overview" => Some(self.overview(s)),
             "cloud.pause" => Some({
                 let result = lightcraft_engine::cloud_status::pause(s, p).map_err(|e| e.to_string());
@@ -298,10 +298,10 @@ impl Host {
             s.apply_received(op).map_err(|e| e.to_string())?;
             s.persist().map_err(|e| e.to_string())?;
         }
-        self.status(s)
+        self.status(s, &json!({}))
     }
-    fn status(&self, s: &mut Session) -> Result<Value, String> {
-        let mut status = s.execute("cloud.syncStatus", &json!({})).map_err(|e| e.to_string())?;
+    fn status(&self, s: &mut Session, params: &Value) -> Result<Value, String> {
+        let mut status = s.execute("cloud.syncStatus", params).map_err(|e| e.to_string())?;
         let data = self.data.borrow();
         status["transportAvailable"] = json!(self.backend.is_some() && !data.providers.is_empty());
         status["running"] = json!(data.sync_running);
@@ -402,7 +402,7 @@ impl Host {
     }
     fn migrate(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
         if s.catalog.sync_state().is_some_and(|s| !s.protocol.is_head()) {
-            return self.status(s);
+            return self.status(s, &json!({}));
         }
         let params = p.as_object().ok_or("upgrade parameters must be an object")?;
         let writers_stopped = match params.get("writersStopped") {
