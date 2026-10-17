@@ -264,7 +264,7 @@ The supplied 2026-10-17 review is tracked before implementation in
 [cloud-reliability-tasks.md](docs/cloud-reliability-tasks.md#follow-up-review-local-conversion-recovery-and-focused-ux-2026-10-17).
 
 - [x] **CR.58** Repair local-only background media completion.
-- [ ] **CR.59** Certify conversion against the original owner after receipt compaction.
+- [x] **CR.59** Certify conversion against the original owner after receipt compaction.
 - [ ] **CR.60** Separate permanent-local editing from the bounded cloud outbox and reconcile rejoin safely.
 - [ ] **CR.61** Drain ready append operations during bounded discovery.
 - [ ] **CR.62** Persist absolute conversion destinations for relative library paths.

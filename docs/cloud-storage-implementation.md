@@ -690,3 +690,7 @@ tests, and presented native 20-photo batches with both protocols passed. See the
 ### CR.58 — Local background media revisions (2026-10-17)
 
 Managed background completion retains its originating typed operation. XMP save, DNG conversion, external-editor copy and reload commit with cloud sync off; explicit cloud enrollment remains blocked. The managed-media subsystem extraction remains CR.69.
+
+### CR.59 — Original-owner conversion certification (2026-10-17)
+
+Cloud-to-local conversion recertifies the final received state against the unchanged original owner and its retained append publication state. Repeated scans retain exact acknowledgements, recover already-published pending IDs from verified receipts, and compare semantic fingerprints independent of transport witnesses. Unpublished mutations remain pending.

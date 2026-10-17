@@ -292,6 +292,9 @@ fn copy_library(
     cancel: &AtomicBool,
     progress: &Mutex<Transition>,
 ) -> Result<crate::cloud_outcome::Outcome> {
+    let owner_catalog = catalog.clone();
+    let owner = catalog.sync_state().ok_or_else(|| error("cloud identity is unavailable"))?.clone();
+    let mut acknowledged = std::collections::BTreeSet::new();
     let mut previous = None;
     for pass in 0..8 {
         if cancel.load(Ordering::Relaxed) {
@@ -303,15 +306,43 @@ fn copy_library(
             p.current_file.clear();
         }
         let state = catalog.sync_state().ok_or_else(|| error("cloud identity is unavailable"))?;
-        let outcome = crate::cloud_replication::receive_only(&connection, state, cancel).map_err(|e| error(e.to_string()))?;
+        let mut outcome = crate::cloud_replication::receive_only(&connection, state, cancel).map_err(|e| error(e.to_string()))?;
         if outcome.append_progress().is_some_and(|p| !p.gaps.is_empty()) {
             return Err(error("Cloud history has missing dependencies. Reconnect and synchronize before retrying."));
         }
-        let fingerprint = crate::assets::sha256(&serde_json::to_vec(outcome.state()).map_err(|e| error(e.to_string()))?);
+        acknowledged.extend(outcome.acknowledged().iter().cloned());
+        let fingerprint = stable_fingerprint(&outcome, &acknowledged)?;
         let op = crate::cloud_sync::completed_outcome(&catalog, &outcome, outcome.acknowledged(), state.generation)?;
         catalog.apply(op)?;
         let blobs = crate::cloud_local_transfer::plan(&catalog)?;
         if previous.as_ref() == Some(&fingerprint) {
+            // Intermediate scans certify against the progressively merged worker
+            // catalog. The final owner still has the original snapshot, including
+            // its retained append publication state and pending mutation identities.
+            let mut witness = outcome.state().proofs.clone();
+            // A receive-only head scan does not publish or produce ACKs. Recover
+            // exact receipts for original pending IDs whose remote write succeeded
+            // before this device lost its durable acknowledgement.
+            for (id, mutation) in &owner.pending {
+                if crate::cloud_history::native::published(&connection, outcome.state(), id, &mutation.digest()?, &mut witness, cancel)
+                    .map_err(|e| error(e.to_string()))?
+                {
+                    acknowledged.insert(id.clone());
+                }
+            }
+            let certified = crate::cloud_history::native::certify(&connection, &owner, outcome.state(), &mut witness, cancel)
+                .map_err(|e| error(e.to_string()))?;
+            outcome.replace_state(certified).map_err(error)?;
+            match &mut outcome {
+                crate::cloud_outcome::Outcome::Append { acknowledged: ids, .. }
+                | crate::cloud_outcome::Outcome::ConditionalHead(crate::cloud_outcome::HeadOutcome::Published { acknowledged: ids, .. }) => {
+                    ids.extend(acknowledged);
+                }
+                _ if !acknowledged.is_empty() => return Err(error("conversion lost its certified publication position; cloud mode retained")),
+                _ => {}
+            }
+            // Prove the exact owner operation before reporting a finished download.
+            crate::cloud_sync::completed_outcome(&owner_catalog, &outcome, outcome.acknowledged(), owner.generation)?;
             crate::cloud_local_transfer::verify_local_files(&catalog, cancel)?;
             // Read-back every complete local reference immediately before owner commit.
             for blob in &blobs {
@@ -354,6 +385,28 @@ fn copy_library(
         previous = Some(fingerprint);
     }
     Err(error("Cloud library kept changing during download. Verified copies are retained. Retry when other devices are less active."))
+}
+
+/// Hash durable library/publication semantics; archive witnesses and discovery
+/// audit cursors are transport evidence and may differ on an unchanged scan.
+fn stable_fingerprint(
+    outcome: &crate::cloud_outcome::Outcome,
+    acknowledged: &std::collections::BTreeSet<String>,
+) -> Result<lightcraft_catalog::assets::BlobId> {
+    let state = outcome.state();
+    let bytes = serde_json::to_vec(&(
+        state.version,
+        &state.library,
+        &state.clock,
+        &state.documents,
+        &state.received,
+        &state.archives,
+        outcome.head_position().map(|position| (position.cursor(), position.generation())),
+        outcome.append_progress().map(|progress| (progress.version, &progress.manifest, &progress.frontiers, &progress.gaps)),
+        acknowledged,
+    ))
+    .map_err(|e| error(e.to_string()))?;
+    Ok(crate::assets::sha256(&bytes))
 }
 impl Session {
     pub(crate) fn save_cloud_mode(&self) -> Result<()> {
@@ -523,6 +576,47 @@ impl Session {
 mod tests {
     use super::*;
     use lightcraft_catalog::{Op, replication::SyncState};
+    #[test]
+    fn conversion_stability_ignores_proof_transport_but_tracks_publication_position() {
+        use crate::cloud_outcome::{HeadPosition, Outcome};
+        use lightcraft_catalog::replication::{
+            AppendProgress,
+            archive::{Node, Value as ArchiveValue},
+        };
+        let remote = SyncState::new("library".into(), "remote".into(), "personal".into()).unwrap().portable();
+        let mut proof_carrying = remote.clone();
+        let node = Node {
+            version: 1,
+            library: "library".into(),
+            author: "remote".into(),
+            first: 1,
+            count: 1,
+            value: ArchiveValue::Leaf { digest: "a".repeat(64), context: "b".repeat(64) },
+        };
+        proof_carrying.proofs.insert(node.digest().unwrap(), node);
+        let position = HeadPosition::new("a".repeat(64), 1).unwrap();
+        let first = Outcome::head(remote.clone(), position.clone(), Default::default());
+        let second = Outcome::head(proof_carrying.clone(), position, Default::default());
+        let ids = Default::default();
+        assert_eq!(stable_fingerprint(&first, &ids).unwrap(), stable_fingerprint(&second, &ids).unwrap());
+        let moved = Outcome::head(remote.clone(), HeadPosition::new("b".repeat(64), 2).unwrap(), Default::default());
+        assert_ne!(stable_fingerprint(&first, &ids).unwrap(), stable_fingerprint(&moved, &ids).unwrap());
+        let mut progress = AppendProgress {
+            version: 1,
+            manifest: "c".repeat(64),
+            frontiers: Default::default(),
+            remote,
+            scan: Default::default(),
+            gaps: Default::default(),
+        };
+        let first = Outcome::append(progress.clone(), Default::default());
+        progress.remote = proof_carrying;
+        let second = Outcome::append(progress.clone(), Default::default());
+        assert_eq!(stable_fingerprint(&first, &ids).unwrap(), stable_fingerprint(&second, &ids).unwrap());
+        progress.frontiers.insert("remote".into(), 1);
+        let advanced = Outcome::append(progress, Default::default());
+        assert_ne!(stable_fingerprint(&first, &ids).unwrap(), stable_fingerprint(&advanced, &ids).unwrap());
+    }
     struct Scratch(PathBuf);
     impl Scratch {
         fn new() -> Self {

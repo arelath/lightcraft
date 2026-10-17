@@ -87,6 +87,20 @@ impl Outcome {
             Self::Append { progress, .. } => &progress.remote,
         }
     }
+    /// Replace certification evidence without discarding protocol position or ACKs.
+    /// The caller supplies a state certified for the same library and schema.
+    pub fn replace_state(&mut self, state: Portable) -> Result<(), String> {
+        if state.library != self.state().library || state.version != self.state().version {
+            return Err("replacement cloud state has a different library or schema".into());
+        }
+        match self {
+            Self::Unchanged { state: current, .. }
+            | Self::ConditionalHead(HeadOutcome::Empty { state: current })
+            | Self::ConditionalHead(HeadOutcome::Published { state: current, .. }) => **current = state,
+            Self::Append { progress, .. } => progress.remote = state,
+        }
+        Ok(())
+    }
     pub fn acknowledged(&self) -> &BTreeSet<String> {
         match self {
             Self::ConditionalHead(HeadOutcome::Published { acknowledged, .. }) | Self::Append { acknowledged, .. } => acknowledged,

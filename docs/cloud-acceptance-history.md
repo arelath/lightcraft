@@ -507,3 +507,10 @@ The local-only engine regression covers all four operations and restart. Present
 
 All eight final-source CI gates passed (`target/cloud-review-cr58-cr62-ci-final.log`).
 This run used disposable local fixtures; fresh live AWS/B2 acceptance remains open.
+
+## 2026-10-17: CR.59 — Original-owner conversion certification
+
+The real-CLI signed fixture passes both protocols after another device compacts receipts, including a remote write whose local acknowledgement was lost. Conversion clears the exact retained pending ID, receives the newer rating, and performs only GET/HEAD with unchanged remote objects. The fingerprint regression distinguishes publication position from proof transport. Evidence: `target/cloud-cr59-compaction-ack.log` and `target/cloud-cr59-stability.log`.
+
+All eight final-source CI gates passed (`target/cloud-review-cr58-cr62-ci-final.log`).
+This run used disposable local fixtures; fresh live AWS/B2 acceptance remains open.

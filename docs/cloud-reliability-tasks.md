@@ -5,8 +5,8 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
-Current status (2026-10-17): CR.1–CR.42, CR.46–CR.47 and CR.56–CR.58 are complete.
-CR.43–CR.45, CR.48–CR.55 and CR.59–CR.74 remain open.
+Current status (2026-10-17): CR.1–CR.42, CR.46–CR.47, CR.56–CR.59 are complete.
+CR.43–CR.45, CR.48–CR.55, CR.60–CR.74 remain open.
 Dated verification notes below
 describe their original snapshots; current operational limits remain in
 [cloud-storage-implementation.md](cloud-storage-implementation.md).
@@ -44,7 +44,7 @@ CR.49/53, CR.61 and the recovery/UI work. CR.62 can land independently. Preserve
 existing mutation identities, immutable media, conflict alternatives and offline copies.
 
 - [x] CR.58 — Carry a typed managed-preparation kind through background completion so local XMP, DNG, external-editor copy and reload revisions commit while sync is off, without authorizing explicit cloud enrollment. Reproduce `wait:false` on a converted library and assert zero network requests.
-- [ ] CR.59 — Certify the final cloud-to-local result against the original owner snapshot, retaining all required archive proofs and append publication state across repeated receive-only scans. Exclude transport proofs from stability fingerprints. Test an older device converting after another device compacts receipts.
+- [x] CR.59 — Certify the final cloud-to-local result against the original owner snapshot, retaining all required archive proofs and append publication state across repeated receive-only scans. Exclude transport proofs from stability fingerprints. Test an older device converting after another device compacts receipts.
 - [ ] CR.60 — Separate permanent-local editing from the bounded cloud outbox. Durably preserve the rejoin baseline, pending mutation identities and local changes without eventually blocking local edits at 10,000 pending mutations; explicitly reconcile on re-enable. Test the capacity boundary, restart, rejoin and conflicts.
 - [ ] CR.61 — Drain causally ready append operations during bounded discovery on native and browser; share discovery planning while keeping platform I/O separate. Retain integrity checks and bounds for unresolved dependencies. Test a fresh reader catching up with 300 sequential 256 KiB caption replacements and cross-author ordering.
 - [ ] CR.62 — Persist a stable absolute permanent-original destination before entering conversion, including relative `--library` paths; retain symlink/junction validation. Test conversion and offline reopening of `./photos`.
@@ -1771,6 +1771,14 @@ throttling are not addressed.
 2026-10-17 — CR.58: Local background media revisions. Managed background completion retains its originating typed operation. XMP save, DNG conversion, external-editor copy and reload commit with cloud sync off; explicit cloud enrollment remains blocked. The managed-media subsystem extraction remains CR.69.
 
 The local-only engine regression covers all four operations and restart. Presented native control-channel acceptance covers asynchronous XMP, external copy and reload, asserting zero extra network requests and unchanged cloud objects. The local-only Info screenshot was inspected. Evidence: `target/cloud-cr58-engine-recheck.log`, `target/cloud-cr58-native-acceptance.log`, `target/cloud-cr58-native/toggle/off-info.png`.
+
+Final-source `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF, workspace
+tests, parity, layers, assets and WASM: `target/cloud-review-cr58-cr62-ci-final.log`.
+These are disposable loopback/procedural fixtures, not live AWS/B2 acceptance.
+
+2026-10-17 — CR.59: Original-owner conversion certification. Cloud-to-local conversion recertifies the final received state against the unchanged original owner and its retained append publication state. Repeated scans retain exact acknowledgements, recover already-published pending IDs from verified receipts, and compare semantic fingerprints independent of transport witnesses. Unpublished mutations remain pending.
+
+The real-CLI signed fixture passes both protocols after another device compacts receipts, including a remote write whose local acknowledgement was lost. Conversion clears the exact retained pending ID, receives the newer rating, and performs only GET/HEAD with unchanged remote objects. The fingerprint regression distinguishes publication position from proof transport. Evidence: `target/cloud-cr59-compaction-ack.log` and `target/cloud-cr59-stability.log`.
 
 Final-source `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF, workspace
 tests, parity, layers, assets and WASM: `target/cloud-review-cr58-cr62-ci-final.log`.
