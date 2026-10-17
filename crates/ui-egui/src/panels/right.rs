@@ -780,8 +780,10 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     if let Some(action) = status["health"]["lastError"]["action"].as_str() {
                         ui.label(egui::RichText::new(action).color(t.text_dim));
                     }
+                    // After an error the advice says Retry Syncing: the button says the same.
+                    let label = if status["health"]["lastError"].is_object() { "Retry Syncing" } else { "Sync now" };
                     if !running
-                        && text_button(ui, "cloudSyncNow", crate::i18n::tr("Sync now"), false).clicked()
+                        && text_button(ui, "cloudSyncNow", crate::i18n::tr(label), false).clicked()
                         && let Err(error) = app.run("cloud.sync", json!({"wait":false}))
                     {
                         app.toast(ui.ctx(), error);

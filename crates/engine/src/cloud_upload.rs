@@ -937,11 +937,11 @@ fn save_preflight(s: &mut Session, ready: &[Item], skipped: &mut [Value], verify
 fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
     if !abort && s.catalog.sync_state().is_none() {
         return Err(error(
-            "enable cloud synchronization with cloud.syncEnable before uploading; choose the storage protocol explicitly; staged originals retained",
+            "set up cloud sync (Set Up Cloud Sync…, or cloud.syncEnable) before uploading; choose the storage protocol explicitly; staged originals retained",
         ));
     }
     if s.cloud_paused && !abort {
-        return Err(error("cloud syncing is paused; use cloud.resume first"));
+        return Err(error("cloud syncing is paused on this device; choose Resume Syncing (cloud.resume) first"));
     }
     if s.cloud_replication_jobs.migrating() || s.cloud_replication_jobs.preparing_migration() {
         return Err(error("uploads are paused for migration; finish migration or resume synchronization first"));

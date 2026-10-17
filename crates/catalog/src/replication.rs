@@ -24,6 +24,11 @@ pub type Clock = BTreeMap<String, u64>;
 fn invalid(message: &str) -> CatalogError {
     CatalogError::Invalid(message.into())
 }
+/// A synchronization limit was reached: not damaged history, so recovery is maintenance or a
+/// smaller change, never a repair.
+fn capacity(message: &str) -> CatalogError {
+    CatalogError::Capacity(message.into())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -108,7 +113,7 @@ impl Mutation {
             }
         }
         if serde_json::to_vec(self).map_err(|e| invalid(&e.to_string()))?.len() > MAX_MUTATION_BYTES {
-            return Err(invalid("synchronization mutation exceeds 2 MiB; local data retained"));
+            return Err(capacity("synchronization mutation exceeds 2 MiB; local data retained"));
         }
         Ok(())
     }
@@ -307,22 +312,22 @@ impl SyncState {
     }
     pub fn validate(&self) -> Result<()> {
         if self.clock.len() > MAX_DEVICES {
-            return Err(invalid(
+            return Err(capacity(
                 "synchronization author limit reached (4,096); retired clocks are retained and safe author-slot retirement is unsupported; current library and outbox retained",
             ));
         }
         if self.documents.len() > MAX_RECORDS {
-            return Err(invalid(
+            return Err(capacity(
                 "synchronization document limit reached (100,000); checkpoints cannot remove document identities or tombstones; current library and outbox retained",
             ));
         }
         if self.received.len() > MAX_RECORDS {
-            return Err(invalid(
-                "synchronization receipt limit reached (100,000); cloud.sync with checkpoint:true archives eligible historical receipts only; finish pending synchronization and resolve conflicts; current heads and pending proofs remain retained, so a smaller separate library may be needed",
+            return Err(capacity(
+                "synchronization receipt limit reached (100,000); Archive receipt history (cloud.sync checkpoint:true) archives eligible historical receipts only; finish pending synchronization and resolve conflicts; current heads and pending proofs remain retained, so a smaller separate library may be needed",
             ));
         }
         if self.pending.len() > MAX_PENDING {
-            return Err(invalid(
+            return Err(capacity(
                 "synchronization pending-change limit reached (10,000); finish uploads and synchronization before editing again; current library and outbox retained",
             ));
         }
@@ -387,7 +392,7 @@ impl SyncState {
         }
         for (id, fields) in &self.documents {
             if fields.len() > MAX_FIELDS {
-                return Err(invalid(
+                return Err(capacity(
                     "synchronized entity field limit reached (10,000); avoid adding fields or membership identities; removed membership fields stay retained, so use smaller separate albums; current library and outbox retained",
                 ));
             }
@@ -396,7 +401,7 @@ impl SyncState {
             }
             for (field, register) in fields {
                 if register.0.len() > MAX_VERSIONS {
-                    return Err(invalid(
+                    return Err(capacity(
                         "synchronized field revision limit reached (128); resolve retained revisions or make a new causal edit to the field; current library and outbox retained",
                     ));
                 }

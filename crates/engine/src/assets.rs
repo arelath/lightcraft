@@ -95,6 +95,25 @@ pub enum AssetError {
     /// The library's control envelope refuses this step (newer format, maintenance, …).
     #[error("{0}")]
     Blocked(crate::cloud_control::Blocked),
+    /// A synchronization limit would be exceeded; the message names the recovery.
+    #[error("{0}")]
+    Capacity(String),
+    /// The cloud library moved to another protocol; this device must rejoin it.
+    #[error("{0}")]
+    Moved(String),
+}
+
+/// Keeps what kind of catalog failure it was: a full disk or a limit is not damaged history.
+impl From<lightcraft_catalog::CatalogError> for AssetError {
+    fn from(error: lightcraft_catalog::CatalogError) -> Self {
+        use lightcraft_catalog::CatalogError;
+        match error {
+            CatalogError::Capacity(message) => Self::Capacity(message),
+            CatalogError::Io(_) | CatalogError::Corrupt(_) => Self::Disk(error.to_string()),
+            CatalogError::Newer(_) => Self::Unsupported(error.to_string()),
+            other => Self::Invalid(other.to_string()),
+        }
+    }
 }
 
 impl AssetError {

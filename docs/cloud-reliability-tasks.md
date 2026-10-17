@@ -5,7 +5,7 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
-Current status (2026-10-16): CR.1–CR.42, CR.46 and CR.47 are complete.
+Current status (2026-10-17): CR.1–CR.42, CR.46, CR.47 and CR.56 are complete.
 CR.43–CR.45 and CR.48–CR.55 remain open. Dated verification notes below
 describe their original snapshots; current operational limits remain in
 [cloud-storage-implementation.md](cloud-storage-implementation.md).
@@ -85,6 +85,7 @@ honour it. Specification: [cloud-sync-protocol.md](cloud-sync-protocol.md#librar
 Source: static review of `cloud-support` at `a883fbfb`.
 
 - [x] CR.46 — Let people resolve every retained field conflict (not only develop) from Cloud Synchronization and Info; show a refused publication (maintenance, moved library, newer writer) in the popup, Info and attention state on desktop and browser; replace the per-frame, unbounded deleted-photo scan with a cached, capped list; translate the popup's counts and show the last remote check as a readable age.
+- [x] CR.56 — Give every cloud failure advice that matches its cause: per-failure recovery for newer formats (update LightCraft), a moved library (Migrate Cloud Library… to rejoin), maintenance and HTTP 301/307/400/404/413 (check bucket, prefix, region, endpoint); keep catalog failures typed (synchronization limits → capacity, catalog I/O or corruption → local resource, newer catalog → unsupported) instead of invalid history; word advice for the Retry Syncing / Resume Syncing buttons and name buttons, not only command ids, in errors.
 
 ## Follow-up review: upgrade safety and durable cache recovery
 
@@ -1699,3 +1700,17 @@ Full final-source `cargo +1.95.0 xtask ci` passed all eight gates: fmt, strict C
 HEIF, workspace tests, parity, layers, assets and WASM (including the browser callers).
 Log: `target/cloud-reliability/cr47-ci.log`. CR.47 is complete; CR.48–CR.55 and the
 previously deferred CR.43–CR.45 remain unchecked.
+
+2026-10-17 — CR.56: failure advice matches the cause. `CloudFailure` carries an optional `recovery`
+(serialized only when set; older failures without it still deserialize) that `action()` prefers over the
+kind's general advice. Control blocks map newer formats to "Update LightCraft", a retired head to
+"Migrate Cloud Library… to rejoin" and maintenance to "another device is upgrading". HTTP 301/307/400/404/413
+are configuration (unsupported) with bucket/prefix/region/endpoint advice, not invalid history. Catalog
+limits are a typed `CatalogError::Capacity` (new `capacity` failure kind; not retried) and reach the status
+through `AssetError::Capacity`; catalog I/O/corruption is a local resource and a newer catalog is
+unsupported. A head library that finds an append manifest reports `AssetError::Moved` with rejoin advice.
+Advice names Retry Syncing; Info's Sync now reads Retry Syncing after an error; paused/setup/rejoin errors
+name the button and keep the command id for agents. Regressions:
+`recovery_advice_names_the_real_fix_not_the_kinds_general_advice`,
+`wrong_bucket_or_region_is_configuration_not_invalid_history` and
+`catalog_failures_keep_their_kind_through_assets_and_the_engine`.

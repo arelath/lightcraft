@@ -16,7 +16,7 @@ fn canceled(cancel: &AtomicBool) -> Result<()> {
     if cancel.load(Ordering::Relaxed) { Err(AssetError::Cancelled) } else { Ok(()) }
 }
 fn catalog_error(error: lightcraft_catalog::CatalogError) -> AssetError {
-    invalid(error.to_string())
+    AssetError::from(error)
 }
 
 pub use crate::cloud_records::Checkpoint;
@@ -221,7 +221,9 @@ pub(crate) fn synchronize_verified(
         return crate::cloud_append::native::synchronize_verified(connection, local, checkpoint_requested, false, cancel, media);
     }
     if connection.get_small(&crate::cloud_append::manifest_key(&connection.prefix, &local.library)?, 16 << 10, cancel)?.is_some() {
-        return Err(invalid("this library has an append manifest; run cloud.upgradeLibrary on this device to rejoin it; pending work retained"));
+        return Err(AssetError::Moved(
+            "this cloud library moved to append-only synchronization; use Migrate Cloud Library… (cloud.upgradeLibrary) on this device to rejoin it; pending work retained".into(),
+        ));
     }
     local.validate().map_err(catalog_error)?;
     if local.pending.is_empty() && !checkpoint_requested {

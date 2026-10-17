@@ -166,7 +166,7 @@ pub fn start_migration(s: &mut Session, p: &Value) -> crate::Result<Value> {
 fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::Request>) -> crate::Result<Value> {
     let migrating = upgrade.is_some();
     if s.cloud_paused && !migrating {
-        return Err(error("cloud syncing is paused; use cloud.resume first"));
+        return Err(error("cloud syncing is paused on this device; choose Resume Syncing (cloud.resume) first"));
     }
     s.claim_cloud_owner()?;
     if s.cloud_replication_jobs.running() {
@@ -190,7 +190,7 @@ fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::
         s.cloud_replication_jobs.last_audit = Some(now);
     }
     s.persist()?;
-    let state = s.catalog.sync_state().cloned().ok_or_else(|| error("enable synchronization first using cloud.syncEnable"))?;
+    let state = s.catalog.sync_state().cloned().ok_or_else(|| error("set up cloud sync first: Set Up Cloud Sync… (cloud.syncEnable)"))?;
     let started_revision = s.catalog.revision;
     let snapshot_connection = state.connection.clone();
     let lib = s.library.as_mut().ok_or_else(|| error("open a persistent library first"))?;

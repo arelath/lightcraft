@@ -53,8 +53,10 @@ in append mode. LIST discovery and full state validation still have linear costs
   use published smart previews. The 4 GiB blob wire bound does not imply decode capacity.
 - Synchronization retries connectivity, HTTP 408/425/429/500/502/503/504 and contention
   failures after 2, 4, 8, 16 and 30 seconds. A sixth failure halts polling. Authentication,
-  integrity, invalid history/schema/identity, unsupported configuration and local resource
-  failures halt immediately with a recovery action. Explicit Resume/Sync now resets the
+  integrity, invalid history/schema/identity, unsupported configuration (including HTTP
+  301/307/400/404/413), synchronization capacity limits and local resource
+  failures halt immediately with a recovery action specific to the cause (update LightCraft,
+  rejoin a moved library, check bucket/prefix/region, archive receipt history). Explicit Resume/Sync now resets the
   retry budget; successful polling clears the error. Migration requires explicit recovery.
   Resource-specific errors and last successful remote scan remain separate from user pause
   and pending publication. Pending edits, staged originals and exact mutation IDs survive

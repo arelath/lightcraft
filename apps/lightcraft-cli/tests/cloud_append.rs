@@ -392,7 +392,7 @@ fn explicit_migration_keeps_pending_ids_and_legacy_objects_blocks_head_continuat
         ],
     );
     assert!(!out.status.success());
-    assert!(rows[2]["error"].as_str().unwrap().contains("append manifest"));
+    assert!(rows[2]["error"].as_str().unwrap().contains("moved to append-only synchronization"));
 }
 
 #[test]

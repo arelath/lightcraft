@@ -76,7 +76,7 @@ fn documents(before: &Documents, after: &Documents) -> BTreeMap<String, Document
 }
 fn update_documents(base: &mut Documents, delta: &BTreeMap<String, DocumentDelta>) -> Result<()> {
     if delta.len() > MAX_RECORDS {
-        return Err(invalid("synchronization delta exceeds document limit"));
+        return Err(super::capacity("synchronization delta exceeds document limit"));
     }
     let empty = BTreeMap::new();
     for (key, edit) in delta {

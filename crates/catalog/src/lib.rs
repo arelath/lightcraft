@@ -67,6 +67,10 @@ pub enum CatalogError {
     Corrupt(String),
     #[error("catalog storage: {0}")]
     Io(String),
+    /// A synchronization limit (authors, documents, receipts, pending changes, fields, revisions
+    /// or state bytes) would be exceeded. Nothing changed; the message names the recovery.
+    #[error("{0}")]
+    Capacity(String),
     /// The library was written by a newer LightCraft (a newer catalog format, or a change this
     /// version doesn't know). Nothing was read into the session and nothing was modified.
     #[error("this library was written by a newer version of LightCraft ({0}); update LightCraft to open it. The library was left unchanged.")]

@@ -361,7 +361,7 @@ impl Host {
         self.claim_owner(s)?;
         let migrating = matches!(upgrade, Some(super::upgrade::Request::Append { .. }));
         if s.cloud_paused && upgrade.is_none() {
-            return Err("cloud syncing is paused; use cloud.resume first".into());
+            return Err("cloud syncing is paused on this device; choose Resume Syncing (cloud.resume) first".into());
         }
         if self.backend.is_none() || self.frozen.get() {
             return Err("persistent browser storage is unavailable".into());

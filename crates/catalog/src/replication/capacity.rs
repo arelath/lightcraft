@@ -1,6 +1,6 @@
 //! Exact metadata utilization and recovery guidance. Counting serialization avoids
 //! allocating a second synchronization-state buffer merely to check its byte budget.
-use super::{MAX_DEVICES, MAX_FIELDS, MAX_PENDING, MAX_RECORDS, MAX_STATE_BYTES, MAX_VERSIONS, SyncState, invalid};
+use super::{MAX_DEVICES, MAX_FIELDS, MAX_PENDING, MAX_RECORDS, MAX_STATE_BYTES, MAX_VERSIONS, SyncState, capacity, invalid};
 use crate::Result;
 use serde::Serialize;
 use std::{collections::BTreeSet, io::Write};
@@ -28,7 +28,7 @@ pub(super) fn serialized_bytes(state: &SyncState) -> Result<usize> {
     let mut counter = Counter { bytes: 0, limit: MAX_STATE_BYTES, exceeded: false };
     if let Err(error) = serde_json::to_writer(&mut counter, state) {
         if counter.exceeded {
-            return Err(invalid(state_size_recovery(state)));
+            return Err(capacity(state_size_recovery(state)));
         }
         return Err(invalid(&format!("cannot measure synchronization state: {error}")));
     }
@@ -40,7 +40,7 @@ fn historical(state: &SyncState) -> usize {
 }
 fn state_size_recovery(state: &SyncState) -> &'static str {
     if historical(state) > 0 {
-        "synchronization state exceeds 64 MiB; current library and outbox retained; synchronize pending uploads/edits, then run cloud.sync with checkpoint:true to archive historical receipts; current documents, conflicts and retired clocks remain retained"
+        "synchronization state exceeds 64 MiB; current library and outbox retained; synchronize pending uploads/edits, then use Archive receipt history (cloud.sync checkpoint:true); current documents, conflicts and retired clocks remain retained"
     } else if !state.pending.is_empty() {
         "synchronization state exceeds 64 MiB; current library and outbox retained; finish synchronizing pending uploads/edits and retry; checkpoint maintenance cannot remove current documents, conflicts or retired author clocks"
     } else {

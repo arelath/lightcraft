@@ -155,7 +155,7 @@ impl std::fmt::Display for Blocked {
             ),
             Self::Retired(successor) => write!(
                 f,
-                "cloud library moved to {} (epoch {}); run cloud.upgradeLibrary on this device to rejoin; pending work retained",
+                "cloud library moved to {} (epoch {}); use Migrate Cloud Library… (cloud.upgradeLibrary) on this device to rejoin; pending work retained",
                 successor.protocol, successor.epoch
             ),
             Self::Invalid(why) => write!(f, "invalid cloud library control record ({why}); remote data preserved, local work retained"),

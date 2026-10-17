@@ -28,7 +28,7 @@ pub fn insert(witness: &mut Witness, hash: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 pub fn ce(error: CatalogError) -> AssetError {
-    AssetError::Invalid(error.to_string())
+    AssetError::from(error)
 }
 /// Plan exact proofs once for both the main catalog and retained append ACKs.
 pub fn merge_session(local: &SyncState, remote: &Portable) -> std::result::Result<archive::MergeSession, CatalogError> {
