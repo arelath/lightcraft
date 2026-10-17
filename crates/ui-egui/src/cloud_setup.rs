@@ -460,6 +460,12 @@ fn provider_step(ui: &mut egui::Ui, setup: &mut Setup) {
     }
     ui.add_space(4.0);
     dim(ui, crate::i18n::tr("Photos, edits and albums are kept in a bucket in your own account, billed by the provider."));
+    dim(
+        ui,
+        crate::i18n::tr(
+            "Enabling cloud sync uploads all photos added to this library, including photos you add later. Originals already in cloud storage are verified and reused. Your local files are kept.",
+        ),
+    );
 }
 
 /// Text under a choice, lined up with its label.

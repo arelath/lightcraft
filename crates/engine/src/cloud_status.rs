@@ -94,6 +94,7 @@ pub fn resume(s: &mut Session, _: &Value) -> Result<Value> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         s.cloud_uploads.request_resume(true);
+        crate::cloud_import::retry_library(s);
         crate::cloud_replication::resume_publication(s);
     }
     overview(s, &Value::Null)

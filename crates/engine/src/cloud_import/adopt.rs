@@ -68,6 +68,7 @@ pub(crate) fn start(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     let mut job = Job::new(s, p, true)?;
+    job.automatic = p["automatic"] == true;
     job.recover = false;
     job.paths = photos
         .iter()

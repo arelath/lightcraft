@@ -317,9 +317,6 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                 navigation(app, ui, "button:cloudShowWaiting", "Show waiting photos", "library.filter", json!({"syncStatus":"pending"}));
             }
             navigation(app, ui, "button:cloudSetup", "Cloud synchronization…", "dialog.cloudSync", json!({}));
-            if !busy(data) || attention {
-                navigation(app, ui, "button:cloudStorage", "Storage connection…", "dialog.cloudStorage", json!({}));
-            }
             #[cfg(not(target_arch = "wasm32"))]
             if !busy(data) && !attention {
                 navigation(app, ui, "button:cloudImport", "Import to cloud storage…", "file.importCloud", json!({}));
@@ -626,15 +623,16 @@ mod tests {
         {
             text(&h, expected);
         }
-        for id in ["button:cloudSetup", "button:cloudStorage", "button:cloudImport", "button:cloudPauseResume"] {
+        for id in ["button:cloudSetup", "button:cloudImport", "button:cloudPauseResume"] {
             assert!(has(&h, id), "{id}");
         }
         assert!(!has(&h, "button:cloudShowWaiting"));
+        assert!(!has(&h, "button:cloudStorage"), "one cloud settings entry point");
         assert!(!has(&h, "button:cloudRetry"));
         assert!(has(&h, "indicator:cloudFooterCheckCircle"));
         assert!(!h.painted_text().iter().any(|text| text == "UPLOADING" || text == "NEEDS ATTENTION"));
         capture(&mut h, "up-to-date");
-        click(&mut h, "button:cloudStorage");
+        click(&mut h, "button:cloudSetup");
         assert!(h.app.ui.dialog.is_some());
         assert!(!has(&h, "popup:cloud"), "navigation closes the popup");
     }

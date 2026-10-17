@@ -1127,6 +1127,7 @@ impl Session {
         if self.cloud_paused || self.cloud_replication_jobs.migrating() || self.cloud_replication_jobs.preparing_migration() {
             return;
         }
+        crate::cloud_import::resume_library(self);
         if !self.cloud_uploads.requested || self.cloud_uploads.pending.len() >= 4 {
             return;
         }

@@ -395,3 +395,29 @@ asset attribution and WASM. Final native build and presented-window acceptance l
 `target/cloud-library-delete-native-verified.log`. The recovery-list regression now
 scrolls the outer dialog to verify its footer remains reachable after adding the action;
 it retains conflict-choice and bounded-list assertions.
+
+## 2026-10-16: whole-library native cloud mode (CUX.9)
+
+Native cloud mode now discovers added file-backed originals and stages them through
+durable per-photo adoption requests. Existing and later imports retain IDs, edits,
+virtual-copy relationships and local files. Browsed Local-folder records are excluded
+until added. Automatic adoption does not insert user Undo steps. Preparation failures
+stay visible, healthy photos continue, and Resume retries failed preparation.
+
+Focused engine checks cover reopening, later imports, pause, virtual-copy sharing,
+missing-original isolation and retry without duplicate records. The opt-in presented
+desktop test drives both protocols against the signed disposable S3 fixture. It checks
+automatic upload after enablement, byte-verified reuse without PUT of an existing
+original, later import while paused, upload after Resume, and absence of the duplicate
+popup settings action. Procedural-photo popup screenshots under
+`target/cloud-whole-library-acceptance/` were visually inspected. These small fixtures
+are not live-provider or large-library performance acceptance. CLI/MCP one-shot commands
+still require explicit adoption/upload; browser original uploads remain unsupported.
+
+All eight stages of `cargo +1.95.0 xtask ci` passed
+(`target/cloud-whole-library-ci.log`), including 777 UI tests and the new engine
+regressions. The final native build and both-protocol desktop acceptance passed
+(`target/cloud-whole-library-native-final-build.log`,
+`target/cloud-whole-library-native-final.log`). The desktop recheck was run after CI
+released the Windows CLI executable lock. Presented-window screenshots and performance
+inspection are retained per protocol in the artifact folder; no headless fallback was used.

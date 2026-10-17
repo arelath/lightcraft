@@ -15,6 +15,9 @@ use std::sync::{Arc, mpsc};
 
 mod adopt;
 pub(crate) use adopt::start as adopt;
+mod automatic;
+pub(crate) use automatic::resume as resume_library;
+pub(crate) use automatic::retry as retry_library;
 mod issues;
 mod requests;
 mod settled;
@@ -39,6 +42,7 @@ struct Completed {
 }
 
 struct Prepared {
+    automatic: bool,
     order: Vec<String>,
     skipped: Vec<settled::Skipped>,
     manifests: Vec<Manifest>,
@@ -247,6 +251,7 @@ struct RequestOptions {
     policy: Option<requests::DuplicatePolicy>,
 }
 struct Job {
+    automatic: bool,
     paths: Vec<PathBuf>,
     adoption: Option<Vec<Photo>>,
     adoption_key: Option<String>,
@@ -436,6 +441,7 @@ impl Job {
             paths,
             adoption: None,
             adoption_key: None,
+            automatic: false,
             root,
             connection,
             resolver,
@@ -558,6 +564,7 @@ impl Job {
     fn run(&mut self, cancel: &AtomicBool, progress: &crate::activity::TaskHandle) -> Result<Prepared> {
         let manifests = self.prepare(cancel, progress)?;
         Ok(Prepared {
+            automatic: self.automatic,
             order: self.request.as_ref().map_or_else(Vec::new, |request| request.candidates.iter().map(|candidate| candidate.id.clone()).collect()),
             skipped: self.skipped.lock().map_err(|_| error("settled import state unavailable"))?.clone(),
             manifests,
@@ -1114,6 +1121,7 @@ fn commit(s: &mut Session, manifests: Vec<Manifest>) -> Result<Value> {
     complete(
         s,
         Prepared {
+            automatic: false,
             order: Vec::new(),
             skipped: Vec::new(),
             manifests,
@@ -1216,8 +1224,15 @@ fn complete(s: &mut Session, mut prepared: Prepared) -> Result<Completed> {
     }
     if !ops.is_empty() {
         s.skip_auto_write = true;
-        s.commit(if adopting { "Move photos to cloud storage" } else { "Import cloud photos" }, Op::Batch { ops })?;
-        if adopting && let Some(entry) = s.undo.last_mut() {
+        if adopting && prepared.automatic {
+            s.apply_system(Op::Batch { ops })?;
+        } else {
+            s.commit(if adopting { "Move photos to cloud storage" } else { "Import cloud photos" }, Op::Batch { ops })?;
+        }
+        if adopting
+            && !prepared.automatic
+            && let Some(entry) = s.undo.last_mut()
+        {
             // Publication may already reference these durable resources. Undo
             // withdraws the photos; it must not strand the frozen outbox.
             adopt::retain_resources(&mut entry.op);
@@ -1422,6 +1437,7 @@ impl Drop for Pending {
 
 #[derive(Default)]
 pub struct Imports {
+    automatic: automatic::Queue,
     pending: Vec<Pending>,
     coordinator: Arc<std::sync::Mutex<()>>,
     pub reports: Vec<Value>,
@@ -2423,6 +2439,7 @@ mod tests {
         let result = complete(
             &mut session,
             Prepared {
+                automatic: false,
                 order: Vec::new(),
                 skipped: Vec::new(),
                 manifests: Vec::new(),
@@ -2532,6 +2549,75 @@ mod tests {
     fn import_local(fixture: &Fixture, session: &mut Session) -> PhotoId {
         session.execute("library.import", &json!({"paths":[fixture.original]})).unwrap();
         session.catalog.photos().next().unwrap().id
+    }
+
+    fn pump_library_adoption(session: &mut Session, ready: impl Fn(&Session) -> bool) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !ready(session) || !session.cloud_imports.pending.is_empty() {
+            assert!(std::time::Instant::now() < until, "{:?}", session.cloud_imports.failures);
+            session.poll_cloud_imports();
+            resume_library(session);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn cloud_mode_stages_the_added_library_and_later_imports_across_reopen() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let first = import_local(&fixture, &mut session);
+        session.execute("photo.rate", &json!({"ids":[first.0],"rating":4})).unwrap();
+        session.execute("photo.virtualCopy", &json!({"ids":[first.0]})).unwrap();
+        let browsed = original_at(&fixture, "browsed.png", 150);
+        session.execute("library.import", &json!({"paths":[browsed]})).unwrap();
+        let browsed_id = session.catalog.photos().find(|p| p.file_name == "browsed.png").unwrap().id;
+        session.apply_system(Op::SetLocal { id: browsed_id, local: true }).unwrap();
+        session.execute("cloud.syncEnable", &json!({"connection":"personal"})).unwrap();
+        session.execute("cloud.pause", &json!({})).unwrap();
+        resume_library(&mut session);
+        assert!(session.cloud_imports.pending.is_empty());
+        session.execute("cloud.resume", &json!({})).unwrap();
+        let undo_steps = session.undo.len();
+        pump_library_adoption(&mut session, |s| matches!(s.catalog.photo(first).unwrap().source, Source::Managed { .. }));
+        assert_eq!(session.undo.len(), undo_steps, "background sync must not insert user undo steps");
+        assert_eq!(session.catalog.photo(first).unwrap().rating, 4);
+        assert_eq!(session.catalog.upload_intents().len(), 1, "virtual copies share one original");
+        assert!(session.catalog.photos().filter(|p| p.id == first || p.copy_of == Some(first)).all(|p| matches!(p.source, Source::Managed { .. })));
+        assert!(matches!(session.catalog.photo(browsed_id).unwrap().source, Source::File { .. }));
+        assert!(fixture.original.is_file());
+        session.close_library().unwrap();
+        drop(session);
+        let mut session = fixture.session();
+        let later = original_at(&fixture, "later.png", 190);
+        session.execute("library.import", &json!({"paths":[later]})).unwrap();
+        pump_library_adoption(&mut session, |s| s.catalog.upload_intents().len() == 2);
+        assert_eq!(session.catalog.photos().count(), 4);
+        assert_eq!(session.catalog.photo(first).unwrap().rating, 4);
+    }
+
+    #[test]
+    fn cloud_mode_reports_a_missing_original_continues_and_retries_without_duplicates() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let first = import_local(&fixture, &mut session);
+        let healthy = original_at(&fixture, "healthy.png", 190);
+        session.execute("library.import", &json!({"paths":[healthy]})).unwrap();
+        let bytes = std::fs::read(&fixture.original).unwrap();
+        std::fs::remove_file(&fixture.original).unwrap();
+        session.execute("cloud.syncEnable", &json!({"connection":"personal"})).unwrap();
+        pump_library_adoption(&mut session, |s| s.catalog.upload_intents().len() == 1 && !s.cloud_imports.failures.is_empty());
+        let failures = session.cloud_imports.failures.clone();
+        for _ in 0..10 {
+            resume_library(&mut session);
+            session.poll_cloud_imports();
+        }
+        assert_eq!(session.cloud_imports.failures, failures, "no per-frame retry storm");
+        assert!(matches!(session.catalog.photo(first).unwrap().source, Source::File { .. }));
+        std::fs::write(&fixture.original, bytes).unwrap();
+        retry_library(&mut session);
+        pump_library_adoption(&mut session, |s| s.catalog.upload_intents().len() == 2);
+        assert!(session.cloud_imports.failures.is_empty());
+        assert_eq!(session.catalog.photos().count(), 2);
     }
 
     #[test]

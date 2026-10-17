@@ -49,14 +49,24 @@ an automatic-retry countdown. Choose and Details open Cloud Synchronization, whe
 full cause, recovery advice, retained choices and maintenance actions remain available.
 Per-import and upload retry actions remain directly accessible. The footer has one main
 action: Pause, Resume, or Retry. Navigation rows close the popup when opening their
-associated view or dialog. Desktop import is offered in the idle state; browser original
+associated view or dialog. Cloud synchronization is the single popup settings action;
+connection configuration remains available from File. Desktop import is offered in the idle state; browser original
 uploads remain unsupported.
 
 ## Current limits and remaining work
 
-- Native local files stay local until managed import or explicit `cloud.adopt`. Adoption
+- Enabling native cloud synchronization automatically queues every file-backed photo
+  added to the library, and later imports, for verified staging and upload. Browsed
+  Local-folder records are enrolled only after being added to the library. Adoption
   relinks existing photo and virtual-copy records after verified staging; IDs, edits,
   metadata, album memberships and photo history remain. Original files are retained.
+  Existing cloud objects are byte-verified before any upload; matching originals are reused.
+  The queue is rediscovered on reopen, bounded to 1,000 candidate IDs per scan, and
+  stages one original family at a time without a library-size limit. Missing or unsupported
+  originals remain local with recovery errors; healthy photos continue. Pause stops new
+  automatic staging, and Resume retries preparation failures. Explicit `cloud.adopt`
+  remains available for individual recovery. One-shot CLI/MCP commands do not run the
+  desktop frame pump; use explicit `cloud.adopt` followed by `cloud.upload` there.
   Native photo/album offline intent follows current members and source revisions.
 - Browser managed import/upload and adoption are unsupported; ordinary file import
   remains device-local. Its verified persistent cache evicts only unpinned indexed cloud
@@ -479,6 +489,9 @@ remote seed is retained for safe retry. See [migration operation](cloud-sync-pro
 and [browser requirements](browser-cloud.md).
 
 ## Revision history
+
+CUX.9 (2026-10-16): native cloud mode automatically stages existing and future added
+library photos, reusing verified cloud originals. Remove the duplicate popup connection action.
 
 CUX.8 (2026-10-16): guarded native whole-library erasure removes historical versions and
 unfinished multipart uploads, retains terminal writer barriers, and blocks restored
