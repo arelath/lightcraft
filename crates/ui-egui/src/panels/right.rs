@@ -732,23 +732,35 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 .iter()
                 .find(|(_, intent)| &intent.asset_id == asset_id)
                 .map(|(id, intent)| (id.clone(), intent.clone()));
-            let pending_upload = upload.as_ref().is_some_and(|(_, intent)| intent.state != lightcraft_catalog::uploads::UploadState::Synchronized);
-            let text = match availability {
-                Some(AssetAvailability::Cached) if pending_upload => "Original saved on this device",
-                Some(AssetAvailability::Cached) => "Original downloaded",
-                Some(AssetAvailability::Downloading { .. }) => "Downloading original…",
-                Some(AssetAvailability::Missing) => "Cloud original is missing",
-                Some(AssetAvailability::Failed { .. }) => "Cloud download failed · retry when connected",
-                _ => "Original in cloud storage",
+            let sync = app.session.catalog.sync_state().map(|state| (state.library.clone(), state.pending.len(), state.generation));
+            let status = if sync.is_some() { app.run("cloud.syncStatus", json!({})).unwrap_or_default() } else { serde_json::Value::Null };
+            let off = sync.is_some() && status["enabled"] == false;
+            let pending_upload =
+                !off && upload.as_ref().is_some_and(|(_, intent)| intent.state != lightcraft_catalog::uploads::UploadState::Synchronized);
+            let text = if off {
+                if matches!(availability, Some(AssetAvailability::Cached)) {
+                    "Permanent original available on this device"
+                } else {
+                    "Local original unavailable. Restore the permanent files or turn on cloud sync."
+                }
+            } else {
+                match availability {
+                    Some(AssetAvailability::Cached) if pending_upload => "Original saved on this device",
+                    Some(AssetAvailability::Cached) => "Original downloaded",
+                    Some(AssetAvailability::Downloading { .. }) => "Downloading original…",
+                    Some(AssetAvailability::Missing) => "Cloud original is missing",
+                    Some(AssetAvailability::Failed { .. }) => "Cloud download failed · retry when connected",
+                    _ => "Original in cloud storage",
+                }
             };
             ui.add_space(6.0);
             {
-                let sync = app.session.catalog.sync_state().map(|state| (state.library.clone(), state.pending.len(), state.generation));
                 if let Some((library, pending, generation)) = sync {
-                    let status = app.run("cloud.syncStatus", json!({})).unwrap_or_default();
                     let running = status["running"].as_bool().unwrap_or(false);
                     ui.label(
-                        egui::RichText::new(if status["migrating"].as_bool() == Some(true) {
+                        egui::RichText::new(if off {
+                            crate::i18n::tr("Cloud sync is off on this device.").to_owned()
+                        } else if status["migrating"].as_bool() == Some(true) {
                             "Migrating cloud library…".to_owned()
                         } else if let Some(retry) = super::cloud::retry_text(&status["health"]) {
                             retry
@@ -771,24 +783,31 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     );
                     ui.label(egui::RichText::new(format!("Library ID: {library}")).small().color(t.text_dim));
                     super::cloud::capacity(app, ui, &status, false);
-                    if let Some(reason) = status["publicationBlocked"].as_str() {
+                    if !off && let Some(reason) = status["publicationBlocked"].as_str() {
                         ui.label(egui::RichText::new(reason).color(t.caution));
                     }
-                    if let Some(error) = status["health"]["lastError"]["message"].as_str() {
+                    if !off && let Some(error) = status["health"]["lastError"]["message"].as_str() {
                         ui.label(egui::RichText::new(error).color(t.text_dim));
                     }
-                    if let Some(action) = status["health"]["lastError"]["action"].as_str() {
+                    if !off && let Some(action) = status["health"]["lastError"]["action"].as_str() {
                         ui.label(egui::RichText::new(action).color(t.text_dim));
                     }
                     // After an error the advice says Retry Syncing: the button says the same.
-                    let label = if status["health"]["lastError"].is_object() { "Retry Syncing" } else { "Sync now" };
+                    let label = if off {
+                        "Turn on cloud sync…"
+                    } else if status["health"]["lastError"].is_object() {
+                        "Retry Syncing"
+                    } else {
+                        "Sync now"
+                    };
                     if !running
-                        && text_button(ui, "cloudSyncNow", crate::i18n::tr(label), false).clicked()
-                        && let Err(error) = app.run("cloud.sync", json!({"wait":false}))
+                        && text_button(ui, if off { "cloudSyncTurnOn" } else { "cloudSyncNow" }, crate::i18n::tr(label), false).clicked()
+                        && let Err(error) = app.run(if off { "dialog.cloudSync" } else { "cloud.sync" }, json!({"wait":false}))
                     {
                         app.toast(ui.ctx(), error);
                     }
-                    if status["protocol"].as_str() == Some("conditional-head-v1")
+                    if !off
+                        && status["protocol"].as_str() == Some("conditional-head-v1")
                         && text_button(ui, "cloudSyncMigrate", crate::i18n::tr("Migrate to append-only…"), false).clicked()
                         && let Err(error) = app.run("dialog.cloudMigrate", json!({}))
                     {
@@ -804,8 +823,12 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                         .collect();
                     if !conflicts.is_empty() {
                         ui.label(
-                            egui::RichText::new(crate::i18n::tr("Another device changed this photo at the same time. Choose what to keep:"))
-                                .color(t.caution),
+                            egui::RichText::new(crate::i18n::tr(if off {
+                                "Conflicting edits are preserved. Turn on cloud sync to resolve them."
+                            } else {
+                                "Another device changed this photo at the same time. Choose what to keep:"
+                            }))
+                            .color(t.caution),
                         );
                     }
                     for conflict in &conflicts {
@@ -816,7 +839,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                                 let _ = app.run("panel.versions", json!({}));
                             }
                         }
-                        crate::cloud_conflicts::choices(app, ui, conflict);
+                        ui.add_enabled_ui(!off, |ui| crate::cloud_conflicts::choices(app, ui, conflict));
                     }
                 } else if text_button(ui, "cloudSyncSetup", crate::i18n::tr("Enable synchronization…"), false).clicked() {
                     let connection = app.session.catalog.asset(asset_id).map(|asset| asset.original.remote.connection.clone());
@@ -825,7 +848,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     }
                 }
             }
-            if let Some((_import_id, upload)) = upload {
+            if let Some((_import_id, upload)) = upload.filter(|_| !off) {
                 use lightcraft_catalog::uploads::UploadState;
                 let label = match upload.state {
                     UploadState::SavedLocally => "Saved locally · upload pending",
@@ -865,6 +888,9 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             let preview_text = match &preview {
                 Some(AssetAvailability::Cached) => "Preview available · editing and explicit preview export work offline",
                 Some(AssetAvailability::Downloading { .. }) => "Downloading editable preview…",
+                _ if off && !matches!(availability, Some(AssetAvailability::Cached)) => {
+                    "Full-quality operations need the permanent local original. Restore it or turn on cloud sync."
+                }
                 _ if !matches!(availability, Some(AssetAvailability::Cached)) => {
                     "Full-quality export and original-file operations require downloading the original"
                 }
@@ -878,13 +904,15 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             if let Some(AssetAvailability::Failed { error }) = &availability {
                 ui.label(egui::RichText::new(error).color(t.text_dim));
             }
-            if !matches!(availability, Some(AssetAvailability::Cached | AssetAvailability::Downloading { .. }))
+            if !off
+                && !matches!(availability, Some(AssetAvailability::Cached | AssetAvailability::Downloading { .. }))
                 && text_button(ui, "cloudDownloadOriginal", crate::i18n::tr("Download original"), false).clicked()
                 && let Err(error) = app.run("cloud.fetch", json!({"ids": [id.0], "original": true}))
             {
                 app.toast(ui.ctx(), error);
             }
-            if matches!(availability, Some(AssetAvailability::Failed { .. } | AssetAvailability::Missing))
+            if !off
+                && matches!(availability, Some(AssetAvailability::Failed { .. } | AssetAvailability::Missing))
                 && text_button(ui, "cloudReconnect", crate::i18n::tr("Reconnect and retry"), false).clicked()
             {
                 match app.run("cloud.reconnect", json!({})) {
@@ -896,7 +924,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     Err(error) => app.toast(ui.ctx(), error),
                 }
             }
-            {
+            if !off {
                 use lightcraft_engine::assets::cache::OfflineQuality;
                 #[cfg(not(target_arch = "wasm32"))]
                 let pin = app.session.media.asset_resolver.as_ref().and_then(|r| r.offline_pin(&format!("photo:{}", id.0)));

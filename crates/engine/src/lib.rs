@@ -31,6 +31,8 @@ pub mod cloud_import;
 #[cfg(target_arch = "wasm32")]
 #[path = "cloud_import_web.rs"]
 pub(crate) mod cloud_import;
+#[cfg(not(target_arch = "wasm32"))]
+mod cloud_local_transfer;
 pub mod cloud_outcome;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_owner;
@@ -44,6 +46,8 @@ pub mod cloud_setup;
 pub mod cloud_signer;
 pub mod cloud_status;
 pub mod cloud_sync;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cloud_transition;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_upgrade;
 #[cfg(not(target_arch = "wasm32"))]
@@ -342,6 +346,8 @@ pub struct Session {
     /// Disk budget of the library's thumbnail cache in MB (0 = default; persisted in prefs.json).
     /// Device-local pause, persisted in library preferences.
     pub cloud_paused: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub cloud_transition: cloud_transition::Controller,
     /// A persistent host that cannot claim its writer must refuse local cloud edits.
     pub cloud_writer_error: Option<String>,
     /// Derived conflict views are local and reused by UI/CLI queries until this catalog changes.
@@ -457,6 +463,8 @@ impl Session {
             preview_build: None,
             import_defaults: import::ImportDefaults::default(),
             cloud_paused: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            cloud_transition: Default::default(),
             cloud_writer_error: None,
             cloud_conflicts_cache: None,
             cache_mb: 0,
@@ -512,7 +520,10 @@ impl Session {
             self.poll_cloud_uploads();
             self.poll_cache_move();
             self.poll_cloud_replication();
+            self.poll_cloud_transition();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        cloud_transition::ensure_command(self, id)?;
         if !matches!(
             id,
             "activity.list"
@@ -593,6 +604,8 @@ impl Session {
 
     /// Apply an op as one undoable step.
     pub fn commit(&mut self, label: &str, op: Op) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        cloud_transition::ensure_command(self, "library.edit")?;
         let clock = cloud_sync::undo_clock(&self.catalog);
         let inv = self.apply_catalog(op)?;
         let fields = undo_fields::Fields::record(&self.catalog, &inv);
@@ -630,6 +643,10 @@ impl Session {
 
     fn apply_catalog_mode(&mut self, op: Op, capture: bool) -> Result<Op> {
         self.ensure_reclamation_idle()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if capture && self.cloud_transition.running() {
+            return Err(EngineError::Other("local library conversion is verifying a fixed catalog; wait or cancel before editing".into()));
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let mut op = op;
         if let Some(reason) = &self.cloud_writer_error

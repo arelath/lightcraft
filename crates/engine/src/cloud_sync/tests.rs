@@ -73,6 +73,68 @@ fn session() -> (Session, MemStore) {
     session.selection = crate::Selection::single(PhotoId(1));
     (session, store)
 }
+
+#[test]
+fn adopting_existing_local_photos_reprojects_album_cover_and_stack_membership() {
+    use lightcraft_catalog::{Stack, StackId};
+    let mut s = Session::new();
+    for id in [1, 2] {
+        s.commit(
+            "Local original",
+            Op::AddPhoto {
+                photo: Box::new(Photo::new(PhotoId(id), Source::File { path: format!("{id}.png") }, &format!("{id}.png"), "PNG", 10, 10, "")),
+            },
+        )
+        .unwrap();
+    }
+    let mut album = Album::new(AlbumId(1), "Before cloud");
+    album.photos = vec![PhotoId(1), PhotoId(2)];
+    album.cover = Some(PhotoId(2));
+    s.commit(
+        "containers",
+        Op::Batch {
+            ops: vec![
+                Op::AddAlbum { album },
+                Op::AddStack { stack: Stack { id: StackId(1), photos: vec![PhotoId(1), PhotoId(2)], collapsed: true } },
+            ],
+        },
+    )
+    .unwrap();
+    let op = enable(&s.catalog, "library".into(), "device".into(), "personal".into()).unwrap();
+    s.apply_system(op).unwrap();
+    for id in [1, 2] {
+        let asset_id = AssetId(format!("asset-{id}"));
+        let asset = Asset {
+            original: Blob {
+                id: BlobId(format!("{id:064x}")),
+                size: 12,
+                remote: RemoteLocation { connection: "personal".into(), key: format!("originals/{id}"), version: None },
+            },
+            smart_preview: None,
+            thumbnail: None,
+            associated: Default::default(),
+        };
+        s.commit(
+            "adopt",
+            Op::Batch {
+                ops: vec![
+                    Op::SetAsset { id: asset_id.clone(), asset: Some(Box::new(asset)) },
+                    Op::Relink { id: PhotoId(id), source: Source::Managed { asset_id }, file_name: format!("{id}.png"), format: None },
+                ],
+            },
+        )
+        .unwrap();
+    }
+    let state = s.catalog.sync_state().unwrap();
+    let album = format!("album:{}", s.catalog.cloud_identity("album:1").unwrap());
+    for id in [1, 2] {
+        let global = s.catalog.cloud_identity(&format!("photo:{id}")).unwrap();
+        assert_eq!(state.winning(&album, &format!("member:{global}")).unwrap().1, &json!(true));
+    }
+    assert_eq!(state.winning(&album, "cover").unwrap().1, &json!(s.catalog.cloud_identity("photo:2").unwrap()));
+    let stack = format!("stack:{}", s.catalog.cloud_identity("stack:1").unwrap());
+    assert_eq!(state.winning(&stack, "photos").unwrap().1.as_array().unwrap().len(), 2);
+}
 #[test]
 fn unavailable_writer_blocks_new_local_mutations_but_allows_verified_remote_receive() {
     let (mut s, _) = session();

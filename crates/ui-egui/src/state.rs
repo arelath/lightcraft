@@ -769,6 +769,9 @@ pub struct NameEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Dialog {
+    CloudDisable {
+        review: crate::cloud_transition::Review,
+    },
     CloudMigration {
         writers_stopped: bool,
     },

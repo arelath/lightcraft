@@ -8,6 +8,9 @@ use crate::{
 use serde_json::{Value, json};
 
 pub(crate) fn needs_attention(data: &Value) -> bool {
+    if data["syncEnabled"] == false && !data["erasure"].is_object() {
+        return false;
+    }
     let summary = &data["summary"];
     let health = &data["health"];
     data["erasure"].is_object()
@@ -122,6 +125,8 @@ pub(super) fn capacity(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value,
     }
     if detailed {
         let enabled = app.session.catalog.sync_state().is_some()
+            && data["enabled"] != false
+            && data["syncEnabled"] != false
             && data["running"] != true
             && data["paused"] != true
             && data["preparingMigration"] != true
@@ -230,6 +235,9 @@ fn footer_text(data: &Value, unsaved: bool) -> &'static str {
     if !unsaved && data["erasure"].is_object() {
         return if data["erasure"]["complete"] == true { "Cloud library deleted" } else { "Deletion incomplete" };
     }
+    if !unsaved && data["syncEnabled"] == false {
+        return "Cloud sync is off";
+    }
     if unsaved || needs_attention(data) {
         "Sync needs attention"
     } else if data["migrating"] == true || data["preparingMigration"] == true {
@@ -250,6 +258,7 @@ fn footer_text(data: &Value, unsaved: bool) -> &'static str {
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let t = Tokens::get(ui.ctx());
     let summary = &data["summary"];
+    let off = data["syncEnabled"] == false;
     let paused = data["paused"] == true;
     let waiting = data["waitingFiles"].as_u64().unwrap_or(0);
     let active = data["uploadingFiles"].as_u64().unwrap_or(0);
@@ -263,18 +272,18 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     ui.spacing_mut().interact_size.y = 18.;
     let popup = ui.scope(|ui| {
         section(ui, |ui| {
-            heading(ui, "CLOUD LIBRARY");
-            let photos = summary["cloudPhotos"].as_u64().unwrap_or(0);
+            heading(ui, if off {"LOCAL LIBRARY"} else {"CLOUD LIBRARY"});
+            let photos = if off {app.session.catalog.photos().filter(|p|!p.deleted&&!p.local).count() as u64} else {summary["cloudPhotos"].as_u64().unwrap_or(0)};
             let albums = summary["albums"].as_u64().unwrap_or(0);
             let photo_text = if photos == 1 { crate::i18n::tr_format!("{n} photo", n = photos) } else { crate::i18n::tr_format!("{n} photos", n = photos) };
             let album_text = if albums == 1 { crate::i18n::tr_format!("{n} album", n = albums) } else { crate::i18n::tr_format!("{n} albums", n = albums) };
             ui.label(egui::RichText::new(crate::i18n::tr_format!("{photos} in {albums}", photos = photo_text, albums = album_text)).font(t.semibold(12.)).color(t.text));
             ui.add_space(4.);
             let storage=if data["erasure"]["complete"]==true {bytes(0)} else if data["erasure"].is_object() {crate::i18n::tr("Unknown").to_owned()} else {bytes(summary["cloudOriginalBytes"].as_u64().unwrap_or(0))};
-            metric(ui, "Storage space used", &storage).on_hover_text(crate::i18n::tr(
-                if data["erasure"].is_object() {"Library deletion retains local copies. Review deletion to inspect any remaining cloud data."} else {"Storage used by cloud originals represented in this catalog; shared originals count once. Previews, sidecars, sync metadata, and other libraries are not included."},
+            metric(ui, if off {"Last known cloud storage"} else {"Storage space used"}, &storage).on_hover_text(crate::i18n::tr(
+                if off {"Cloud sync is off. This is the last known size of cloud originals, not a current cloud scan or local disk usage."} else if data["erasure"].is_object() {"Library deletion retains local copies. Review deletion to inspect any remaining cloud data."} else {"Storage used by cloud originals represented in this catalog; shared originals count once. Previews, sidecars, sync metadata, and other libraries are not included."},
             ));
-            if !attention && !busy(data) && let Some(age) = data["health"]["sync"]["secondsSinceLastRemoteScan"].as_u64() {
+            if !off && !attention && !busy(data) && let Some(age) = data["health"]["sync"]["secondsSinceLastRemoteScan"].as_u64() {
                 metric(ui, "Last checked", &ago(age));
             } else if !attention && !busy(data) && data["syncEnabled"] == true {
                 metric(ui, "Last checked", crate::i18n::tr("Not yet checked"));
@@ -284,7 +293,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             divider(ui);
             section(ui, |ui| { heading(ui, if data["erasure"]["complete"]==true {"LIBRARY DELETED"} else {"NEEDS ATTENTION"}); attention_details(app, ui, data); });
         }
-        if waiting > 0 || active > 0 || data["preparingFiles"].as_u64().unwrap_or(0) > 0 {
+        if !off && (waiting > 0 || active > 0 || data["preparingFiles"].as_u64().unwrap_or(0) > 0) {
             divider(ui);
             section(ui, |ui| {
                 heading(ui, if paused { "UPLOADS PAUSED" } else { "UPLOADING" });
@@ -307,18 +316,28 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                 metric(ui, "Changes to publish", &changes.to_string());
                 if active == 0 { metric(ui, "Queued data", &bytes(summary["queuedBytes"].as_u64().unwrap_or(0))); }
             });
-        } else if changes > 0 && !attention {
+        } else if changes > 0 && !attention && !off {
             divider(ui);
             section(ui, |ui| { metric(ui, "Changes to publish", &changes.to_string()); });
         }
         divider(ui);
         section(ui, |ui| {
-            if !attention && (busy(data) || paused) {
+            if !off && !attention && (busy(data) || paused) {
                 navigation(app, ui, "button:cloudShowWaiting", "Show waiting photos", "library.filter", json!({"syncStatus":"pending"}));
             }
             navigation(app, ui, "button:cloudSetup", "Cloud synchronization…", "dialog.cloudSync", json!({}));
+            if !off && data["syncEnabled"] == true && !data["erasure"].is_object() {
+                #[cfg(not(target_arch = "wasm32"))]
+                navigation(app, ui, "button:cloudDisableOpen", "Turn off cloud sync…", "dialog.cloudDisable", json!({}));
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let r = ui.add_enabled(false, egui::Button::new(crate::i18n::tr("Turn off cloud sync…")))
+                        .on_disabled_hover_text(crate::i18n::tr("Use desktop LightCraft to keep permanent local originals. Pause is available below."));
+                    register(ui.ctx(), "button:cloudDisableOpen", r.rect);
+                }
+            }
             #[cfg(not(target_arch = "wasm32"))]
-            if !busy(data) && !attention {
+            if !off && !busy(data) && !attention {
                 navigation(app, ui, "button:cloudImport", "Import to cloud storage…", "file.importCloud", json!({}));
             }
         });
@@ -331,7 +350,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                     "Sync needs attention" | "Cloud library deleted" | "Deletion incomplete" => Icon::Warning,
                     "Syncing paused" => Icon::Pause,
                     "Synced and backed up" => Icon::CheckCircle,
-                    "Local library" => Icon::Cloud,
+                    "Local library" | "Cloud sync is off" => Icon::Cloud,
                     _ => Icon::Sync,
                 };
                 icons::paint(ui.painter(), rect.shrink(2.), icon, if attention { t.caution } else { t.accent });
@@ -347,14 +366,20 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                     if response.clicked(){invoke(app,ui,"dialog.cloudDelete",json!({}));}
                     return;
                 }
+                if off {
+                    let response = ui.button(crate::i18n::tr("Turn on"));
+                    register(ui.ctx(), "button:cloudTurnOn", response.rect);
+                    if response.clicked() { invoke(app,ui,"dialog.cloudSync",json!({})); }
+                    return;
+                }
                 let retry = attention && !paused;
                 let label = if retry { "Retry" } else if paused { "Resume" } else { "Pause" };
                 let id = if retry { "button:cloudRetry" } else { "button:cloudPauseResume" };
                 let response = ui.add_enabled(app.session.library.is_some() && (!(retry || paused) || data["canResume"] == true), egui::Button::new(crate::i18n::tr(label)).frame(true).stroke(egui::Stroke::new(1., t.button_border)).min_size(egui::vec2(54., 24.)));
                 register(ui.ctx(), id, response.rect);
                 if response.clicked() && let Err(error) = app.run(if retry || paused { "cloud.resume" } else { "cloud.pause" }, json!({})) { app.toast(ui.ctx(), error); }
-            }).response.on_hover_text(crate::i18n::tr("Uploads and library publication pause on this device. Photos remain available for editing."));
-            if paused && data["canResume"] != true { ui.label(crate::i18n::tr("Stopping current transfers…")); }
+            }).response.on_hover_text(crate::i18n::tr(if off {"Turn on cloud sync explicitly to merge this local library with cloud storage."} else {"Uploads and library publication pause on this device. Photos remain available for editing."}));
+            if !off && paused && data["canResume"] != true { ui.label(crate::i18n::tr("Stopping current transfers…")); }
         });
     });
     register(ui.ctx(), "popup:cloud", popup.response.rect);

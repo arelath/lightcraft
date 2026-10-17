@@ -1516,7 +1516,7 @@ fn folder_menu(app: &mut LightcraftApp, resp: &egui::Response, a: &Album) {
             }
             ui.separator();
         }
-        if !a.folder && (cfg!(target_arch = "wasm32") || app.session.media.asset_resolver.is_some()) {
+        if !a.folder && !crate::cloud_transition::local_only(app) && (cfg!(target_arch = "wasm32") || app.session.media.asset_resolver.is_some()) {
             ui.menu_button(crate::i18n::tr("Offline cloud copies"), |ui| {
                 for (label, command, quality) in [
                     ("Keep originals offline", "cloud.pin", "original"),

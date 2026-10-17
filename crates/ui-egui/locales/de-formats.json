@@ -266,5 +266,9 @@
   "{n} uploading": "{n} werden hochgeladen",
   "{n} waiting": "{n} warten",
   "Your {n} changes wait here.": "Deine {n} Änderungen warten hier.",
-  "{active} of {total} photos": "{active} von {total} Fotos"
+  "{active} of {total} photos": "{active} von {total} Fotos",
+  "Estimated: {files} files · {bytes}": "Estimated: {files} files · {bytes}",
+  "Files: {done} of {total} · {remaining} remaining": "Files: {done} of {total} · {remaining} remaining",
+  "Data: {done} of {total} · {remaining} remaining": "Data: {done} of {total} · {remaining} remaining",
+  "Downloading current file: {done} of {total}": "Downloading current file: {done} of {total}"
 }

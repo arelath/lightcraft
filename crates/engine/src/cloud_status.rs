@@ -17,6 +17,9 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
     out["inputLimits"] = crate::input_limits::view();
     #[cfg(not(target_arch = "wasm32"))]
     {
+        out["syncEnabled"] = json!(s.catalog.sync_state().is_some() && !s.cloud_transition.local_only());
+        out["localOnly"] = json!(s.cloud_transition.local_only());
+        out["transition"] = crate::cloud_transition::snapshot(s);
         let active = s.cloud_uploads.active_files(&s.catalog) as u64;
         out["uploadingFiles"] = json!(active);
         out["waitingFiles"] = json!(summary.queued_files.saturating_sub(summary.failed_files).saturating_sub(active));
@@ -77,6 +80,8 @@ pub fn pause(s: &mut Session, _: &Value) -> Result<Value> {
     overview(s, &Value::Null)
 }
 pub fn resume(s: &mut Session, _: &Value) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::cloud_transition::ensure_command(s, "cloud.resume")?;
     #[cfg(not(target_arch = "wasm32"))]
     crate::cloud_upload::ensure_not_erased(s)?;
     #[cfg(not(target_arch = "wasm32"))]

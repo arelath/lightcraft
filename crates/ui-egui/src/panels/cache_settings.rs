@@ -61,6 +61,25 @@ fn refetch(ui: &egui::Ui) {
 }
 
 pub fn cache_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    if crate::cloud_transition::local_only(app) {
+        ui.heading(crate::i18n::tr("Local library storage"));
+        ui.label(crate::i18n::tr("Cloud sync is off. Your library originals are permanent local files, separate from the disposable cloud cache."));
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = app.session.media.asset_resolver.as_ref().and_then(|r| r.permanent_root()) {
+            ui.add(egui::Label::new(RichText::new(path.to_string_lossy()).monospace()).wrap());
+        }
+        ui.label(crate::i18n::tr(
+            "Turn on cloud sync to manage cloud cache locations and offline-copy settings. Permanent local originals are retained.",
+        ));
+        let action = ui.button(crate::i18n::tr("Turn on cloud sync…"));
+        register(ui.ctx(), "button:cacheLocalCloudEnable", action.rect);
+        if action.clicked()
+            && let Err(error) = app.run("dialog.cloudSync", json!({}))
+        {
+            app.toast(ui.ctx(), error);
+        }
+        return;
+    }
     let f = fetch(app, ui);
     let storage = match f.storage {
         Ok(v) => v,

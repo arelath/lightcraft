@@ -250,6 +250,8 @@ pub struct AssetResolver {
     transfers: transfers::Queue,
     activity: Mutex<Option<crate::activity::Activity>>,
     durable_root: Mutex<Option<PathBuf>>,
+    permanent_root: Mutex<Option<PathBuf>>,
+    local_only: AtomicBool,
     /// The blobs "Store a copy of all …" covers (from the catalog), and whether a worker is
     /// downloading the missing ones.
     keep_all_blobs: Mutex<BTreeMap<BlobId, Blob>>,
@@ -267,8 +269,11 @@ impl AssetResolver {
         self.cache.pin(owner)
     }
     pub fn new(root: PathBuf) -> Self {
+        Self::new_for_library(root, None, None)
+    }
+    pub(crate) fn new_for_library(root: PathBuf, durable_root: Option<PathBuf>, permanent_root: Option<PathBuf>) -> Self {
         let entries = Arc::new(Mutex::new(BTreeMap::new()));
-        let cache = cache::Cache::new(root.clone(), Arc::downgrade(&entries));
+        let cache = cache::Cache::new(root.clone(), Arc::downgrade(&entries), durable_root.clone(), permanent_root.clone());
         Self {
             root,
             stores: Mutex::new(BTreeMap::new()),
@@ -279,7 +284,9 @@ impl AssetResolver {
             cache,
             transfers: transfers::Queue::new(4),
             activity: Mutex::new(None),
-            durable_root: Mutex::new(None),
+            durable_root: Mutex::new(durable_root),
+            permanent_root: Mutex::new(permanent_root),
+            local_only: AtomicBool::new(false),
             keep_all_blobs: Mutex::new(BTreeMap::new()),
             owner_blobs: Mutex::new(BTreeMap::new()),
             offline_dirty: AtomicBool::new(false),
@@ -306,6 +313,18 @@ impl AssetResolver {
     }
     pub fn durable_root(&self) -> Option<PathBuf> {
         self.durable_root.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn set_permanent_root(&self, root: PathBuf) {
+        self.cache.protect_permanent_root(root.clone());
+        *self.permanent_root.lock().unwrap_or_else(PoisonError::into_inner) = Some(root);
+    }
+    pub fn permanent_root(&self) -> Option<PathBuf> {
+        self.permanent_root.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn set_local_only(&self, value: bool) {
+        self.local_only.store(value, Ordering::Release);
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn validate_storage(&self) -> Result<()> {
@@ -361,6 +380,12 @@ impl AssetResolver {
     }
     fn local_path(&self, blob: &Blob) -> Result<PathBuf> {
         self.cache.validate_root()?;
+        if let Some(root) = self.permanent_root.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+            let path = root.join("blobs").join(&blob.id.0);
+            if path.try_exists().map_err(disk)? {
+                return Ok(path);
+            }
+        }
         if let Some(root) = self.durable_root() {
             let path = root.join("blobs").join(&blob.id.0);
             if path.try_exists().map_err(disk)? {
@@ -590,6 +615,11 @@ impl TransferManager for AssetResolver {
                 if CACHED_ONLY.with(std::cell::Cell::get) {
                     return Err(pending_source());
                 }
+                if self.local_only.load(Ordering::Acquire) {
+                    return Err(AssetError::Unsupported(
+                        "Cloud sync is off; this local original is missing. Restore the local library files or explicitly turn sync on.".into(),
+                    ));
+                }
                 let store = self
                     .stores
                     .lock()
@@ -598,12 +628,19 @@ impl TransferManager for AssetResolver {
                     .cloned()
                     .ok_or_else(|| AssetError::Unconfigured(blob.remote.connection.clone()))?;
                 let _permit = self.transfers.enter(&blob.id, entry.priority.clone(), cancel)?;
+                if self.local_only.load(Ordering::Acquire) {
+                    return Err(AssetError::Unsupported("Cloud sync is off; queued original downloads are stopped.".into()));
+                }
                 std::fs::create_dir_all(&self.root).map_err(disk)?;
                 *entry.state.lock().unwrap_or_else(PoisonError::into_inner) = AssetAvailability::Downloading { done: 0, total: blob.size };
                 transfers::progress(blob, 0);
                 let mut transfer_error = None;
                 let result = lightcraft_catalog::safe_file::write_atomic_with(&path, &mut |out| {
                     let mut writer = VerifiedWriter { out, hash: Sha256::new(), done: 0, expected: blob.size, cancel };
+                    if self.local_only.load(Ordering::Acquire) {
+                        transfer_error = Some(AssetError::Unsupported("Cloud sync is off; queued original downloads are stopped.".into()));
+                        return Err(std::io::Error::other("cloud sync is off"));
+                    }
                     if let Err(e) = store.download(blob, &mut writer, cancel, &mut |done| {
                         *entry.state.lock().unwrap_or_else(PoisonError::into_inner) = AssetAvailability::Downloading { done, total: blob.size };
                         transfers::progress(blob, done);

@@ -827,6 +827,7 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<(Vec<Item>, Vec<Valu
 }
 
 pub fn start(s: &mut Session, p: &Value) -> Result<Value> {
+    crate::cloud_transition::ensure_command(s, "cloud.upload")?;
     start_impl(s, p, false, None)
 }
 pub fn abort(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1124,7 +1125,12 @@ impl Session {
     /// Native hosts pump this after polling owner events. Headless one-shot commands
     /// explicitly use `cloud.upload` so local import completion never waits for a bucket.
     pub fn resume_cloud_uploads(&mut self) {
-        if self.cloud_paused || self.cloud_replication_jobs.migrating() || self.cloud_replication_jobs.preparing_migration() {
+        if self.cloud_paused
+            || self.cloud_transition.local_only()
+            || self.cloud_transition.blocking()
+            || self.cloud_replication_jobs.migrating()
+            || self.cloud_replication_jobs.preparing_migration()
+        {
             return;
         }
         crate::cloud_import::resume_library(self);

@@ -164,6 +164,7 @@ pub fn start_migration(s: &mut Session, p: &Value) -> crate::Result<Value> {
     start_impl(s, p, Some(request))
 }
 fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::Request>) -> crate::Result<Value> {
+    crate::cloud_transition::ensure_command(s, "cloud.sync")?;
     let migrating = upgrade.is_some();
     if s.cloud_paused && !migrating {
         return Err(error("cloud syncing is paused on this device; choose Resume Syncing (cloud.resume) first"));
@@ -308,6 +309,8 @@ pub(crate) fn retry_after_reconnect(s: &mut Session) {
 impl Session {
     fn automatic_polling(&self) -> bool {
         !(self.cloud_paused
+            || self.cloud_transition.local_only()
+            || self.cloud_transition.blocking()
             || self.cloud_replication_jobs.preparing_migration()
             || self.catalog.sync_state().is_none()
             || self.cloud_replication_jobs.running()

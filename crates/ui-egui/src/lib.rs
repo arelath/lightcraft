@@ -14,6 +14,7 @@ mod cloud_retention;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_setup;
 mod cloud_tasks;
+mod cloud_transition;
 pub mod control;
 pub mod credits;
 pub mod date_picker;
@@ -368,6 +369,7 @@ pub struct LightcraftApp {
     /// Cloud setup's connection check in progress (feeds its dialog).
     #[cfg(not(target_arch = "wasm32"))]
     pub cloud_check: Option<cloud_setup::CheckTask>,
+    pub(crate) cloud_transition: cloud_transition::Runtime,
     /// A Synchronize Folder scan in progress (feeds its dialog).
     pub sync: Option<sync::SyncTask>,
     /// `session.folder_changes` came from the Synchronize Folder dialog (and goes with it).
@@ -485,6 +487,7 @@ impl LightcraftApp {
             library_problem: None,
             activity_expanded: false,
             model_setup: Default::default(),
+            cloud_transition: Default::default(),
         }
     }
 
@@ -505,11 +508,15 @@ impl LightcraftApp {
 
     /// Run a UI or engine command by id. The single entry point for every frontend path.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        if cloud_transition::blocked(self) && !cloud_transition::permitted(id) {
+            return Err("Local originals are being prepared. Finish or cancel turning cloud sync off before editing or navigating.".into());
+        }
         let _cached_only = lightcraft_engine::assets::CachedOnly::enter(!self.headless_host);
         if let Some(mut action) = self.services.cloud_action.take() {
             let result = action(&mut self.session, id, &params);
             self.services.cloud_action = Some(action);
             if let Some(result) = result {
+                cloud_transition::observe(self, id, &params, &result);
                 return result;
             }
         }
@@ -1134,6 +1141,8 @@ impl LightcraftApp {
         import::poll_scan(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]
         cloud_setup::poll(self, ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        cloud_transition::poll(self, ctx);
         sync::poll(self, ctx);
         sync::poll_run(self, ctx);
         import::tick(self, ctx);

@@ -139,7 +139,7 @@ pub(crate) fn command(s: &mut Session, p: &Value) -> Result<Value> {
     if overlaps(&target, &current)? {
         return Err(bad(C, "choose a folder outside the current cloud cache folder"));
     }
-    for protected in [library_dir.join("Managed"), library_dir.join("Originals")] {
+    for protected in [library_dir.join("Managed"), library_dir.join("Originals"), library_dir.join("Local Originals")] {
         if overlaps(&target, &protected)? {
             return Err(bad(C, format!("the cloud cache cannot share {}: it holds photos that are not disposable", protected.display())));
         }

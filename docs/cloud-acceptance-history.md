@@ -23,7 +23,58 @@ the exact task/commit context, final-source CI, browser/native fixture runs and 
 10,000/50,000-photo and CR.10 request-count measurements. Consult it for CR.1–CR.41;
 the earlier reports below do not supersede those changes or verify newer source.
 
-## 2026-10-12–13: native foundation and managed revisions
+## 2026-10-17: device-local cloud on/off (CUX.11)
+
+The on/off controls distinguish disconnecting from Pause. Turning on retains photo
+identities and conflicting edits while merging and uploading local content; immutable
+SHA-256 bytes are deduplicated. Turning off confirms the permanent destination and
+scope, blocks library interaction, and shows stage, file/byte progress, remaining work
+and recovery actions. Sync remains enabled until the received catalog and every live
+original/supporting blob are verified and durably saved. Other devices are not frozen;
+another scan incorporates arrivals observed during transfer. See the
+[transition contract](cloud-sync-protocol.md#turning-synchronization-off-on-this-device).
+
+Isolated validation with Rust 1.95.0 on Windows:
+
+- `cargo +1.95.0 xtask ci` passed all eight stages: fmt, strict Clippy, HEIF,
+  workspace tests, parity references, layers, assets and WASM. Final log:
+  `cargo-xtask-ci-final-success.log` in the evidence directory below.
+- Engine cloud tests: 212 passed, one ignored. Coverage includes retained content
+  choices, sidecars, insufficient space, cancellation, corrupt copies, failed durable
+  writes, restart, cache/output protection and queued-download network gates.
+- Five headless UI tests passed, covering confirmation, blocked editing/navigation and
+  Escape, interrupted recovery, safe Quit, completed mode, and persistent Retry/Cancel
+  errors, plus the local-only Info action. Screenshots at 1200×900 and 900×600 were inspected.
+- Three real-CLI loopback-provider tests passed, exercising both protocols, local/cloud
+  merge, album membership, concurrent arrivals, restart and retry. Removing only the
+  fixture's staging/cache still permits byte-exact offline original export with no
+  requests. Local edits publish after explicit enable; conversion permits GET/HEAD only.
+- The native control-channel test passed with a held original GET: confirmation,
+  presented download progress, rejected navigation, Escape protection, verified
+  completion, local-only popup, Info and cache-settings guidance. The durable bytes
+  match the original and the provider objects are unchanged. The final `ui.inspect`
+  sample reports 26.82 ms UI update, 5.17 ms last render and empty render queues; this tiny fixture is not a
+  large-library performance benchmark.
+
+Local evidence is under
+`C:\Users\pdykstra\AppData\Local\Temp\lightcraft-transition-evidence`:
+`before-settings.png` and `after-settings.png` are CLI headless renders;
+`ui-final-audit/` contains mocked headless UI fixtures. Actual desktop window captures
+using an isolated loopback provider are under
+`native/toggle/{confirmation,downloading,complete,off,off-info,off-cache-settings}.png`
+with `inspect.json` and the native log (no compositor-fallback warnings).
+Engine, UI, CLI and native logs are retained alongside them. The native test is
+`cloud_toggle_native_confirmation_blocking_progress_and_durable_completion` in
+`apps/lightcraft-cli/tests/cloud_library_mode.rs`; it requires
+`LIGHTCRAFT_NATIVE_LIBRARY_APP` and `LIGHTCRAFT_LIBRARY_SNAPSHOTS` and runs with
+`--ignored`. The ordinary CLI tests are in `cloud_toggle.rs`.
+
+No real library or live provider was changed. Browser conversion remains unavailable
+with desktop guidance; permanent storage requires a filesystem supporting hard links.
+Optional CJK fonts were inaccessible in this environment, so screenshots use the
+bundled English font. Browser interaction and live-provider acceptance were not rerun.
+
+## 2026-10-12-13: native foundation and managed revisions
 
 ### Verification and remaining work
 

@@ -105,6 +105,7 @@ pub fn inspect(app: &LightcraftApp, ctx: &egui::Context) -> Value {
         })),
         "hoverPreview": app.hover_preview.as_ref().map(|h| h.label.clone()),
         "status": app.ui.status,
+        "cloudTransition": app.cloud_transition.status,
         "toast": app.ui.toast.as_ref().map(|toast| &toast.0),
         "copied": app.copied,
         "notices": app.notices,
@@ -173,6 +174,11 @@ fn widget_rect(app: &LightcraftApp, id: &str) -> Option<egui::Rect> {
 }
 
 pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
+    if crate::cloud_transition::blocked(app) && matches!(req.method.as_str(), "ui.set" | "ui.dialog.confirm" | "ui.dialog.cancel") {
+        return err(
+            "Local preparation is blocking this library. Use cloud.syncDisable with cancel:true to cancel safely, or use Retry in the progress dialog.",
+        );
+    }
     let _cached_only = lightcraft_engine::assets::CachedOnly::enter(!app.headless_host);
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(deferred) = crate::cloud_tasks::defer_control(app, req) {

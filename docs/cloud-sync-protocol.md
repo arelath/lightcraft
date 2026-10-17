@@ -1,6 +1,6 @@
 # Direct bucket synchronization
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
 
 This is the current normative metadata protocol and owner-durability contract.
 [Current behavior and limits](cloud-storage-implementation.md), the
@@ -13,10 +13,60 @@ Configure the same bucket and library prefix on each computer. In File → Cloud
 the first computer leaves Library ID blank; subsequent computers enter the first computer's
 Library ID (also shown in Info). Connection names and credentials belong to each computer.
 Use separate local catalog directories. Each persistent installation/catalog claims its own current author in both protocols;
-copied catalogs keep historical pending IDs and rotate the current writer before editing. Existing local photos remain local until imported
-into managed storage. Existing catalogs open without a cloud connection.
+copied catalogs keep historical pending IDs and rotate the current writer before editing. Native cloud mode automatically adopts added local photos into managed storage. Folder-browsed Local records stay on this device. Existing catalogs open without a cloud connection.
 
 `cloud.syncEnable {connection, library?, protocol?}` enables a durable offline mutation journal.
+On native hosts it also enrolls all added library photos in automatic durable staging;
+folder-browsed Local records are excluded. Identical original bytes share SHA-256
+objects, while distinct photo identities, virtual copies and concurrent edit choices
+remain distinct. Adopting a local original reprojects its existing album/stack references.
+
+### Turning synchronization off on this device
+
+`cloud.syncDisablePreview {}` returns the permanent destination and an estimate from
+the current catalog. `cloud.syncDisable {confirm:true, wait?:false}` starts or retries a
+native conversion; `cloud.transitionStatus {}` reports stage, completed/total file and
+byte counts, current file, destination, blocking state and an actionable error.
+`cloud.syncDisable {cancel:true}` waits for an active worker to stop before unblocking.
+CLI clients can request `wait:true`; desktop calls must remain asynchronous.
+
+The stages are draining → reading → downloading → checking → complete. Any failure
+retains cloud mode and enters a blocking retry/cancel state. A separate, atomically
+written, device-local `cloud-mode.json` records intent before workers stop. Reopening
+an interrupted conversion requires Retry or Cancel; corrupt/future records fail closed
+instead of silently reconnecting. Existing verified files are rechecked and reused.
+
+The receive-only reader validates both supported protocols without publishing any
+objects. It merges cloud-only content with this catalog's pending changes, downloads
+all live managed originals, previews, thumbnails and associated XMP, including retained
+content-conflict alternatives, into `<library>/Local Originals/blobs/<sha256>`.
+Deleted entities, unrelated bucket contents and historical garbage are outside this
+scope. Disk-space and write-permission checks precede media acquisition. Streamed
+copies are synced, verified by exact length and SHA-256 and published without replacing
+existing originals. The destination must support hard links; otherwise conversion
+fails with cloud mode retained. Permanent copies are independent of upload staging
+and disposable cache; cache relocation, trimming and output guards protect them.
+
+After copying, another verified scan must show the same cloud state. New content
+extends the plan and repeats verification, with a bounded retry limit for continuously
+changing libraries. The resulting local library reflects the final observed head or
+append frontiers. This is not a global freeze: writes published after that observation
+remain on other devices until this device explicitly reconnects. An incomplete append
+history, changed local catalog/storage binding, corrupt file or failed durable save
+prevents success. The merged catalog is persisted before the atomic local-only mode
+record is committed. Cloud originals are never deleted by this operation.
+
+Local-only mode retains causal identities, conflict history and pending edits, while
+blocking automatic adoption, upload, polling and implicit source downloads. Explicit
+`cloud.syncEnable` reconnects the same library and resumes merge/upload; pause/resume
+is separate and cannot reconnect a disabled library. Editing and navigation are blocked
+during conversion, including commands/control clients; Quit is safe and restart resumes
+through explicit recovery. Browser Pause remains available, but browser conversion
+to permanent local files is disabled with desktop guidance: browser cache persistence
+does not provide this durability guarantee.
+
+### Background synchronization
+
 `cloud.sync {wait?, checkpoint?}` reconciles and publishes it. Native GUI synchronization
 runs on a worker and polls every five seconds while enabled. Typed transient failures use
 bounded automatic backoff; permanent failures require explicit recovery (see Cloud subsystem

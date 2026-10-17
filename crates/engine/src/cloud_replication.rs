@@ -205,6 +205,28 @@ pub(crate) use media::{SharedMedia, VerifiedMedia};
 
 use crate::cloud_outcome::HeadPosition;
 pub use crate::cloud_outcome::Outcome;
+/// A detach reads cloud state but never creates or publishes cloud objects.
+pub(crate) fn receive_only(connection: &S3Connection, local: &SyncState, cancel: &AtomicBool) -> Result<Outcome> {
+    if local.protocol == lightcraft_catalog::replication::SyncProtocol::AppendLog {
+        return crate::cloud_append::native::receive_only(connection, local, cancel);
+    }
+    if connection.get_small(&crate::cloud_append::manifest_key(&connection.prefix, &local.library)?, 16 << 10, cancel)?.is_some() {
+        return Err(AssetError::Moved("cloud library moved to append synchronization; rejoin before turning sync off".into()));
+    }
+    let mut proofs = Default::default();
+    let remote = read_with_witness(connection, &local.library, &mut proofs, cancel)?;
+    let Some((head, _)) = remote.head else {
+        if local.require_existing || local.generation > 0 {
+            return Err(invalid("cloud library is absent; reconnect before turning sync off"));
+        }
+        return Ok(Outcome::empty(remote.state.portable()));
+    };
+    if head.generation < local.generation {
+        return Err(invalid("cloud library rolled back; local work retained"));
+    }
+    let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut proofs, cancel)?;
+    Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, BTreeSet::new()))
+}
 /// Reconcile each failed conditional head update by reading the competing history. Mutation
 /// IDs and payloads never change across attempts, including uncertain publication responses.
 pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requested: bool, cancel: &AtomicBool) -> Result<Outcome> {

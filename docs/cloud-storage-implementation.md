@@ -1,6 +1,6 @@
 # Cloud storage implementation
 
-Last updated: 2026-10-16. This document describes current behavior and operational limits. The normative wire and
+Last updated: 2026-10-17. This document describes current behavior and operational limits. The normative wire and
 durability contract is [cloud-sync-protocol.md](cloud-sync-protocol.md); its receipt-history
 contract is [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
 [browser-cloud.md](browser-cloud.md) defines the browser adapter contract.
@@ -493,7 +493,14 @@ made during the worker's remote scan, and rolls back on journal failure. A parti
 remote seed is retained for safe retry. See [migration operation](cloud-sync-protocol.md#setup-cutover-and-retention)
 and [browser requirements](browser-cloud.md).
 
+## Device-local cloud mode
+
+Native Cloud Synchronization and the cloud popup offer explicit on/off actions. Turning on merges local and cloud library state, stages added local originals, and reuses verified identical bytes. Turning off requires confirmation, blocks edits/navigation, stops local writers and downloads a verified live library snapshot to permanent `Local Originals/blobs` storage. It preserves identities, conflicts, local edits and all cloud originals. Progress includes stage, bytes/files, remaining work and destination; Retry, Cancel and safe Quit support interrupted conversions. The atomic `cloud-mode.json` record prevents restart or reconnect from silently enabling sync. Browser users can pause but need desktop for permanent local conversion. See [the transition contract](cloud-sync-protocol.md#turning-synchronization-off-on-this-device) for snapshot semantics, disk checks and hard-link filesystem requirements.
+
 ## Revision history
+
+CUX.11 (2026-10-17): implement resumable native cloud on/off transitions and blocking conversion UX; protect permanent originals from cache maintenance and output writes, preserve identities and reprojection of albums/stacks during adoption. See [dated validation and screenshots](cloud-acceptance-history.md#2026-10-17-device-local-cloud-onoff-cux11).
+
 
 CUX.10 (2026-10-16): include generated demo originals in automatic cloud staging;
 verify float pixels, appearance, stable identities, staged recovery and append-mode native upload.

@@ -61,6 +61,28 @@ pub(crate) fn synchronize_verified(
     cancel: &AtomicBool,
     media: &mut crate::cloud_replication::VerifiedMedia,
 ) -> Result<crate::cloud_replication::Outcome> {
+    synchronize_mode(connection, local, ScanOptions { checkpoint, audit, receive_only: false }, cancel, media)
+}
+
+/// Receive a verified library snapshot without publishing manifests, mutations or checkpoints.
+pub(crate) fn receive_only(connection: &S3Connection, local: &SyncState, cancel: &AtomicBool) -> Result<crate::cloud_replication::Outcome> {
+    synchronize_mode(connection, local, ScanOptions { checkpoint: false, audit: true, receive_only: true }, cancel, &mut Default::default())
+}
+
+struct ScanOptions {
+    checkpoint: bool,
+    audit: bool,
+    receive_only: bool,
+}
+
+fn synchronize_mode(
+    connection: &S3Connection,
+    local: &SyncState,
+    options: ScanOptions,
+    cancel: &AtomicBool,
+    media: &mut crate::cloud_replication::VerifiedMedia,
+) -> Result<crate::cloud_replication::Outcome> {
+    let ScanOptions { checkpoint, audit, receive_only } = options;
     if local.protocol != SyncProtocol::AppendLog {
         return Err(invalid("append synchronization requires explicit protocol selection"));
     }
@@ -72,16 +94,21 @@ pub(crate) fn synchronize_verified(
         let reply = connection.get_small(&key, control::MAX_CONTROL_BYTES, cancel)?.ok_or(AssetError::Missing)?;
         records.push((key, reply.bytes));
     }
-    let blocked =
+    let mut blocked =
         control::publication(control::effective(&connection.prefix, &local.library, &records)).map_err(crate::assets::AssetError::Blocked)?;
+    if receive_only {
+        blocked = Some("Downloading a local library copy; publication stopped on this device".into());
+    }
     let bytes = manifest(&local.library)?;
     let manifest_key = manifest_key(&connection.prefix, &local.library)?;
-    if local.require_existing {
-        let existing = connection
-            .get_small(&manifest_key, 16 << 10, cancel)?
-            .ok_or_else(|| invalid("cannot join: append library is absent; verify its destination and library ID; local work retained"))?;
-        if existing.bytes != bytes {
-            return Err(AssetError::Integrity);
+    if local.require_existing || receive_only {
+        match connection.get_small(&manifest_key, 16 << 10, cancel)? {
+            Some(existing) if existing.bytes == bytes => {}
+            Some(_) => return Err(AssetError::Integrity),
+            None if receive_only
+                && !local.require_existing
+                && local.append.as_ref().is_none_or(|p| p.frontiers.is_empty() && p.remote.clock.is_empty() && p.scan.checkpoints.is_empty()) => {}
+            None => return Err(invalid("cannot join: append library is absent; verify its destination and library ID; local work retained")),
         }
     } else if blocked.is_none() {
         connection.put_immutable_verified(&manifest_key, &bytes, cancel)?;

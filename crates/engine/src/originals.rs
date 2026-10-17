@@ -18,6 +18,7 @@ pub struct OriginalGuard {
     /// The entries of `by_name` that are symlinks, found on the first check that needs them.
     links: std::sync::OnceLock<Vec<(PathBuf, String)>>,
     roots: Vec<PathBuf>,
+    integrity_error: Option<String>,
 }
 
 impl OriginalGuard {
@@ -105,6 +106,9 @@ impl OriginalGuard {
     }
 
     fn check_roots(&self, target: &Path) -> Result<(), String> {
+        if let Some(error) = &self.integrity_error {
+            return Err(error.clone());
+        }
         if self.roots.is_empty() {
             return Ok(());
         }
@@ -182,6 +186,9 @@ impl crate::Session {
         let mut guard = OriginalGuard::new(&self.catalog);
         if let Some(resolver) = &self.media.asset_resolver {
             guard.add_root(resolver.root());
+            if let Some(root) = resolver.permanent_root() {
+                guard.add_root(&root);
+            }
             if let Some(root) = resolver.durable_root() {
                 guard.add_root(&root.join("blobs"));
                 guard.add_root(&root.join("imports"));
@@ -190,8 +197,25 @@ impl crate::Session {
             for asset in self.catalog.assets().values() {
                 for blob in asset.blobs() {
                     guard.add_file(&resolver.root().join(&blob.id.0), "a managed original or rendition");
+                    if let Some(root) = resolver.permanent_root() {
+                        guard.add_file(&root.join("blobs").join(&blob.id.0), "a permanent local original or rendition");
+                    }
                     if let Some(root) = resolver.durable_root() {
                         guard.add_file(&root.join("blobs").join(&blob.id.0), "a durable managed blob");
+                    }
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(root) = resolver.permanent_root().filter(|root| root.exists()) {
+                match crate::cloud_local_transfer::plan(&self.catalog) {
+                    Ok(blobs) => {
+                        for blob in blobs {
+                            guard.add_file(&root.join("blobs").join(blob.id.0), "a permanent local original or retained conflict source");
+                        }
+                    }
+                    Err(error) => {
+                        guard.integrity_error =
+                            Some(format!("cannot protect permanent originals: {error}; repair this library before writing outputs"))
                     }
                 }
             }
@@ -207,6 +231,9 @@ impl crate::Session {
             if let Some(resolver) = &self.media.asset_resolver {
                 let mut guard = OriginalGuard::default();
                 guard.add_root(resolver.root());
+                if let Some(root) = resolver.permanent_root() {
+                    guard.add_root(&root);
+                }
                 if let Some(root) = resolver.durable_root() {
                     guard.add_root(&root.join("blobs"));
                     guard.add_root(&root.join("imports"));

@@ -164,7 +164,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 .saturating_add(cloud["summary"]["syncing"].as_u64().unwrap_or(0))
                 .saturating_add(cloud["summary"]["issues"].as_u64().unwrap_or(0));
             let attention = super::cloud::needs_attention(&cloud);
-            let cloud_text = if cloud["paused"] == true {
+            let cloud_text = if cloud["syncEnabled"] == false {
+                crate::i18n::tr("Cloud sync is off").to_owned()
+            } else if cloud["paused"] == true {
                 "Cloud library — syncing paused".to_owned()
             } else if let Some(retry) = super::cloud::retry_text(&cloud["health"]["sync"]) {
                 retry
@@ -203,6 +205,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 }
                 if id == "cloud" {
                     if !warn
+                        && cloud["syncEnabled"] != false
                         && (pending > 0
                             || cloud["paused"] == true
                             || attention

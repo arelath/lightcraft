@@ -61,6 +61,22 @@ fn affected(catalog: &Catalog, next: &Catalog, op: &Op) -> Scope {
             _ => {}
         }
     }
+    // Adoption/relinking changes which references are portable. Reproject the
+    // existing containers too, or their memberships vanish on the first receive.
+    let changed_sources: BTreeSet<_> =
+        scope.photos.iter().copied().filter(|id| catalog.photo(*id).map(|p| &p.source) != next.photo(*id).map(|p| &p.source)).collect();
+    if !changed_sources.is_empty() {
+        scope.albums.extend(
+            catalog
+                .albums()
+                .chain(next.albums())
+                .filter(|a| a.photos.iter().any(|id| changed_sources.contains(id)) || a.cover.is_some_and(|id| changed_sources.contains(&id)))
+                .map(|a| a.id),
+        );
+        scope.stacks.extend(
+            catalog.stacks().chain(next.stacks()).filter(|stack| stack.photos.iter().any(|id| changed_sources.contains(id))).map(|stack| stack.id),
+        );
+    }
     scope
 }
 fn error(message: impl Into<String>) -> EngineError {
@@ -164,6 +180,10 @@ pub(crate) fn device_local_smart_albums(catalog: &Catalog, connection: &str) -> 
     excluded
 }
 mod portable;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn retained_content_asset(value: Value, connection: &str) -> Result<lightcraft_catalog::assets::Asset> {
+    portable::decode::<portable::Content>(value)?.asset.rebound(connection).map_err(error)
+}
 fn project(catalog: &Catalog, ids: &Catalog, state: &SyncState, scope: Option<&Scope>) -> Result<Documents> {
     let mut docs = Documents::new();
     let photos: Vec<_> = scope.map_or_else(|| catalog.photos().collect(), |s| s.photos.iter().filter_map(|id| catalog.photo(*id)).collect());

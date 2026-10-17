@@ -79,6 +79,10 @@ filmstrip is visible.
 | `ui.render` | `{id?, size?, path?}` | Render a photo (PNG to `path`), `{width, height}` |
 | `app.quit` | — | Close the app |
 
+`ui.inspect.cloudTransition` reports the last presented native cloud-to-local
+conversion status. Wait for its stage before capturing progress/completion UI;
+`cloud.transitionStatus` reports engine progress and can advance ahead of the UI poll.
+
 White balance (`develop.set` with `wb.temp` / `wb.tint`, `develop.wb`, `develop.wbPick`) is in Kelvin and tint on
 raws with colour matrices — in the file (DNG) or measured for the camera model (`lightcraft_raw::spectral`; issue
 #730) — where As Shot reads the file's as-shot white; rendered files and raws without matrices use a relative scale

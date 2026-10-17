@@ -131,6 +131,7 @@ pub struct State {
     pub signature_errors: usize,
     pub hold_part: bool,
     pub hold_head: bool,
+    pub hold_get: Option<String>,
     pub hold_abort: bool,
     pub defer_abort: usize,
     pub unsupported_conditional: bool,
@@ -138,6 +139,8 @@ pub struct State {
     pub versioned_media: bool,
     pub retention_modified: Option<String>,
     pub next_head: Option<Vec<u8>>,
+    /// Swap an isolated fixture snapshot after serving an exact GET response.
+    pub replace_after_get: Option<(String, BTreeMap<String, Vec<u8>>)>,
 }
 
 pub struct Fixture {
@@ -208,8 +211,15 @@ impl Fixture {
                 } else {
                     serve(&mut state, &method, &target, &headers, body)
                 };
+                if method == "GET"
+                    && state.replace_after_get.as_ref().is_some_and(|(trigger, _)| trigger == &target)
+                    && let Some((_, objects)) = state.replace_after_get.take()
+                {
+                    state.objects = objects;
+                }
                 let hold_part = state.hold_part && method == "PUT" && target.contains("partNumber=1&");
                 let hold_head = state.hold_head && method == "PUT" && target.ends_with("/catalog/head.json");
+                let hold_get = method == "GET" && state.hold_get.as_ref() == Some(&target);
                 let hold_abort = state.hold_abort && method == "DELETE" && target.contains("uploadId=");
                 state.traffic.push(Traffic {
                     method: method.clone(),
@@ -221,17 +231,22 @@ impl Fixture {
                 let versioned_media = state.versioned_media;
                 let retention_modified = state.retention_modified.clone();
                 drop(state);
-                if hold_part || hold_head || hold_abort {
+                if hold_part || hold_head || hold_abort || hold_get {
                     while !worker_stop.load(Ordering::Relaxed) {
                         let state = worker_state.lock().unwrap();
-                        let held = (hold_part && state.hold_part) || (hold_head && state.hold_head) || (hold_abort && state.hold_abort);
+                        let held = (hold_part && state.hold_part)
+                            || (hold_head && state.hold_head)
+                            || (hold_abort && state.hold_abort)
+                            || (hold_get && state.hold_get.as_ref() == Some(&target));
                         drop(state);
                         if !held {
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(2));
                     }
-                    continue; // Request was accepted; response remains intentionally uncertain.
+                    if !hold_get || worker_stop.load(Ordering::Relaxed) {
+                        continue; // Accepted writes remain intentionally uncertain; held reads resume normally.
+                    }
                 }
                 if lose {
                     continue;

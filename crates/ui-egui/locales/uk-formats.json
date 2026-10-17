@@ -266,5 +266,9 @@
   "{n} uploading": "Завантажується: {n}",
   "{n} waiting": "Очікує: {n}",
   "Your {n} changes wait here.": "Ваші зміни ({n}) очікують тут.",
-  "{active} of {total} photos": "{active} з {total} фото"
+  "{active} of {total} photos": "{active} з {total} фото",
+  "Estimated: {files} files · {bytes}": "Estimated: {files} files · {bytes}",
+  "Files: {done} of {total} · {remaining} remaining": "Files: {done} of {total} · {remaining} remaining",
+  "Data: {done} of {total} · {remaining} remaining": "Data: {done} of {total} · {remaining} remaining",
+  "Downloading current file: {done} of {total}": "Downloading current file: {done} of {total}"
 }

@@ -15,7 +15,12 @@ fn eligible(photo: &Photo) -> bool {
     !photo.deleted && !photo.local && matches!(photo.source, Source::File { .. } | Source::Demo { .. })
 }
 pub(crate) fn resume(s: &mut Session) {
-    if s.cloud_paused || s.cloud_replication_jobs.migrating() || s.cloud_replication_jobs.preparing_migration() {
+    if s.cloud_paused
+        || s.cloud_transition.local_only()
+        || s.cloud_transition.blocking()
+        || s.cloud_replication_jobs.migrating()
+        || s.cloud_replication_jobs.preparing_migration()
+    {
         return;
     }
     let Some(state) = s.catalog.sync_state() else { return };

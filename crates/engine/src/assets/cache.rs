@@ -142,6 +142,7 @@ struct State {
 pub(super) struct Cache {
     root: PathBuf,
     durable_root: Mutex<Option<PathBuf>>,
+    permanent_root: Mutex<Option<PathBuf>>,
     entries: Weak<Entries>,
     state: Mutex<State>,
     maintenance: Mutex<()>,
@@ -154,7 +155,7 @@ pub(super) struct Cache {
     sender: Option<mpsc::SyncSender<()>>,
 }
 impl Cache {
-    pub(super) fn new(root: PathBuf, entries: Weak<Entries>) -> Arc<Self> {
+    pub(super) fn new(root: PathBuf, entries: Weak<Entries>, durable_root: Option<PathBuf>, permanent_root: Option<PathBuf>) -> Arc<Self> {
         let loaded = (|| {
             let file = match std::fs::File::open(root.join(POLICY)) {
                 Ok(file) => file,
@@ -181,7 +182,8 @@ impl Cache {
         let unresolved_library = policy.keep_all != KeepAll::default();
         let cache = Arc::new(Self {
             root,
-            durable_root: Mutex::new(None),
+            durable_root: Mutex::new(durable_root),
+            permanent_root: Mutex::new(permanent_root),
             entries,
             state: Mutex::new(State {
                 policy,
@@ -436,8 +438,17 @@ impl Cache {
     pub(super) fn protect_durable_root(&self, root: PathBuf) {
         *self.durable_root.lock().unwrap_or_else(PoisonError::into_inner) = Some(root);
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn protect_permanent_root(&self, root: PathBuf) {
+        *self.permanent_root.lock().unwrap_or_else(PoisonError::into_inner) = Some(root);
+    }
 
     pub(super) fn validate_root(&self) -> Result<()> {
+        if let Some(root) = &*self.permanent_root.lock().unwrap_or_else(PoisonError::into_inner)
+            && crate::originals::paths_overlap(&self.root, root).map_err(AssetError::Invalid)?
+        {
+            return Err(AssetError::Invalid("disposable cache overlaps permanent local originals; choose a separate cache folder".into()));
+        }
         if let Some(root) = &*self.durable_root.lock().unwrap_or_else(PoisonError::into_inner) {
             for protected in [root.clone(), root.join("blobs"), root.join("working")] {
                 if crate::originals::paths_overlap(&self.root, &protected).map_err(AssetError::Invalid)? {

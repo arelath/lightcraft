@@ -40,13 +40,17 @@ impl Desktop {
         Self { child, socket: BufReader::new(socket) }
     }
     fn ask(&mut self, method: &str, params: Value) -> Value {
+        let result = self.raw(method, params);
+        assert_eq!(result["ok"], true, "{result}");
+        result["result"].clone()
+    }
+    fn raw(&mut self, method: &str, params: Value) -> Value {
         writeln!(self.socket.get_mut(), "{}", json!({"method":method,"params":params})).unwrap();
         self.socket.get_mut().flush().unwrap();
         let mut line = String::new();
         self.socket.read_line(&mut line).unwrap();
         let result: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(result["ok"], true, "{result}");
-        result["result"].clone()
+        result
     }
     fn execute(&mut self, command: &str, params: Value) -> Value {
         self.ask("engine.execute", json!({"command":command,"params":params}))
@@ -75,6 +79,127 @@ fn photo(f: &support::Fixture, name: &str, shade: u8) -> (std::path::PathBuf, Ve
     std::fs::write(&path, &bytes).unwrap();
     let key = format!("/photos/library/originals/{}", support::hash(&bytes));
     (path, bytes, key)
+}
+
+#[test]
+#[ignore = "explicit native cloud-toggle acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn cloud_toggle_native_confirmation_blocking_progress_and_durable_completion() {
+    let f = support::Fixture::new();
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("toggle");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let publisher = f.dir.join("publisher");
+    let local = f.dir.join("local");
+    let (import, source) = f.import(&publisher, false);
+    let (out, rows) = f.run(&publisher, &[("cloud.upload", json!({"imports":[import]})), ("cloud.sync", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let (_, saved, _) = lightcraft_engine::catalog::Journal::open(Box::new(lightcraft_engine::catalog::FsStore::open(&publisher).unwrap())).unwrap();
+    let library = saved.sync_state().unwrap().library.clone();
+    let original = saved.assets().values().next().unwrap().original.clone();
+    let (out, rows) = f.run(
+        &local,
+        &[
+            (
+                "cloud.configure",
+                json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"}),
+            ),
+            ("cloud.syncEnable", json!({"connection":"personal","library":library})),
+            ("cloud.sync", json!({})),
+        ],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let widgets = app.ask("ui.widgets", json!({"filter":"icon:cloud"}));
+        if widgets.as_array().is_some_and(|widgets| widgets.iter().any(|widget| widget["id"] == "icon:cloud")) {
+            break;
+        }
+        assert!(Instant::now() < until, "first native frame did not show the cloud icon: {widgets}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    app.ask("ui.clickWidget", json!({"id":"icon:cloud"}));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("enabled.png")}));
+    app.execute("dialog.cloudDisable", json!({}));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("confirmation.png")}));
+    let remote = f.state.lock().unwrap().objects.clone();
+    {
+        let mut storage = f.state.lock().unwrap();
+        storage.requests.clear();
+        storage.hold_get = Some(format!("/photos/{}", original.remote.key));
+    }
+    app.ask("ui.clickWidget", json!({"id":"button:cloudDisableConfirm"}));
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = app.execute("cloud.transitionStatus", json!({}));
+        let presented = app.ask("ui.inspect", json!({}))["cloudTransition"].clone();
+        if status["stage"] == "downloading" && presented["currentDownloadTotal"].as_u64().is_some_and(|n| n > 0) {
+            break;
+        }
+        assert!(Instant::now() < until, "download did not reach held original: {status}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.ask("ui.screenshot", json!({"path":artifacts.join("downloading.png")}));
+    let blocked = app.raw("engine.execute", json!({"command":"library.preferences","params":{}}));
+    assert_eq!(blocked["ok"], false, "{blocked}");
+    app.ask("ui.key", json!({"key":"Escape"}));
+    assert_eq!(app.execute("cloud.transitionStatus", json!({}))["blocking"], true);
+    f.state.lock().unwrap().hold_get = None;
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = app.execute("cloud.transitionStatus", json!({}));
+        let presented = app.ask("ui.inspect", json!({}))["cloudTransition"].clone();
+        if status["stage"] == "complete" && presented["stage"] == "complete" {
+            assert_eq!(status["localOnly"], true);
+            break;
+        }
+        assert!(Instant::now() < until, "conversion did not complete: {status}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.ask("ui.screenshot", json!({"path":artifacts.join("complete.png")}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.ask("ui.clickWidget", json!({"id":"button:cloudDisableDone"}));
+    app.ask("ui.clickWidget", json!({"id":"icon:cloud"}));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("off.png")}));
+    app.ask("ui.clickWidget", json!({"id":"icon:cloud"}));
+    app.execute("panel.info", json!({}));
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let widgets = app.ask("ui.widgets", json!({"filter":"cloudSyncTurnOn"}));
+        let window = app.ask("ui.inspect", json!({}))["window"].clone();
+        let height = window[1].as_f64().unwrap();
+        if widgets.as_array().is_some_and(|widgets| {
+            widgets.iter().any(|widget| {
+                let y = widget["rect"][1].as_f64().unwrap();
+                let h = widget["rect"][3].as_f64().unwrap();
+                y > 80. && y + h < height - 40.
+            })
+        }) {
+            break;
+        }
+        assert!(Instant::now() < until, "Info did not present the explicit turn-on action: {widgets}");
+        app.ask("ui.move", json!({"x":window[0].as_f64().unwrap()-180.,"y":window[1].as_f64().unwrap()/2.}));
+        app.ask("ui.scroll", json!({"dy":-350.}));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.ask("ui.screenshot", json!({"path":artifacts.join("off-info.png")}));
+    app.execute("app.settings", json!({"tab":"cache"}));
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let widgets = app.ask("ui.widgets", json!({"filter":"cacheLocalCloudEnable"}));
+        if widgets.as_array().is_some_and(|widgets| !widgets.is_empty()) {
+            break;
+        }
+        assert!(Instant::now() < until, "Cache settings did not show permanent local storage guidance");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.ask("ui.screenshot", json!({"path":artifacts.join("off-cache-settings.png")}));
+    app.ask("ui.dialog.cancel", json!({}));
+    app.ask("app.quit", json!({}));
+    assert!(app.child.wait().unwrap().success());
+    assert_eq!(std::fs::read(local.join("Local Originals").join("blobs").join(original.id.0)).unwrap(), std::fs::read(source).unwrap());
+    let storage = f.state.lock().unwrap();
+    assert_eq!(storage.objects, remote);
+    assert!(storage.requests.iter().all(|(m, _)| matches!(m.as_str(), "GET" | "HEAD")));
 }
 
 #[test]

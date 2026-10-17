@@ -33,7 +33,7 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
     #[cfg(not(target_arch = "wasm32"))]
     let (running, reports) = (s.cloud_replication_jobs.running(), s.cloud_replication_jobs.reports.clone());
     #[cfg(not(target_arch = "wasm32"))]
-    let health = s.cloud_replication_jobs.health(true, s.cloud_paused);
+    let health = s.cloud_replication_jobs.health(!s.cloud_transition.local_only(), s.cloud_paused);
     #[cfg(not(target_arch = "wasm32"))]
     let publication_blocked = s.cloud_replication_jobs.publication_blocked().map(str::to_owned);
     #[cfg(target_arch = "wasm32")]
@@ -42,7 +42,11 @@ pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
     let (running, reports) = (false, Vec::<Value>::new());
     #[cfg(target_arch = "wasm32")]
     let health = crate::cloud_status::PollHealth::default().view(true, false, s.cloud_paused, false, false);
-    Ok(json!({"enabled":true,"library":state.library,"device":state.device,"connection":state.connection,
+    #[cfg(not(target_arch = "wasm32"))]
+    let enabled = !s.cloud_transition.local_only();
+    #[cfg(target_arch = "wasm32")]
+    let enabled = true;
+    Ok(json!({"enabled":enabled,"library":state.library,"device":state.device,"connection":state.connection,
         "paused":s.cloud_paused,
         "health":health,
         "publicationBlocked":publication_blocked,
@@ -164,6 +168,7 @@ fn enable(s: &mut Session, p: &Value) -> Result<Value> {
         {
             return Err(bad(C, "this library already has a durable synchronization identity; open a separate library to join another one"));
         }
+        crate::cloud_transition::enable(s)?;
         return status(s, p);
     }
     let connection = super::str_param(p, "connection").ok_or_else(|| bad(C, "missing connection"))?;
@@ -196,6 +201,12 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "cloud.resume", "Resume Syncing", [], None, "{}; resume durable uploads and catalog publication after paused jobs drain", always, crate::cloud_status::resume),
         cmd!(query "cloud.syncStatus","Cloud synchronization status",[],None,"{} → protocol, pending count, cursor/frontiers, gaps, conflicts, exact metadata utilization and early capacity warnings",always,status),
     ];
+    #[cfg(not(target_arch = "wasm32"))]
+    specs.extend([
+        cmd!(query "cloud.syncDisablePreview", "Review turning off cloud sync", [], None, "{}; estimate permanent local copies before final remote discovery", always, crate::cloud_transition::preview),
+        cmd!(query "cloud.syncDisable", "Turn off cloud sync", [], None, "{confirm?:true,cancel?:true,wait?:false}; download and verify live library files before committing local-only mode; never delete cloud files", always, crate::cloud_transition::disable),
+        cmd!(query "cloud.transitionStatus", "Cloud mode conversion status", [], None, "{}; durable conversion stage, bytes, files, destination and recovery actions", always, crate::cloud_transition::status),
+    ]);
     specs.push(cmd!(
         "cloud.restoreDeleted",
         "Recover deleted cloud photo",

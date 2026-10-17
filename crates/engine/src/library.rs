@@ -340,6 +340,10 @@ impl Session {
     /// its folder holds.
     pub fn open_library(&mut self, dir: impl AsRef<Path>, seed_demo: bool) -> Result<&LoadReport> {
         self.ensure_reclamation_idle()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.cloud_transition.blocking() {
+            return Err(EngineError::Other("finish or cancel the local library download before switching libraries".into()));
+        }
         let dir = dir.as_ref().to_path_buf();
         if let Some(place) = crate::lightroom_folder::lightroom_catalog_at(&dir) {
             return Err(EngineError::LightroomCatalog { path: dir, catalog: place.catalog });
@@ -375,6 +379,10 @@ impl Session {
     /// filesystem original copies or moves. The browser supplies its own cache adapter instead.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_library_in_with_cache(&mut self, stores: LibraryStores, seed_demo: bool, cache_dir: PathBuf) -> Result<&LoadReport> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.cloud_transition.blocking() {
+            return Err(EngineError::Other("finish or cancel the local library download before switching libraries".into()));
+        }
         if cache_dir.as_os_str().is_empty() {
             return Err(EngineError::Other("cache directory is empty".into()));
         }
@@ -393,6 +401,10 @@ impl Session {
     /// Open `stores`; the new library takes `lock` once nothing can fail any more.
     fn open_stores(&mut self, stores: LibraryStores, seed_demo: bool, lock: &mut Option<LibraryLock>, cache_dir: Option<PathBuf>) -> Result<()> {
         self.ensure_reclamation_idle()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.cloud_transition.blocking() {
+            return Err(EngineError::Other("finish or cancel the local library download before switching libraries".into()));
+        }
         let LibraryStores { dir, catalog, mut files, on_disk } = stores;
         let cache_dir = cache_dir.or_else(|| on_disk.then(|| dir.clone()));
         self.media.smart_dir = cache_dir.as_ref().map(|d| crate::smart::dir(d));
@@ -514,7 +526,13 @@ impl Session {
         };
         #[cfg(target_arch = "wasm32")]
         let (asset_root, location_warning): (Option<PathBuf>, Option<String>) = (cache_dir.as_ref().map(|d| d.join("assets-cache")), None);
-        self.media.asset_resolver = asset_root.map(|root| std::sync::Arc::new(crate::assets::AssetResolver::new(root)));
+        self.media.asset_resolver = asset_root.map(|root| {
+            std::sync::Arc::new(crate::assets::AssetResolver::new_for_library(
+                root,
+                on_disk.then(|| dir.join("Managed")),
+                on_disk.then(|| dir.join("Local Originals")),
+            ))
+        });
         if let Some(resolver) = &self.media.asset_resolver {
             resolver.set_activity(self.activity.clone());
             if on_disk {
@@ -565,6 +583,8 @@ impl Session {
             crate::cmd::previews::refresh_stale_smart_previews(self);
         }
         self.library_identity = std::sync::Arc::new(());
+        #[cfg(not(target_arch = "wasm32"))]
+        self.load_cloud_mode()?;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(lib) = &mut self.library {
             if let Some(error) = self.media.asset_resolver.as_ref().and_then(|r| r.cache_status().error) {
@@ -680,6 +700,8 @@ impl Session {
     /// holding everything in memory, so it saves those ops too (the log handle may be the only
     /// thing that's broken). Fails only if nothing could be saved; the ops then stay queued.
     pub fn close_library(&mut self) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.cloud_transition.stop_for_close();
         self.ensure_reclamation_idle()?;
         #[cfg(not(target_arch = "wasm32"))]
         {

@@ -486,6 +486,12 @@ fn cloud_popup_pauses_resumes_and_status_picker_filters_with_a_removable_chip() 
         true,
     )
     .unwrap();
+    // Pause/Resume applies to an enabled library; an unbound local library now
+    // offers explicit Turn on instead of pretending synchronization is paused.
+    s.apply_received(lightcraft_catalog::Op::SetSyncState {
+        state: Some(Box::new(lightcraft_catalog::replication::SyncState::new("cloud-popup".into(), "device".into(), "fixture".into()).unwrap())),
+    })
+    .unwrap();
     let mut h = Headless::new(LightcraftApp::new(s, Services { png: None, ..Default::default() }), [1600., 1000.], 1.);
     h.settle(T);
     click(&mut h, "icon:cloud");

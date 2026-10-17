@@ -178,6 +178,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("dialog.cloudStorage", "Cloud Storage…", None, "File"),
     ("dialog.cloudDelete", "Delete Entire Cloud Library…", None, ""),
     ("dialog.cloudSync", "Cloud Synchronization…", None, "File"),
+    ("dialog.cloudDisable", "Turn Off Cloud Sync…", None, "File"),
     ("dialog.cloudMigrate", "Migrate Cloud Library…", None, "File"),
     ("file.addFolder", "Import from Folder…", None, "File"),
     ("file.importLightroom", "Import Lightroom Catalog…", None, "File"),
@@ -1345,6 +1346,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             }
             None => Err("Enable or join a cloud library before reviewing deletion.".into()),
         },
+        "dialog.cloudDisable" => crate::cloud_transition::open(app),
         "dialog.cloudSync" => {
             let configured = match app.run("cloud.connections", json!({})) {
                 Ok(value) => value,
@@ -1354,6 +1356,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             let connection = p
                 .get("connection")
                 .and_then(Value::as_str)
+                .or_else(|| app.session.catalog.sync_state().map(|s| s.connection.as_str()))
                 .or_else(|| saved.and_then(|c| c.get("id")).and_then(Value::as_str))
                 .unwrap_or("")
                 .to_owned();
@@ -1924,6 +1927,15 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
 }
 
 pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
+    if crate::cloud_transition::blocked(app) && !crate::cloud_transition::permitted(id) {
+        return false;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if app.session.cloud_transition.local_only()
+        && matches!(id, "file.importCloud" | "file.adoptCloud" | "dialog.cloudMigrate" | "dialog.cloudDelete" | "dialog.cloudStorage")
+    {
+        return false;
+    }
     match id {
         "dialog.contactSheet" | "app.contactSheet" => !cfg!(target_arch = "wasm32") && app.session.active().is_some() && app.export.is_none(),
         s if s.starts_with("panel.") || s.starts_with("tool.") || s.starts_with("section.") => app.session.active().is_some() || s == "panel.close",
@@ -1952,6 +1964,16 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
         "file.importCloud" => cfg!(not(target_arch = "wasm32")) && app.session.library.is_some(),
         "dialog.cloudStorage" | "dialog.cloudSync" => {
             (cfg!(not(target_arch = "wasm32")) || app.services.cloud_action.is_some()) && app.session.library.is_some()
+        }
+        "dialog.cloudDisable" => {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                app.session.catalog.sync_state().is_some() && !app.session.cloud_transition.local_only()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                false
+            }
         }
         "dialog.cloudMigrate" => app.session.catalog.sync_state().is_some_and(|state| state.protocol.is_head()),
         "file.exportPresets" => app.session.presets.iter().any(|p| !p.builtin),

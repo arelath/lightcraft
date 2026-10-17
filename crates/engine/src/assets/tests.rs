@@ -51,6 +51,31 @@ fn store(bytes: &[u8]) -> Arc<MemoryStore> {
 }
 
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn queued_download_cannot_reconnect_after_cloud_sync_is_turned_off() {
+    let scratch = Scratch::new();
+    let bytes = b"queued original";
+    let original = blob(bytes);
+    let provider = store(bytes);
+    let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+    resolver.connect("memory".into(), provider.clone()).unwrap();
+    let cancel = AtomicBool::new(false);
+    let permits: Vec<_> =
+        (0..4).map(|n| resolver.transfers.enter(&BlobId(format!("{n:064x}")), Arc::new(AtomicU32::new(0)), &cancel).unwrap()).collect();
+    let work = resolver.clone();
+    let worker = std::thread::spawn(move || work.acquire(&original, &AtomicBool::new(false)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while resolver.transfer_status().queued.is_empty() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    resolver.set_local_only(true);
+    drop(permits);
+    assert!(worker.join().unwrap().is_err());
+    assert_eq!(provider.reads.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn reopen_verifies_and_reuses_cache_without_a_connection() {
     let scratch = Scratch::new();
     let bytes = b"a safely downloaded original";

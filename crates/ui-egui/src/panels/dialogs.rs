@@ -231,6 +231,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::Import { .. } => "Import Photos",
         Dialog::CloudStorage { .. } => "Cloud Storage",
         Dialog::CloudSync { .. } => "Cloud Synchronization",
+        Dialog::CloudDisable { .. } => "Turn Off Cloud Sync",
         Dialog::CloudDelete { .. } => "Delete Entire Cloud Library",
         #[cfg(not(target_arch = "wasm32"))]
         Dialog::CloudSetup { setup } => setup.title(),
@@ -301,6 +302,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
             Dialog::CloudStorage { .. }
             | Dialog::CloudImport { .. }
             | Dialog::CloudSync { .. }
+            | Dialog::CloudDisable { .. }
             | Dialog::CloudDelete { .. }
             | Dialog::CloudMigration { .. } => 480.0,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1036,6 +1038,20 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     ui.label(crate::i18n::tr("Cancel leaves this device paused. Use Sync now to resume without migrating."));
                 }
                 Dialog::CloudSync { connection, library,protocol } => {
+                    let overview = app.run("cloud.overview", json!({})).unwrap_or_default();
+                    let sync_enabled = overview["syncEnabled"] == true;
+                    ui.strong(crate::i18n::tr(if sync_enabled { "Cloud sync is on" } else { "Cloud sync is off" }));
+                    if !sync_enabled {
+                        ui.label(crate::i18n::tr("Turning on sync uploads this library's local originals and merges its photos, edits and albums with the cloud library. Identical bytes are reused; cloud-only photos and conflicting edits are retained."));
+                    }
+                    if sync_enabled {
+                        let r = ui.add_enabled(!cfg!(target_arch = "wasm32"), egui::Button::new(crate::i18n::tr("Turn off cloud sync…")));
+                        crate::widgets::register(ui.ctx(), "button:cloudDisableOpen", r.rect);
+                        if r.clicked() && let Err(error) = app.run("dialog.cloudDisable", json!({})) { app.toast(ui.ctx(), error); }
+                        if cfg!(target_arch = "wasm32") {
+                            ui.label(crate::i18n::tr("Use desktop LightCraft to turn sync off and keep permanent local originals. You can pause syncing in the cloud popup."));
+                        }
+                    }
                     ui.strong(crate::i18n::tr("Deleting cloud photos retains their uploaded originals, previous revisions and history. It does not free bucket space."));
                     if cfg!(target_arch = "wasm32") {
                         ui.label(crate::i18n::tr("Browser original rendering: 512 MiB and 32 megapixels. Larger shared photos need a smart preview for editing; render full originals on desktop."));
@@ -1045,15 +1061,15 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     ui.label(crate::i18n::tr("Use the same storage prefix and library ID on each device. Leave Library ID empty only when creating a shared library."));
                     ui.label(crate::i18n::tr("Smart albums with local folders or local photo selections stay on this device."));
                     ui.label(crate::i18n::tr_format!("Enabling sync for existing photos and albums, or editing one entity, requires at most {limit} changed fields and 1 MiB per entity. Album metadata and managed memberships share this budget; split large albums before setup.", limit = lightcraft_engine::cloud_sync::MAX_ENTITY_CHANGES));
-                    field(ui, "Connection name", |ui| { crate::text_field::TextField::singleline("cloudSyncConnection", connection).width(f32::INFINITY).show(ui); });
                     ui.add_enabled_ui(app.session.catalog.sync_state().is_none(),|ui|{
+                        field(ui, "Connection name", |ui| { crate::text_field::TextField::singleline("cloudSyncConnection", connection).width(f32::INFINITY).show(ui); });
                         egui::ComboBox::from_id_salt("cloudSyncProtocol").selected_text(if protocol.is_head(){"S3 conditional writes"}else{"Append-only (Backblaze B2)"}).show_ui(ui,|ui|{
                             ui.selectable_value(protocol,lightcraft_catalog::replication::SyncProtocol::ConditionalHead,"S3 conditional writes");
                             ui.selectable_value(protocol,lightcraft_catalog::replication::SyncProtocol::AppendLog,"Append-only (Backblaze B2)");
                         });
+                        field(ui, "Library ID", |ui| { crate::text_field::TextField::singleline("cloudSyncLibrary", library).width(f32::INFINITY).show(ui); });
                     });
-                    field(ui, "Library ID", |ui| { crate::text_field::TextField::singleline("cloudSyncLibrary", library).width(f32::INFINITY).show(ui); });
-                    if app.session.catalog.sync_state().is_some_and(|state| state.protocol.is_head()) {
+                    if sync_enabled && app.session.catalog.sync_state().is_some_and(|state| state.protocol.is_head()) {
                         let button = ui.button(crate::i18n::tr("Migrate to append-only…"));
                         crate::widgets::register(ui.ctx(), "button:cloudSyncMigrate", button.rect);
                         if button.clicked() && let Err(error) = app.run("dialog.cloudMigrate", json!({})) { app.toast(ui.ctx(), error); }
@@ -1061,6 +1077,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     ui.label(crate::i18n::tr("After a failed synchronization, retry from Info. Originals and pending edits stay on this device."));
                     let status = app.run("cloud.syncStatus",json!({})).unwrap_or_default();
                     super::cloud::capacity(app, ui, &status, true);
+                    if sync_enabled {
                     if let Some(conflicts) = status.get("structuralConflicts").and_then(Value::as_array).filter(|conflicts|!conflicts.is_empty()) {
                         ui.separator();
                         ui.strong(crate::i18n::tr("Conflicting folder or stack moves"));
@@ -1088,8 +1105,10 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     crate::widgets::register(ui.ctx(),"button:cloudDeleteOpen",r.rect);
                     if r.clicked(){let _=app.run("dialog.cloudDelete",json!({}));}
                     crate::cloud_conflicts::deleted(app, ui, &status);
+                    }
                 }
                 Dialog::CloudDelete { review } => crate::cloud_erase::body(app,ui,review),
+                Dialog::CloudDisable { review } => crate::cloud_transition::body(app,ui,review),
                 Dialog::Settings { tab } => crate::panels::settings::body(app, ui, tab),
                 Dialog::SamModel { error, .. } => sam_model_body(app, ui, error.as_deref()),
                 Dialog::KeywordTag {
@@ -1307,7 +1326,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 let informational = unusable_model
                     || matches!(
                         dlg,
-                        Dialog::CloudDelete { .. } | Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
+                        Dialog::CloudDisable { .. } | Dialog::CloudDelete { .. } | Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
                     );
                 let sam = &app.session.segmenter;
                 let (sam_installed, sam_running, sam_failed) = (sam.installed(), sam.download_status().running, sam.download_status().error.is_some());
@@ -1343,7 +1362,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                     Dialog::ContactSheet { .. } => "Choose PDF…",
                     Dialog::CloudStorage { .. } => "Save Connection",
-                    Dialog::CloudSync { .. } => "Enable & Synchronize",
+                    Dialog::CloudSync { .. } => if app.run("cloud.overview", json!({})).ok().is_some_and(|v| v["syncEnabled"] == true) { "Done" } else { "Turn on cloud sync" },
+                    Dialog::CloudDisable { .. } => "",
                     #[cfg(not(target_arch = "wasm32"))]
                     Dialog::CloudSetup { setup } => setup.ok_label(),
                     Dialog::CloudMigration { .. } => "Migrate Library",
@@ -1425,7 +1445,10 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
     }
     // (while the shortcuts editor records a key, it takes Esc itself to cancel; an open popup in
     // the dialog, such as a date picker's calendar, takes it to close itself)
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !crate::widgets::escape_taken(ctx) {
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        && !crate::widgets::escape_taken(ctx)
+        && !matches!(&dlg, Dialog::CloudDisable { review } if review.blocking())
+    {
         close = true;
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -1489,6 +1512,9 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
     // a dialog opened from inside this one (a button in Settings that shows a licence) takes its place
     if app.ui.dialog.as_ref().is_some_and(|now| *now != at_start) {
         return;
+    }
+    if let Dialog::CloudDisable { review } = &dlg {
+        close = review.dismissed || close && !review.blocking();
     }
     app.ui.dialog = if close { None } else { Some(dlg) };
 }
@@ -1889,6 +1915,9 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
             app.run("cloud.upgradeLibrary", json!({"plan":"appendLog","writersStopped":writers_stopped,"wait":false}))
         }
         Dialog::CloudSync { connection, library, protocol } => {
+            if app.run("cloud.overview", json!({})).ok().is_some_and(|v| v["syncEnabled"] == true) {
+                return Ok(Value::Null);
+            }
             let mut params = json!({"connection":connection.trim(),"protocol":protocol});
             if !library.trim().is_empty()
                 && let Some(object) = params.as_object_mut()
@@ -1905,7 +1934,9 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         }
         Dialog::RemoveFolder { path, disk, .. } => app.run("library.removeFolder", json!({"path": path, "disk": disk})),
         d @ Dialog::SynchronizeFolder { .. } => crate::sync::confirm(app, d),
-        Dialog::CloudDelete { .. } | Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } => Ok(serde_json::Value::Null),
+        Dialog::CloudDisable { .. } | Dialog::CloudDelete { .. } | Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } => {
+            Ok(serde_json::Value::Null)
+        }
     }
 }
 

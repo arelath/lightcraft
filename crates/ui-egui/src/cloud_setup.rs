@@ -606,7 +606,12 @@ fn library_step(ui: &mut egui::Ui, setup: &mut Setup) {
     }
     ui.add_space(4.0);
     if setup.choice != Choice::New {
-        dim(ui, crate::i18n::tr("Joining adds this catalog's photos and edits to that library and brings its photos here."));
+        dim(
+            ui,
+            crate::i18n::tr(
+                "Joining merges this catalog's photos, edits and albums with the existing cloud library. Identical original bytes are reused; separate photo identities and conflicting edits are retained.",
+            ),
+        );
     }
     dim(
         ui,

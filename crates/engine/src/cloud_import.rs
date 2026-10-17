@@ -1458,6 +1458,9 @@ impl Imports {
     pub fn preparing(&self) -> usize {
         self.pending.iter().filter(|pending| !pending.done.load(Ordering::Relaxed)).count()
     }
+    pub(crate) fn running(&self) -> bool {
+        !self.pending.is_empty()
+    }
 }
 
 pub fn start(s: &mut Session, p: &Value) -> Result<Value> {
