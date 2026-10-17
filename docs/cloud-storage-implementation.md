@@ -694,3 +694,7 @@ Managed background completion retains its originating typed operation. XMP save,
 ### CR.59 — Original-owner conversion certification (2026-10-17)
 
 Cloud-to-local conversion recertifies the final received state against the unchanged original owner and its retained append publication state. Repeated scans retain exact acknowledgements, recover already-published pending IDs from verified receipts, and compare semantic fingerprints independent of transport witnesses. Unpublished mutations remain pending.
+
+### CR.62 — Stable absolute local-original destinations (2026-10-17)
+
+Native library binding and the permanent Local Originals destination are resolved to absolute paths. Conversion persists the reviewed destination and verifies that binding again before worker startup; existing symlink/junction and blob validation remain in force.

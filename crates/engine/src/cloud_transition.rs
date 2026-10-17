@@ -106,7 +106,7 @@ fn destination(s: &Session) -> Result<PathBuf> {
         .as_ref()
         .filter(|l| l.on_disk)
         .ok_or_else(|| error("turning cloud sync off requires a desktop library on durable local storage"))?;
-    Ok(lib.dir.join("Local Originals"))
+    std::path::absolute(lib.dir.join("Local Originals")).map_err(|e| error(format!("can't resolve permanent local originals location: {e}")))
 }
 pub fn status(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(snapshot(s))
@@ -543,7 +543,12 @@ impl Session {
                 .into_iter()
                 .find(|c| c.id == id)
                 .ok_or_else(|| error("Reconnect the configured cloud connection, then retry."))?;
-            let destination = destination(self)?;
+            let expected_destination = destination(self)?;
+            let destination =
+                PathBuf::from(self.cloud_transition.mode.transition.as_ref().ok_or_else(|| error("transition unavailable"))?.destination.clone());
+            if !destination.is_absolute() || destination != expected_destination {
+                return Err(error("Permanent local destination no longer matches this library. Cancel and review the local download again."));
+            }
             let cancel = Arc::new(AtomicBool::new(false));
             let progress = Arc::new(Mutex::new(self.cloud_transition.mode.transition.clone().ok_or_else(|| error("transition unavailable"))?));
             let (sender, receiver) = mpsc::channel();

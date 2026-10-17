@@ -514,3 +514,10 @@ The real-CLI signed fixture passes both protocols after another device compacts 
 
 All eight final-source CI gates passed (`target/cloud-review-cr58-cr62-ci-final.log`).
 This run used disposable local fixtures; fresh live AWS/B2 acceptance remains open.
+
+## 2026-10-17: CR.62 — Stable absolute local-original destinations
+
+The real-CLI regression converts `./photos`, verifies absolute destinations in preview and the durable mode record, checks the original bytes, and reopens from another working directory without network requests. Evidence: `target/cloud-cr59-cr62-cli.log` and the final workspace CI run.
+
+All eight final-source CI gates passed (`target/cloud-review-cr58-cr62-ci-final.log`).
+This run used disposable local fixtures; fresh live AWS/B2 acceptance remains open.

@@ -349,6 +349,9 @@ impl Session {
             return Err(EngineError::LightroomCatalog { path: dir, catalog: place.catalog });
         }
         let dir = resolve_dir(&dir)?;
+        // Bind filesystem-backed libraries once; later workers and persistent
+        // original locations must not depend on the process working directory.
+        let dir = std::path::absolute(&dir).map_err(|e| EngineError::Other(format!("can't resolve library {}: {e}", dir.display())))?;
         let open = || FsStore::open(&dir).map_err(|e| EngineError::Other(format!("can't open library {}: {e}", dir.display())));
         let stores = LibraryStores { catalog: Box::new(open()?), files: Box::new(open()?), on_disk: true, dir: dir.clone() };
         // the library open in this session (same directory): hand its lock over
