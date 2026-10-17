@@ -211,15 +211,11 @@ fn attention_row(app: &mut LightcraftApp, ui: &mut egui::Ui, icon: Icon, title: 
                         let command = if id == "button:cloudChoose" {
                             "dialog.cloudConflicts"
                         } else if id == "button:cloudStorageDetails" || id == "button:cloudErrorDetails" {
-                            "dialog.cloudStorage"
+                            "dialog.cloudError"
                         } else {
                             "dialog.cloudMaintenance"
                         };
-                        let params = if command == "dialog.cloudStorage" {
-                            json!({"id":app.session.catalog.sync_state().map(|s| &s.connection)})
-                        } else {
-                            json!({})
-                        };
+                        let params = if command == "dialog.cloudError" { json!({"storage":id == "button:cloudStorageDetails"}) } else { json!({}) };
                         invoke(app, ui, command, params);
                     }
                 }
@@ -483,7 +479,10 @@ fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         } else if health["retry"]["exhausted"] == true {
             crate::i18n::tr("Automatic retry limit reached.").to_owned()
         } else {
-            health["lastError"]["action"].as_str().or(sync_error).unwrap_or(crate::i18n::tr("Automatic checking stopped after an error.")).to_owned()
+            lightcraft_engine::cloud_status::Diagnostic::from_overview(data, false).map_or_else(
+                || crate::i18n::tr("Automatic checking stopped after an error.").to_owned(),
+                |diagnostic| crate::i18n::tr(diagnostic.short_cause()).to_owned(),
+            )
         };
         attention_row(
             app,
@@ -766,10 +765,65 @@ mod tests {
             if id == "button:cloudChoose" {
                 assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudConflicts)));
             } else {
-                assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudSetup { .. })));
+                assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudError { .. })));
+                text(&h, "Storage unavailable");
+                text(&h, "Cloud synchronization");
+                assert!(!has(&h, "button:cloudErrorConnection"));
             }
             assert!(!has(&h, "popup:cloud"));
         }
+    }
+    #[test]
+    fn empty_library_details_show_original_error_and_only_relevant_repair_actions() {
+        use lightcraft_engine::cloud_status::{CloudFailure, FailureKind, PollHealth};
+        for (error, repair_widget) in [
+            (CloudFailure::http("Read empty library", 403), Some("button:cloudErrorConnection")),
+            (CloudFailure::integrity("Invalid checkpoint hash: exact expected digest"), None),
+            (CloudFailure::new(FailureKind::Capacity, "Receipt capacity reached: exact bound"), Some("button:cloudErrorCapacity")),
+            (CloudFailure::from(lightcraft_engine::cloud_control::Blocked::UpdateToRead("schema 9".into())), None),
+            (CloudFailure::local("Cannot save catalog: disk full"), None),
+        ] {
+            let mut data = overview();
+            data["summary"]["cloudPhotos"] = json!(0);
+            let mut health = PollHealth::default();
+            health.fail_typed(&error, Some(1000), Some(29));
+            data["health"]["sync"] = health.view_at(true, false, false, false, true, Some(1000));
+            let mut h = open(data, [1200., 900.]);
+            click(&mut h, "button:cloudErrorDetails");
+            text(&h, &error.message);
+            text(&h, "Cloud synchronization");
+            text(&h, "Activity task: 29");
+            text(&h, "No automatic retry scheduled");
+            for widget in ["button:cloudErrorConnection", "button:cloudErrorCapacity"] {
+                assert_eq!(has(&h, widget), repair_widget == Some(widget), "{error}: {widget}");
+            }
+            if error.remedy == Some(lightcraft_engine::cloud_status::Recovery::Update) {
+                assert!(!has(&h, "button:cloudErrorRetry"));
+                text(&h, "Update LightCraft");
+            }
+            if let Some(widget) = repair_widget {
+                click(&mut h, widget);
+                if widget == "button:cloudErrorConnection" {
+                    assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudSetup { .. })));
+                } else {
+                    assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudMaintenance)));
+                }
+            } else {
+                let result = h.request("ui.dialog.confirm", json!({}), T);
+                assert_eq!(result["ok"], true, "{result}");
+                assert!(h.app.ui.dialog.is_none());
+            }
+        }
+    }
+    #[test]
+    fn legacy_storage_error_details_do_not_guess_a_connection_problem() {
+        let mut data = overview();
+        data["error"] = json!("Authentication and disk keywords in an unclassified diagnostic");
+        let mut h = open(data, [1200., 900.]);
+        click(&mut h, "button:cloudStorageDetails");
+        text(&h, "Authentication and disk keywords in an unclassified diagnostic");
+        assert!(!has(&h, "button:cloudErrorConnection"));
+        assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudError { .. })));
     }
     #[test]
     fn cloud_popup_deleted_library_shows_remaining_scope_without_resume_or_retry() {

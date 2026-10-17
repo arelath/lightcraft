@@ -57,6 +57,18 @@ impl Desktop {
     fn execute(&mut self, command: &str, params: Value) -> Value {
         self.ask("engine.execute", json!({"command":command,"params":params}))
     }
+    fn click_when_ready(&mut self, id: &str) {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let widgets = self.ask("ui.widgets", json!({"filter":id}));
+            if widgets.to_string().contains(id) {
+                break;
+            }
+            assert!(Instant::now() < until, "widget did not appear: {id}: {widgets}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.ask("ui.clickWidget", json!({"id":id}));
+    }
     fn settled(&mut self, f: &support::Fixture, originals: &[String]) {
         let until = Instant::now() + Duration::from_secs(45);
         loop {
@@ -96,6 +108,81 @@ fn photo(f: &support::Fixture, name: &str, shade: u8) -> (std::path::PathBuf, Ve
     std::fs::write(&path, &bytes).unwrap();
     let key = format!("/photos/library/originals/{}", support::hash(&bytes));
     (path, bytes, key)
+}
+
+#[test]
+#[ignore = "explicit native empty-library diagnostics acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn empty_cloud_library_error_details_preserve_diagnostic_and_repair_connection() {
+    let f = support::Fixture::new();
+    let local = f.dir.join("empty-cloud");
+    let (out, rows) = f.run(
+        &local,
+        &[
+            (
+                "cloud.configure",
+                json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"}),
+            ),
+            ("cloud.syncEnable", json!({"connection":"personal"})),
+            ("cloud.sync", json!({})),
+        ],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    f.state.lock().unwrap().unauthorized = true;
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("empty-error");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    app.execute("cloud.sync", json!({"wait":false}));
+    let until = Instant::now() + Duration::from_secs(30);
+    let error = loop {
+        let data = app.execute("cloud.overview", json!({}));
+        assert_eq!(data["summary"]["cloudPhotos"], 0);
+        if data["health"]["sync"]["lastError"]["kind"] == "authentication" {
+            break data["health"]["sync"]["lastError"].clone();
+        }
+        assert!(Instant::now() < until, "authentication failure not visible: {data}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    app.click_when_ready("icon:cloud");
+    app.click_when_ready("button:cloudErrorDetails");
+    let until = Instant::now() + Duration::from_secs(10);
+    let inspect = loop {
+        let inspect = app.ask("ui.inspect", json!({}));
+        if inspect["cloudDiagnostic"].is_object() {
+            break inspect;
+        }
+        assert!(Instant::now() < until, "Details did not open: {inspect}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(inspect["cloudDiagnostic"]["failure"]["message"], error["message"], "{inspect}");
+    assert_eq!(inspect["cloudDiagnostic"]["failure"]["httpStatus"], error["httpStatus"]);
+    assert_eq!(inspect["cloudDiagnostic"]["failure"]["recovery"], "editConnection");
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&inspect).unwrap()).unwrap();
+    app.ask("ui.screenshot", json!({"path":artifacts.join("details.png")}));
+    app.click_when_ready("button:cloudErrorConnection");
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let widgets = app.ask("ui.widgets", json!({"filter":"cloudSetup"}));
+        if widgets.to_string().contains("button:cloudSetupMore") {
+            break;
+        }
+        assert!(Instant::now() < until, "connection editor did not open: {widgets}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.ask("ui.dialog.cancel", json!({}));
+    f.state.lock().unwrap().unauthorized = false;
+    app.execute("cloud.sync", json!({"wait":false}));
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = app.execute("cloud.syncStatus", json!({}));
+        if status["health"]["state"] == "healthy" {
+            break;
+        }
+        assert!(Instant::now() < until, "empty library did not recover: {status}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.ask("app.quit", json!({}));
+    assert!(app.child.wait().unwrap().success());
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
 }
 
 #[test]

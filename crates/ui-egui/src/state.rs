@@ -773,6 +773,11 @@ pub struct NameEdit {
 pub enum Dialog {
     CloudConflicts,
     CloudMaintenance,
+    CloudError {
+        diagnostic: Box<lightcraft_engine::cloud_status::Diagnostic>,
+        #[serde(default)]
+        action_error: Option<String>,
+    },
     CloudDisable {
         review: crate::cloud_transition::Review,
     },

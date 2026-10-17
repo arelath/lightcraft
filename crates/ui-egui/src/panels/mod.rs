@@ -5,6 +5,7 @@ pub mod bottombar;
 pub mod cache_settings;
 pub mod chips;
 pub mod cloud;
+pub mod cloud_error;
 pub mod compare;
 pub mod crop_overlay;
 pub mod denoise;

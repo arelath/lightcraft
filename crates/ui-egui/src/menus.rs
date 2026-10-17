@@ -180,6 +180,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("dialog.cloudSync", "Cloud Library…", None, "File"),
     ("dialog.cloudConflicts", "Resolve Cloud Conflicts…", None, ""),
     ("dialog.cloudMaintenance", "Cloud Storage Tools…", None, ""),
+    ("dialog.cloudError", "Cloud Error Details…", None, ""),
     ("dialog.cloudDisable", "Turn Off Cloud Sync…", None, "File"),
     ("dialog.cloudMigrate", "Migrate Cloud Library…", None, "File"),
     ("file.addFolder", "Import from Folder…", None, "File"),
@@ -1357,6 +1358,12 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.dialog = Some(Dialog::CloudMaintenance);
             Ok(Value::Null)
         }
+        "dialog.cloudError" => app.run("cloud.overview", json!({})).and_then(|data| {
+            let diagnostic = lightcraft_engine::cloud_status::Diagnostic::from_overview(&data, p["storage"] == true)
+                .ok_or_else(|| "No current cloud error. Check the cloud status again.".to_owned())?;
+            app.ui.dialog = Some(Dialog::CloudError { diagnostic: Box::new(diagnostic), action_error: None });
+            Ok(Value::Null)
+        }),
         "dialog.cloudSync" if app.run("cloud.overview", json!({})).ok().is_some_and(|v| v["syncEnabled"] == true) => {
             app.ui.dialog = None;
             app.ui.open_cloud_popup = true;

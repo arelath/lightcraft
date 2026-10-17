@@ -68,11 +68,26 @@ fn cloud_health_headline_covers_halted_polling_and_structural_only_conflicts() {
         let text = h.view.painted_text();
         assert!(text.iter().any(|value| value.contains("Sync needs attention")), "{text:?}");
         assert!(!text.iter().any(|value| value == "Synced and backed up"));
-        let cause = if structural { "Album or stack choices need attention" } else { "Remote access failed; polling stopped" };
+        let cause = if structural { "Album or stack choices need attention" } else { "Open Details for the diagnostic." };
         assert!(text.iter().any(|value| value.contains(cause)), "{text:?}");
         assert!(!text.iter().any(|value| value.contains("Last checked")), "{text:?}");
         let widgets = h.request("ui.widgets", json!({"filter":"indicator:cloudQueue"}), T);
         assert!(!widgets["result"].as_array().unwrap().is_empty());
+        if !structural {
+            assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudErrorDetails"}), T)["ok"], true);
+            for _ in 0..4 {
+                h.step();
+            }
+            assert!(h.painted_text().iter().any(|value| value.contains("Remote access failed; polling stopped")));
+            assert_eq!(h.request("ui.dialog.cancel", json!({}), T)["ok"], true);
+            for _ in 0..4 {
+                h.step();
+            }
+            assert_eq!(h.request("ui.clickWidget", json!({"id":"icon:cloud"}), T)["ok"], true);
+            for _ in 0..4 {
+                h.step();
+            }
+        }
         {
             let mut value = overview.lock().unwrap();
             value["health"]["sync"]["state"] = json!("healthy");

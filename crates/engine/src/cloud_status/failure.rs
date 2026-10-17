@@ -14,6 +14,33 @@ pub enum FailureKind {
     /// A synchronization limit was reached: maintenance or a smaller change recovers it.
     Capacity,
 }
+/// Recovery provenance is independent of message wording and retry policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Recovery {
+    Retry,
+    EditConnection,
+    RepairRemote,
+    RepairLocal,
+    ReviewCapacity,
+    CheckCompatibility,
+    Update,
+    Rejoin,
+    FinishUpgrade,
+    NewLibrary,
+}
+impl Recovery {
+    pub fn for_kind(kind: FailureKind) -> Self {
+        match kind {
+            FailureKind::Connectivity | FailureKind::Contention | FailureKind::Cancelled => Self::Retry,
+            FailureKind::Authentication => Self::EditConnection,
+            FailureKind::Integrity | FailureKind::InvalidHistory => Self::RepairRemote,
+            FailureKind::LocalResource => Self::RepairLocal,
+            FailureKind::Capacity => Self::ReviewCapacity,
+            FailureKind::Unsupported => Self::CheckCompatibility,
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, thiserror::Error)]
 #[error("{message}")]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +52,8 @@ pub struct CloudFailure {
     /// moved library, fix the bucket or prefix).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<Recovery>,
 }
 const UPDATE: &str = "Update LightCraft on this device, then use Retry Syncing. Local edits are kept and publish after the update.";
 const RETIRED: &str = "This cloud library moved to a new format. Use Migrate Cloud Library… to rejoin it; pending edits are kept and publish there.";
@@ -33,7 +62,11 @@ const MAINTENANCE: &str =
 impl CloudFailure {
     pub fn new(kind: FailureKind, message: impl Into<String>) -> Self {
         let message = message.into();
-        Self { kind, message: lightcraft_catalog::uploads::UploadBlock::new(&message, false).reason, http_status: None, recovery: None }
+        Self { kind, message: lightcraft_catalog::uploads::UploadBlock::new(&message, false).reason, http_status: None, recovery: None, remedy: None }
+    }
+    pub fn with_remedy(mut self, remedy: Recovery) -> Self {
+        self.remedy = Some(remedy);
+        self
     }
     /// Replace the kind's general advice with advice specific to this failure.
     pub fn with_recovery(mut self, recovery: impl Into<String>) -> Self {
@@ -60,6 +93,9 @@ impl CloudFailure {
         };
         let mut error = Self::new(kind, format!("{operation} returned HTTP {status}; pending work retained"));
         error.http_status = Some(status);
+        if matches!(status, 301 | 307 | 400 | 404 | 501 | 505) {
+            error.remedy = Some(Recovery::EditConnection);
+        }
         error.recovery = match status {
             301 | 307 => Some(
                 "Storage redirected the request (wrong region or endpoint). Check the region and endpoint in Storage Connection, then use Retry Syncing.",
@@ -103,7 +139,7 @@ impl CloudFailure {
                 "Check the endpoint, TLS and protocol support in Storage Connection, then use Retry Syncing with a supported configuration."
             }
             FailureKind::Capacity => {
-                "The library reached a synchronization limit; follow the message (Archive receipt history in Cloud Synchronization, finish pending sync, or split large albums). Nothing was lost."
+                "The library reached a synchronization limit; follow the diagnostic (Archive receipt history in Storage tools, finish pending sync, or split large albums). Pending work is kept."
             }
             FailureKind::Cancelled => "Use Retry Syncing when ready. Pending work is kept.",
         }
@@ -134,7 +170,9 @@ impl From<&crate::assets::AssetError> for CloudFailure {
             AssetError::Disk(_) => FailureKind::LocalResource,
             AssetError::Unsupported(_) => FailureKind::Unsupported,
             AssetError::Capacity(_) => FailureKind::Capacity,
-            AssetError::Moved(_) => return Self::new(FailureKind::Unsupported, error.to_string()).with_recovery(RETIRED),
+            AssetError::Moved(_) => {
+                return Self::new(FailureKind::Unsupported, error.to_string()).with_recovery(RETIRED).with_remedy(Recovery::Rejoin);
+            }
             AssetError::Cancelled => FailureKind::Cancelled,
         };
         Self::new(kind, error.to_string())
@@ -166,7 +204,7 @@ impl From<&lightcraft_catalog::CatalogError> for CloudFailure {
         match error {
             CatalogError::Capacity(_) => Self::new(FailureKind::Capacity, error.to_string()),
             CatalogError::Io(_) | CatalogError::Corrupt(_) => Self::local(error.to_string()),
-            CatalogError::Newer(_) => Self::new(FailureKind::Unsupported, error.to_string()).with_recovery(UPDATE),
+            CatalogError::Newer(_) => Self::new(FailureKind::Unsupported, error.to_string()).with_recovery(UPDATE).with_remedy(Recovery::Update),
             _ => Self::new(FailureKind::InvalidHistory, error.to_string()),
         }
     }
@@ -197,7 +235,14 @@ impl From<crate::cloud_control::Blocked> for CloudFailure {
             Blocked::Conflict(_) => (FailureKind::Contention, None),
             Blocked::Invalid(_) => (FailureKind::InvalidHistory, None),
         };
-        let failure = Self::new(kind, blocked.to_string());
+        let remedy = match &blocked {
+            Blocked::UpdateToRead(_) | Blocked::UpdateToWrite(_) | Blocked::UpdateToUpgrade(_) => Recovery::Update,
+            Blocked::Deleted => Recovery::NewLibrary,
+            Blocked::Retired(_) => Recovery::Rejoin,
+            Blocked::FinishUpgrade(_) => Recovery::FinishUpgrade,
+            _ => Recovery::for_kind(kind),
+        };
+        let failure = Self::new(kind, blocked.to_string()).with_remedy(remedy);
         match recovery {
             Some(recovery) => failure.with_recovery(recovery),
             None => failure,

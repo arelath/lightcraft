@@ -84,6 +84,12 @@ pub fn inspect(app: &LightcraftApp, ctx: &egui::Context) -> Value {
     let r = ctx.content_rect();
     json!({
         "ui": serde_json::to_value(&app.ui).unwrap_or_default(),
+        // Dialog state can contain credential entry fields and is intentionally not
+        // serialized with UiState. Expose only the already-public cloud diagnostic.
+        "cloudDiagnostic": match &app.ui.dialog {
+            Some(crate::state::Dialog::CloudError { diagnostic, .. }) => Some(diagnostic),
+            _ => None,
+        },
         "window": [r.width(), r.height()],
         "pixelsPerPoint": ctx.pixels_per_point(),
         "canvasRect": app.canvas_rect.map(rect_json),

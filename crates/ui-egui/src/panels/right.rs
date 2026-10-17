@@ -786,11 +786,13 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     if !off && let Some(reason) = status["publicationBlocked"].as_str() {
                         ui.label(egui::RichText::new(reason).color(t.caution));
                     }
-                    if !off && let Some(error) = status["health"]["lastError"]["message"].as_str() {
-                        ui.label(egui::RichText::new(error).color(t.text_dim));
-                    }
-                    if !off && let Some(action) = status["health"]["lastError"]["action"].as_str() {
-                        ui.label(egui::RichText::new(action).color(t.text_dim));
+                    if !off && let Some(diagnostic) = lightcraft_engine::cloud_status::Diagnostic::from_sync_status(&status) {
+                        ui.label(egui::RichText::new(&diagnostic.failure.message).color(t.text_dim));
+                        if text_button(ui, "cloudErrorInfoDetails", crate::i18n::tr("Details…"), false).clicked()
+                            && let Err(error) = app.run("dialog.cloudError", json!({}))
+                        {
+                            app.toast(ui.ctx(), error);
+                        }
                     }
                     // After an error the advice says Retry Syncing: the button says the same.
                     let label = if off {

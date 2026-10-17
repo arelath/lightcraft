@@ -233,6 +233,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::CloudConnect { .. } => "Turn on cloud sync",
         Dialog::CloudConflicts => "Resolve cloud conflicts",
         Dialog::CloudMaintenance => "Cloud storage tools",
+        Dialog::CloudError { .. } => "Cloud error details",
         Dialog::CloudDisable { .. } => "Turn Off Cloud Sync",
         Dialog::CloudDelete { .. } => "Delete Entire Cloud Library",
         #[cfg(not(target_arch = "wasm32"))]
@@ -306,6 +307,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
             | Dialog::CloudConnect { .. }
             | Dialog::CloudConflicts
             | Dialog::CloudMaintenance
+            | Dialog::CloudError { .. }
             | Dialog::CloudDisable { .. }
             | Dialog::CloudDelete { .. }
             | Dialog::CloudMigration { .. } => 480.0,
@@ -1052,6 +1054,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         field(ui, "Library ID", |ui| { crate::text_field::TextField::singleline("cloudSyncLibrary", library).width(f32::INFINITY).show(ui); });
                     });
                 }
+                Dialog::CloudError { diagnostic, action_error } => super::cloud_error::body(app, ui, diagnostic, action_error),
                 Dialog::CloudConflicts => {
                     let status = app.run("cloud.syncStatus", json!({})).unwrap_or_default();
                     if let Some(conflicts) = status.get("structuralConflicts").and_then(Value::as_array).filter(|conflicts|!conflicts.is_empty()) {
@@ -1302,7 +1305,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 let informational = unusable_model
                     || matches!(
                         dlg,
-                        Dialog::CloudConflicts | Dialog::CloudMaintenance | Dialog::CloudDisable { .. } | Dialog::CloudDelete { .. } | Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
+                        Dialog::CloudConflicts | Dialog::CloudMaintenance | Dialog::CloudError { .. } | Dialog::CloudDisable { .. } | Dialog::CloudDelete { .. } | Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
                     );
                 let sam = &app.session.segmenter;
                 let (sam_installed, sam_running, sam_failed) = (sam.installed(), sam.download_status().running, sam.download_status().error.is_some());
@@ -1913,6 +1916,7 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         d @ Dialog::SynchronizeFolder { .. } => crate::sync::confirm(app, d),
         Dialog::CloudConflicts
         | Dialog::CloudMaintenance
+        | Dialog::CloudError { .. }
         | Dialog::CloudDisable { .. }
         | Dialog::CloudDelete { .. }
         | Dialog::About

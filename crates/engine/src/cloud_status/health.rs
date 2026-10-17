@@ -1,13 +1,14 @@
 //! Runtime health belongs to the subsystem/resource that performed the work.
-use super::{CloudFailure, FailureKind, RetryBudget};
+use super::{CloudFailure, FailureKind, Recovery, RetryBudget};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Failure {
     pub message: String,
+    #[serde(default)]
     pub task: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<FailureKind>,
@@ -17,6 +18,10 @@ pub struct Failure {
     pub action: Option<String>,
     #[serde(default)]
     pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Recovery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
 }
 impl Failure {
     fn classified(error: &CloudFailure, task: Option<u64>) -> Self {
@@ -25,6 +30,7 @@ impl Failure {
         failure.http_status = error.http_status;
         failure.action = Some(error.action().into());
         failure.retryable = error.retryable();
+        failure.recovery = Some(error.remedy.unwrap_or_else(|| Recovery::for_kind(error.kind)));
         failure
     }
     pub fn new(message: &str, task: Option<u64>) -> Self {
@@ -35,6 +41,8 @@ impl Failure {
             http_status: None,
             action: None,
             retryable: false,
+            recovery: None,
+            operation: None,
         }
     }
 }
@@ -78,6 +86,7 @@ impl PollHealth {
         self.last_error = Some(Failure::classified(error, task));
         self.retry.suspend();
         if let Some(failure) = &mut self.last_error {
+            failure.operation = Some("Cloud library upgrade".into());
             failure.retryable = false;
             if error.recovery.is_none() {
                 failure.action = Some(format!(

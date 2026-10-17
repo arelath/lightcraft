@@ -43,6 +43,10 @@ command ID (for example `edit.undo`, `edit.redo`, `view.filmstrip` or `view.left
 their command behavior. That API invokes the app command dispatcher directly; it does not traverse
 Cocoa menu dispatch. Native menu activation and keyboard accelerator delivery require a separate test.
 
+`ui.inspect` also reports `cloudDiagnostic` while Cloud error details is open: the public
+failure, operation/resource, captured retry state and typed recovery. It is `null` otherwise.
+Setup and credential-entry dialog state remains excluded from inspection.
+
 Before capturing a finished Detail view, poll `ui.inspect` until the expected `loupe.photo` is active,
 `loupe.source` is `render` or `cached`, `loupe.pending` is false, and the render queues are empty.
 For the loupe, `cached` is a prior view render keyed by the current photo and develop settings;
