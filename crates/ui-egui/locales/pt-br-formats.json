@@ -265,5 +265,6 @@
   "{photos} in {albums}": "{photos} em {albums}",
   "{n} uploading": "{n} enviando",
   "{n} waiting": "{n} aguardando",
-  "Your {n} changes wait here.": "Suas {n} alterações aguardam aqui."
+  "Your {n} changes wait here.": "Suas {n} alterações aguardam aqui.",
+  "{active} of {total} photos": "{active} de {total} fotos"
 }

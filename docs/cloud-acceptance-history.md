@@ -342,3 +342,29 @@ To reproduce the representative screenshots from the repository root in PowerShe
 $env:LIGHTCRAFT_POPUP_SNAPSHOTS = "$PWD/target/cloud-popup-acceptance"
 cargo +1.95.0 test -p lightcraft-ui-egui --lib cloud_popup_redesign
 ```
+
+## 2026-10-16: corrected cloud popup mockup
+
+CUX.7 adds original check-circle, sync, warning, pause, conflict and cloud-off vectors;
+compact 214-point cards; inline photo/byte progress; idle-only last-check information;
+and aligned attention links and footer actions. The cloud-original total excludes
+locally staged originals, retaining deduplication and remotely received catalog records.
+The photo progress numerator is actively uploading photos, not completed photos.
+
+Twenty-four focused cloud UI checks passed. The final workspace suite also passed,
+including the popup states/actions and catalog remote-byte regressions. Final fixture
+screenshots (`up-to-date.png`, `uploading.png`, `needs-attention.png`, and
+`paused-small-window.png`) under `target/cloud-popup-corrected-acceptance/` were inspected
+against the corrected mockup. Fixtures supply representative states, not provider I/O.
+
+The final native build passed pause/resume and both settings-navigation checks through
+the control channel using a separate scratch catalog. Presented-window normal/paused
+screenshots were inspected with no headless fallback; the app was closed afterward.
+Results and perf are retained in `native-final-results.json` and
+`native-final-inspect.json` in the same artifact directory. Build and final lint logs are
+`target/cloud-popup-corrected-final-build2.log` and
+`target/cloud-popup-corrected-final-clippy.log`.
+
+All eight CI stages passed (`target/cloud-popup-corrected-ci-final.log`): formatting,
+clippy, HEIF, workspace tests (774 UI tests passed, 2 ignored), parity, layers, assets,
+and WASM. The final popup-only lint pass also covers the local-library icon correction.

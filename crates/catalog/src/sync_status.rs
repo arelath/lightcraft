@@ -34,6 +34,8 @@ pub struct Overview {
     pub local_photos: u64,
     pub albums: u64,
     pub original_bytes: u64,
+    /// Catalog originals with remote upload evidence, excluding locally staged originals.
+    pub cloud_original_bytes: u64,
     pub waiting: u64,
     pub syncing: u64,
     pub synced: u64,
@@ -171,7 +173,15 @@ fn build(cat: &Catalog) -> Overview {
     }
     out.queued_files = files.len() as u64;
     out.failed_files = failed_files.len() as u64;
+    let mut remote_originals = BTreeMap::<AssetId, bool>::new();
+    for intent in cat.upload_intents().values() {
+        if let Some(asset) = cat.asset(&intent.asset_id) {
+            let verified = intent.verified.contains(&asset.original.remote.key);
+            remote_originals.entry(intent.asset_id.clone()).and_modify(|v| *v |= verified).or_insert(verified);
+        }
+    }
     let mut originals = BTreeSet::new();
+    let mut cloud_originals = BTreeSet::new();
     for photo in cat.photos().filter(|p| p.in_library()) {
         let status = if let Source::Managed { asset_id } = &photo.source {
             out.cloud_photos = out.cloud_photos.saturating_add(1);
@@ -183,6 +193,13 @@ fn build(cat: &Catalog) -> Overview {
                 ))
             {
                 out.original_bytes = out.original_bytes.saturating_add(asset.original.size);
+            }
+            if let Some(asset) = cat.asset(asset_id)
+                // Records received from the cloud have no device-local upload intent.
+                && remote_originals.get(asset_id).copied().unwrap_or(true)
+                && cloud_originals.insert((asset.original.remote.connection.clone(), asset.original.remote.key.clone(), asset.original.remote.version.clone()))
+            {
+                out.cloud_original_bytes = out.cloud_original_bytes.saturating_add(asset.original.size);
             }
             let entity = cat.cloud_identity(&format!("photo:{}", photo.id.0)).map(|id| format!("photo:{id}"));
             let mut state =
@@ -277,6 +294,7 @@ mod tests {
         }
         let before = c.sync_overview();
         assert_eq!((before.queued_files, before.failed_files, before.queued_bytes, before.original_bytes), (3, 1, 300, 400));
+        assert_eq!(before.cloud_original_bytes, 100);
         assert!(Arc::ptr_eq(&before, &c.sync_overview()));
         c.apply(Op::SetRating { id: PhotoId(1), rating: 2 }).unwrap();
         assert!(Arc::ptr_eq(&before, &c.sync_overview()), "unrelated metadata edits reuse the index until sync intent changes");
@@ -287,6 +305,7 @@ mod tests {
         intent.verified.insert("originals/1".into());
         c.apply(Op::SetUploadIntent { id: "upload-1".into(), intent: Some(Box::new(intent)) }).unwrap();
         assert_eq!(c.photo_sync_status(PhotoId(1)), SyncStatus::Synced);
+        assert_eq!(c.sync_overview().cloud_original_bytes, 200);
         let mut state = c.sync_state().unwrap().clone();
         state.enqueue(vec![Change { entity: "photo:global-1".into(), field: "rating".into(), base: None, value: json!(4) }]).unwrap();
         c.apply(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
@@ -335,6 +354,7 @@ mod tests {
         c.apply(Op::AddPhoto { photo: Box::new(copy) }).unwrap();
         assert_eq!(c.photo_sync_status(PhotoId(6)), SyncStatus::Pending);
         assert_eq!(c.sync_overview().original_bytes, 400);
+        assert_eq!(c.sync_overview().cloud_original_bytes, 100);
         assert_eq!(c.sync_overview().queued_files, 3);
         c.apply(Op::SetDeleted { id: PhotoId(3), deleted: true }).unwrap();
         assert_eq!(c.sync_overview().issues, 0);

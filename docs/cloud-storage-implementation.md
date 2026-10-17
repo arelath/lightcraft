@@ -31,10 +31,16 @@ in append mode. LIST discovery and full state validation still have linear costs
 
 ## Cloud status popup
 
-The cloud icon opens a compact library card: photo/album totals, known original size and
-last successful remote check. Uploads show live transfer bytes, active/waiting photo counts
-and changes awaiting publication. While originals are queued, the size is labelled
-“Managed originals” because it includes data that has not reached storage yet.
+The cloud icon opens a compact library card with photo/album totals and original bytes
+recorded remotely (received catalog originals or locally verified uploads), deduplicated
+by remote object identity. Locally staged originals are excluded. The last successful
+remote check appears in the idle state. Uploads show active photos out of active plus
+waiting photos alongside current transfer bytes, a progress bar, and changes awaiting
+publication. The photo count describes concurrent work, not completed photos.
+
+Check-circle, sync-arrows and warning-triangle footer icons distinguish the three main
+states. Pause, conflict-branch and cloud-off icons identify attention causes; navigation
+rows have trailing chevrons. All icons are original vector drawings.
 
 Problems appear together under Needs Attention, with publication-blocked changes, a
 conflicting photo/field preview and Choose, and synchronization failures with Details and

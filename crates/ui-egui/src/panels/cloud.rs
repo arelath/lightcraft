@@ -1,5 +1,10 @@
 //! Cloud library popup. Counts describe this catalog, never invented provider capacity.
-use crate::{LightcraftApp, theme::Tokens, widgets::register};
+use crate::{
+    LightcraftApp,
+    icons::{self, Icon},
+    theme::Tokens,
+    widgets::register,
+};
 use serde_json::{Value, json};
 
 pub(crate) fn needs_attention(data: &Value) -> bool {
@@ -128,10 +133,13 @@ pub(super) fn capacity(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value,
 fn heading(ui: &mut egui::Ui, text: &str) {
     let t = Tokens::get(ui.ctx());
     ui.label(egui::RichText::new(crate::i18n::tr(text)).font(t.font(11.)).color(t.text_dim));
-    ui.add_space(6.);
+    ui.add_space(4.);
 }
 fn section(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::NONE.inner_margin(egui::Margin::same(16)).show(ui, add);
+    egui::Frame::NONE.inner_margin(egui::Margin::same(14)).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 4.;
+        add(ui);
+    });
 }
 fn divider(ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
@@ -143,7 +151,7 @@ fn metric(ui: &mut egui::Ui, label: &str, value: &str) -> egui::Response {
     ui.horizontal(|ui| {
         let response = ui.label(egui::RichText::new(crate::i18n::tr(label)).color(t.text_dim));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(value);
+            ui.label(egui::RichText::new(value).color(t.text));
         });
         response
     })
@@ -160,7 +168,10 @@ fn navigation(app: &mut LightcraftApp, ui: &mut egui::Ui, id: &str, label: &str,
     let t = Tokens::get(ui.ctx());
     let response = ui.add_enabled(
         app.session.library.is_some(),
-        egui::Button::new(crate::i18n::tr(label)).frame(false).min_size(egui::vec2(ui.available_width(), 30.)).right_text(""),
+        egui::Button::new(egui::RichText::new(crate::i18n::tr(label)).font(t.semibold(12.)).color(t.text))
+            .frame(false)
+            .min_size(egui::vec2(ui.available_width(), 22.))
+            .right_text(""),
     );
     register(ui.ctx(), id, response.rect);
     crate::icons::paint(
@@ -173,26 +184,34 @@ fn navigation(app: &mut LightcraftApp, ui: &mut egui::Ui, id: &str, label: &str,
         invoke(app, ui, command, params);
     }
 }
-fn attention_row(app: &mut LightcraftApp, ui: &mut egui::Ui, title: &str, detail: &str, link: Option<(&str, &str)>) {
+fn attention_row(app: &mut LightcraftApp, ui: &mut egui::Ui, icon: Icon, title: &str, detail: &str, link: Option<(&str, &str)>) {
     let t = Tokens::get(ui.ctx());
     ui.horizontal_top(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(18., 20.), egui::Sense::hover());
-        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "!", t.semibold(15.), t.caution);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(16., 18.), egui::Sense::hover());
+        icons::paint(ui.painter(), rect, icon, t.caution);
+        register(ui.ctx(), format!("indicator:cloud{icon:?}"), rect);
         ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(crate::i18n::tr(title)).size(14.));
+            ui.horizontal_top(|ui| {
+                let link_width = if link.is_some() { 44. + ui.spacing().item_spacing.x } else { 0. };
+                let title_width = (ui.available_width() - link_width).max(50.);
+                ui.allocate_ui_with_layout(egui::vec2(title_width, 0.), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(title_width);
+                    ui.add(egui::Label::new(egui::RichText::new(crate::i18n::tr(title)).font(t.semibold(13.)).color(t.text)).wrap());
+                });
                 if let Some((id, label)) = link {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let response = ui.link(crate::i18n::tr(label));
-                        register(ui.ctx(), id, response.rect);
-                        if response.clicked() {
-                            invoke(app, ui, "dialog.cloudSync", json!({}));
-                        }
-                    });
+                    let response = ui.link(crate::i18n::tr(label));
+                    register(ui.ctx(), id, response.rect);
+                    if response.clicked() {
+                        invoke(app, ui, "dialog.cloudSync", json!({}));
+                    }
                 }
             });
             if !detail.is_empty() {
-                ui.add(egui::Label::new(egui::RichText::new(detail).color(t.text_dim)).wrap());
+                let width = (ui.available_width() - if link.is_some() { 44. } else { 0. }).max(50.);
+                ui.allocate_ui_with_layout(egui::vec2(width, 0.), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(width);
+                    ui.add(egui::Label::new(egui::RichText::new(detail).size(13.).color(t.text_dim)).wrap());
+                });
             }
         });
     });
@@ -233,8 +252,11 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let changes = summary["pendingChanges"].as_u64().unwrap_or(0);
     let attention = needs_attention(data) || app.session.unsaved().is_some();
     ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
-    ui.set_width(320.);
-    ui.spacing_mut().item_spacing.y = 6.;
+    ui.set_width(214.);
+    ui.style_mut().override_font_id = Some(t.font(12.));
+    ui.spacing_mut().item_spacing.y = 0.;
+    ui.spacing_mut().item_spacing.x = 6.;
+    ui.spacing_mut().interact_size.y = 18.;
     let popup = ui.scope(|ui| {
         section(ui, |ui| {
             heading(ui, "CLOUD LIBRARY");
@@ -242,14 +264,14 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             let albums = summary["albums"].as_u64().unwrap_or(0);
             let photo_text = if photos == 1 { crate::i18n::tr_format!("{n} photo", n = photos) } else { crate::i18n::tr_format!("{n} photos", n = photos) };
             let album_text = if albums == 1 { crate::i18n::tr_format!("{n} album", n = albums) } else { crate::i18n::tr_format!("{n} albums", n = albums) };
-            ui.label(crate::i18n::tr_format!("{photos} in {albums}", photos = photo_text, albums = album_text));
-            ui.add_space(6.);
-            metric(ui, if waiting > 0 || active > 0 || summary["queuedFiles"].as_u64().unwrap_or(0) > 0 { "Managed originals" } else { "Originals in the cloud" }, &bytes(summary["originalBytes"].as_u64().unwrap_or(0))).on_hover_text(crate::i18n::tr(
-                "Known original data in this catalog; shared originals count once. This is not the storage provider's quota or total bucket usage. Pending uploads may not yet be in the cloud.",
+            ui.label(egui::RichText::new(crate::i18n::tr_format!("{photos} in {albums}", photos = photo_text, albums = album_text)).font(t.semibold(12.)).color(t.text));
+            ui.add_space(4.);
+            metric(ui, "Originals in the cloud", &bytes(summary["cloudOriginalBytes"].as_u64().unwrap_or(0))).on_hover_text(crate::i18n::tr(
+                "Originals recorded in the cloud catalog or verified after upload; shared originals count once. This is not the storage provider's quota or total bucket usage.",
             ));
-            if let Some(age) = data["health"]["sync"]["secondsSinceLastRemoteScan"].as_u64() {
+            if !attention && !busy(data) && let Some(age) = data["health"]["sync"]["secondsSinceLastRemoteScan"].as_u64() {
                 metric(ui, "Last checked", &ago(age));
-            } else if data["syncEnabled"] == true {
+            } else if !attention && !busy(data) && data["syncEnabled"] == true {
                 metric(ui, "Last checked", crate::i18n::tr("Not yet checked"));
             }
         });
@@ -261,11 +283,16 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             divider(ui);
             section(ui, |ui| {
                 heading(ui, if paused { "UPLOADS PAUSED" } else { "UPLOADING" });
-                metric(ui, &crate::i18n::tr_format!("{n} uploading", n = active), &crate::i18n::tr_format!("{n} waiting", n = waiting));
                 let done = data["doneBytes"].as_u64().unwrap_or(0);
                 let total = data["totalBytes"].as_u64().unwrap_or(0);
+                ui.horizontal(|ui| {
+                    ui.label(crate::i18n::tr_format!("{active} of {total} photos", active = active, total = active.saturating_add(waiting)))
+                        .on_hover_text(crate::i18n::tr("Photos currently uploading out of all active and waiting photos."));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(crate::i18n::tr_format!("{done} of {total}", done = bytes(done.min(total)).replace(".0 ", " "), total = bytes(total).replace(".0 ", " "))).color(t.text_dim));
+                    });
+                });
                 if total > 0 {
-                    ui.label(egui::RichText::new(crate::i18n::tr_format!("{done} of {total}", done = bytes(done.min(total)), total = bytes(total))).color(t.text_dim));
                     ui.add(egui::ProgressBar::new((done as f64 / total as f64).clamp(0., 1.) as f32).desired_height(6.).fill(t.accent))
                         .on_hover_text(crate::i18n::tr("Progress of current transfers; queued data includes originals, previews and sidecars."));
                 } else if !paused && active > 0 {
@@ -297,20 +324,25 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         section(ui, |ui| {
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(20., 24.), egui::Sense::hover());
-                if attention {
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "!", t.semibold(16.), t.caution);
-                } else {
-                    crate::icons::paint(ui.painter(), rect.shrink(2.), crate::icons::Icon::Cloud, t.accent);
-                }
-                let status_width = (ui.available_width() - 70.).max(80.);
-                ui.allocate_ui_with_layout(egui::vec2(status_width, 36.), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let status = footer_text(data, app.session.unsaved().is_some());
+                let icon = match status {
+                    "Sync needs attention" => Icon::Warning,
+                    "Syncing paused" => Icon::Pause,
+                    "Synced and backed up" => Icon::CheckCircle,
+                    "Local library" => Icon::Cloud,
+                    _ => Icon::Sync,
+                };
+                icons::paint(ui.painter(), rect.shrink(2.), icon, if attention { t.caution } else { t.accent });
+                register(ui.ctx(), format!("indicator:cloudFooter{icon:?}"), rect);
+                let status_width = (ui.available_width() - 60.).max(50.);
+                ui.allocate_ui_with_layout(egui::vec2(status_width, 24.), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.set_min_width(status_width);
-                    ui.add(egui::Label::new(crate::i18n::tr(footer_text(data, app.session.unsaved().is_some()))).wrap());
+                    ui.add(egui::Label::new(crate::i18n::tr(status)).wrap());
                 });
                 let retry = attention && !paused;
                 let label = if retry { "Retry" } else if paused { "Resume" } else { "Pause" };
                 let id = if retry { "button:cloudRetry" } else { "button:cloudPauseResume" };
-                let response = ui.add_enabled(app.session.library.is_some() && (!(retry || paused) || data["canResume"] == true), egui::Button::new(crate::i18n::tr(label)).frame(true).stroke(egui::Stroke::new(1., t.button_border)).min_size(egui::vec2(64., 30.)));
+                let response = ui.add_enabled(app.session.library.is_some() && (!(retry || paused) || data["canResume"] == true), egui::Button::new(crate::i18n::tr(label)).frame(true).stroke(egui::Stroke::new(1., t.button_border)).min_size(egui::vec2(54., 24.)));
                 register(ui.ctx(), id, response.rect);
                 if response.clicked() && let Err(error) = app.run(if retry || paused { "cloud.resume" } else { "cloud.pause" }, json!({})) { app.toast(ui.ctx(), error); }
             }).response.on_hover_text(crate::i18n::tr("Uploads and library publication pause on this device. Photos remain available for editing."));
@@ -336,7 +368,7 @@ fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             String::new()
         };
         let detail = format!("{reason} {waiting}");
-        attention_row(app, ui, "Publishing paused", &detail, None);
+        attention_row(app, ui, Icon::Pause, "Publishing paused", &detail, None);
     }
     let fields = data["health"]["conflicts"]["fields"].as_u64().unwrap_or_else(|| data["conflicts"].as_array().map_or(0, |v| v.len() as u64));
     let structural =
@@ -358,7 +390,7 @@ fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                 )
             })
             .unwrap_or_else(|| crate::i18n::tr("Album or stack choices need attention").to_owned());
-        attention_row(app, ui, &title, &detail, Some(("button:cloudChoose", "Choose")));
+        attention_row(app, ui, Icon::Conflict, &title, &detail, Some(("button:cloudChoose", "Choose")));
     }
     let health = &data["health"]["sync"];
     let sync_error = health["lastError"]["message"].as_str();
@@ -376,7 +408,14 @@ fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         } else {
             health["lastError"]["action"].as_str().or(sync_error).unwrap_or(crate::i18n::tr("Automatic checking stopped after an error.")).to_owned()
         };
-        attention_row(app, ui, title, &detail, Some(("button:cloudErrorDetails", "Details")));
+        attention_row(
+            app,
+            ui,
+            if health["lastError"]["kind"] == "connectivity" { Icon::CloudOff } else { Icon::Warning },
+            title,
+            &detail,
+            Some(("button:cloudErrorDetails", "Details")),
+        );
     }
     if let Some(issues) = data["health"]["imports"]["failed"].as_array() {
         for issue in issues.iter().take(3) {
@@ -439,12 +478,13 @@ fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             && !blocked.is_some_and(|items| items.iter().any(|item| item["reason"].as_str() == Some(error)))
             && !data["health"]["imports"]["failed"].as_array().is_some_and(|items| items.iter().any(|item| item["reason"].as_str() == Some(error)))
     }) {
-        attention_row(app, ui, "Cloud storage needs attention", error, Some(("button:cloudStorageDetails", "Details")));
+        attention_row(app, ui, Icon::Warning, "Cloud storage needs attention", error, Some(("button:cloudStorageDetails", "Details")));
     }
     if data["health"]["offline"]["persistentCache"]["temporaryBlobs"].as_u64().unwrap_or(0) > 0 {
         attention_row(
             app,
             ui,
+            Icon::Warning,
             "Some downloads are available for this session only.",
             crate::i18n::tr("These downloads are not saved for offline use."),
             Some(("button:cloudOfflineDetails", "Details")),
@@ -459,7 +499,7 @@ fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         ui.label(crate::i18n::tr("Local upload records waiting"));
     }
     if app.session.unsaved().is_some() {
-        attention_row(app, ui, "Local changes could not be saved", crate::i18n::tr("LightCraft is retrying."), None);
+        attention_row(app, ui, Icon::Warning, "Local changes could not be saved", crate::i18n::tr("LightCraft is retrying."), None);
     }
     if data["capacityWarnings"].as_array().is_some_and(|warnings| !warnings.is_empty()) {
         capacity(app, ui, data, false);
@@ -468,6 +508,7 @@ fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         attention_row(
             app,
             ui,
+            Icon::Warning,
             "Cloud storage needs attention",
             crate::i18n::tr("Open Cloud Synchronization for recovery details."),
             Some(("button:cloudHealthDetails", "Details")),
@@ -482,7 +523,7 @@ mod tests {
     use std::time::Duration;
     const T: Duration = Duration::from_secs(30);
     fn overview() -> Value {
-        json!({"summary":{"cloudPhotos":3,"albums":1,"originalBytes":1_200_000_000},"syncEnabled":true,"canResume":true,
+        json!({"summary":{"cloudPhotos":3,"albums":1,"originalBytes":1_200_000_000,"cloudOriginalBytes":1_200_000_000},"syncEnabled":true,"canResume":true,
             "health":{"sync":{"state":"healthy","lastSuccessfulRemoteScan":{"atUnixMs":1000},"secondsSinceLastRemoteScan":120}}})
     }
     fn open(data: Value, size: [f32; 2]) -> Headless {
@@ -561,6 +602,7 @@ mod tests {
         }
         assert!(!has(&h, "button:cloudShowWaiting"));
         assert!(!has(&h, "button:cloudRetry"));
+        assert!(has(&h, "indicator:cloudFooterCheckCircle"));
         assert!(!h.painted_text().iter().any(|text| text == "UPLOADING" || text == "NEEDS ATTENTION"));
         capture(&mut h, "up-to-date");
         click(&mut h, "button:cloudStorage");
@@ -570,6 +612,8 @@ mod tests {
     #[test]
     fn cloud_popup_redesign_uploads_show_live_progress_and_waiting_filter() {
         let mut data = overview();
+        data["summary"]["cloudPhotos"] = json!(15);
+        data["summary"]["cloudOriginalBytes"] = json!(1_300_000_000);
         data["waitingFiles"] = json!(8);
         data["uploadingFiles"] = json!(4);
         data["doneBytes"] = json!(45_000_000);
@@ -577,10 +621,12 @@ mod tests {
         data["summary"]["pendingChanges"] = json!(2);
         let mut h = open(data, [1200., 900.]);
         capture(&mut h, "uploading");
-        for expected in ["UPLOADING", "4 uploading", "8 waiting", "45.0 MB of 120.0 MB", "Changes to publish", "Syncing library…"] {
+        for expected in ["UPLOADING", "4 of 12 photos", "45 MB of 120 MB", "Changes to publish", "Syncing library…"] {
             text(&h, expected);
         }
         assert!(!has(&h, "button:cloudImport"));
+        assert!(has(&h, "indicator:cloudFooterSync"));
+        assert!(!h.painted_text().iter().any(|text| text == "Last checked"));
 
         click(&mut h, "button:cloudShowWaiting");
         assert_eq!(h.app.session.filter.sync_status, Some(lightcraft_catalog::sync_status::SyncStatus::Pending));
@@ -611,6 +657,10 @@ mod tests {
                 text(&h, expected);
             }
             assert!(has(&h, "button:cloudRetry"));
+            for icon in ["Pause", "Conflict", "CloudOff", "FooterWarning"] {
+                assert!(has(&h, &format!("indicator:cloud{icon}")));
+            }
+            assert!(!h.painted_text().iter().any(|text| text == "Last checked"));
             assert!(!has(&h, "button:cloudShowWaiting"));
             assert!(!has(&h, "button:cloudImport"));
 

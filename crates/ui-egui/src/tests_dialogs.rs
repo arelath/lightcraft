@@ -70,7 +70,7 @@ fn cloud_health_headline_covers_halted_polling_and_structural_only_conflicts() {
         assert!(!text.iter().any(|value| value == "Synced and backed up"));
         let cause = if structural { "Album or stack choices need attention" } else { "Remote access failed; polling stopped" };
         assert!(text.iter().any(|value| value.contains(cause)), "{text:?}");
-        assert!(text.iter().any(|value| value.contains("20 s ago")), "{text:?}");
+        assert!(!text.iter().any(|value| value.contains("Last checked")), "{text:?}");
         let widgets = h.request("ui.widgets", json!({"filter":"indicator:cloudQueue"}), T);
         assert!(!widgets["result"].as_array().unwrap().is_empty());
         {
@@ -396,7 +396,6 @@ fn cloud_popup_says_publishing_is_blocked_and_counts_field_conflicts() {
         "Your 2 changes wait here.",
         "1 conflicting edit",
         "3 photos in 1 album",
-        "2 h ago",
     ] {
         assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
     }

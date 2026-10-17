@@ -265,5 +265,6 @@
   "{photos} in {albums}": "{photos}, {albums}",
   "{n} uploading": "Загружается: {n}",
   "{n} waiting": "Ожидает: {n}",
-  "Your {n} changes wait here.": "Ваши изменения ({n}) ожидают здесь."
+  "Your {n} changes wait here.": "Ваши изменения ({n}) ожидают здесь.",
+  "{active} of {total} photos": "{active} из {total} фото"
 }

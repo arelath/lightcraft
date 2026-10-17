@@ -14,6 +14,12 @@ pub enum Icon {
     Share,
     Help,
     Cloud,
+    CloudOff,
+    CheckCircle,
+    Sync,
+    Pause,
+    Conflict,
+    Warning,
     Sliders,
     Crop,
     Eraser,
@@ -236,6 +242,39 @@ fn paint_with(p: &Painter, rect: Rect, icon: Icon, color: Color32, turn: Option<
             pen.arc(10.0, 8.0, 2.5, 180.0, 400.0);
             pen.line(&[(10.0, 10.5), (10.0, 11.8)]);
             pen.dot(10.0, 14.2, 0.9);
+        }
+        CheckCircle => {
+            pen.circle(10., 10., 7.5);
+            pen.line(&[(6.5, 10.), (9., 12.5), (13.5, 7.5)]);
+        }
+        Sync => {
+            pen.arc(10., 10., 6.5, 205., 345.);
+            pen.line(&[(16.3, 3.5), (16.3, 8.3), (11.5, 8.3)]);
+            pen.arc(10., 10., 6.5, 25., 165.);
+            pen.line(&[(3.7, 16.5), (3.7, 11.7), (8.5, 11.7)]);
+        }
+        Pause => {
+            pen.rect(5., 4., 8., 16., 0.5);
+            pen.rect(12., 4., 15., 16., 0.5);
+        }
+        Conflict => {
+            pen.line(&[(6., 5.), (6., 15.)]);
+            pen.line(&[(6., 7.), (10., 11.), (14., 11.)]);
+            for (x, y) in [(6., 3.5), (6., 16.5), (16., 11.)] {
+                pen.circle(x, y, 1.8);
+            }
+        }
+        Warning => {
+            pen.closed(&[(10., 2.), (19., 17.5), (1., 17.5)]);
+            pen.line(&[(10., 7.), (10., 11.5)]);
+            pen.dot(10., 14.5, 0.8);
+        }
+        CloudOff => {
+            pen.arc(7., 11.5, 3.5, 90., 245.);
+            pen.arc(10.5, 8.5, 4.5, 240., 340.);
+            pen.arc(14., 11.8, 3.2, 270., 400.);
+            pen.line(&[(7., 15.), (12., 15.)]);
+            pen.line(&[(2., 2.), (18., 18.)]);
         }
         Cloud => {
             pen.arc(7.0, 11.5, 3.5, 90.0, 270.0);

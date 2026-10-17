@@ -265,5 +265,6 @@
   "{photos} in {albums}": "{albums}に{photos}",
   "{n} uploading": "{n} 枚をアップロード中",
   "{n} waiting": "{n} 枚が待機中",
-  "Your {n} changes wait here.": "{n} 件の変更はここで待機します。"
+  "Your {n} changes wait here.": "{n} 件の変更はここで待機します。",
+  "{active} of {total} photos": "{total} 枚中 {active} 枚"
 }
