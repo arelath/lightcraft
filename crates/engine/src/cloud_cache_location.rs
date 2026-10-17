@@ -11,6 +11,7 @@
 
 use crate::cmd::bad;
 use crate::{Result, Session};
+use lightcraft_catalog::assets::BlobId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Digest;
@@ -31,6 +32,21 @@ const MAX_FILES: usize = 400_000;
 struct Pointer {
     version: u32,
     path: PathBuf,
+}
+
+fn save_pointer(cache_dir: &Path, pointer: Option<&Pointer>) -> std::result::Result<(), String> {
+    let path = cache_dir.join(POINTER);
+    match pointer {
+        Some(pointer) => {
+            let bytes = serde_json::to_vec_pretty(pointer).map_err(|e| e.to_string())?;
+            lightcraft_catalog::safe_file::write_atomic(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        },
+    }
 }
 
 /// The cloud cache folder for a library whose device cache folder is `cache_dir`, and a warning
@@ -66,7 +82,9 @@ pub struct PendingMove {
 /// What a finished copy leaves to do on the owner thread.
 pub struct Moved {
     from: PathBuf,
-    copied: Vec<String>,
+    to: PathBuf,
+    cache_dir: PathBuf,
+    copied: Vec<(BlobId, u64)>,
 }
 
 fn paths_equal(a: &Path, b: &Path) -> bool {
@@ -159,6 +177,9 @@ pub(crate) fn command(s: &mut Session, p: &Value) -> Result<Value> {
     if !resolver.transfer_status().active.is_empty() {
         return Err(bad(C, "cloud downloads are running; wait for them to finish (or cancel them) before moving the cache"));
     }
+    // A target may be an earlier move's old root. Stop its deferred deletion before
+    // any probe/copy can reuse that directory, not merely after reopening it.
+    s.stop_cache_cleanup();
     std::fs::create_dir_all(&target).map_err(|e| bad(C, format!("{}: {e}", target.display())))?;
     let probe = target.join(".lightcraft-write-test");
     lightcraft_catalog::safe_file::write_atomic(&probe, b"ok").map_err(|e| bad(C, format!("{} is not writable: {e}", target.display())))?;
@@ -262,7 +283,8 @@ impl Job {
                 let _ = std::fs::remove_file(&target);
                 return Err(format!("{} did not verify after copying; the old folder is still in use", target.display()));
             }
-            copied.push(name.clone());
+            let size = std::fs::metadata(&target).map_err(|e| format!("{}: {e}", target.display()))?.len();
+            copied.push((BlobId(name.clone()), size));
             if let Some(task) = progress {
                 task.progress(done, self.total.max(done));
             }
@@ -272,19 +294,8 @@ impl Job {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("cache settings: {e}")),
         }
-        let pointer_path = self.cache_dir.join(POINTER);
-        match &self.pointer {
-            Some(pointer) => {
-                let bytes = serde_json::to_vec_pretty(pointer).map_err(|e| e.to_string())?;
-                lightcraft_catalog::safe_file::write_atomic(&pointer_path, &bytes).map_err(|e| format!("{}: {e}", pointer_path.display()))?;
-            }
-            None => match std::fs::remove_file(&pointer_path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("{}: {e}", pointer_path.display())),
-            },
-        }
-        Ok(Moved { from: self.from, copied })
+        save_pointer(&self.cache_dir, self.pointer.as_ref())?;
+        Ok(Moved { from: self.from, to: self.to, cache_dir: self.cache_dir, copied })
     }
 }
 
@@ -301,34 +312,99 @@ fn file_hash(path: &Path) -> std::io::Result<String> {
     }
 }
 
-/// Reopen the library on the new folder, then delete the old copies (in the background; a file
-/// still open elsewhere stays and is harmless).
-fn finish(s: &mut Session, moved: Moved) -> Value {
-    let reopened = match s.library.as_ref().map(|l| l.dir.clone()) {
-        Some(dir) => s.close_library().and_then(|_| s.open_library(&dir, false).map(|_| ())).map_err(|e| e.to_string()),
-        None => Err("the library was closed".into()),
-    };
-    let report = match &reopened {
-        Ok(()) => {
-            let Moved { from, copied } = moved;
-            let count = copied.len();
-            let _ = std::thread::Builder::new().name("cloud-cache-cleanup".into()).spawn(move || {
-                for name in copied {
-                    let _ = std::fs::remove_file(from.join(name));
+/// Retire only copies whose replacement still verifies. Old resolver leases can outlive
+/// reopen, so keep that resolver and retry briefly; on failure or long leases retain the
+/// remaining files and their retention settings. A restart can leave extra old copies.
+fn cleanup(adopted: crate::assets::relocation::AdoptedCache, from: PathBuf, mut copies: Vec<(BlobId, u64)>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !copies.is_empty() {
+        let mut waiting = Vec::new();
+        for (id, size) in copies {
+            match adopted.remove(&id, size) {
+                Ok(true) => {}
+                Ok(false) => waiting.push((id, size)),
+                Err(crate::assets::AssetError::Cancelled) => return,
+                Err(error) => {
+                    log::warn!("old cloud cache retained at {}: {error}", from.display());
+                    return;
                 }
-                let _ = std::fs::remove_file(from.join(RETENTION));
-                // only an emptied folder goes
-                let _ = std::fs::remove_dir(&from);
-            });
-            json!({"ok": true, "moved": count})
+            }
         }
-        Err(e) => json!({"ok": false, "error": format!("the cache was copied but the library could not be reopened: {e}")}),
+        copies = waiting;
+        if !copies.is_empty() {
+            if std::time::Instant::now() >= deadline {
+                log::warn!("old cloud cache retained at {}: {} copies still in use", from.display(), copies.len());
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    if let Err(error) = adopted.finish()
+        && !matches!(error, crate::assets::AssetError::Cancelled)
+    {
+        log::warn!("old cloud cache settings retained at {}: {error}", from.display());
+    }
+}
+
+/// Reopen on the intended folder and verify retention adoption before allowing cleanup.
+fn finish(s: &mut Session, moved: Moved) -> Value {
+    let directory = s.library.as_ref().map(|library| library.dir.clone());
+    let reopened = (|| -> std::result::Result<_, String> {
+        let dir = directory.as_ref().ok_or("the library was closed")?;
+        let old = s.media.asset_resolver.clone().filter(|old| paths_equal(old.root(), &moved.from)).ok_or("the original cache binding changed")?;
+        s.close_library().and_then(|_| s.open_library(dir, false).map(|_| ())).map_err(|e| e.to_string())?;
+        let new = s
+            .media
+            .asset_resolver
+            .clone()
+            .filter(|new| paths_equal(new.root(), &moved.to))
+            .ok_or("the reopened library did not adopt the intended destination (it may have fallen back to the library folder)")?;
+        crate::assets::relocation::AdoptedCache::adopt(old, new).map_err(|e| e.to_string())
+    })();
+    let report = match reopened {
+        Ok((adopted, guard)) => {
+            let count = moved.copied.len();
+            let Some(library) = s.library.as_mut().filter(|library| library.permits_cache_cleanup()) else {
+                // Without an exclusive library lock another process could reuse a root
+                // concurrently. Moving is still safe; retain old copies conservatively.
+                let report = json!({"ok":true,"moved":count,"cleanup":"old copies retained; no exclusive library lock"});
+                s.cache_move_report = Some(report.clone());
+                return report;
+            };
+            library.cache_cleanup = Some(guard);
+            let spawned = std::thread::Builder::new().name("cloud-cache-cleanup".into()).spawn(move || cleanup(adopted, moved.from, moved.copied));
+            let mut report = json!({"ok": true, "moved": count, "cleanup":"background; in-use or unverified old copies are retained"});
+            if let Err(error) = spawned {
+                report["cleanupError"] = json!(format!("could not start cleanup; old copies retained: {error}"));
+            }
+            report
+        }
+        Err(error) => {
+            let restore = (|| -> std::result::Result<(), String> {
+                let pointer =
+                    (!paths_equal(&moved.from, &moved.cache_dir.join(DEFAULT_DIR))).then(|| Pointer { version: 1, path: moved.from.clone() });
+                save_pointer(&moved.cache_dir, pointer.as_ref())?;
+                let dir = directory.as_ref().ok_or("the library was closed")?;
+                s.close_library().and_then(|_| s.open_library(dir, false).map(|_| ())).map_err(|e| e.to_string())?;
+                if s.media.asset_resolver.as_ref().is_none_or(|resolver| !paths_equal(resolver.root(), &moved.from)) {
+                    return Err("the old cache folder is unavailable; reconnect it and reopen the library".into());
+                }
+                Ok(())
+            })();
+            json!({"ok": false, "error": format!("cache move was not adopted: {error}; old copies retained at {}", moved.from.display()),
+                "oldSelectionRestored":restore.is_ok(), "restoreError":restore.err()})
+        }
     };
     s.cache_move_report = Some(report.clone());
     report
 }
 
 impl Session {
+    pub(crate) fn stop_cache_cleanup(&mut self) {
+        if let Some(library) = &mut self.library {
+            library.cache_cleanup = None;
+        }
+    }
     /// Finish a cache move whose copy completed: reopen on the new folder. True when the
     /// library was reopened (hosts drop what they cached about it).
     pub fn poll_cache_move(&mut self) -> bool {
@@ -356,3 +432,6 @@ impl Session {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

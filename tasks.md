@@ -270,7 +270,8 @@ The supplied 2026-10-17 review is tracked before implementation in
 - [x] **CR.62** Persist absolute conversion destinations for relative library paths.
 - [ ] **CR.63–CR.74** Complete typed diagnostics/actions, explicit authentication choice, navigable recovery/conflicts, confirmation lifecycle, managed-media boundaries and precise local/cloud UX.
 - [x] **CR.49** Fence successor publication, refuse unsafe cancellation and preserve explicit finish-upgrade recovery.
-- [ ] **CR.48, CR.50–CR.55** Recheck and close the previously tracked epoch, migration, status, lease, browser-cache, relocation, credential-isolation and discovery findings with current evidence. Detailed items remain individually tracked in the reliability checklist.
+- [x] **CR.53** Verify cache destination adoption, honor old byte leases and fence cleanup before folder reuse.
+- [ ] **CR.48, CR.50–CR.52, CR.54–CR.55** Recheck and close the previously tracked epoch, migration, status, lease, browser-cache, relocation, credential-isolation and discovery findings with current evidence. Detailed items remain individually tracked in the reliability checklist.
 
 ## Cloud queue UX — follow-up
 

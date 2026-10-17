@@ -1101,6 +1101,7 @@ fn moving_the_cloud_cache_copies_verified_files_reopens_on_the_new_folder_and_su
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     let old_root = resolver.root().to_path_buf();
+    let old_lease = resolver.acquire_cached(&b, &AtomicBool::new(false)).unwrap().unwrap();
     drop(resolver);
 
     for bad in [
@@ -1124,6 +1125,13 @@ fn moving_the_cloud_cache_copies_verified_files_reopens_on_the_new_folder_and_su
     assert_eq!(resolver.offline_pin(&format!("photo:{}", id.0)).unwrap().blobs, vec![b.id.clone()]);
     assert_eq!(resolver.offline_pin(&format!("album:{album}")).unwrap().blobs, vec![b.id.clone()]);
     assert_eq!(resolver.clear_cache().unwrap(), 0, "live owners resolve before eviction at the new root");
+    let hold_until = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    while std::time::Instant::now() < hold_until {
+        assert_eq!(old_lease.read_bytes().unwrap(), bytes, "a lease from the old resolver survives reopen and cleanup");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(old_root.join(&b.id.0).exists(), "active old resolver leases defer removal");
+    drop(old_lease);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while old_root.join(&b.id.0).exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1167,6 +1175,32 @@ fn a_damaged_cache_location_pointer_falls_back_with_a_warning() {
     session.open_library(&scratch.0, false).unwrap();
     assert_eq!(session.media.asset_resolver.as_ref().unwrap().root(), scratch.0.join("assets-cache").as_path());
     assert!(session.library.as_ref().unwrap().settings_warnings.iter().any(|w| w.contains("damaged")));
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn relocated_cache_removal_requires_exact_replacement_bytes_and_the_original_lease_gate() {
+    let (source, destination) = (Scratch::new(), Scratch::new());
+    let bytes = b"verified relocated original";
+    let b = blob(bytes);
+    let old = Arc::new(AssetResolver::new(source.0.clone()));
+    let new = Arc::new(AssetResolver::new(destination.0.clone()));
+    old.connect("memory".into(), store(bytes)).unwrap();
+    let lease = old.acquire(&b, &AtomicBool::new(false)).unwrap();
+    std::fs::write(destination.0.join(&b.id.0), bytes).unwrap();
+    let (adopted, _guard) = relocation::AdoptedCache::adopt(old, new).unwrap();
+    assert!(!adopted.remove(&b.id, b.size).unwrap(), "old lease still owns its path");
+    assert_eq!(lease.read_bytes().unwrap(), bytes);
+    drop(lease);
+    std::fs::write(destination.0.join(&b.id.0), b"corrupt").unwrap();
+    assert!(matches!(adopted.remove(&b.id, b.size), Err(AssetError::Integrity)));
+    assert_eq!(std::fs::read(source.0.join(&b.id.0)).unwrap(), bytes);
+    std::fs::write(destination.0.join(&b.id.0), bytes).unwrap();
+    assert!(adopted.remove(&b.id, b.size + 1).is_err(), "size is part of the verified replacement");
+    assert!(source.0.join(&b.id.0).exists());
+    assert!(adopted.remove(&b.id, b.size).unwrap());
+    assert!(!source.0.join(&b.id.0).exists());
+    assert_eq!(std::fs::read(destination.0.join(&b.id.0)).unwrap(), bytes);
 }
 
 #[test]

@@ -44,6 +44,8 @@ fn pending_source() -> AssetError {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod managed;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod relocation;
 
 /// A write publication changes the namespace epoch before releasing its mutex.
 /// Maintenance can scan outside the lock and reject a stale scan without holding
@@ -536,12 +538,17 @@ impl AssetResolver {
 }
 
 fn verify_file(path: &Path, blob: &Blob, cancel: &AtomicBool) -> Result<bool> {
+    verify_blob_file(path, &blob.id, blob.size, cancel)
+}
+
+/// Verify content independently of transport metadata (also used for cache relocation).
+fn verify_blob_file(path: &Path, id: &BlobId, expected: u64, cancel: &AtomicBool) -> Result<bool> {
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(disk(e)),
     };
-    if file.metadata().map_err(disk)?.len() != blob.size {
+    if file.metadata().map_err(disk)?.len() != expected {
         return Ok(false);
     }
     let mut hash = Sha256::new();
@@ -556,12 +563,12 @@ fn verify_file(path: &Path, blob: &Blob, cancel: &AtomicBool) -> Result<bool> {
             break;
         }
         size = size.saturating_add(n as u64);
-        if size > blob.size {
+        if size > expected {
             return Ok(false);
         }
         hash.update(buf.get(..n).ok_or(AssetError::Integrity)?);
     }
-    Ok(size == blob.size && format!("{:x}", hash.finalize()) == blob.id.0)
+    Ok(size == expected && format!("{:x}", hash.finalize()) == id.0)
 }
 
 struct VerifiedWriter<'a> {

@@ -147,6 +147,10 @@ pub(super) struct Cache {
     state: Mutex<State>,
     maintenance: Mutex<()>,
     #[cfg(not(target_arch = "wasm32"))]
+    retired: std::sync::atomic::AtomicBool,
+    #[cfg(not(target_arch = "wasm32"))]
+    retirement_io: Mutex<()>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) durable_io: Mutex<()>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) durable_epoch: std::sync::atomic::AtomicU64,
@@ -202,6 +206,10 @@ impl Cache {
             }),
             maintenance: Mutex::new(()),
             #[cfg(not(target_arch = "wasm32"))]
+            retired: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(not(target_arch = "wasm32"))]
+            retirement_io: Mutex::new(()),
+            #[cfg(not(target_arch = "wasm32"))]
             durable_io: Mutex::new(()),
             #[cfg(not(target_arch = "wasm32"))]
             durable_epoch: std::sync::atomic::AtomicU64::new(0),
@@ -233,6 +241,13 @@ impl Cache {
         if let Some(sender) = &self.sender {
             let _ = sender.try_send(());
         }
+    }
+    /// Leases may keep this cache alive after relocation. Its old maintenance and
+    /// policy must never affect a later resolver that reuses the same directory.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn retire(&self) {
+        self.retired.store(true, Ordering::Release);
+        let _barrier = self.retirement_io.lock().unwrap_or_else(PoisonError::into_inner);
     }
     pub(super) fn touch(&self, id: &BlobId) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -274,6 +289,12 @@ impl Cache {
         self.state.lock().unwrap_or_else(PoisonError::into_inner).policy.pins.get(owner).cloned()
     }
     fn save(&self, state: &mut State, mut policy: Policy) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _live = self.retirement_io.lock().unwrap_or_else(PoisonError::into_inner);
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.retired.load(Ordering::Acquire) {
+            return Err(AssetError::Invalid("this cache was relocated; use the current library's cache settings".into()));
+        }
         self.validate_root()?;
         if let Some(error) = &state.error {
             return Err(AssetError::Disk(format!(
@@ -426,6 +447,12 @@ impl Cache {
         let mut policy = state.policy.clone();
         policy.removed.insert(id.clone());
         self.save(&mut state, policy)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let _live = self.retirement_io.lock().unwrap_or_else(PoisonError::into_inner);
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.retired.load(Ordering::Acquire) {
+            return Err(AssetError::Invalid("this cache was relocated; old copy retained".into()));
+        }
         match std::fs::remove_file(self.root.join(&id.0)) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -475,6 +502,10 @@ impl Cache {
     /// Evict least recently used eligible blobs down to `target` (else the size limit); returns
     /// the bytes freed.
     fn trim_to(&self, target: Option<u64>) -> Result<u64> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.retired.load(Ordering::Acquire) {
+            return Ok(0);
+        }
         self.validate_root()?;
         let _maintenance = self.maintenance.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(error) = &self.state.lock().unwrap_or_else(PoisonError::into_inner).error {
@@ -542,6 +573,12 @@ impl Cache {
             if entry.pins.load(Ordering::Relaxed) != 0 || state.pinned_ids.contains(&id) {
                 continue;
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            let _live = self.retirement_io.lock().unwrap_or_else(PoisonError::into_inner);
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.retired.load(Ordering::Acquire) {
+                break;
+            }
             match std::fs::remove_file(self.root.join(&id.0)) {
                 Ok(()) => {
                     used = used.saturating_sub(size);
@@ -564,6 +601,9 @@ impl Cache {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn promote_staging_cancel(&self, cancel: &std::sync::atomic::AtomicBool) -> Result<()> {
+        if self.retired.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let Some(root) = self.durable_root.lock().unwrap_or_else(PoisonError::into_inner).clone() else {
             return Ok(());
         };
@@ -598,6 +638,9 @@ impl Cache {
             return Ok(());
         };
         for (id, blob) in candidates {
+            if self.retired.load(Ordering::Acquire) {
+                return Ok(());
+            }
             if cancel.load(Ordering::Relaxed) {
                 return Err(AssetError::Cancelled);
             }
@@ -645,6 +688,10 @@ impl Cache {
             // other pending owners were excluded by the ownership scan.
             if epoch != self.durable_epoch.load(Ordering::Acquire) {
                 self.schedule_trim();
+                return Ok(());
+            }
+            let _live = self.retirement_io.lock().unwrap_or_else(PoisonError::into_inner);
+            if self.retired.load(Ordering::Acquire) {
                 return Ok(());
             }
             std::fs::remove_file(&source).map_err(disk)?;

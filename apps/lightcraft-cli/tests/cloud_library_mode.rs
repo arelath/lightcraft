@@ -150,6 +150,74 @@ fn upgrade_successor_exposure_refuses_remote_cancellation_and_finishes_in_native
 }
 
 #[test]
+#[ignore = "explicit native cache relocation acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn cache_relocation_adopts_verified_offline_originals_in_native_app() {
+    let f = support::Fixture::new();
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("cache-relocation");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let publisher = f.dir.join("publisher");
+    let local = f.dir.join("local");
+    let (_, source) = f.import(&publisher, false);
+    let (out, rows) = f.run(&publisher, &[("cloud.upload", json!({})), ("cloud.sync", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let (_, saved, _) = lightcraft_engine::catalog::Journal::open(Box::new(lightcraft_engine::catalog::FsStore::open(&publisher).unwrap())).unwrap();
+    let library = saved.sync_state().unwrap().library.clone();
+    let original = saved.assets().values().next().unwrap().original.id.clone();
+    let (out, rows) = f.run(
+        &local,
+        &[
+            (
+                "cloud.configure",
+                json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"}),
+            ),
+            ("cloud.syncEnable", json!({"connection":"personal","library":library})),
+            ("cloud.sync", json!({})),
+            ("cloud.pin", json!({"ids":[1],"wait":true})),
+            ("cloud.pause", json!({})),
+        ],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    let before = app.execute("cloud.cacheLocation", json!({}));
+    let old = std::path::PathBuf::from(before["path"].as_str().unwrap());
+    let target = f.dir.join("relocated-cache");
+    app.execute("cloud.cacheLocation", json!({"path":target,"wait":false}));
+    let until = Instant::now() + Duration::from_secs(30);
+    let report = loop {
+        let status = app.execute("cloud.cacheLocation", json!({}));
+        if !status["lastMove"].is_null() {
+            assert_eq!(status["lastMove"]["ok"], true, "{status}");
+            assert_eq!(std::path::Path::new(status["path"].as_str().unwrap()), target);
+            break status;
+        }
+        assert!(Instant::now() < until, "native cache move completion: {status}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(std::fs::read(target.join(&original.0)).unwrap(), std::fs::read(source).unwrap());
+    let cache = app.execute("cloud.cache", json!({}));
+    assert!(cache["pins"].as_object().is_some_and(|pins| pins.contains_key("photo:1")), "offline owner retained: {cache}");
+    app.execute("app.settings", json!({"tab":"cache"}));
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let widgets = app.ask("ui.widgets", json!({"filter":"button:settingsCacheBrowse"}));
+        if widgets.as_array().is_some_and(|widgets| !widgets.is_empty()) {
+            break;
+        }
+        assert!(Instant::now() < until, "Cache settings did not appear: {widgets}");
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    app.ask("ui.screenshot", json!({"path":artifacts.join("adopted.png")}));
+    std::fs::write(artifacts.join("move.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    // Native render leases may defer cleanup; the verified replacement and policy are
+    // required independently of whether this optional space reclamation has finished.
+    if old.join(&original.0).exists() {
+        assert!(target.join(&original.0).exists());
+    }
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+}
+
+#[test]
 #[ignore = "explicit native cloud-toggle acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
 fn cloud_toggle_native_confirmation_blocking_progress_and_durable_completion() {
     let f = support::Fixture::new();

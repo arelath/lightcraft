@@ -98,6 +98,9 @@ pub struct Library {
     warnings_reported: usize,
     /// Settings files that couldn't be read or set aside: never overwritten this session.
     blocked: Vec<&'static str>,
+    /// Cancel deferred cache deletion before releasing this library's process lock.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) cache_cleanup: Option<crate::assets::relocation::CleanupGuard>,
     /// Keeps other processes out of this library while it's open (last: released after the
     /// journal's background snapshot has landed).
     lock: Option<LibraryLock>,
@@ -139,6 +142,10 @@ struct ViewFile {
 }
 
 impl Library {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn permits_cache_cleanup(&self) -> bool {
+        self.lock.as_ref().is_some_and(LibraryLock::held)
+    }
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn cloud_connections(&mut self) -> Result<Vec<crate::assets::s3::S3Connection>> {
         let Some(bytes) =
@@ -405,6 +412,8 @@ impl Session {
     fn open_stores(&mut self, stores: LibraryStores, seed_demo: bool, lock: &mut Option<LibraryLock>, cache_dir: Option<PathBuf>) -> Result<()> {
         self.ensure_reclamation_idle()?;
         #[cfg(not(target_arch = "wasm32"))]
+        self.stop_cache_cleanup();
+        #[cfg(not(target_arch = "wasm32"))]
         if self.cloud_transition.blocking() {
             return Err(EngineError::Other("finish or cancel the local library download before switching libraries".into()));
         }
@@ -564,6 +573,8 @@ impl Session {
             settings_warnings: unlocked_warning(lock.as_ref()).into_iter().chain(settings.warnings).chain(location_warning).collect(),
             warnings_reported: 0,
             blocked: settings.blocked,
+            #[cfg(not(target_arch = "wasm32"))]
+            cache_cleanup: None,
             lock: lock.take(),
         });
         self.library_identity = std::sync::Arc::new(());
@@ -705,6 +716,8 @@ impl Session {
     /// holding everything in memory, so it saves those ops too (the log handle may be the only
     /// thing that's broken). Fails only if nothing could be saved; the ops then stay queued.
     pub fn close_library(&mut self) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.stop_cache_cleanup();
         #[cfg(not(target_arch = "wasm32"))]
         self.cloud_transition.stop_for_close();
         self.ensure_reclamation_idle()?;
