@@ -552,6 +552,10 @@ pub fn specs() -> Vec<CommandSpec> {
             test_connection
         ),
         cmd!(query "cloud.status", "Cloud Photo Status", [], None, "{ids?}; cached, downloading, remote, missing or failed state on this device", always, status),
+        cmd!(query "cloud.deleteLibrary", "Delete Entire Cloud Library", [], None, "{library, apply?:false, preview?, confirmation?:DELETE CLOUD LIBRARY, allDevicesStopped?:false, wait?}; review then permanently erase library media and historical object versions in its dedicated folder; leave only deletion barriers; native only", always, |s,p| {
+            #[cfg(not(target_arch="wasm32"))] {crate::cloud_upload::erase_library(s,p)}
+            #[cfg(target_arch="wasm32")] {let _=(s,p);Err(bad("cloud.deleteLibrary","use the desktop app to delete a cloud library; the browser signer does not grant deletion"))}
+        }),
         cmd!(query "cloud.reclaim", "Preview or Reclaim Orphan Cloud Media", [], None, "{connection, olderThanDays?:30 (7–3650), apply?:false, preview?, allWritersPausedAndPublished?:false, wait?}; complete reference audit; preview before conditional deletion of unreferenced unversioned media; published/deleted/revised content and history retained; desktop uses activity/cloud.uploadStatus", always, |s,p| {
             #[cfg(not(target_arch="wasm32"))] { crate::cloud_upload::reclaim(s,p) }
             #[cfg(target_arch="wasm32")] { let _=(s,p); Err(bad("cloud.reclaim","use the native app for remote retention audits; browser offline/cache controls do not delete remote objects")) }

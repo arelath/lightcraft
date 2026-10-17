@@ -433,14 +433,8 @@ fn cloud_sync_dialog_keeps_a_chosen_conflict_value_and_bounds_the_recover_list()
         h.step();
     }
     let text = h.view.painted_text();
-    for label in [
-        "Conflicting edits",
-        "beach.jpg · Rating",
-        "★★ · This device · shown now",
-        "★★★★★ · Another device",
-        "Deleted cloud photos: 250",
-        "Not listed here: 50",
-    ] {
+    for label in ["Conflicting edits", "beach.jpg · Rating", "★★ · This device · shown now", "★★★★★ · Another device", "Deleted cloud photos: 250"]
+    {
         assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
     }
     let painted = text.iter().filter(|value| value.starts_with("gone-")).count();
@@ -450,4 +444,14 @@ fn cloud_sync_dialog_keeps_a_chosen_conflict_value_and_bounds_the_recover_list()
         h.step();
     }
     assert_eq!(*calls.lock().unwrap(), vec![json!({"entity":"photo:p1","field":"rating","revision":"dev-b-4"})]);
+    // Additional maintenance actions can put the recover-list footer below the
+    // initial viewport. Scroll the outer dialog, outside the nested photo list.
+    let action = h.app.widgets.iter().find(|(id, _)| id == "button:cloudDeleteOpen").map(|(_, rect)| *rect).unwrap();
+    assert_eq!(h.request("ui.move", json!({"x":action.center().x,"y":action.center().y}), T)["ok"], true);
+    for _ in 0..4 {
+        assert_eq!(h.request("ui.scroll", json!({"dy":-400.0}), T)["ok"], true);
+        h.step();
+    }
+    let text = h.view.painted_text();
+    assert!(text.iter().any(|value| value.contains("Not listed here: 50")), "recover footer must be reachable: {text:?}");
 }

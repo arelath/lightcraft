@@ -62,7 +62,7 @@ pub fn effective(storage: &str, library: &str, records: &[(String, Vec<u8>)]) ->
 pub fn publication(control: std::result::Result<Control, Blocked>) -> std::result::Result<Option<String>, Blocked> {
     match control.and_then(|c| c.may_publish().map(|_| c)) {
         Ok(_) => Ok(None),
-        Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => Err(blocked),
+        Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_) | Blocked::Deleted)) => Err(blocked),
         Err(blocked) => Ok(Some(blocked.to_string())),
     }
 }

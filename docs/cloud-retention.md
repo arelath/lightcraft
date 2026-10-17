@@ -1,12 +1,12 @@
 # Cloud deletion and retention
 
-Last updated: 2026-10-17
+Last updated: 2026-10-16
 
 Deleting a managed photo changes the shared catalog. Emptying Recently Deleted removes
 its local photo record. **Both actions retain uploaded originals, earlier revisions,
 supporting XMP, tombstones and metadata history. Bucket charges continue.** Recovery and
-conflict resolution depend on this retained content. Neither action sends DeleteObject.
-The deletion confirmation, cloud popup and Cloud Synchronization dialog state this policy.
+conflict resolution depend on this retained content. Neither action sends DeleteObject. Explicit whole-library erasure is a separate destructive operation described below.
+The photo-deletion confirmation and Cloud Synchronization retention section state this policy.
 
 Cloud Synchronization → Cloud retention and orphan media provides a native preview and
 an explicit apply action. `cloud.reclaim` exposes the same workflow through CLI/MCP/control.
@@ -98,4 +98,50 @@ history and candidate HEADs again on every application; this is not a cheap poll
 
 | Date | Change |
 | --- | --- |
+| 2026-10-16 | CUX.8: separate whole-library erasure with typed consent, historical-version and multipart removal, durable terminal barriers and interrupted recovery. |
 | 2026-10-17 | CR.18: prominent retained-deletion policy and explicit, reference-checked orphan preview/apply with conditional deletion. |
+
+## Delete an entire cloud library
+
+Desktop: Cloud Synchronization → Delete entire cloud library… opens a separate dialog.
+Pause and review deletion to see the exact library ID, bucket, storage folder, version
+count and stored bytes. Close LightCraft on every other device, acknowledge permanent
+deletion, then type `DELETE CLOUD LIBRARY` exactly. Dismissing the dialog clears consent.
+The normal Close/Enter action never dispatches deletion.
+
+`cloud.deleteLibrary` defaults to a read-only review. It requires the current `library`
+ID; applying requires its exact `preview`, `confirmation:"DELETE CLOUD LIBRARY"`,
+and `allDevicesStopped:true`. Desktop work uses Activity and `cloud.uploadStatus`;
+headless calls wait by default. Cancel only stops remaining deletions and cannot undo
+objects already removed. After interruption, keep all devices stopped and review again.
+
+This operation permanently removes original media, renditions, XMP, edits, albums,
+previous object versions, delete markers and metadata/receipt history under the dedicated
+storage folder, and aborts incomplete multipart uploads. It preserves the bucket and
+all device-local copies. It retains only tiny terminal Deleted control records with no
+personal history, preventing conforming clients from reinitializing the erased library.
+A durable device-local deletion-intent marker also blocks uploads, Resume and sync after
+restart, including when an erase was interrupted. The popup shows completed erasure with
+zero tracked cloud-original bytes and a Details action; incomplete erasure shows unknown
+remaining usage and a Review action. A fresh review can finish deletion.
+Use a new local library and a fresh storage folder for subsequent synchronization.
+
+The folder must be nonempty and dedicated to this library: bucket-wide erasure, other
+library namespaces and unrecognized objects are refused. Version and multipart
+inventories must be supported and agree with live objects. Permissions must include
+version listing/deletion and multipart listing/abort; a read-only setup probe does not
+prove those permissions. Object Lock, unsupported APIs, null-version delete markers,
+changed inventories or failed deletes stop the operation without reporting completion.
+The inventory is bounded to 100,000 object versions and 256 pages per listing.
+
+Version-aware deletion follows the provider's
+[ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html)
+and [DeleteObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html)
+contracts. There is no current-object-only fallback. The browser signer does not grant
+delete authority; the browser directs users to the desktop app. Append-mode barriers
+remain cooperative: the stopped-device acknowledgement is essential, and unknown old
+or independently credentialed writers cannot be remotely forced to stop by this client.
+Current native upload workers reread the remote terminal control before each media
+transfer, including multipart recovery, so a restored catalog without its local deletion
+marker cannot recreate erased originals.
+These controls are not a claim of physical erasure from provider backups or offline devices.

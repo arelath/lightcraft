@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 pub(crate) fn needs_attention(data: &Value) -> bool {
     let summary = &data["summary"];
     let health = &data["health"];
-    summary["issues"].as_u64().unwrap_or(0) > 0
+    data["erasure"].is_object()
+        || summary["issues"].as_u64().unwrap_or(0) > 0
         || summary["failedFiles"].as_u64().unwrap_or(0) > 0
         || summary["blockedImportCount"].as_u64().unwrap_or(0) > 0
         || data["error"].is_string()
@@ -226,6 +227,9 @@ fn busy(data: &Value) -> bool {
         || data["summary"]["pendingChanges"].as_u64().unwrap_or(0) > 0
 }
 fn footer_text(data: &Value, unsaved: bool) -> &'static str {
+    if !unsaved && data["erasure"].is_object() {
+        return if data["erasure"]["complete"] == true { "Cloud library deleted" } else { "Deletion incomplete" };
+    }
     if unsaved || needs_attention(data) {
         "Sync needs attention"
     } else if data["migrating"] == true || data["preparingMigration"] == true {
@@ -266,8 +270,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             let album_text = if albums == 1 { crate::i18n::tr_format!("{n} album", n = albums) } else { crate::i18n::tr_format!("{n} albums", n = albums) };
             ui.label(egui::RichText::new(crate::i18n::tr_format!("{photos} in {albums}", photos = photo_text, albums = album_text)).font(t.semibold(12.)).color(t.text));
             ui.add_space(4.);
-            metric(ui, "Storage space used", &bytes(summary["cloudOriginalBytes"].as_u64().unwrap_or(0))).on_hover_text(crate::i18n::tr(
-                "Storage used by cloud originals represented in this catalog; shared originals count once. Previews, sidecars, sync metadata, and other libraries are not included.",
+            let storage=if data["erasure"]["complete"]==true {bytes(0)} else if data["erasure"].is_object() {crate::i18n::tr("Unknown").to_owned()} else {bytes(summary["cloudOriginalBytes"].as_u64().unwrap_or(0))};
+            metric(ui, "Storage space used", &storage).on_hover_text(crate::i18n::tr(
+                if data["erasure"].is_object() {"Library deletion retains local copies. Review deletion to inspect any remaining cloud data."} else {"Storage used by cloud originals represented in this catalog; shared originals count once. Previews, sidecars, sync metadata, and other libraries are not included."},
             ));
             if !attention && !busy(data) && let Some(age) = data["health"]["sync"]["secondsSinceLastRemoteScan"].as_u64() {
                 metric(ui, "Last checked", &ago(age));
@@ -277,7 +282,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         });
         if attention {
             divider(ui);
-            section(ui, |ui| { heading(ui, "NEEDS ATTENTION"); attention_details(app, ui, data); });
+            section(ui, |ui| { heading(ui, if data["erasure"]["complete"]==true {"LIBRARY DELETED"} else {"NEEDS ATTENTION"}); attention_details(app, ui, data); });
         }
         if waiting > 0 || active > 0 || data["preparingFiles"].as_u64().unwrap_or(0) > 0 {
             divider(ui);
@@ -326,7 +331,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(20., 24.), egui::Sense::hover());
                 let status = footer_text(data, app.session.unsaved().is_some());
                 let icon = match status {
-                    "Sync needs attention" => Icon::Warning,
+                    "Sync needs attention" | "Cloud library deleted" | "Deletion incomplete" => Icon::Warning,
                     "Syncing paused" => Icon::Pause,
                     "Synced and backed up" => Icon::CheckCircle,
                     "Local library" => Icon::Cloud,
@@ -339,6 +344,12 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                     ui.set_min_width(status_width);
                     ui.add(egui::Label::new(crate::i18n::tr(status)).wrap());
                 });
+                if data["erasure"].is_object() {
+                    let response=ui.button(crate::i18n::tr(if data["erasure"]["complete"]==true {"Details"} else {"Review"}));
+                    register(ui.ctx(),"button:cloudDeleteReview",response.rect);
+                    if response.clicked(){invoke(app,ui,"dialog.cloudDelete",json!({}));}
+                    return;
+                }
                 let retry = attention && !paused;
                 let label = if retry { "Retry" } else if paused { "Resume" } else { "Pause" };
                 let id = if retry { "button:cloudRetry" } else { "button:cloudPauseResume" };
@@ -353,6 +364,24 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
 }
 
 fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
+    if data["erasure"].is_object() {
+        attention_row(
+            app,
+            ui,
+            Icon::Warning,
+            if data["erasure"]["complete"] == true { "Cloud library deleted" } else { "Deletion incomplete" },
+            crate::i18n::tr(if data["erasure"]["complete"] == true {
+                "Cloud data was erased. Local copies remain on your devices."
+            } else {
+                "Some data may already be gone. Keep other devices stopped and review deletion to finish."
+            }),
+            None,
+        );
+        if app.session.unsaved().is_some() {
+            attention_row(app, ui, Icon::Warning, "Local changes could not be saved", crate::i18n::tr("LightCraft is retrying."), None);
+        }
+        return;
+    }
     let start = ui.cursor().top();
     let t = Tokens::get(ui.ctx());
     let summary = &data["summary"];
@@ -667,6 +696,21 @@ mod tests {
             click(&mut h, id);
             assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudSync { .. })));
             assert!(!has(&h, "popup:cloud"));
+        }
+    }
+    #[test]
+    fn cloud_popup_deleted_library_shows_remaining_scope_without_resume_or_retry() {
+        for complete in [false, true] {
+            let mut data = overview();
+            data["erasure"] = json!({"complete":complete});
+            let mut h = open(data, [1200., 900.]);
+            text(&h, if complete { "Cloud library deleted" } else { "Deletion incomplete" });
+            text(&h, if complete { "0 B" } else { "Unknown" });
+            assert!(has(&h, "button:cloudDeleteReview"));
+            assert!(!has(&h, "button:cloudPauseResume"));
+            assert!(!has(&h, "button:cloudRetry"));
+            click(&mut h, "button:cloudDeleteReview");
+            assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::CloudDelete { .. })));
         }
     }
     #[test]

@@ -57,6 +57,13 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
     out["health"]["publicationBlocked"] = sync["publicationBlocked"].clone();
     out["utilization"] = sync["utilization"].clone();
     out["capacityWarnings"] = sync["capacityWarnings"].clone();
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(status) = crate::cloud_upload::erasure_status(s) {
+        if status["complete"] == true {
+            out["summary"]["cloudOriginalBytes"] = json!(0);
+        }
+        out["erasure"] = status;
+    }
     Ok(out)
 }
 pub fn pause(s: &mut Session, _: &Value) -> Result<Value> {
@@ -70,6 +77,8 @@ pub fn pause(s: &mut Session, _: &Value) -> Result<Value> {
     overview(s, &Value::Null)
 }
 pub fn resume(s: &mut Session, _: &Value) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::cloud_upload::ensure_not_erased(s)?;
     #[cfg(not(target_arch = "wasm32"))]
     {
         if s.cloud_uploads.running() > 0 || s.cloud_replication_jobs.running() {

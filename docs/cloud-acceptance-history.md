@@ -368,3 +368,30 @@ Results and perf are retained in `native-final-results.json` and
 All eight CI stages passed (`target/cloud-popup-corrected-ci-final.log`): formatting,
 clippy, HEIF, workspace tests (774 UI tests passed, 2 ignored), parity, layers, assets,
 and WASM. The final popup-only lint pass also covers the local-library icon correction.
+
+## 2026-10-16: guarded whole-cloud-library erasure (CUX.8)
+
+The native signed loopback fixture covers both sync protocols, exact typed consent,
+fresh-review rejection, historical versions and delete markers, unfinished multipart
+uploads, foreign-data rejection, mixed head/append publication authorities, late writes,
+interrupted retries and terminal upload refusal after restoring a catalog without its
+local erasure marker. An empty existing bucket is probed without writes and initialized
+on its first synchronization. These checks use procedural media and disposable storage;
+they are not live AWS/B2 deletion acceptance.
+
+The real desktop app passed the separate opt-in control-channel acceptance test:
+an incorrect phrase caused no deletion, the exact phrase erased the fixture, and the
+popup reported a deleted library with zero cloud original bytes and a Details action.
+Reopening Details preserved the completed state. The review, typed confirmation,
+completion, popup and reopened-details screenshots under
+`target/cloud-library-delete-acceptance/native-*.png` were visually inspected, with no
+headless fallback. Local catalog/photos and the bucket remained. The test closed its
+isolated app afterward. Headless UI regressions also cover dismissal clearing consent.
+
+All eight stages of `cargo +1.95.0 xtask ci` passed
+(`target/cloud-library-delete-ci-verified.log`), including 777 UI tests, parity, layers,
+asset attribution and WASM. Final native build and presented-window acceptance logs are
+`target/cloud-library-delete-native-verified-build.log` and
+`target/cloud-library-delete-native-verified.log`. The recovery-list regression now
+scrolls the outer dialog to verify its footer remains reachable after adding the action;
+it retains conflict-choice and bounded-list assertions.

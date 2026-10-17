@@ -176,6 +176,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("file.importCloud", "Import to Cloud Storage…", None, "File"),
     ("file.adoptCloud", "Move Selected Photos to Cloud Storage…", None, "File"),
     ("dialog.cloudStorage", "Cloud Storage…", None, "File"),
+    ("dialog.cloudDelete", "Delete Entire Cloud Library…", None, ""),
     ("dialog.cloudSync", "Cloud Synchronization…", None, "File"),
     ("dialog.cloudMigrate", "Migrate Cloud Library…", None, "File"),
     ("file.addFolder", "Import from Folder…", None, "File"),
@@ -1337,6 +1338,13 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
         "dialog.cloudSync" if app.session.catalog.sync_state().is_none() => {
             crate::cloud_setup::open(app, p.get("connection").and_then(Value::as_str), false)
         }
+        "dialog.cloudDelete" => match app.session.catalog.sync_state() {
+            Some(state) => {
+                app.ui.dialog = Some(Dialog::CloudDelete { review: crate::cloud_erase::Review::new(state.library.clone()) });
+                Ok(Value::Null)
+            }
+            None => Err("Enable or join a cloud library before reviewing deletion.".into()),
+        },
         "dialog.cloudSync" => {
             let configured = match app.run("cloud.connections", json!({})) {
                 Ok(value) => value,

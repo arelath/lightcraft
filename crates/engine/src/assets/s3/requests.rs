@@ -12,6 +12,9 @@ use std::io::{Cursor, Read};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+mod versions;
+pub use versions::ObjectVersion;
+
 const MAX_REPLY: usize = 2 << 20;
 const MAX_CHECKPOINT: usize = 64 << 20;
 pub(super) const PART_BYTES: usize = 8 << 20;

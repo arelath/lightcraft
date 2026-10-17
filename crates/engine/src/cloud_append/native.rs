@@ -31,6 +31,16 @@ fn scan(connection: &S3Connection, mut request: ListRequest, cancel: &AtomicBool
 fn list(prefix: String, delimiter: bool) -> ListRequest {
     ListRequest { prefix, delimiter, continuation: None, start_after: None }
 }
+/// Fresh cooperative control check before original media can be recreated.
+pub(crate) fn ensure_readable(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result<()> {
+    let (keys, _) = scan(connection, list(control::prefix(&connection.prefix, library)?, false), cancel)?;
+    let mut records = Vec::new();
+    for key in control::latest(&keys) {
+        let reply = connection.get_small(&key, control::MAX_CONTROL_BYTES, cancel)?.ok_or(AssetError::Missing)?;
+        records.push((key, reply.bytes));
+    }
+    control::effective(&connection.prefix, library, &records).and_then(|c| c.may_read()).map_err(AssetError::Blocked)
+}
 pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint: bool, cancel: &AtomicBool) -> Result<crate::cloud_replication::Outcome> {
     synchronize_with_audit(connection, local, checkpoint, false, cancel)
 }

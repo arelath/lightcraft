@@ -112,7 +112,10 @@ pub struct State {
     pub fail_list_after: Option<usize>,
     pub late_object: Option<(String, Vec<u8>)>,
     pub objects: BTreeMap<String, Vec<u8>>,
-    multipart: BTreeMap<String, (String, BTreeMap<u16, Vec<u8>>)>,
+    pub multipart: BTreeMap<String, (String, BTreeMap<u16, Vec<u8>>)>,
+    pub historical_versions: BTreeMap<(String, String), Option<Vec<u8>>>,
+    pub track_versions: bool,
+    pub object_after_erasure_barrier: Option<(String, Vec<u8>)>,
     pub requests: Vec<(String, String)>,
     pub traffic: Vec<Traffic>,
     pub created: usize,
@@ -268,6 +271,7 @@ impl Fixture {
         let rows = String::from_utf8_lossy(&output.stdout).lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         (output, rows)
     }
+    #[allow(dead_code)]
     pub fn import(&self, library: &std::path::Path, large: bool) -> (String, PathBuf) {
         let result = self.import_unsynchronized(library, large);
         let (output, rows) = self.run(library, &[("cloud.syncEnable", json!({"connection":"personal"}))]);
@@ -323,6 +327,81 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
             (decode(key), decode(value))
         })
         .collect::<BTreeMap<_, _>>();
+    if method == "PUT"
+        && serde_json::from_slice::<Value>(&body).ok().is_some_and(|v| v["state"] == "deleted" || v["control"]["state"] == "deleted")
+        && let Some((key, bytes)) = state.object_after_erasure_barrier.take()
+    {
+        state.objects.insert(key, bytes);
+    }
+    if state.track_versions
+        && method == "PUT"
+        && query.is_empty()
+        && let Some(old) = state.objects.get(key)
+        && old != &body
+    {
+        let id = format!("v-{}", hash(old));
+        state.historical_versions.insert((key.to_owned(), id), Some(old.clone()));
+    }
+    if method == "GET" && query.contains_key("versions") {
+        let prefix = &query["prefix"];
+        let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+        let mut versions = BTreeMap::new();
+        for (key, body) in &state.objects {
+            if let Some(key) = key.strip_prefix("/photos/").filter(|k| k.starts_with(prefix)) {
+                let id = if state.track_versions { format!("v-{}", hash(body)) } else { "null".into() };
+                versions.insert((key.to_owned(), id), (Some(body.clone()), true));
+            }
+        }
+        for ((key, id), body) in &state.historical_versions {
+            if let Some(key) = key.strip_prefix("/photos/").filter(|k| k.starts_with(prefix)) {
+                let full = format!("/photos/{key}");
+                let latest = !state.objects.contains_key(&full)
+                    && state
+                        .historical_versions
+                        .iter()
+                        .filter(|((k, _), v)| k == &full && v.is_none())
+                        .map(|((_, v), _)| v)
+                        .next_back()
+                        .is_some_and(|v| v == id);
+                versions.insert((key.to_owned(), id.clone()), (body.clone(), latest));
+            }
+        }
+        let marker = query.get("key-marker").zip(query.get("version-id-marker"));
+        let entries: Vec<_> = versions.into_iter().filter(|((key, id), _)| marker.is_none_or(|(k, v)| (key, id) > (k, v))).collect();
+        let max = if state.list_page_size == 0 { 1000 } else { state.list_page_size };
+        let truncated = entries.len() > max;
+        let page: Vec<_> = entries.into_iter().take(max).collect();
+        let mut xml = format!("<ListVersionsResult><Prefix>{}</Prefix><IsTruncated>{truncated}</IsTruncated>", escape(prefix));
+        for ((key, id), (body, latest)) in &page {
+            let (kind, extra) = match body {
+                Some(body) => ("Version", format!("<Size>{}</Size><ETag>{}</ETag>", body.len(), escape(&tag(body)))),
+                None => ("DeleteMarker", String::new()),
+            };
+            xml.push_str(&format!(
+                "<{kind}><Key>{}</Key><VersionId>{}</VersionId><IsLatest>{latest}</IsLatest>{extra}</{kind}>",
+                escape(key),
+                escape(id)
+            ));
+        }
+        if truncated {
+            let ((key, id), _) = page.last().unwrap();
+            xml.push_str(&format!("<NextKeyMarker>{}</NextKeyMarker><NextVersionIdMarker>{}</NextVersionIdMarker>", escape(key), escape(id)));
+        }
+        xml.push_str("</ListVersionsResult>");
+        return (200, xml.into_bytes(), None, false);
+    }
+    if method == "GET" && query.contains_key("uploads") {
+        let prefix = &query["prefix"];
+        let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let mut xml = format!("<ListMultipartUploadsResult><Prefix>{}</Prefix><IsTruncated>false</IsTruncated>", escape(prefix));
+        for (id, (key, _)) in &state.multipart {
+            if let Some(key) = key.strip_prefix("/photos/").filter(|k| k.starts_with(prefix)) {
+                xml.push_str(&format!("<Upload><Key>{}</Key><UploadId>{}</UploadId></Upload>", escape(key), escape(id)));
+            }
+        }
+        xml.push_str("</ListMultipartUploadsResult>");
+        return (200, xml.into_bytes(), None, false);
+    }
     if method == "GET" && query.get("list-type").map(String::as_str) == Some("2") {
         assert_eq!(key, "/photos/");
         state.list_calls += 1;
@@ -385,6 +464,22 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
         if let Some(bytes) = state.objects.get(key) {
             response = bytes.clone();
             etag = Some(tag(bytes));
+        } else {
+            status = 404;
+        }
+    } else if method == "DELETE" && query.contains_key("versionId") {
+        let id = &query["versionId"];
+        if state.delete_conflict {
+            status = 412;
+        } else if state.historical_versions.remove(&(key.to_owned(), id.clone())).is_some() {
+            status = 204;
+        } else if state
+            .objects
+            .get(key)
+            .is_some_and(|body| if id == "null" { headers.get("if-match") == Some(&tag(body)) } else { id == &format!("v-{}", hash(body)) })
+        {
+            state.objects.remove(key);
+            status = 204;
         } else {
             status = 404;
         }
@@ -463,43 +558,51 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
         } else {
             if key.ends_with("/catalog/head.json") {
                 let head: Value = serde_json::from_slice(&body).unwrap();
-                let batch_key = format!("/photos/{}", head["tip"]["key"].as_str().unwrap());
-                let batch: Value = serde_json::from_slice(&state.objects[&batch_key]).unwrap();
-                for imported in batch.get("imports").and_then(Value::as_array).into_iter().flatten() {
-                    for field in ["original", "smartPreview", "thumbnail"] {
-                        let blob = &imported["asset"][field];
-                        let object = format!("/photos/{}", blob["remote"]["key"].as_str().unwrap());
-                        assert_eq!(
-                            hash(&state.objects[&object]),
-                            blob["id"].as_str().unwrap(),
-                            "no catalog head may reference absent or wrong bytes"
-                        );
-                    }
-                }
-                for mutation in batch.get("mutations").and_then(Value::as_array).into_iter().flatten() {
-                    for change in mutation["changes"].as_array().unwrap().iter().filter(|change| change["field"] == "content") {
-                        let asset = &change["value"]["asset"];
-                        let mut blobs = vec![&asset["original"]];
-                        blobs.extend([asset.get("smartPreview"), asset.get("thumbnail")].into_iter().flatten().filter(|blob| !blob.is_null()));
-                        blobs.extend(asset.get("associated").and_then(Value::as_object).into_iter().flat_map(|map| map.values()));
-                        for blob in blobs {
+                if head["control"]["state"] == "deleted" {
+                    assert_eq!(head["tip"]["hash"], "0".repeat(64));
+                    assert_eq!(head["generation"], 1);
+                    assert!(head["checkpoint"].is_null());
+                    assert!(head["control"]["migration"].is_null());
+                    assert!(head["control"]["successor"].is_null());
+                } else {
+                    let batch_key = format!("/photos/{}", head["tip"]["key"].as_str().unwrap());
+                    let batch: Value = serde_json::from_slice(&state.objects[&batch_key]).unwrap();
+                    for imported in batch.get("imports").and_then(Value::as_array).into_iter().flatten() {
+                        for field in ["original", "smartPreview", "thumbnail"] {
+                            let blob = &imported["asset"][field];
                             let object = format!("/photos/{}", blob["remote"]["key"].as_str().unwrap());
                             assert_eq!(
                                 hash(&state.objects[&object]),
                                 blob["id"].as_str().unwrap(),
-                                "mutation references only verified uploaded bytes"
+                                "no catalog head may reference absent or wrong bytes"
                             );
-                            assert_eq!(state.objects[&object].len() as u64, blob["size"].as_u64().unwrap());
                         }
                     }
-                }
-                if let Some(checkpoint) = head.get("checkpoint") {
-                    let object = format!("/photos/{}", checkpoint["object"]["key"].as_str().unwrap());
-                    assert_eq!(hash(&state.objects[&object]), checkpoint["object"]["hash"].as_str().unwrap());
-                }
-                if state.stop_after_recovery_prefix && head.get("checkpoint").is_some_and(|checkpoint| checkpoint["covers"] != batch["parent"]) {
-                    state.stop_after_recovery_prefix = false;
-                    state.unauthorized = true;
+                    for mutation in batch.get("mutations").and_then(Value::as_array).into_iter().flatten() {
+                        for change in mutation["changes"].as_array().unwrap().iter().filter(|change| change["field"] == "content") {
+                            let asset = &change["value"]["asset"];
+                            let mut blobs = vec![&asset["original"]];
+                            blobs.extend([asset.get("smartPreview"), asset.get("thumbnail")].into_iter().flatten().filter(|blob| !blob.is_null()));
+                            blobs.extend(asset.get("associated").and_then(Value::as_object).into_iter().flat_map(|map| map.values()));
+                            for blob in blobs {
+                                let object = format!("/photos/{}", blob["remote"]["key"].as_str().unwrap());
+                                assert_eq!(
+                                    hash(&state.objects[&object]),
+                                    blob["id"].as_str().unwrap(),
+                                    "mutation references only verified uploaded bytes"
+                                );
+                                assert_eq!(state.objects[&object].len() as u64, blob["size"].as_u64().unwrap());
+                            }
+                        }
+                    }
+                    if let Some(checkpoint) = head.get("checkpoint") {
+                        let object = format!("/photos/{}", checkpoint["object"]["key"].as_str().unwrap());
+                        assert_eq!(hash(&state.objects[&object]), checkpoint["object"]["hash"].as_str().unwrap());
+                    }
+                    if state.stop_after_recovery_prefix && head.get("checkpoint").is_some_and(|checkpoint| checkpoint["covers"] != batch["parent"]) {
+                        state.stop_after_recovery_prefix = false;
+                        state.unauthorized = true;
+                    }
                 }
                 lose = std::mem::take(&mut state.lost_head);
                 if state.lost_head_matching.as_ref().is_some_and(|text| String::from_utf8_lossy(&body).contains(text.as_str())) {

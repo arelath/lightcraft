@@ -183,6 +183,9 @@ impl From<crate::cloud_control::Blocked> for CloudFailure {
         use crate::cloud_control::Blocked;
         let (kind, recovery) = match &blocked {
             Blocked::UpdateToRead(_) | Blocked::UpdateToWrite(_) | Blocked::UpdateToUpgrade(_) => (FailureKind::Unsupported, Some(UPDATE)),
+            Blocked::Deleted => {
+                (FailureKind::Unsupported, Some("This cloud library was deleted. Use a new library and storage folder; local copies remain."))
+            }
             Blocked::Retired(_) => (FailureKind::Unsupported, Some(RETIRED)),
             Blocked::Maintenance { .. } => (FailureKind::Contention, Some(MAINTENANCE)),
             Blocked::Conflict(_) => (FailureKind::Contention, None),

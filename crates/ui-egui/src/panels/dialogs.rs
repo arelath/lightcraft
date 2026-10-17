@@ -231,6 +231,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::Import { .. } => "Import Photos",
         Dialog::CloudStorage { .. } => "Cloud Storage",
         Dialog::CloudSync { .. } => "Cloud Synchronization",
+        Dialog::CloudDelete { .. } => "Delete Entire Cloud Library",
         #[cfg(not(target_arch = "wasm32"))]
         Dialog::CloudSetup { setup } => setup.title(),
         Dialog::CloudMigration { .. } => "Migrate Cloud Library",
@@ -300,6 +301,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
             Dialog::CloudStorage { .. }
             | Dialog::CloudImport { .. }
             | Dialog::CloudSync { .. }
+            | Dialog::CloudDelete { .. }
             | Dialog::CloudMigration { .. } => 480.0,
             #[cfg(not(target_arch = "wasm32"))]
             Dialog::CloudSetup { .. } => 480.0,
@@ -1081,8 +1083,13 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                     crate::cloud_conflicts::list(app, ui, &status);
                     crate::cloud_retention::body(app, ui);
+                    ui.separator();
+                    let r=ui.button(egui::RichText::new(crate::i18n::tr("Delete entire cloud library…")).color(t.reject));
+                    crate::widgets::register(ui.ctx(),"button:cloudDeleteOpen",r.rect);
+                    if r.clicked(){let _=app.run("dialog.cloudDelete",json!({}));}
                     crate::cloud_conflicts::deleted(app, ui, &status);
                 }
+                Dialog::CloudDelete { review } => crate::cloud_erase::body(app,ui,review),
                 Dialog::Settings { tab } => crate::panels::settings::body(app, ui, tab),
                 Dialog::SamModel { error, .. } => sam_model_body(app, ui, error.as_deref()),
                 Dialog::KeywordTag {
@@ -1300,7 +1307,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 let informational = unusable_model
                     || matches!(
                         dlg,
-                        Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
+                        Dialog::CloudDelete { .. } | Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
                     );
                 let sam = &app.session.segmenter;
                 let (sam_installed, sam_running, sam_failed) = (sam.installed(), sam.download_status().running, sam.download_status().error.is_some());
@@ -1898,7 +1905,7 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         }
         Dialog::RemoveFolder { path, disk, .. } => app.run("library.removeFolder", json!({"path": path, "disk": disk})),
         d @ Dialog::SynchronizeFolder { .. } => crate::sync::confirm(app, d),
-        Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } => Ok(serde_json::Value::Null),
+        Dialog::CloudDelete { .. } | Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } => Ok(serde_json::Value::Null),
     }
 }
 

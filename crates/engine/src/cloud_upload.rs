@@ -22,8 +22,11 @@ use std::time::Duration;
 const PART_BYTES: usize = 8 << 20;
 const MAX_RECEIPT: u64 = 4 << 20;
 mod cleanup;
+mod erase;
 mod finalize;
 mod retention;
+pub(crate) use erase::ensure_not_erased;
+pub use erase::{start as erase_library, status as erasure_status};
 mod stages;
 mod transitions;
 pub use cleanup::{observed as observed_cleanup, start as cleanup};
@@ -515,6 +518,7 @@ enum Maintenance {
     Receipt,
     Cleanup { connection: String },
     Retention { connection: String, apply: bool },
+    Erase { connection: String, apply: bool },
 }
 
 struct Pending {
@@ -534,7 +538,9 @@ struct Pending {
 impl Pending {
     fn maintenance_connection(&self) -> Option<&str> {
         match &self.maintenance {
-            Some(Maintenance::Cleanup { connection } | Maintenance::Retention { connection, .. }) => Some(connection),
+            Some(Maintenance::Cleanup { connection } | Maintenance::Retention { connection, .. } | Maintenance::Erase { connection, .. }) => {
+                Some(connection)
+            }
             _ => None,
         }
     }
@@ -559,7 +565,9 @@ pub struct Uploads {
 }
 impl Uploads {
     pub(crate) fn reclaiming(&self) -> bool {
-        self.pending.iter().any(|pending| matches!(pending.maintenance, Some(Maintenance::Retention { apply: true, .. })))
+        self.pending
+            .iter()
+            .any(|pending| matches!(pending.maintenance, Some(Maintenance::Retention { apply: true, .. } | Maintenance::Erase { apply: true, .. })))
     }
     pub fn health(&self) -> Value {
         self.health.view()
@@ -631,9 +639,11 @@ fn task_health(health: &mut crate::cloud_status::ResourceHealth, s: &Session, pe
         }
     }
     if pending.ids.is_empty()
-        && let Some(Maintenance::Cleanup { connection } | Maintenance::Retention { connection, .. }) = &pending.maintenance
+        && let Some(Maintenance::Cleanup { connection } | Maintenance::Retention { connection, .. } | Maintenance::Erase { connection, .. }) =
+            &pending.maintenance
     {
-        let kind = if matches!(pending.maintenance, Some(Maintenance::Retention { .. })) { "retention" } else { "cleanup" };
+        let kind =
+            if matches!(pending.maintenance, Some(Maintenance::Retention { .. } | Maintenance::Erase { .. })) { "retention" } else { "cleanup" };
         let key = format!("{kind}:{connection}");
         match result {
             Ok(_) => health.success(&key),
@@ -935,6 +945,7 @@ fn save_preflight(s: &mut Session, ready: &[Item], skipped: &mut [Value], verify
 }
 
 fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
+    ensure_not_erased(s)?;
     if !abort && s.catalog.sync_state().is_none() {
         return Err(error(
             "set up cloud sync (Set Up Cloud Sync…, or cloud.syncEnable) before uploading; choose the storage protocol explicitly; staged originals retained",

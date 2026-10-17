@@ -32,6 +32,8 @@ const MAX_TEXT: usize = 128;
 #[serde(rename_all = "camelCase")]
 pub enum State {
     Active,
+    /// Permanently erased; only this non-personal barrier is retained.
+    Deleted,
     Upgrading,
     /// The library moved to another publication protocol; this authority accepts
     /// no further commits and points at its successor.
@@ -133,6 +135,7 @@ pub enum Blocked {
     },
     /// The library moved to another protocol.
     Retired(Successor),
+    Deleted,
     Invalid(String),
     /// Append mode has no CAS: two different control records at the same revision
     /// leave the intended state unknown, so publication pauses (receiving continues).
@@ -158,6 +161,9 @@ impl std::fmt::Display for Blocked {
                 "cloud library moved to {} (epoch {}); use Migrate Cloud Library… (cloud.upgradeLibrary) on this device to rejoin; pending work retained",
                 successor.protocol, successor.epoch
             ),
+            Self::Deleted => {
+                write!(f, "this cloud library was permanently deleted; synchronization is disabled; use a new library and storage folder")
+            }
             Self::Invalid(why) => write!(f, "invalid cloud library control record ({why}); remote data preserved, local work retained"),
             Self::Conflict(why) => write!(
                 f,
@@ -235,7 +241,7 @@ impl Control {
             return bad("active metadata root does not belong to its epoch");
         }
         match (self.state, &self.migration, &self.successor) {
-            (State::Active, None, None) => {}
+            (State::Active | State::Deleted, None, None) => {}
             (State::Upgrading, Some(m), None) => {
                 if !valid_text(&m.id) || !valid_text(&m.owner) || !hex(&m.token) || !hex(&m.source.tip) || m.source.generation == 0 {
                     return bad("migration identity");
@@ -256,6 +262,9 @@ impl Control {
     /// Reading: any valid, readable control (including maintenance and retirement).
     pub fn may_read(&self) -> Outcome<()> {
         self.validate()?;
+        if self.state == State::Deleted {
+            return Err(Blocked::Deleted);
+        }
         if self.minimum_reader > READER {
             return Err(Blocked::UpdateToRead(format!("schema reader {}", self.minimum_reader)));
         }
@@ -274,6 +283,22 @@ impl Control {
             (State::Retired, _, Some(s)) => Err(Blocked::Retired(s.clone())),
             _ => Err(Blocked::Invalid("state".into())),
         }
+    }
+    /// Irreversible publication barrier. The erase worker separately verifies its target.
+    pub fn delete(&self) -> Outcome<Self> {
+        self.validate()?;
+        if self.state == State::Deleted {
+            return Ok(self.clone());
+        }
+        if self.state != State::Retired {
+            self.may_publish()?;
+        }
+        let mut next = self.next()?;
+        next.state = State::Deleted;
+        next.migration = None;
+        next.successor = None;
+        next.validate()?;
+        Ok(next)
     }
     fn next(&self) -> Outcome<Self> {
         let mut next = self.clone();

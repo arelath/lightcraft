@@ -227,3 +227,17 @@ fn head_v4_carries_control_and_older_heads_read_as_active_epoch_one() {
     future["control"] = serde_json::to_value(Control::initial("library")).unwrap();
     assert!(Head::decode(&serde_json::to_vec(&future).unwrap()).err().unwrap().contains("newer LightCraft"));
 }
+
+#[test]
+fn deleted_library_blocks_reads_publication_and_upgrade_and_cannot_reactivate() {
+    for active in [Control::initial("library"), Control::initial_append("library")] {
+        let deleted = active.delete().unwrap();
+        assert_eq!(deleted.state, State::Deleted);
+        assert!(matches!(deleted.may_read(), Err(Blocked::Deleted)));
+        assert!(matches!(deleted.may_publish(), Err(Blocked::Deleted)));
+        assert!(deleted.begin("upgrade", Plan::Rebase, Boundary { tip: "a".repeat(64), generation: 1 }, "device", &"b".repeat(64), 0).is_err());
+        assert_eq!(deleted.delete().unwrap(), deleted);
+        assert_eq!(Control::decode(&serde_json::to_value(&deleted).unwrap()).unwrap(), deleted);
+        assert!(crate::cloud_append::control::publication(Ok(deleted)).is_err());
+    }
+}

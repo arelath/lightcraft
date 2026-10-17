@@ -65,7 +65,11 @@ uploads remain unsupported.
   distinguishes temporary session bytes from durably saved offline copies. Browser
   storage remains subject to browser eviction/site-data removal; see [quota recovery](browser-cloud.md#verified-cache-offline-selections-and-quota-recovery). The maintained [personal signer deployment and capability matrix](browser-signer.md)
   use `lightcraft-cli cloud-signer`, exact-origin CORS and private server credentials.
-- Deletion retains complete objects, revisions, tombstones and receipt archives.
+- Ordinary photo deletion retains complete objects, revisions, tombstones and receipt archives.
+  Desktop Cloud Synchronization also offers a separate [whole-library erase](cloud-retention.md#delete-an-entire-cloud-library),
+  requiring a fresh storage review, a stopped-device acknowledgement and the exact typed
+  phrase `DELETE CLOUD LIBRARY`. It removes historical versions and incomplete uploads,
+  retaining only deletion barriers, the bucket and local device copies.
   Native [retention tooling](cloud-retention.md) previews/apply-checks unreferenced,
   unversioned orphan media; AWS S3 apply requires a reviewed token and stopped writers.
   Custom endpoints/B2 remain preview-only. Multipart cleanup only retires incomplete
@@ -104,6 +108,15 @@ uploads remain unsupported.
 The checklist above describes this revision; use the [task checkboxes](cloud-reliability-tasks.md)
 for later completion state. Verification details and provider/account caveats belong
 to the dated archive, not to current feature claims.
+
+## Starting with an empty bucket
+
+The bucket must already exist. Connection checking only lists/reads and does not create
+or write objects. An empty correctly configured storage folder is a valid result:
+setup says there is no library yet and offers New Library. Enable & Synchronize creates
+the remote library metadata during its first synchronization. Saving a connection alone
+does not enable synchronization or move existing local photos into cloud storage.
+A successful read-only check does not establish PUT or erase/version permissions.
 
 ## Adopting existing photos
 
@@ -466,6 +479,10 @@ remote seed is retained for safe retry. See [migration operation](cloud-sync-pro
 and [browser requirements](browser-cloud.md).
 
 ## Revision history
+
+CUX.8 (2026-10-16): guarded native whole-library erasure removes historical versions and
+unfinished multipart uploads, retains terminal writer barriers, and blocks restored
+catalog uploads before media writes. Empty existing buckets initialize on first sync.
 
 CR.19 (2026-10-17): shared original input/geometry checks across render, conversion, merge and denoise; explicit native/browser decode budgets and quantitative status reporting.
 

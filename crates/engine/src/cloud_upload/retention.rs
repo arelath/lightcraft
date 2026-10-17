@@ -21,7 +21,7 @@ fn digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 /// Deliberately narrow: unknown/future layouts are retained.
-fn media_hash<'a>(prefix: &str, key: &'a str) -> Option<&'a str> {
+pub(super) fn media_hash<'a>(prefix: &str, key: &'a str) -> Option<&'a str> {
     let tail = key.strip_prefix(prefix)?.strip_prefix('/')?;
     let parts: Vec<_> = tail.split('/').collect();
     match parts.as_slice() {

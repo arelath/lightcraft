@@ -997,6 +997,9 @@ pub enum Dialog {
         folder: String,
         catalog: Option<String>,
     },
+    CloudDelete {
+        review: crate::cloud_erase::Review,
+    },
     /// Confirm moving photos to Recently Deleted.
     ConfirmDelete {
         count: usize,

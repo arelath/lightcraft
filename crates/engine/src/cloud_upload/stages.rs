@@ -193,6 +193,17 @@ impl Item {
             self.write_receipt(&receipt, cancel)?;
             self.phase(&receipt, events, cancel)?;
             for blob in blobs(&receipt.imported.asset).cloned().collect::<Vec<_>>() {
+                // A restored catalog has no local erasure marker. Read the remote
+                // terminal barrier before any media PUT or multipart recovery.
+                if let Some(local) = &self.sync {
+                    if local.protocol.is_head() {
+                        if let Some((head, _)) = crate::cloud_publication::read_head(&self.connection, cancel).map_err(|e| error(e.to_string()))? {
+                            head.control().and_then(|c| c.may_read().map_err(|e| e.to_string())).map_err(error)?;
+                        }
+                    } else {
+                        crate::cloud_append::native::ensure_readable(&self.connection, &local.library, cancel).map_err(|e| error(e.to_string()))?;
+                    }
+                }
                 let verified = self.remote_verified(&blob, cancel, task, media).map_err(|e| {
                     remote_invalid |= matches!(e, AssetError::Integrity);
                     error(e.to_string())

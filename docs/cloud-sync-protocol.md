@@ -1,6 +1,6 @@
 # Direct bucket synchronization
 
-Last updated: 2026-10-17
+Last updated: 2026-10-16
 
 This is the current normative metadata protocol and owner-durability contract.
 [Current behavior and limits](cloud-storage-implementation.md), the
@@ -116,7 +116,9 @@ Head polling downloads only batches since the durable cursor when that cursor re
 the tail. An older cursor falls back to a verified checkpoint plus its tail. Browsing reads
 the local catalog throughout. `checkpoint:true` publishes a checkpoint before conditionally
 advancing the head. A checkpoint boundary is inclusive: readers do not fetch the covered batch.
-No maintenance command currently removes remote objects. Operators may expire covered change
+Ordinary maintenance preserves remote history; explicit `cloud.deleteLibrary` is the
+separate whole-library erasure exception (see [cloud deletion](cloud-retention.md#delete-an-entire-cloud-library)).
+Operators may expire covered change
 objects only after retaining a referenced checkpoint and its tail. Originals, revisions,
 tombstones and deduplication receipts are retained; this is not a remote garbage collector.
 Rebootstrap merges pending offline mutations instead of replacing local state.
@@ -984,6 +986,16 @@ Active(epoch e, root R)
   → Retired(successor)         appendLog: only token T; seed published first
   → Active(e)                  cancel before activation: only token T
 ```
+
+Whole-library erasure adds a terminal `Deleted` control state with no migration or
+successor. It rejects reads, publication and upgrades. After reviewed typed consent,
+the native eraser installs this barrier before deleting data. A conditional-head barrier
+uses the observed ETag and replaces personal-history references with inert placeholders;
+this terminal transition deliberately does not append a batch or keep a readable tip.
+Append erasure publishes an immutable Deleted control record at the next revision.
+Old envelopes/history are removed, retaining only the terminal barriers. Other devices
+must be stopped; append control is cooperative. Native local deletion-intent markers
+keep the initiating device from uploading again, including after interruption/restart.
 
 The lease decides only when another device may *attempt* a takeover; wall clocks never
 authorize a commit. A takeover keeps the migration id, plan and frozen source, issues a new

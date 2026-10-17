@@ -481,7 +481,7 @@ impl Session {
     pub(crate) fn ensure_reclamation_idle(&self) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         if self.cloud_uploads.reclaiming() {
-            return Err(EngineError::Other("orphan cloud reclamation is applying a frozen preview; wait for completion or cancel it in Activity before editing or switching libraries".into()));
+            return Err(EngineError::Other("cloud storage deletion is applying a frozen preview; wait for completion or cancel it in Activity before editing, resuming synchronization or switching libraries".into()));
         }
         Ok(())
     }
@@ -526,6 +526,20 @@ impl Session {
                 | "albums.list"
         ) {
             self.ensure_reclamation_idle()?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(
+            id,
+            "cloud.sync"
+                | "cloud.syncEnable"
+                | "cloud.migrateAppend"
+                | "cloud.upgradeLibrary"
+                | "cloud.prepareMigration"
+                | "cloud.import"
+                | "cloud.adopt"
+                | "cloud.recoverImports"
+        ) {
+            crate::cloud_upload::ensure_not_erased(self)?;
         }
         let log_start = self.pending_log.len();
         let was_active = self.active();

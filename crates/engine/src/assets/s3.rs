@@ -443,7 +443,7 @@ mod presign;
 pub use presign::{BrowserAuthorization, BrowserRequest};
 
 mod requests;
-pub use requests::{ObjectReply, ObjectStat, PutCondition};
+pub use requests::{ObjectReply, ObjectStat, ObjectVersion, PutCondition};
 
 #[cfg(test)]
 mod tests {
