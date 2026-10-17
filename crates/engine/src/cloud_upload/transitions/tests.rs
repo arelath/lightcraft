@@ -116,6 +116,21 @@ fn deleted_or_relinked_photo_completes_retained_phases_after_restart_without_res
 }
 
 #[test]
+fn superseded_local_revisions_ignore_late_phases_and_never_claim_remote_readiness() {
+    let (mut catalog, mut intent, asset) = fixture(SyncProtocol::ConditionalHead);
+    intent.state = UploadState::Superseded;
+    catalog.apply(Op::SetUploadIntent { id: "import".into(), intent: Some(Box::new(intent.clone())) }).unwrap();
+    for state in [UploadState::Uploading, UploadState::ObjectsVerified, UploadState::Synchronized, UploadState::Failed] {
+        let update = update(state, asset.blobs().map(|b| b.remote.key.clone()).collect());
+        assert!(matches!(phase(context(&intent), &catalog, Some(&intent), update).unwrap(), IntentDecision::Unchanged));
+    }
+    assert!(!media_ready(intent.state, &asset, &intent.verified));
+    assert_eq!(catalog.sync_overview().queued_files, 0);
+    assert_eq!(catalog.sync_overview().queued_bytes, 0);
+    assert_eq!(catalog.sync_overview().failed_uploads, 0);
+}
+
+#[test]
 fn stale_failures_and_wrong_owners_preserve_acknowledgement_but_remote_damage_revokes_it() {
     let (catalog, mut intent, asset) = fixture(SyncProtocol::ConditionalHead);
     intent.state = UploadState::Synchronized;

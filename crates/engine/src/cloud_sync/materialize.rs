@@ -143,6 +143,9 @@ fn device_local_photo(catalog: &Catalog, connection: &str, id: PhotoId) -> bool 
 }
 
 fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
+    if catalog.local_sync_baseline().is_some() {
+        return Err(error("local edits await explicit rejoin; turn on cloud sync on desktop before receiving cloud changes"));
+    }
     let old = catalog.sync_state();
     let mut selected: BTreeSet<_> = state
         .documents
@@ -662,7 +665,7 @@ fn acknowledged_uploads(
         .filter_map(|(id, intent)| {
             let global = catalog.cloud_identity(&format!("photo:{}", intent.photo_id.0))?;
             let asset = catalog.asset(&intent.asset_id)?;
-            if intent.state == lightcraft_catalog::uploads::UploadState::Synchronized
+            if matches!(intent.state, lightcraft_catalog::uploads::UploadState::Synchronized | lightcraft_catalog::uploads::UploadState::Superseded)
                 || asset.original.remote.connection != state.connection
                 || !content.contains_key(&(format!("photo:{global}"), intent.asset_id.0.clone()))
                 || asset.blobs().any(|blob| !intent.verified.contains(&blob.remote.key))

@@ -65,6 +65,34 @@ through explicit recovery. Browser Pause remains available, but browser conversi
 to permanent local files is disabled with desktop guidance: browser cache persistence
 does not provide this durability guarantee.
 
+### Permanent-local edits and explicit rejoin (CR.60)
+
+While synchronization is off, the ordinary catalog is the durable local overlay. The
+first local edit atomically journals a device-local projection baseline with that edit;
+later edits do not append cloud mutations or reserve cloud author sequences. The shared
+causal state and existing pending mutation IDs/payloads remain frozen. The baseline is
+bounded to 64 MiB and the existing entity/field bounds; it is local catalog data, excluded
+from cloud publication. Catalog format 21 records this baseline and older builds refuse
+the newer local catalog.
+
+Explicit re-enable claims the current writer, compares the final local projection with
+the saved baseline, and prepares bounded mutations using the frozen causal context
+before receiving newer cloud state. Concurrent remote edits therefore remain alternatives
+rather than becoming observed edits that local rejoin silently replaces. The prepared
+mutations and baseline removal share one catalog transaction; persistence precedes the
+mode-file switch and resumption of remote work. A retained baseline forces local-only
+mode on restart, even if a restored mode file says otherwise. Incoming materialization
+refuses an unmerged baseline. Rejoin still enforces cloud mutation/outbox capacity;
+refusal leaves sync off, local edits saved and local editing available.
+
+Unpublished intermediate managed revisions replaced during the disconnected period are
+marked `superseded`. They retain immutable manifests and protected staged bytes, are
+excluded from cloud queue counts and upload selection, and cannot become remotely
+acknowledged through a stale worker. A current or pending content reference reactivates
+the corresponding upload. Previously frozen pending imports are never superseded or
+rewritten. New file-backed photos retain their edits and ordinary automatic enrollment
+runs after rejoin. Superseded local history is not a cloud backup guarantee.
+
 ### Background synchronization
 
 `cloud.sync {wait?, checkpoint?}` reconciles and publishes it. Native GUI synchronization

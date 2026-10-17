@@ -77,6 +77,9 @@ pub(super) fn phase(context: PhaseContext<'_>, catalog: &Catalog, current: Optio
     if context.asset != Some(&current.asset_id) {
         return Err(error("import's asset changed; staged data preserved"));
     }
+    if current.state == UploadState::Superseded {
+        return Ok(IntentDecision::Unchanged);
+    }
     if !ContentReadiness::of(catalog, current).eligible() {
         return Err(error("photo was deleted or changed; upload stopped and original preserved"));
     }

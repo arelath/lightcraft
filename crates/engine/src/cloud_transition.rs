@@ -183,6 +183,27 @@ pub(crate) fn enable(s: &mut Session) -> Result<()> {
     if !s.cloud_transition.local_only() {
         return Ok(());
     }
+    // Author against the frozen causal base before receiving anything newer.
+    // The catalog transaction retains original pending IDs and clears the local
+    // baseline only alongside its newly prepared aggregate mutations.
+    s.claim_cloud_owner()?;
+    let clock = crate::cloud_sync::undo_clock(&s.catalog);
+    let context = |message: String| format!("Cannot turn on cloud sync: {message}. Cloud sync remains off; local edits are saved.");
+    let rejoin = crate::cloud_sync::rejoin(&s.catalog).map_err(|e| match e {
+        EngineError::Catalog(lightcraft_catalog::CatalogError::Capacity(message)) => {
+            EngineError::Catalog(lightcraft_catalog::CatalogError::Capacity(context(message)))
+        }
+        EngineError::Other(message) => error(context(message)),
+        other => other,
+    })?;
+    s.apply_received(rejoin)?;
+    s.persist()?;
+    let base = crate::cloud_sync::undo_base(&s.catalog, &clock);
+    for entry in s.undo.iter_mut().chain(s.redo.iter_mut()) {
+        if entry.cloud_base.as_ref().is_some_and(|base| base.is_empty()) {
+            entry.cloud_base = base.clone();
+        }
+    }
     let previous = s.cloud_transition.mode.clone();
     let previous_pause = s.cloud_paused;
     s.cloud_paused = false;
@@ -452,6 +473,11 @@ impl Session {
                 return Err(e);
             }
         }
+        // A retained catalog baseline is authoritative evidence of local edits,
+        // even if an older/restored side file says synchronization was enabled.
+        if self.catalog.local_sync_baseline().is_some() {
+            self.cloud_transition.mode.local_only = true;
+        }
         if let Some(resolver) = &self.media.asset_resolver {
             resolver.set_local_only(self.cloud_transition.local_only());
         }
@@ -712,6 +738,76 @@ mod tests {
         assert_eq!(s.execute("cloud.overview", &json!({})).unwrap()["syncEnabled"], false);
         assert_eq!(s.execute("cloud.syncStatus", &json!({})).unwrap()["enabled"], false);
         assert!(s.catalog.sync_state().is_some());
+    }
+    #[test]
+    fn permanent_local_edits_exceed_outbox_capacity_then_rejoin_with_original_causality() {
+        use lightcraft_catalog::{ColorLabel, replication::Change};
+        let scratch = Scratch::new();
+        let mut s = scratch.open();
+        bind(&mut s);
+        s.commit("base", Op::SetLabelName { label: ColorLabel::Red, name: Some("base".into()) }).unwrap();
+        let frozen = s.catalog.sync_state().unwrap().clone();
+        let mut peer = SyncState::restore_durable(&frozen.portable(), "peer".into(), "personal".into()).unwrap();
+        peer.enqueue(vec![Change {
+            entity: "library:library".into(),
+            field: "label.Red".into(),
+            base: peer.winning("library:library", "label.Red").map(|(stamp, _)| stamp),
+            value: json!("remote"),
+        }])
+        .unwrap();
+        s.cloud_transition.mode.local_only = true;
+        s.save_cloud_mode().unwrap();
+        let before_invalid = s.catalog.to_snapshot();
+        assert!(s.commit("invalid", Op::SetRating { id: lightcraft_catalog::PhotoId(999), rating: 4 }).is_err());
+        assert_eq!(s.catalog.to_snapshot(), before_invalid, "baseline and edit must apply atomically");
+        for n in 0..=lightcraft_catalog::replication::MAX_PENDING {
+            s.commit("local", Op::SetLabelName { label: ColorLabel::Red, name: Some(format!("local{n}")) }).unwrap();
+        }
+        s.undo_step().unwrap();
+        assert_eq!(s.catalog.custom_label_name(ColorLabel::Red), Some("local9999"));
+        s.redo_step().unwrap();
+        assert_eq!(s.catalog.sync_state().unwrap(), &frozen, "local edits never grow or rewrite the cloud outbox");
+        assert!(
+            crate::cloud_sync::incoming_checkpoint(&s.catalog, &peer.portable(), &Default::default(), "a".repeat(64), 1).is_err(),
+            "receive cannot overwrite the unmerged local catalog"
+        );
+        s.close_library().unwrap();
+        drop(s);
+        let mut s = scratch.open();
+        assert!(s.cloud_transition.local_only());
+        assert_eq!(s.catalog.custom_label_name(ColorLabel::Red), Some("local10000"));
+        assert_eq!(s.catalog.sync_state().unwrap(), &frozen);
+        assert_eq!(s.catalog.local_sync_baseline().unwrap().clock, frozen.clock);
+        enable(&mut s).unwrap();
+        assert!(!s.cloud_transition.local_only());
+        assert!(s.catalog.local_sync_baseline().is_none());
+        let joined = s.catalog.sync_state().unwrap();
+        assert_eq!(joined.pending.len(), frozen.pending.len() + 1, "only the final local difference is queued");
+        for (id, mutation) in &frozen.pending {
+            assert_eq!(joined.pending.get(id), Some(mutation), "original pending identities and payloads survive rejoin");
+        }
+        let received = crate::cloud_sync::incoming_checkpoint(&s.catalog, &peer.portable(), &Default::default(), "a".repeat(64), 1).unwrap();
+        s.apply_received(received).unwrap();
+        let register = &s.catalog.sync_state().unwrap().documents["library:library"]["label.Red"].0;
+        assert_eq!(register.len(), 2, "remote and disconnected local edits remain concurrent alternatives");
+        assert!(register.values().any(|v| v == "remote"));
+        assert!(register.values().any(|v| v == "local10000"));
+    }
+    #[test]
+    fn rejoin_limit_refusal_keeps_local_edits_baseline_and_cloud_mode_off() {
+        let scratch = Scratch::new();
+        let mut s = scratch.open();
+        bind(&mut s);
+        s.cloud_transition.mode.local_only = true;
+        s.save_cloud_mode().unwrap();
+        let value = "a".repeat(crate::cloud_sync::MAX_ENTITY_BYTES + 1);
+        s.commit("large local value", Op::SetLabelName { label: lightcraft_catalog::ColorLabel::Red, name: Some(value.clone()) }).unwrap();
+        let pending = s.catalog.sync_state().unwrap().pending.clone();
+        assert!(enable(&mut s).unwrap_err().to_string().contains("local edits are saved"));
+        assert!(s.cloud_transition.local_only());
+        assert!(s.catalog.local_sync_baseline().is_some());
+        assert_eq!(s.catalog.custom_label_name(lightcraft_catalog::ColorLabel::Red), Some(value.as_str()));
+        assert_eq!(s.catalog.sync_state().unwrap().pending, pending);
     }
     #[test]
     fn failed_mode_write_retains_previous_mode_and_history() {

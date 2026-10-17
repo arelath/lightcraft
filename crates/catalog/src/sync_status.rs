@@ -116,6 +116,9 @@ fn build(cat: &Catalog) -> Overview {
     let mut failed_files = BTreeSet::new();
     let mut queue_blobs = BTreeSet::new();
     for (id, intent) in cat.upload_intents() {
+        if intent.state == UploadState::Superseded {
+            continue;
+        }
         if out.first_upload_error.is_none() {
             out.first_upload_error = intent
                 .blocked

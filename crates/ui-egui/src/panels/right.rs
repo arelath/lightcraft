@@ -857,6 +857,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     UploadState::ObjectsVerified => "Objects verified · publication pending",
                     UploadState::Published => "Published · saving synchronization state",
                     UploadState::Synchronized => "Original synchronized",
+                    UploadState::Superseded => "Replaced locally · original retained on this device",
                 };
                 ui.label(egui::RichText::new(crate::i18n::tr(label)).color(t.text_dim));
                 if let Some(message) = &upload.error {

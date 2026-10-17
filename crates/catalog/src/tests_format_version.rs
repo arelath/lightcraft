@@ -216,8 +216,9 @@ fn op_variants_are_versioned() {
             Op::SetAlbumRules { .. } | Op::AddAlbum { .. } => 15,
             Op::SetSyncState { .. } | Op::PatchSyncState { .. } => 19,
             Op::SetMediaKind { .. } => 20,
+            Op::SetLocalSyncBaseline { .. } => 21,
         }
     }
-    let newest = since(&Op::SetMediaKind { id: PhotoId(1), kind: MediaKind::Raw });
+    let newest = since(&Op::SetLocalSyncBaseline { baseline: None });
     assert_eq!(newest, VERSION, "the newest op shape's version must be the current format version");
 }

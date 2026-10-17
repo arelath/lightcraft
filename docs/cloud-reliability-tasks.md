@@ -5,8 +5,8 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
-Current status (2026-10-17): CR.1–CR.42, CR.46–CR.47, CR.56–CR.59, CR.61–CR.62 are complete.
-CR.43–CR.45, CR.48–CR.55, CR.60, CR.63–CR.74 remain open.
+Current status (2026-10-17): CR.1–CR.42, CR.46–CR.47, CR.56–CR.62 are complete.
+CR.43–CR.45, CR.48–CR.55, CR.63–CR.74 remain open.
 Dated verification notes below
 describe their original snapshots; current operational limits remain in
 [cloud-storage-implementation.md](cloud-storage-implementation.md).
@@ -45,7 +45,7 @@ existing mutation identities, immutable media, conflict alternatives and offline
 
 - [x] CR.58 — Carry a typed managed-preparation kind through background completion so local XMP, DNG, external-editor copy and reload revisions commit while sync is off, without authorizing explicit cloud enrollment. Reproduce `wait:false` on a converted library and assert zero network requests.
 - [x] CR.59 — Certify the final cloud-to-local result against the original owner snapshot, retaining all required archive proofs and append publication state across repeated receive-only scans. Exclude transport proofs from stability fingerprints. Test an older device converting after another device compacts receipts.
-- [ ] CR.60 — Separate permanent-local editing from the bounded cloud outbox. Durably preserve the rejoin baseline, pending mutation identities and local changes without eventually blocking local edits at 10,000 pending mutations; explicitly reconcile on re-enable. Test the capacity boundary, restart, rejoin and conflicts.
+- [x] CR.60 — Separate permanent-local editing from the bounded cloud outbox. Durably preserve the rejoin baseline, pending mutation identities and local changes without eventually blocking local edits at 10,000 pending mutations; explicitly reconcile on re-enable. Test the capacity boundary, restart, rejoin and conflicts.
 - [x] CR.61 — Drain causally ready append operations during bounded discovery on native and browser; share discovery planning while keeping platform I/O separate. Retain integrity checks and bounds for unresolved dependencies. Test a fresh reader catching up with 300 sequential 256 KiB caption replacements and cross-author ordering.
 - [x] CR.62 — Persist a stable absolute permanent-original destination before entering conversion, including relative `--library` paths; retain symlink/junction validation. Test conversion and offline reopening of `./photos`.
 - [ ] CR.63 — Add library-wide error Details with the original diagnostic, affected operation, retry state and cause-specific recovery. Use a typed UI status/action model across popup, Info and focused dialogs; offer Edit connection only for relevant configuration/authentication failures. Test an empty library and integrity/capacity/schema/disk errors.
@@ -1798,4 +1798,12 @@ A shared-planner regression catches up through 300 sequential 256 KiB replacemen
 
 Final-source `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF, workspace
 tests, parity, layers, assets and WASM: `target/cloud-review-cr58-cr62-ci-final.log`.
+These are disposable loopback/procedural fixtures, not live AWS/B2 acceptance.
+
+2026-10-17 — CR.60: Permanent-local editing and causal rejoin. Permanent-local edits use the ordinary catalog independently of the bounded cloud outbox. A device-local projection baseline is journaled atomically with the first edit, while shared causal state and existing pending IDs remain frozen. Re-enable coalesces final differences against that context before receiving remote changes, durably prepares the new mutations and removes the baseline before enabling remote work. Cloud capacity limits can refuse rejoin with local edits retained and sync still off. Unpublished intermediate media revisions become Superseded, retain protected staging, and leave the upload queue; referencing one again reactivates it. Catalog format 21 records the baseline.
+
+All 44 focused local/revision tests passed, including 10,001 local edits, unchanged original cloud outbox, restart, undo/redo, original pending IDs, remote concurrency, baseline/edit atomicity and rejoin limit refusal. Real-CLI rejoin passes both protocols with a new local photo and concurrent ratings (target/cloud-cr60-cli-rejoin-tests.log). Native rejoin automatically uploads final revisions and the added photo, with zero network requests while local-only; its screenshot was inspected (target/cloud-cr60-native-rejoin.log, target/cloud-cr60-native/local-rejoin/rejoined.png). The original conversion native check passed a retry and three further repetitions after one unexplained control connection reset; command/exit diagnostics were added, but the initial reset cause was not established. Inspection sample: frame 1.43 ms, logic 30.78 ms, last render 4.72 ms; no large-library performance claim.
+
+Final-source `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF, workspace
+tests, parity, layers, assets and WASM: `target/cloud-review-cr60-ci.log`.
 These are disposable loopback/procedural fixtures, not live AWS/B2 acceptance.

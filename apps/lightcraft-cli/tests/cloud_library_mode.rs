@@ -48,7 +48,9 @@ impl Desktop {
         writeln!(self.socket.get_mut(), "{}", json!({"method":method,"params":params})).unwrap();
         self.socket.get_mut().flush().unwrap();
         let mut line = String::new();
-        self.socket.read_line(&mut line).unwrap();
+        if let Err(error) = self.socket.read_line(&mut line) {
+            panic!("control response for {method} {params}: {error}; app status: {:?}", self.child.try_wait());
+        }
         let result: Value = serde_json::from_str(&line).unwrap();
         result
     }
@@ -276,6 +278,56 @@ fn a_new_append_library_uploads_generated_demo_photos_without_manual_import() {
     let state = f.state.lock().unwrap();
     assert_eq!(state.signature_errors, 0);
     assert_eq!(state.objects.keys().filter(|key| key.starts_with("/photos/library/originals/")).count(), 1);
+}
+
+#[test]
+#[ignore = "explicit native local-only rejoin acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn local_only_rejoin_uploads_final_revisions_and_new_local_photos() {
+    use lightcraft_engine::catalog::{FsStore, Journal, Source, uploads::UploadState};
+    let f = support::Fixture::new();
+    let local = f.dir.join("local-rejoin");
+    let (import, _) = f.import(&local, false);
+    let (out, rows) = f.run(
+        &local,
+        &[("cloud.upload", json!({"imports":[import]})), ("cloud.sync", json!({})), ("cloud.syncDisable", json!({"confirm":true,"wait":true}))],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    assert_eq!(rows[2]["result"]["stage"], "complete");
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("local-rejoin");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    let requests = f.state.lock().unwrap().requests.len();
+    for rating in [3, 4] {
+        app.execute("photo.rate", json!({"ids":[1],"rating":rating}));
+        app.prepared("photo.saveMetadataToFile", 1);
+    }
+    let (source, _, _) = photo(&f, "added-while-local.png", 77);
+    app.execute("library.import", json!({"paths":[source]}));
+    app.execute("photo.rate", json!({"ids":[2],"rating":2}));
+    assert_eq!(f.state.lock().unwrap().requests.len(), requests, "local revisions and imports never access cloud storage");
+    app.execute("cloud.syncEnable", json!({"connection":"personal"}));
+    let until = Instant::now() + Duration::from_secs(45);
+    loop {
+        let status = app.execute("cloud.overview", json!({}));
+        if status["summary"]["cloudPhotos"] == 2 {
+            break;
+        }
+        assert!(Instant::now() < until, "new local photo was not enrolled: {status}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.settled(&f, &[]);
+    app.ask("ui.clickWidget", json!({"id":"icon:cloud"}));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("rejoined.png")}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.ask("app.quit", json!({}));
+    assert!(app.child.wait().unwrap().success());
+    let saved = Journal::open(Box::new(FsStore::open(&local).unwrap())).unwrap().1;
+    assert!(saved.local_sync_baseline().is_none());
+    assert_eq!(saved.photos().count(), 2);
+    assert!(saved.photos().all(|photo| matches!(photo.source, Source::Managed { .. })));
+    assert!(saved.upload_intents().values().any(|intent| intent.state == UploadState::Superseded));
+    assert!(saved.upload_intents().values().all(|intent| matches!(intent.state, UploadState::Synchronized | UploadState::Superseded)));
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
 }
 
 #[test]

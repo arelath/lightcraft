@@ -7,6 +7,10 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Documents = BTreeMap<String, BTreeMap<String, Value>>;
+mod local;
+pub(crate) use local::prepare_local;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use local::{rejoin, resumes_uploads};
 pub(crate) type UndoBase = BTreeMap<(String, String), BTreeSet<String>>;
 /// Product limits for one entity's bootstrap or one local edit. A remote checkpoint
 /// may contain more fields accumulated through smaller edits (up to MAX_FIELDS).
@@ -287,6 +291,22 @@ pub(crate) fn prepare(catalog: &Catalog, op: Op) -> Result<(Op, Op)> {
     let before = project(catalog, &next, &state, Some(&scope))?;
     let after = project(&next, &next, &state, Some(&scope))?;
     let mut changes = differences(&before, &after, &state);
+    retain_develop_versions(&state, &mut changes, &after);
+    if changes.iter().any(|change| change.field == "content") {
+        metadata.extend(local::referenced_uploads(catalog, &after, None));
+    }
+    if enqueue_changes(&mut state, changes)? {
+        metadata.push(Op::SetSyncState { state: Some(Box::new(state)) });
+    }
+    if metadata.is_empty() {
+        return Ok((op, inverse));
+    }
+    let mut ops = vec![op];
+    ops.extend(metadata);
+    Ok((Op::Batch { ops }, inverse))
+}
+
+fn retain_develop_versions(state: &SyncState, changes: &mut Vec<Change>, after: &Documents) {
     // Conflict versions are materialized without an echo. Before a later local recipe
     // causally retires those heads, archive the alternatives in the same outgoing mutation.
     let recipes: Vec<_> = changes.iter().filter(|c| c.field == "develop").map(|c| c.entity.clone()).collect();
@@ -303,15 +323,6 @@ pub(crate) fn prepare(catalog: &Catalog, op: Op) -> Result<(Op, Op)> {
             });
         }
     }
-    if enqueue_changes(&mut state, changes)? {
-        metadata.push(Op::SetSyncState { state: Some(Box::new(state)) });
-    }
-    if metadata.is_empty() {
-        return Ok((op, inverse));
-    }
-    let mut ops = vec![op];
-    ops.extend(metadata);
-    Ok((Op::Batch { ops }, inverse))
 }
 
 /// The final local state carrying newly authored IDs, including explicit conflict
@@ -383,9 +394,11 @@ pub fn publication_order(
     Ok(ordered)
 }
 
-fn user_inverse(op: Op) -> Op {
+pub(crate) fn user_inverse(op: Op) -> Op {
     match op {
-        Op::SetCloudIdentity { .. } | Op::SetSyncState { .. } | Op::PatchSyncState { .. } => Op::Batch { ops: Vec::new() },
+        Op::SetCloudIdentity { .. } | Op::SetSyncState { .. } | Op::PatchSyncState { .. } | Op::SetLocalSyncBaseline { .. } => {
+            Op::Batch { ops: Vec::new() }
+        }
         Op::Batch { ops } => Op::Batch { ops: ops.into_iter().map(user_inverse).collect() },
         op => op,
     }
@@ -421,6 +434,9 @@ pub(crate) fn undo_base(catalog: &Catalog, before: &lightcraft_catalog::replicat
     )
 }
 pub(crate) fn guard_undo(catalog: &Catalog, op: &Op, expected: Option<&UndoBase>) -> Result<()> {
+    if catalog.local_sync_baseline().is_some() {
+        return Ok(());
+    }
     let Some(state) = catalog.sync_state() else {
         return Ok(());
     };

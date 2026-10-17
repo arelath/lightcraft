@@ -265,7 +265,7 @@ The supplied 2026-10-17 review is tracked before implementation in
 
 - [x] **CR.58** Repair local-only background media completion.
 - [x] **CR.59** Certify conversion against the original owner after receipt compaction.
-- [ ] **CR.60** Separate permanent-local editing from the bounded cloud outbox and reconcile rejoin safely.
+- [x] **CR.60** Separate permanent-local editing from the bounded cloud outbox and reconcile rejoin safely.
 - [x] **CR.61** Drain ready append operations during bounded discovery.
 - [x] **CR.62** Persist absolute conversion destinations for relative library paths.
 - [ ] **CR.63–CR.74** Complete typed diagnostics/actions, explicit authentication choice, navigable recovery/conflicts, confirmation lifecycle, managed-media boundaries and precise local/cloud UX.

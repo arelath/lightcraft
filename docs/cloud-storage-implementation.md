@@ -63,8 +63,9 @@ uploads remain unsupported.
   Demo photos have no on-disk original: background preparation materializes full-resolution
   linear Rec.2020 originals as 32-bit floating-point DNGs, retaining scene tone mapping,
   highlight headroom and separate edits. Their actual encoded size replaces the demo estimate.
-  Generated adoption uses manifest version 5 and catalog format 20; older local builds
-  refuse the newer catalog rather than discarding its media-kind conversion operation.
+  Generated adoption uses manifest version 5; the current local catalog format is 21
+  (media-kind conversion first required format 20). Older builds refuse the newer catalog
+  rather than discarding local rejoin or media-kind operations.
   Existing cloud objects are byte-verified before any upload; matching originals are reused.
   The queue is rediscovered on reopen, bounded to 1,000 candidate IDs per scan, and
   stages one original family at a time without a library-size limit. Missing or unsupported
@@ -702,3 +703,7 @@ Native library binding and the permanent Local Originals destination are resolve
 ### CR.61 — Incremental append discovery (2026-10-17)
 
 Native and browser append discovery share stage-and-drain planning. Causally ready operations are applied and their superseded payloads released during discovery; integrity checks and the 64 MiB unresolved-dependency staging bound remain enforced.
+
+### CR.60 — Permanent-local editing and causal rejoin (2026-10-17)
+
+Permanent-local edits use the ordinary catalog independently of the bounded cloud outbox. A device-local projection baseline is journaled atomically with the first edit, while shared causal state and existing pending IDs remain frozen. Re-enable coalesces final differences against that context before receiving remote changes, durably prepares the new mutations and removes the baseline before enabling remote work. Cloud capacity limits can refuse rejoin with local edits retained and sync still off. Unpublished intermediate media revisions become Superseded, retain protected staging, and leave the upload queue; referencing one again reactivates it. Catalog format 21 records the baseline.

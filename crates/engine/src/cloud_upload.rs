@@ -578,7 +578,7 @@ impl Uploads {
             .filter(|p| p.maintenance.is_none())
             .flat_map(|p| p.ids.keys())
             .filter_map(|id| catalog.upload_intents().get(id))
-            .filter(|i| i.state != UploadState::Synchronized)
+            .filter(|i| !matches!(i.state, UploadState::Synchronized | UploadState::Superseded))
             .map(|i| i.photo_id)
             .collect::<BTreeSet<_>>()
             .len()
@@ -631,7 +631,7 @@ fn task_health(health: &mut crate::cloud_status::ResourceHealth, s: &Session, pe
             None => {
                 health.success(&resource);
             }
-            Some(_) if intent.state == UploadState::Failed || intent.blocked.is_some() => health.success(&resource),
+            Some(_) if matches!(intent.state, UploadState::Failed | UploadState::Superseded) || intent.blocked.is_some() => health.success(&resource),
             Some(reason) if intent.state != UploadState::Synchronized || (verification && !fresh) => {
                 health.fail(resource, reason, Some(pending.guard.id()))
             }
@@ -701,6 +701,9 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<(Vec<Item>, Vec<Valu
     let mut result = Vec::new();
     let mut skipped = Vec::new();
     for (id, intent) in s.catalog.upload_intents() {
+        if intent.state == UploadState::Superseded {
+            continue;
+        }
         if selected.as_ref().is_some_and(|selected| !selected.contains(id)) || (intent.state == UploadState::Synchronized && !verify) {
             continue;
         }
@@ -1142,7 +1145,7 @@ impl Session {
             .upload_intents()
             .iter()
             .filter(|(id, intent)| {
-                intent.state != UploadState::Synchronized
+                !matches!(intent.state, UploadState::Synchronized | UploadState::Superseded)
                     && (self.cloud_uploads.include_failed || (intent.state != UploadState::Failed && intent.blocked.is_none()))
                     && !self.cloud_uploads.attempted.contains(*id)
                     && !self.cloud_uploads.pending.iter().any(|pending| pending.ids.contains_key(*id))

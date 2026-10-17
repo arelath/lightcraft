@@ -1309,8 +1309,11 @@ fn completed_result(
         s.selection = Selection::single(PhotoId(*id));
     }
     let selected: std::collections::BTreeSet<_> = ids.iter().copied().collect();
-    let pending =
-        s.catalog.upload_intents().values().any(|intent| selected.contains(&intent.photo_id.0) && intent.state != UploadState::Synchronized);
+    let pending = s
+        .catalog
+        .upload_intents()
+        .values()
+        .any(|intent| selected.contains(&intent.photo_id.0) && !matches!(intent.state, UploadState::Synchronized | UploadState::Superseded));
     let first = copies.first().cloned().unwrap_or(Value::Null);
     let summaries: Vec<_> = skipped
         .iter()
@@ -1865,6 +1868,17 @@ mod tests {
         assert!(reopened.cloud_transition.local_only());
         assert_eq!(reopened.catalog.photo(id).unwrap().rating, 4);
         assert!(reopened.catalog.photo(derived).is_some());
+        crate::cloud_transition::enable(&mut reopened).unwrap();
+        let root = reopened.media.asset_resolver.as_ref().unwrap().durable_root().unwrap();
+        let superseded: Vec<_> = reopened.catalog.upload_intents().iter().filter(|(_, intent)| intent.state == UploadState::Superseded).collect();
+        assert!(!superseded.is_empty(), "intermediate disconnected revisions are retained without endless publication waiting");
+        for (id, intent) in superseded {
+            let manifest = read_manifest(&root, id).unwrap();
+            assert_eq!(manifest.asset_id, intent.asset_id);
+            assert_eq!(std::fs::read(root.join("blobs").join(manifest.asset.original.id.0)).unwrap().len() as u64, manifest.asset.original.size);
+        }
+        assert_eq!(reopened.catalog.sync_overview().failed_uploads, 0);
+        assert!(reopened.catalog.local_sync_baseline().is_none());
     }
     #[test]
     fn supporting_xmp_survives_dng_xmp_write_external_render_and_returned_original_revisions() {

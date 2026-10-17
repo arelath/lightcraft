@@ -63,6 +63,7 @@
 //! | 18 | Synchronization deltas | Atomic field/register, receipt, outbox and append-publication journal patches |
 //! | 19 | Append discovery | Device-local consumed checkpoints and resumable bounded identity audits |
 //! | 20 | Generated cloud originals | `Op::SetMediaKind` preserves scene-referred rendering after DNG materialization |
+//! | 21 | Permanent-local editing | Device-local rejoin baseline independent of the cloud outbox |
 //!
 //! Rules:
 //! - **Bump [`VERSION`]** (and add a row above) in the change that adds an [`Op`] variant or a
@@ -87,7 +88,7 @@ pub const LOG: &str = "catalog.log";
 const FORMAT: &str = "lightcraft-catalog";
 /// The catalog format this build writes (and the newest it reads). See the module docs →
 /// *Format versions*; bump it whenever an [`Op`] variant or a serialized field is added.
-pub const VERSION: u32 = 20;
+pub const VERSION: u32 = 21;
 
 /// When [`Journal::wants_snapshot`] says it's time to compact the log.
 #[derive(Clone, Copy, Debug)]

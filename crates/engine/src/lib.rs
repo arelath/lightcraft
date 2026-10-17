@@ -649,8 +649,11 @@ impl Session {
         }
         #[cfg(not(target_arch = "wasm32"))]
         let mut op = op;
+        let local_only = self.catalog.local_sync_baseline().is_some();
+        #[cfg(not(target_arch = "wasm32"))]
+        let local_only = local_only || self.cloud_transition.local_only();
         if let Some(reason) = &self.cloud_writer_error
-            && ((capture && self.catalog.sync_state().is_some()) || cloud_sync::authored_state(&self.catalog, &op).is_some())
+            && ((capture && !local_only && self.catalog.sync_state().is_some()) || cloud_sync::authored_state(&self.catalog, &op).is_some())
         {
             return Err(EngineError::Other(format!(
                 "cannot edit cloud library before claiming this installation's writer: {reason}; saved data retained"
@@ -661,15 +664,25 @@ impl Session {
             cloud_owner::bind_initial(self, &mut op)?;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if capture {
+        if capture && !local_only {
             self.claim_cloud_owner()?;
         }
-        let (op, inv) = if capture && self.catalog.sync_state().is_some() {
+        let (op, inv) = if capture && local_only {
+            let op = cloud_sync::prepare_local(&self.catalog, op)?;
+            let inverse = self.catalog.apply(op.clone())?;
+            (op, cloud_sync::user_inverse(inverse))
+        } else if capture && self.catalog.sync_state().is_some() {
             let prepared = cloud_sync::prepare(&self.catalog, op)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            let resumed_uploads = cloud_sync::resumes_uploads(&self.catalog, &prepared.0);
             #[cfg(not(target_arch = "wasm32"))]
             cloud_owner::reserve(self, &prepared.0)?;
             let op = self.catalog.compact_sync_op(prepared.0)?;
             self.catalog.apply(op.clone())?;
+            #[cfg(not(target_arch = "wasm32"))]
+            if resumed_uploads {
+                self.cloud_uploads.request_resume(false);
+            }
             (op, prepared.1)
         } else {
             #[cfg(not(target_arch = "wasm32"))]

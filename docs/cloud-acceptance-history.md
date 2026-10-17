@@ -528,3 +528,10 @@ A shared-planner regression catches up through 300 sequential 256 KiB replacemen
 
 All eight final-source CI gates passed (`target/cloud-review-cr58-cr62-ci-final.log`).
 This run used disposable local fixtures; fresh live AWS/B2 acceptance remains open.
+
+## 2026-10-17: CR.60 — Permanent-local editing and causal rejoin
+
+All 44 focused local/revision tests passed, including 10,001 local edits, unchanged original cloud outbox, restart, undo/redo, original pending IDs, remote concurrency, baseline/edit atomicity and rejoin limit refusal. Real-CLI rejoin passes both protocols with a new local photo and concurrent ratings (target/cloud-cr60-cli-rejoin-tests.log). Native rejoin automatically uploads final revisions and the added photo, with zero network requests while local-only; its screenshot was inspected (target/cloud-cr60-native-rejoin.log, target/cloud-cr60-native/local-rejoin/rejoined.png). The original conversion native check passed a retry and three further repetitions after one unexplained control connection reset; command/exit diagnostics were added, but the initial reset cause was not established. Inspection sample: frame 1.43 ms, logic 30.78 ms, last render 4.72 ms; no large-library performance claim.
+
+All eight final-source CI gates passed (`target/cloud-review-cr60-ci.log`).
+This run used disposable local fixtures; fresh live AWS/B2 acceptance remains open.

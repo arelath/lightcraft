@@ -20,6 +20,7 @@ mod identity_index;
 pub mod journal;
 pub mod keywords;
 pub mod local;
+pub mod local_sync;
 pub mod lock;
 pub mod managed;
 pub mod model;
@@ -88,6 +89,9 @@ pub const HISTORY_LIMIT: usize = 200;
 pub enum Op {
     SetSyncState {
         state: Option<Box<replication::SyncState>>,
+    },
+    SetLocalSyncBaseline {
+        baseline: Option<Box<local_sync::Baseline>>,
     },
     PatchSyncState {
         delta: Box<replication::delta::SyncDelta>,
@@ -295,6 +299,8 @@ pub struct Catalog {
     sync_status_cache: sync_status::Cache,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sync_state: Option<Box<replication::SyncState>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_sync_baseline: Option<Arc<local_sync::Baseline>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     cloud_identities: BTreeMap<String, String>,
     #[serde(skip)]
@@ -335,6 +341,9 @@ pub struct Catalog {
 impl Catalog {
     pub fn sync_state(&self) -> Option<&replication::SyncState> {
         self.sync_state.as_deref()
+    }
+    pub fn local_sync_baseline(&self) -> Option<&local_sync::Baseline> {
+        self.local_sync_baseline.as_deref()
     }
     pub fn cloud_identity(&self, entity: &str) -> Option<&str> {
         self.cloud_identities.get(entity).map(String::as_str)
@@ -612,6 +621,16 @@ impl Catalog {
                 | Op::RemoveAlbum { .. }
         );
         let inverse = match op {
+            Op::SetLocalSyncBaseline { baseline } => {
+                if let Some(baseline) = &baseline {
+                    baseline.validate()?;
+                    if self.sync_state().is_none_or(|state| state.library != baseline.library || state.connection != baseline.connection) {
+                        return Err(CatalogError::Invalid("local synchronization baseline belongs to a different library".into()));
+                    }
+                }
+                let old = std::mem::replace(&mut self.local_sync_baseline, baseline.map(|b| Arc::from(*b)));
+                Op::SetLocalSyncBaseline { baseline: old.map(|b| Box::new((*b).clone())) }
+            }
             Op::SetSyncState { state } => {
                 if let Some(state) = &state {
                     state.validate()?;

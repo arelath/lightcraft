@@ -566,9 +566,14 @@ impl Session {
             blocked: settings.blocked,
             lock: lock.take(),
         });
+        self.library_identity = std::sync::Arc::new(());
+        #[cfg(not(target_arch = "wasm32"))]
+        self.load_cloud_mode()?;
         // forget untouched Local records of folders not browsed for a while (journaled at once)
         #[cfg(not(target_arch = "wasm32"))]
-        self.claim_cloud_owner()?;
+        if !self.cloud_transition.local_only() {
+            self.claim_cloud_owner()?;
+        }
         if self.forget_local_days > 0 {
             let plan = self.forget_local(false, None);
             if !plan.evict.is_empty() {
@@ -585,9 +590,6 @@ impl Session {
         if self.library.as_ref().is_some_and(|l| l.cache_dir.is_some()) {
             crate::cmd::previews::refresh_stale_smart_previews(self);
         }
-        self.library_identity = std::sync::Arc::new(());
-        #[cfg(not(target_arch = "wasm32"))]
-        self.load_cloud_mode()?;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(lib) = &mut self.library {
             if let Some(error) = self.media.asset_resolver.as_ref().and_then(|r| r.cache_status().error) {

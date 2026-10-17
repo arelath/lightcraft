@@ -43,6 +43,9 @@ pub enum UploadState {
     ObjectsVerified,
     Published,
     Synchronized,
+    /// An unpublished intermediate local revision was replaced before rejoin.
+    /// Its bytes remain durable local history, never acknowledged cloud storage.
+    Superseded,
 }
 
 /// Preparation failed before a media attempt. This never revokes a verified ACK.
