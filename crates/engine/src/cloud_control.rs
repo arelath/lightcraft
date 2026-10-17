@@ -14,7 +14,7 @@ pub use capability::{Converter, MigrationSpec};
 
 /// Envelope format this build understands. A newer envelope is refused before any
 /// other field of the library is interpreted.
-pub const CONTROL_VERSION: u32 = 1;
+pub const CONTROL_VERSION: u32 = 2;
 /// Highest library schema this build can read.
 pub const READER: u32 = 1;
 /// Highest library schema this build can publish without losing fields.
@@ -72,6 +72,23 @@ impl Plan {
     }
 }
 
+/// Durable cancellation boundary, committed through the old publication authority
+/// before any successor object is written. Missing v1 markers are conservatively
+/// unknown: an older worker might already have exposed its output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Exposure {
+    #[default]
+    Legacy,
+    Preparing,
+    Publishing,
+}
+impl Exposure {
+    fn is_legacy(&self) -> bool {
+        *self == Self::Legacy
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Migration {
@@ -87,6 +104,8 @@ pub struct Migration {
     /// not a malicious client with write credentials.
     pub token: String,
     pub lease_until_ms: u64,
+    #[serde(default, skip_serializing_if = "Exposure::is_legacy")]
+    pub exposure: Exposure,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +146,8 @@ pub enum Blocked {
     UpdateToWrite(String),
     /// A readable maintenance envelope describes a converter this build lacks.
     UpdateToUpgrade(String),
+    /// Successor data may exist; restoring the old authority would split the library.
+    FinishUpgrade(String),
     /// An upgrade holds the publication authority; receiving continues.
     Maintenance {
         migration: String,
@@ -151,6 +172,10 @@ impl std::fmt::Display for Blocked {
             Self::UpdateToUpgrade(why) => {
                 write!(f, "update LightCraft to complete this cloud library upgrade ({why}); remote data preserved, pending work retained")
             }
+            Self::FinishUpgrade(id) => write!(
+                f,
+                "cloud library upgrade {id} may have published successor data; cancellation is unsafe; use Migrate Cloud Library… (cloud.upgradeLibrary) to finish the same upgrade; remote data and pending work retained"
+            ),
             Self::Maintenance { migration, plan, .. } => write!(
                 f,
                 "cloud library maintenance in progress ({} upgrade {migration}); publication paused, browsing and local edits continue, pending work retained",
@@ -193,7 +218,9 @@ impl Control {
     /// The implicit control of a library created before the envelope existed.
     pub fn initial(library: &str) -> Self {
         Self {
-            control_version: CONTROL_VERSION,
+            // Healthy v1 envelopes remain readable by existing clients. Maintenance
+            // transitions promote the envelope before using the new safety marker.
+            control_version: 1,
             library: library.into(),
             epoch: 1,
             schema: SCHEMA,
@@ -243,6 +270,9 @@ impl Control {
         match (self.state, &self.migration, &self.successor) {
             (State::Active | State::Deleted, None, None) => {}
             (State::Upgrading, Some(m), None) => {
+                if self.control_version < 2 && m.exposure != Exposure::Legacy {
+                    return bad("exposure marker requires control format 2");
+                }
                 if !valid_text(&m.id) || !valid_text(&m.owner) || !hex(&m.token) || !hex(&m.source.tip) || m.source.generation == 0 {
                     return bad("migration identity");
                 }
@@ -302,6 +332,7 @@ impl Control {
     }
     fn next(&self) -> Outcome<Self> {
         let mut next = self.clone();
+        next.control_version = CONTROL_VERSION;
         next.revision = self.revision.checked_add(1).ok_or_else(|| Blocked::Invalid("control revision exhausted".into()))?;
         Ok(next)
     }
@@ -320,6 +351,7 @@ impl Control {
             owner: owner.into(),
             token: token.into(),
             lease_until_ms: now_ms.saturating_add(LEASE_MS),
+            exposure: Exposure::Preparing,
         });
         next.validate()?;
         Ok(next)
@@ -368,10 +400,26 @@ impl Control {
         next.validate()?;
         Ok(next)
     }
-    /// Before activation, the owner can return the library to its unchanged epoch.
-    pub fn cancel(&self, token: &str) -> Outcome<Self> {
+    /// Latch possible successor exposure before the first output PUT. Once committed,
+    /// it survives failures, uncertain responses, restarts and ownership takeovers.
+    pub fn begin_output(&self, token: &str, now_ms: u64) -> Outcome<Self> {
         self.owned(token)?;
         self.migration_spec()?;
+        let mut next = self.next()?;
+        if let Some(m) = &mut next.migration {
+            m.exposure = Exposure::Publishing;
+            m.lease_until_ms = now_ms.saturating_add(LEASE_MS);
+        }
+        next.validate()?;
+        Ok(next)
+    }
+    /// Only a durably unexposed migration can restore the unchanged old authority.
+    pub fn cancel(&self, token: &str) -> Outcome<Self> {
+        let migration = self.owned(token)?;
+        self.migration_spec()?;
+        if migration.exposure != Exposure::Preparing {
+            return Err(Blocked::FinishUpgrade(migration.id.clone()));
+        }
         let mut next = self.next()?;
         next.state = State::Active;
         next.migration = None;
@@ -381,6 +429,9 @@ impl Control {
     pub fn activate(&self, token: &str) -> Outcome<Self> {
         let m = self.owned(token)?.clone();
         let spec = self.migration_spec()?;
+        if m.exposure != Exposure::Publishing {
+            return Err(Blocked::Invalid("successor publication was not fenced before activation".into()));
+        }
         if m.plan != Plan::Rebase {
             return Err(Blocked::Invalid("this plan retires the head instead of activating an epoch".into()));
         }
@@ -399,6 +450,9 @@ impl Control {
     pub fn retire(&self, token: &str, successor: Successor) -> Outcome<Self> {
         let m = self.owned(token)?;
         self.migration_spec()?;
+        if m.exposure != Exposure::Publishing {
+            return Err(Blocked::Invalid("successor publication was not fenced before retirement".into()));
+        }
         if m.plan != Plan::AppendLog {
             return Err(Blocked::Invalid("only a protocol migration retires the head".into()));
         }

@@ -127,6 +127,14 @@ async fn append(provider: &Provider, local: &SyncState, owner: &str, writers_sto
             }
             Err(failure) => return Err(failure.message()),
         }
+        transition(provider, library, |head, c| {
+            if head.control.as_ref().and_then(|c| c.migration.as_ref()).is_none_or(|m| m.token != token) {
+                return Err(taken_over());
+            }
+            Ok(c.begin_output(&token, now_ms())?)
+        })
+        .await
+        .map_err(Failure::message)?;
         let seeded = super::append::migrate(provider, local).await?;
         let successor = Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: manifest.clone() };
         transition(provider, library, |head, c| {

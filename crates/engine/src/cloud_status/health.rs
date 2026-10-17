@@ -79,8 +79,12 @@ impl PollHealth {
         self.retry.suspend();
         if let Some(failure) = &mut self.last_error {
             failure.retryable = false;
-            failure.action =
-                Some("Resolve the reported error, then explicitly retry or cancel migration. Prior protocol and pending edits are retained.".into());
+            if error.recovery.is_none() {
+                failure.action = Some(format!(
+                    "{} Then explicitly retry the upgrade; cancellation is available only before successor publication. Local work is retained.",
+                    error.action()
+                ));
+            }
         }
     }
     pub fn reset_retries(&mut self) {

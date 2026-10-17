@@ -535,3 +535,9 @@ All 44 focused local/revision tests passed, including 10,001 local edits, unchan
 
 All eight final-source CI gates passed (`target/cloud-review-cr60-ci.log`).
 This run used disposable local fixtures; fresh live AWS/B2 acceptance remains open.
+
+## 2026-10-17: CR.49 — Durable successor exposure
+
+Thirteen shared control tests and ten real-CLI upgrade tests pass, including both orders of cancellation/output-authorization CAS, takeover, v1 unknown exposure, failure before manifest, after manifest and after the complete checkpoint seed but before retirement, interruption of rebase output, a lost exposure-CAS response, unchanged remote objects on refusal, retained pending IDs, retry completion and typed update recovery. Native control-channel acceptance refuses cancellation after seed publication, preserves every remote object and finishes on retry; refusal and completion screenshots were inspected. Evidence: target/cloud-cr49-control.log, target/cloud-cr49-upgrade-final.log, target/cloud-cr49-native-acceptance.log and target/cloud-cr49-native/upgrade-exposure/. Sample inspection: frame 0.93 ms, logic 31.00 ms, last render 7.93 ms; no large-library performance claim. All eight final-source CI gates pass (target/cloud-review-cr49-ci.log). Browser WASM compilation is covered; fresh browser runtime and live AWS/B2 acceptance remain CR.45.
+
+Earlier cancellation-after-seed acceptance describes stopping a local Activity worker. It does not authorize returning the remote head to Active after output may exist.

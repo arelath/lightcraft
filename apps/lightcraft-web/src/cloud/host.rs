@@ -522,7 +522,7 @@ impl Host {
                                         data.health.fail_migration(
                                             &CloudFailure::new(
                                                 FailureKind::Cancelled,
-                                                "Migration cancelled; prior protocol and pending edits retained",
+                                                "Upgrade worker stopped; local protocol and pending edits retained. Remote maintenance may remain; finish the same upgrade.",
                                             ),
                                             Some(job.guard.id()),
                                         );

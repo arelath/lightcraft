@@ -125,6 +125,8 @@ pub struct State {
     pub lost_head: bool,
     /// Lose the response of the first accepted head PUT whose body contains this text.
     pub lost_head_matching: Option<String>,
+    /// Refuse matching object PUTs before mutation: (path fragment, body fragment).
+    pub refuse_put: Option<(String, String)>,
     pub stop_after_recovery_prefix: bool,
     pub embedded_error: bool,
     pub unauthorized: bool,
@@ -330,6 +332,10 @@ impl Drop for Fixture {
 }
 
 fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<String, String>, body: Vec<u8>) -> (u16, Vec<u8>, Option<String>, bool) {
+    if method == "PUT" && state.refuse_put.as_ref().is_some_and(|(path, text)| target.contains(path) && String::from_utf8_lossy(&body).contains(text))
+    {
+        return (403, Vec::new(), None, false);
+    }
     if state.unsupported_conditional && (headers.contains_key("if-none-match") || headers.contains_key("if-match")) {
         return (501, b"<Error><Code>NotImplemented</Code><Message>Conditional writes unavailable</Message></Error>".to_vec(), None, false);
     }

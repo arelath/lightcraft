@@ -142,11 +142,15 @@ fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &At
     // its full verified history is exactly the source state.
     let mut proofs = Default::default();
     let mut source = crate::cloud_replication::read_with_witness(connection, library, &mut proofs, cancel)?;
+    let publishing = transition(connection, library, cancel, |head, control| {
+        owned(head, &token)?;
+        Ok(control.begin_output(&token, now_ms())?)
+    })?;
     let epoch = migration.target_epoch;
     let first = publication::encode(&Batch { version: 3, parent: None, imports: Vec::new(), mutations: Vec::new(), checkpoint_marker: true })?;
     let first_ref = crate::cloud_replication::batch_ref(connection, epoch, &first)?;
     crate::cloud_replication::write_immutable(connection, &first_ref.key, &first, cancel)?;
-    let base = head.generation.checked_add(1).ok_or_else(|| invalid("generation exhausted"))?;
+    let base = publishing.generation.checked_add(1).ok_or_else(|| invalid("generation exhausted"))?;
     let checkpoint: CheckpointRef = crate::cloud_replication::checkpoint(connection, &mut source.state, first_ref.clone(), base, epoch, cancel)?;
     // Verify the replacement before activation: exact bytes, structure and state.
     let written = crate::cloud_replication::read_checkpoint(connection, &checkpoint, cancel)?;
@@ -226,6 +230,10 @@ fn append_log(connection: &S3Connection, local: &SyncState, owner: &str, writers
             }
             Err(Failure::Other(error)) => return Err(error),
         };
+        transition(connection, library, cancel, |head, control| {
+            owned(head, &token)?;
+            Ok(control.begin_output(&token, now_ms())?)
+        })?;
         crate::cloud_append::migration::seed(connection, local, cancel).map_err(CloudFailure::from)?;
         let successor = Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: manifest.clone() };
         transition(connection, library, cancel, |head, control| {
@@ -254,7 +262,7 @@ fn rejoin(connection: &S3Connection, local: &SyncState, manifest: &str, cancel: 
     Ok(crate::cloud_append::native::synchronize_verified(connection, &probe, false, true, cancel, &mut Default::default())?)
 }
 
-/// Abandon maintenance before activation, restoring the unchanged epoch. A different
+/// Abandon maintenance before any successor publication, restoring the unchanged epoch. A different
 /// device must wait for the lease to expire; the owning installation may cancel at once.
 fn cancel_upgrade(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &AtomicBool) -> Result<Outcome> {
     let token = crate::cloud_control::token().map_err(CloudFailure::local)?;

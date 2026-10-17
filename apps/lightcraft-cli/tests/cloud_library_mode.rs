@@ -99,6 +99,57 @@ fn photo(f: &support::Fixture, name: &str, shade: u8) -> (std::path::PathBuf, Ve
 }
 
 #[test]
+#[ignore = "explicit native upgrade exposure acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn upgrade_successor_exposure_refuses_remote_cancellation_and_finishes_in_native_app() {
+    let f = support::Fixture::new();
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("upgrade-exposure");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let local = f.dir.join("local");
+    f.import(&local, false);
+    let (out, rows) = f.run(
+        &local,
+        &[("cloud.upload", json!({})), ("cloud.syncEnable", json!({"connection":"personal"})), ("cloud.sync", json!({})), ("cloud.pause", json!({}))],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    {
+        let mut state = f.state.lock().unwrap();
+        state.append_mode = true;
+        state.refuse_put = Some(("/catalog/head.json".into(), "\"state\":\"retired\"".into()));
+    }
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    let wait = |app: &mut Desktop, task: u64| -> Value {
+        let until = Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = app.execute("cloud.syncStatus", json!({}));
+            if let Some(report) = status["reports"].as_array().and_then(|reports| reports.iter().find(|report| report["task"] == task)) {
+                return report.clone();
+            }
+            assert!(Instant::now() < until, "upgrade completion: {status}");
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    };
+    let task = app.execute("cloud.upgradeLibrary", json!({"plan":"appendLog","wait":false}))["task"].as_u64().unwrap();
+    assert_eq!(wait(&mut app, task)["ok"], false);
+    let before = f.state.lock().unwrap().objects.clone();
+    let task = app.execute("cloud.upgradeLibrary", json!({"cancel":true,"wait":false}))["task"].as_u64().unwrap();
+    let refusal = wait(&mut app, task);
+    assert_eq!(refusal["ok"], false, "{refusal}");
+    assert!(refusal["error"].as_str().unwrap().contains("cancellation is unsafe"), "{refusal}");
+    assert_eq!(f.state.lock().unwrap().objects, before);
+    app.ask("ui.clickWidget", json!({"id":"icon:cloud"}));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("refused.png")}));
+    std::fs::write(artifacts.join("refusal.json"), serde_json::to_vec_pretty(&refusal).unwrap()).unwrap();
+    f.state.lock().unwrap().refuse_put = None;
+    let task = app.execute("cloud.upgradeLibrary", json!({"plan":"appendLog","wait":false}))["task"].as_u64().unwrap();
+    let finished = wait(&mut app, task);
+    assert_eq!(finished["ok"], true, "{finished}");
+    assert_eq!(app.execute("cloud.syncStatus", json!({}))["protocol"], "append-log-v1");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("finished.png")}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+}
+
+#[test]
 #[ignore = "explicit native cloud-toggle acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
 fn cloud_toggle_native_confirmation_blocking_progress_and_durable_completion() {
     let f = support::Fixture::new();

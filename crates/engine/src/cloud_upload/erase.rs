@@ -120,7 +120,7 @@ fn inventory(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> R
 fn head(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result<Option<(crate::cloud_records::Head, String)>> {
     let key = format!("{}/catalog/head.json", connection.prefix);
     let Some(reply) = connection.get_small(&key, 16 << 10, cancel).map_err(asset_error)? else { return Ok(None) };
-    let head = crate::cloud_records::Head::decode(&reply.bytes).map_err(error)?;
+    let head = crate::cloud_records::Head::decode(&reply.bytes).map_err(|blocked| error(blocked.to_string()))?;
     if head.library.as_deref() != Some(library) || head.control().map_err(error)?.library != library {
         return Err(error("storage head belongs to another library; nothing erased"));
     }

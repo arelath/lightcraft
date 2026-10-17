@@ -44,11 +44,13 @@ fn upgrading_head(f: &Fixture, lease_until_ms: u64) -> Vec<u8> {
     let mut control = current["control"].clone();
     assert_eq!(control["state"], "active", "the library starts publishable");
     control["state"] = json!("upgrading");
+    control["controlVersion"] = json!(2);
     control["revision"] = json!(control["revision"].as_u64().unwrap() + 1);
     control["migration"] = json!({
         "id": "rebase-crashed", "plan": "rebase", "targetEpoch": 2, "targetSchema": 1,
         "source": {"tip": current["tip"]["hash"], "generation": current["generation"]},
-        "owner": "crashed-device", "token": "ab".repeat(32), "leaseUntilMs": lease_until_ms
+        "owner": "crashed-device", "token": "ab".repeat(32), "leaseUntilMs": lease_until_ms,
+        "exposure": "preparing"
     });
     let mut next = current.clone();
     next["generation"] = json!(current["generation"].as_u64().unwrap() + 1);
@@ -169,6 +171,152 @@ fn upgrading_head_with_lease(_: &Fixture, bytes: &[u8], lease: u64) -> Vec<u8> {
     let mut value: Value = serde_json::from_slice(bytes).unwrap();
     value["control"]["migration"]["leaseUntilMs"] = json!(lease);
     serde_json::to_vec(&value).unwrap()
+}
+
+#[test]
+fn cancellation_after_possible_successor_exposure_refuses_without_erasing_and_retry_finishes() {
+    // The checkpoint is the complete committed-history seed in this protocol.
+    for stage in ["before-manifest", "after-manifest", "after-seed"] {
+        let f = Fixture::new();
+        let (a, b) = initialize(&f);
+        ok(&f, &b, &[("photo.rate", json!({"ids":[1],"rating":4}))]);
+        let offline = pending(&b);
+        let library = catalog(&a).sync_state().unwrap().library.clone();
+        let root = format!("/photos/library/sync-v2/{library}/");
+        let manifest = format!("/photos/{}", lightcraft_engine::cloud_append::manifest_key("library", &library).unwrap());
+        let fault = match stage {
+            "before-manifest" => (manifest.clone(), String::new()),
+            "after-manifest" => (format!("{root}checkpoints/"), String::new()),
+            _ => (HEAD.into(), "\"state\":\"retired\"".into()),
+        };
+        {
+            let mut state = f.state.lock().unwrap();
+            state.append_mode = true;
+            state.refuse_put = Some(fault);
+            if stage == "before-manifest" {
+                state.lost_head_matching = Some("\"exposure\":\"publishing\"".into());
+            }
+        }
+        let (out, rows) = f.run(&a, &[("cloud.upgradeLibrary", json!({"plan":"appendLog"}))]);
+        assert!(!out.status.success(), "{stage}: {rows:?}");
+        let maintenance = head(&f);
+        assert_eq!(maintenance["control"]["state"], "upgrading", "{stage}");
+        assert_eq!(maintenance["control"]["migration"]["exposure"], "publishing", "{stage}");
+        let (objects, count) = {
+            let state = f.state.lock().unwrap();
+            let seeded = state.objects.keys().any(|k| k.starts_with(&format!("{root}checkpoints/")));
+            assert!(state.lost_head_matching.is_none(), "uncertain exposure CAS was resolved");
+            assert_eq!(state.objects.contains_key(&manifest), stage != "before-manifest", "{stage}");
+            assert_eq!(seeded, stage == "after-seed", "{stage}");
+            (state.objects.clone(), state.requests.len())
+        };
+        let snapshot = catalog(&a).to_snapshot();
+        let (out, rows) = f.run(&a, &[("cloud.upgradeLibrary", json!({"cancel":true})), ("cloud.syncStatus", json!({}))]);
+        assert!(!out.status.success(), "{stage}: {rows:?}");
+        assert!(rows[0]["error"].as_str().unwrap().contains("cancellation is unsafe"), "{stage}: {rows:?}");
+        let failure = &rows[1]["result"]["health"]["lastError"];
+        assert_eq!(failure["kind"], "unsupported", "{rows:?}");
+        assert!(failure["action"].as_str().unwrap().contains("finish the same upgrade"), "{rows:?}");
+        assert_eq!(rows[1]["result"]["health"]["retry"]["scheduled"], false);
+        {
+            let state = f.state.lock().unwrap();
+            assert_eq!(state.objects, objects, "cancellation preserves every object at {stage}");
+            assert!(state.requests.iter().skip(count).all(|(method, _)| method == "GET"));
+        }
+        assert_eq!(catalog(&a).to_snapshot(), snapshot, "local catalog retained");
+        f.state.lock().unwrap().refuse_put = None;
+        ok(&f, &a, &[("cloud.upgradeLibrary", json!({"plan":"appendLog"}))]);
+        assert_eq!(head(&f)["control"]["state"], "retired", "retry finishes {stage}");
+        {
+            let state = f.state.lock().unwrap();
+            for (key, bytes) in &objects {
+                if key != HEAD {
+                    assert_eq!(state.objects.get(key), Some(bytes), "output retained: {key}");
+                }
+            }
+            assert!(!state.requests.iter().any(|(method, _)| method == "DELETE"));
+            assert_eq!(state.signature_errors, 0);
+        }
+        assert_eq!(pending(&b), offline);
+        ok(&f, &b, &[("cloud.upgradeLibrary", json!({})), ("cloud.sync", json!({}))]);
+        ok(&f, &a, &[("cloud.sync", json!({}))]);
+        assert!(pending(&b).as_object().unwrap().is_empty());
+        assert_eq!(catalog(&a).photo(PhotoId(1)).unwrap().rating, 4);
+    }
+}
+
+#[test]
+fn cancellation_before_output_latch_restores_old_authority_but_legacy_unknown_exposure_cannot() {
+    let f = Fixture::new();
+    let (a, _) = initialize(&f);
+    f.state.lock().unwrap().refuse_put = Some((HEAD.into(), "\"exposure\":\"publishing\"".into()));
+    let (out, rows) = f.run(&a, &[("cloud.upgradeLibrary", json!({"plan":"appendLog"}))]);
+    assert!(!out.status.success(), "{rows:?}");
+    assert_eq!(head(&f)["control"]["migration"]["exposure"], "preparing");
+    f.state.lock().unwrap().refuse_put = None;
+    ok(&f, &a, &[("cloud.upgradeLibrary", json!({"cancel":true}))]);
+    assert_eq!(head(&f)["control"]["state"], "active");
+    assert!(!f.state.lock().unwrap().objects.keys().any(|k| k.contains("/sync-v2/")));
+    // A v1 upgrader carried no exposure marker. Absence of visible successor data
+    // cannot prove its paused worker will not publish after a lease takeover.
+    let mut legacy: Value = serde_json::from_slice(&upgrading_head(&f, 0)).unwrap();
+    legacy["control"]["controlVersion"] = json!(1);
+    legacy["control"]["migration"].as_object_mut().unwrap().remove("exposure");
+    let bytes = serde_json::to_vec(&legacy).unwrap();
+    f.state.lock().unwrap().objects.insert(HEAD.into(), bytes.clone());
+    let (out, rows) = f.run(&a, &[("cloud.upgradeLibrary", json!({"cancel":true}))]);
+    assert!(!out.status.success(), "{rows:?}");
+    assert!(rows[0]["error"].as_str().unwrap().contains("cancellation is unsafe"), "{rows:?}");
+    assert_eq!(f.state.lock().unwrap().objects[HEAD], bytes);
+    ok(&f, &a, &[("cloud.upgradeLibrary", json!({"plan":"rebase"}))]);
+    assert_eq!(head(&f)["control"]["epoch"], 2);
+}
+
+#[test]
+fn future_control_head_preserves_typed_update_recovery() {
+    let f = Fixture::new();
+    let (a, _) = initialize(&f);
+    let mut future = head(&f);
+    future["control"]["controlVersion"] = json!(lightcraft_engine::cloud_control::CONTROL_VERSION + 1);
+    future["control"]["newField"] = json!(true);
+    f.state.lock().unwrap().objects.insert(HEAD.into(), serde_json::to_vec(&future).unwrap());
+    let snapshot = catalog(&a).to_snapshot();
+    let (out, rows) = f.run(&a, &[("cloud.sync", json!({})), ("cloud.syncStatus", json!({}))]);
+    assert!(!out.status.success(), "{rows:?}");
+    let failure = &rows[1]["result"]["health"]["lastError"];
+    assert_eq!(failure["kind"], "unsupported", "{rows:?}");
+    assert!(failure["action"].as_str().unwrap().starts_with("Update LightCraft"), "{rows:?}");
+    assert_eq!(rows[1]["result"]["health"]["retry"]["scheduled"], false);
+    assert_eq!(catalog(&a).to_snapshot(), snapshot);
+}
+
+#[test]
+fn interrupted_rebase_cannot_cancel_after_output_authorization_and_resumes_same_epoch() {
+    for namespace in ["changes", "checkpoints"] {
+        let f = Fixture::new();
+        let (a, _) = initialize(&f);
+        f.state.lock().unwrap().refuse_put = Some((format!("/catalog/epochs/2/{namespace}/"), String::new()));
+        let (out, rows) = f.run(&a, &[("cloud.upgradeLibrary", json!({"plan":"rebase"}))]);
+        assert!(!out.status.success(), "{namespace}: {rows:?}");
+        let frozen = head(&f);
+        assert_eq!(frozen["control"]["migration"]["exposure"], "publishing");
+        let objects = f.state.lock().unwrap().objects.clone();
+        let (out, rows) = f.run(&a, &[("cloud.upgradeLibrary", json!({"cancel":true}))]);
+        assert!(!out.status.success(), "{rows:?}");
+        assert!(rows[0]["error"].as_str().unwrap().contains("cancellation is unsafe"), "{rows:?}");
+        assert_eq!(f.state.lock().unwrap().objects, objects);
+        f.state.lock().unwrap().refuse_put = None;
+        ok(&f, &a, &[("cloud.upgradeLibrary", json!({"plan":"rebase"}))]);
+        let active = head(&f);
+        assert_eq!(active["control"]["epoch"], 2);
+        assert_eq!(active["control"]["state"], "active");
+        for (key, bytes) in &objects {
+            if key != HEAD {
+                assert_eq!(f.state.lock().unwrap().objects.get(key), Some(bytes));
+            }
+        }
+        assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+    }
 }
 
 #[test]

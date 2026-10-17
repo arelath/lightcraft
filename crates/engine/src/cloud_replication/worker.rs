@@ -477,7 +477,7 @@ impl Session {
                         jobs.health.fail_migration(
                             &crate::cloud_status::CloudFailure::new(
                                 crate::cloud_status::FailureKind::Cancelled,
-                                "Migration cancelled; prior protocol and pending edits retained",
+                                "Upgrade worker stopped; local protocol and pending edits retained. Remote maintenance may remain; finish the same upgrade.",
                             ),
                             Some(id),
                         );

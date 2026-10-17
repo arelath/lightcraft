@@ -29,7 +29,7 @@ pub struct Head {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<Control>,
 }
-use crate::cloud_control::Control;
+use crate::cloud_control::{Blocked, Control};
 /// Key of a catalog object in an epoch namespace (see `cloud_control::epoch_root`).
 pub fn object_key(prefix: &str, epoch: u64, namespace: &str, hash: &str) -> String {
     let object = format!("{}/{namespace}/{hash}.json", crate::cloud_control::epoch_root(epoch));
@@ -98,16 +98,17 @@ impl RecordRef {
 impl Head {
     /// Decode a head, checking a newer control envelope before the rest of the record
     /// so a future format yields an "update LightCraft" error rather than "malformed".
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Blocked> {
         let value: serde_json::Value =
-            serde_json::from_slice(bytes).map_err(|_| "remote catalog head is malformed; preserved, local work retained".to_string())?;
+            serde_json::from_slice(bytes).map_err(|_| Blocked::Invalid("remote catalog head is malformed; preserved, local work retained".into()))?;
         if let Some(control) = value.get("control") {
-            Control::decode(control).map_err(|blocked| blocked.to_string())?;
+            Control::decode(control)?;
         }
         if value.get("version").and_then(serde_json::Value::as_u64).is_some_and(|version| version > u64::from(HEAD_VERSION)) {
-            return Err("cloud catalog head is from a newer LightCraft; update to read it; local data retained".into());
+            return Err(Blocked::UpdateToRead("cloud catalog head is from a newer LightCraft".into()));
         }
-        serde_json::from_value(value).map_err(|_| "remote catalog head is malformed or from an unsupported version; preserved".into())
+        serde_json::from_value(value)
+            .map_err(|_| Blocked::Invalid("remote catalog head is malformed or from an unsupported version; preserved".into()))
     }
     /// The authoritative control: embedded in version 4, implicit for older heads.
     pub fn control(&self) -> Result<Control, String> {

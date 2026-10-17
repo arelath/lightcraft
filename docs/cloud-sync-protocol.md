@@ -636,7 +636,9 @@ immutable seed, retires the head, then atomically saves mode/progress on the cat
 Unsent pending IDs and mappings, including edits made while the worker runs, remain intact. A
 failed native journal save rolls back the local cutover. Cancellation can leave the head in
 maintenance with a verified seed; retry the upgrade (the same installation resumes at once)
-or cancel it with `cloud.upgradeLibrary {"cancel":true}` before retirement. Every other catalog
+or cancel it with `cloud.upgradeLibrary {"cancel":true}` only before successor publication
+has been durably authorized. Once successor output may exist, finish the same upgrade.
+Every other catalog
 runs the same command once after retirement to rejoin; that rejoin writes nothing remotely.
 Failed legacy upload receipts are explicitly rebound during this migration and retain their
 staged bytes and multipart identities. This version rejects CAS synchronization when it finds
@@ -1022,7 +1024,7 @@ small, stable **control envelope** (`crates/engine/src/cloud_control.rs`):
 | `state` | `active`, `upgrading` (with `migration`) or `retired` (with `successor`) |
 | `activeMetadataRoot` | Epoch namespace: `catalog` for epoch 1, `catalog/epochs/<n>` later |
 | `revision` | Increments on every control transition |
-| `migration` | Stable `id`, `plan` (`rebase` or `appendLog`), target epoch/schema, exact frozen `source` (head tip and generation), `owner`, fencing `token` (it stops a stale owner, not a malicious writer), `leaseUntilMs` |
+| `migration` | Stable `id`, `plan` (`rebase` or `appendLog`), target epoch/schema, exact frozen `source` (head tip and generation), `owner`, fencing `token` (it stops a stale owner, not a malicious writer), `leaseUntilMs`, and format-2 `exposure` (`preparing` or `publishing`; absent v1 means unknown) |
 
 This build reads and writes schema 1 (the current wire set). Version 2/3 heads, written
 before the envelope existed, read as Active epoch 1 schema 1 and become version 4 on the
@@ -1062,7 +1064,7 @@ Active(epoch e, root R)
   → Upgrading(e, frozen source S, migration M, owner O, token T)      begin / takeover
   → Active(e+1, root R')       rebase: only token T; checkpoint in R' read back first
   → Retired(successor)         appendLog: only token T; seed published first
-  → Active(e)                  cancel before activation: only token T
+  → Active(e)                  cancel only while exposure=preparing: only token T
 ```
 
 Whole-library erasure adds a terminal `Deleted` control state with no migration or
@@ -1078,7 +1080,20 @@ keep the initiating device from uploading again, including after interruption/re
 The lease decides only when another device may *attempt* a takeover; wall clocks never
 authorize a commit. A takeover keeps the migration id, plan and frozen source, issues a new
 token (so a resumed stale owner can no longer activate or cancel) and never lets ordinary
-writers resume. The same installation may resume or cancel its own migration immediately.
+writers resume. The same installation may resume its own migration immediately. Cancellation
+also requires a durable `preparing` exposure marker.
+
+Control format 2 adds `migration.exposure`. New acquisitions start in `preparing`. Before
+the first successor PUT, native and browser runners CAS the same head to `publishing`,
+confirm the exact control by rereading, and only then write output. This is a one-way latch:
+failed or uncertain PUTs, renewal and takeover retain it. A racing cancellation and output
+authorization cannot both win the head CAS. `publishing` means output **may** exist; its
+absence on a later LIST does not authorize returning the old library to Active. Retry/finish
+the same migration using its frozen source and immutable output identities; never blindly
+delete a possibly used successor. Older v1 maintenance records have unknown exposure and
+also require completion. Healthy initial envelopes remain format 1; maintenance transitions
+promote to format 2, which older clients refuse before decoding new fields. Newer-envelope
+head errors retain typed update/recovery advice through native and browser transports.
 
 `cloud.upgradeLibrary {plan?: "appendLog"|"rebase", cancel?, writersStopped?, wait?}`:
 
@@ -1089,7 +1104,10 @@ writers resume. The same installation may resume or cancel its own migration imm
   the head. Run on a device whose head is already retired, it only rejoins: read-only
   discovery, local protocol switch, pending mutations unchanged. The browser supports
   `appendLog` and `cancel`; `rebase` runs in the desktop app or CLI.
-* `cancel` returns an unactivated library to its unchanged epoch.
+* `cancel` returns a `preparing` library to its unchanged epoch. `publishing` and legacy
+  unknown exposure are refused without changing local or remote data, with an instruction
+  to finish the same upgrade. Stopping a local worker only halts that attempt; it does not
+  reverse the remote maintenance state.
 
 **Rejoining.** A device that was offline sees the new epoch on its next read: its cursor is
 not in the new chain, so it rebootstraps from the new epoch's checkpoint and then publishes

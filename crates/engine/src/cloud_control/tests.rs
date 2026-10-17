@@ -45,7 +45,7 @@ fn migration_registry_uses_actual_schemas_and_converter_compatibility() {
     let base = Control::initial("library");
     let upgrade = base.begin("m", Plan::Rebase, source(), "owner", &tok(1), 0).unwrap();
     let spec = upgrade.migration_spec().unwrap();
-    let active = upgrade.activate(&tok(1)).unwrap();
+    let active = upgrade.begin_output(&tok(1), 0).unwrap().activate(&tok(1)).unwrap();
     assert_eq!((active.schema, active.minimum_reader, active.minimum_writer), (spec.target_schema(), spec.minimum_reader(), spec.minimum_writer()));
 }
 
@@ -104,8 +104,9 @@ fn two_simultaneous_upgraders_elect_exactly_one_owner() {
     assert!(!head.cas(&base, b), "loser's CAS fails against the changed head");
     let reread = head.0.clone();
     assert!(matches!(reread.begin("m2", Plan::Rebase, source(), "device-b", &tok(2), 0), Err(Blocked::Maintenance { .. })));
-    let active = reread.activate(&tok(1)).unwrap();
-    assert!(head.cas(&reread, active));
+    let publishing = reread.begin_output(&tok(1), 0).unwrap();
+    assert!(head.cas(&reread, publishing.clone()));
+    assert!(head.cas(&publishing, publishing.activate(&tok(1)).unwrap()));
     assert_eq!(head.0.epoch, 2);
     assert_eq!(head.0.active_metadata_root, "catalog/epochs/2");
 }
@@ -127,7 +128,7 @@ fn ordinary_commit_racing_maintenance_cannot_slip_past_the_frozen_boundary() {
 fn crashed_upgrader_takeover_invalidates_the_stale_owner() {
     let base = Control::initial("library");
     let mut head = Authority(base.clone());
-    let a = base.begin("m1", Plan::Rebase, source(), "device-a", &tok(1), 1_000).unwrap();
+    let a = base.begin("m1", Plan::Rebase, source(), "device-a", &tok(1), 1_000).unwrap().begin_output(&tok(1), 1_000).unwrap();
     assert!(head.cas(&base, a.clone()));
     assert!(matches!(a.takeover("device-b", &tok(2), 1_000 + LEASE_MS - 1, false), Err(Blocked::Maintenance { .. })), "lease still held");
     let b = a.takeover("device-b", &tok(2), 1_000 + LEASE_MS, false).unwrap();
@@ -146,7 +147,7 @@ fn crashed_upgrader_takeover_invalidates_the_stale_owner() {
 fn lost_activation_response_is_resolved_by_rereading_the_token_outcome() {
     let base = Control::initial("library");
     let mut head = Authority(base.clone());
-    let a = base.begin("m1", Plan::Rebase, source(), "device-a", &tok(1), 0).unwrap();
+    let a = base.begin("m1", Plan::Rebase, source(), "device-a", &tok(1), 0).unwrap().begin_output(&tok(1), 0).unwrap();
     head.cas(&base, a.clone());
     let active = a.activate(&tok(1)).unwrap();
     head.cas(&a, active.clone()); // response lost
@@ -165,10 +166,57 @@ fn cancellation_restores_the_same_epoch_and_retirement_points_at_the_successor()
     back.may_publish().unwrap();
     let m = base.begin("m2", Plan::AppendLog, source(), "device-a", &tok(3), 0).unwrap();
     assert!(m.activate(&tok(3)).is_err(), "protocol migrations retire instead");
-    let retired = m.retire(&tok(3), Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "b".repeat(64) }).unwrap();
+    let retired = m
+        .begin_output(&tok(3), 0)
+        .unwrap()
+        .retire(&tok(3), Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "b".repeat(64) })
+        .unwrap();
     assert!(matches!(retired.may_publish(), Err(Blocked::Retired(_))));
     retired.may_read().unwrap();
     assert!(retired.begin("m3", Plan::Rebase, source(), "x", &tok(4), 0).is_err());
+}
+
+#[test]
+fn exposure_is_durable_across_takeover_and_cancellation_races() {
+    for plan in [Plan::Rebase, Plan::AppendLog] {
+        let preparing = Control::initial("library").begin("m", plan, source(), "owner", &tok(1), 0).unwrap();
+        assert_eq!(preparing.control_version, 2);
+        assert_eq!(preparing.migration.as_ref().unwrap().exposure, Exposure::Preparing);
+        assert!(preparing.activate(&tok(1)).is_err(), "output must be fenced first");
+        let publishing = preparing.begin_output(&tok(1), 1).unwrap();
+        let cancelled = preparing.cancel(&tok(1)).unwrap();
+        // Whichever transition wins, the stale peer cannot accept its competing
+        // transition. The output worker proceeds only after its exact CAS is confirmed.
+        for cancel_first in [true, false] {
+            let mut head = Authority(preparing.clone());
+            if cancel_first {
+                assert!(head.cas(&preparing, cancelled.clone()));
+                assert!(!head.cas(&preparing, publishing.clone()));
+                assert!(head.0.begin_output(&tok(1), 2).is_err());
+            } else {
+                assert!(head.cas(&preparing, publishing.clone()));
+                assert!(!head.cas(&preparing, cancelled.clone()));
+                assert!(matches!(head.0.cancel(&tok(1)), Err(Blocked::FinishUpgrade(_))));
+            }
+        }
+        let back: Control = Control::decode(&serde_json::to_value(&publishing).unwrap()).unwrap();
+        let takeover = back.takeover("next", &tok(2), LEASE_MS + 1, false).unwrap();
+        assert_eq!(takeover.migration.as_ref().unwrap().exposure, Exposure::Publishing);
+        assert_eq!(takeover.migration.as_ref().unwrap().source, source());
+        assert!(matches!(takeover.cancel(&tok(2)), Err(Blocked::FinishUpgrade(_))));
+        assert!(takeover.begin_output(&tok(1), LEASE_MS + 2).is_err(), "stale owner cannot authorize output");
+        assert!(matches!(takeover.renew(&tok(2), LEASE_MS + 2).unwrap().cancel(&tok(2)), Err(Blocked::FinishUpgrade(_))));
+        let mut legacy = serde_json::to_value(&preparing).unwrap();
+        legacy["controlVersion"] = json!(1);
+        legacy["migration"].as_object_mut().unwrap().remove("exposure");
+        let legacy = Control::decode(&legacy).unwrap();
+        assert_eq!(legacy.migration.as_ref().unwrap().exposure, Exposure::Legacy);
+        assert!(matches!(legacy.cancel(&tok(1)), Err(Blocked::FinishUpgrade(_))), "v1 output exposure is unknown");
+        let resumed = legacy.takeover("next", &tok(2), LEASE_MS, false).unwrap();
+        assert_eq!(resumed.control_version, 2);
+        assert!(matches!(resumed.cancel(&tok(2)), Err(Blocked::FinishUpgrade(_))));
+        resumed.begin_output(&tok(2), LEASE_MS).unwrap();
+    }
 }
 
 #[test]
@@ -222,10 +270,10 @@ fn head_v4_carries_control_and_older_heads_read_as_active_epoch_one() {
     future["control"]["controlVersion"] = json!(CONTROL_VERSION + 1);
     future["control"]["lease"] = json!("new field");
     let error = Head::decode(&serde_json::to_vec(&future).unwrap()).err().unwrap();
-    assert!(error.contains("update LightCraft"), "{error}");
+    assert!(matches!(error, Blocked::UpdateToRead(_)), "{error}");
     future["version"] = json!(9);
     future["control"] = serde_json::to_value(Control::initial("library")).unwrap();
-    assert!(Head::decode(&serde_json::to_vec(&future).unwrap()).err().unwrap().contains("newer LightCraft"));
+    assert!(matches!(Head::decode(&serde_json::to_vec(&future).unwrap()), Err(Blocked::UpdateToRead(_))));
 }
 
 #[test]

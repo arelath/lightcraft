@@ -187,6 +187,12 @@ impl From<crate::cloud_control::Blocked> for CloudFailure {
                 (FailureKind::Unsupported, Some("This cloud library was deleted. Use a new library and storage folder; local copies remain."))
             }
             Blocked::Retired(_) => (FailureKind::Unsupported, Some(RETIRED)),
+            Blocked::FinishUpgrade(_) => (
+                FailureKind::Unsupported,
+                Some(
+                    "Successor data may already exist. Use Migrate Cloud Library… to finish the same upgrade. Keep both namespaces; do not erase successor data.",
+                ),
+            ),
             Blocked::Maintenance { .. } => (FailureKind::Contention, Some(MAINTENANCE)),
             Blocked::Conflict(_) => (FailureKind::Contention, None),
             Blocked::Invalid(_) => (FailureKind::InvalidHistory, None),
@@ -277,6 +283,7 @@ mod tests {
             (Blocked::UpdateToRead("schema 9".into()), FailureKind::Unsupported),
             (Blocked::UpdateToWrite("schema 9".into()), FailureKind::Unsupported),
             (Blocked::UpdateToUpgrade("converter 1 to 2".into()), FailureKind::Unsupported),
+            (Blocked::FinishUpgrade("m".into()), FailureKind::Unsupported),
             (retired, FailureKind::Unsupported),
             (maintenance, FailureKind::Contention),
             (Blocked::Conflict("revision 3".into()), FailureKind::Contention),
@@ -322,6 +329,13 @@ mod tests {
         assert!(!newer.action().contains("TLS"));
         let upgrade = CloudFailure::from(Blocked::UpdateToUpgrade("converter 1 to 2".into()));
         assert!(upgrade.action().starts_with("Update LightCraft"));
+        let finish = CloudFailure::from(Blocked::FinishUpgrade("m".into()));
+        assert!(finish.action().contains("finish the same upgrade"));
+        let mut migration = super::super::PollHealth::default();
+        for error in [&finish, &upgrade] {
+            migration.fail_migration(error, Some(1));
+            assert_eq!(migration.view_at(true, false, false, true, true, None)["lastError"]["action"], error.action());
+        }
         let moved = CloudFailure::from(Blocked::Retired(Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "x".into() }));
         assert!(moved.action().contains("Migrate Cloud Library"), "{}", moved.action());
         let maintenance = CloudFailure::from(Blocked::Maintenance { migration: "m".into(), plan: Plan::Rebase, owner: "o".into() });

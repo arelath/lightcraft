@@ -174,8 +174,10 @@ Explicit Sync now resumes cancelled preparation. The pause does not survive app 
 `cloud.prepareMigration` and `cloud.upgradeLibrary {plan?:"appendLog", cancel?, writersStopped?}`
 (alias `cloud.migrateAppend`) expose the same control flow as the desktop, using the same head
 transitions and token confirmation; `rebase` upgrades run in the desktop app or CLI. Observe
-Activity and the background report before retrying `cloud.sync`. Cancellation after remote seed
-publication preserves local mode/pending work; retry the upgrade to finish or cancel it.
+Activity and the background report before retrying `cloud.sync`. Stopping the local worker after
+remote seed publication preserves local mode/pending work; retry to finish the same upgrade.
+Explicit remote maintenance cancellation requires a durable `preparing` marker;
+`publishing` and legacy unknown exposure are refused without erasing data.
 Migration saves the remotely verified seed and local mode durably without acknowledging
 unsent pending work. Each other catalog rejoins a retired head with the same command, which
 writes nothing remotely. Browser append scans honour append control records like native ones.

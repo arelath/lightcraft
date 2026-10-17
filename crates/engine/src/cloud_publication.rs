@@ -58,7 +58,7 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 pub fn read_head(connection: &S3Connection, cancel: &AtomicBool) -> Result<Option<(Head, String)>> {
     let key = keys::in_library(&connection.prefix, "catalog/head.json")?;
     let Some(reply) = connection.get_small(&key, 16 << 10, cancel)? else { return Ok(None) };
-    let head = Head::decode(&reply.bytes).map_err(AssetError::Invalid)?;
+    let head = Head::decode(&reply.bytes).map_err(AssetError::Blocked)?;
     if head.version < 2 {
         return Err(invalid("obsolete pre-release catalog head; use a fresh catalog and storage prefix; local data retained"));
     }
