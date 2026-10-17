@@ -500,3 +500,10 @@ inspected. Both runs used DX12 on NVIDIA RTX 4000 Ada, with no GPU fallback and 
 render queues. Observed frame times were 1.67/2.40 ms; full update times were 42.77/57.12 ms
 (these acceptance snapshots are not a performance benchmark). The tests used disposable
 procedural photos and storage; no real B2 bucket or personal library was modified.
+
+## 2026-10-17: CR.58 — Local background media revisions
+
+The local-only engine regression covers all four operations and restart. Presented native control-channel acceptance covers asynchronous XMP, external copy and reload, asserting zero extra network requests and unchanged cloud objects. The local-only Info screenshot was inspected. Evidence: `target/cloud-cr58-engine-recheck.log`, `target/cloud-cr58-native-acceptance.log`, `target/cloud-cr58-native/toggle/off-info.png`.
+
+All eight final-source CI gates passed (`target/cloud-review-cr58-cr62-ci-final.log`).
+This run used disposable local fixtures; fresh live AWS/B2 acceptance remains open.

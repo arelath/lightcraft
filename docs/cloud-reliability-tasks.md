@@ -5,8 +5,9 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
-Current status (2026-10-17): CR.1–CR.42, CR.46, CR.47, CR.56 and CR.57 are complete.
-CR.43–CR.45 and CR.48–CR.55 remain open. Dated verification notes below
+Current status (2026-10-17): CR.1–CR.42, CR.46–CR.47 and CR.56–CR.58 are complete.
+CR.43–CR.45, CR.48–CR.55 and CR.59–CR.74 remain open.
+Dated verification notes below
 describe their original snapshots; current operational limits remain in
 [cloud-storage-implementation.md](cloud-storage-implementation.md).
 
@@ -31,6 +32,43 @@ describe their original snapshots; current operational limits remain in
 - [x] CR.19 — Align and expose native input, pixel, and blob limits; validate representative large `.3fr` inputs before migration and test actionable limit errors.
 - [x] CR.20 — Provide supported browser signer deployment instructions and a desktop/browser capability matrix; verify the deployment workflow and stated scope.
 - [x] CR.21 — Classify sync failures and retry transient connectivity with bounded backoff; pause authentication, integrity, schema, and identity failures with actionable status. Test native/browser recovery.
+
+
+## Follow-up review: local conversion, recovery and focused UX (2026-10-17)
+
+Source: supplied source-level review of `b0fd344b` (CUX.12). Its scenarios have not
+been treated as executed reproductions. Additions were recorded before implementation.
+Existing CR.43–CR.45 and CR.48–CR.55 retain their IDs and unchecked status; this review
+reaffirms them rather than creating duplicate tasks. Prioritize CR.58/59/60, then
+CR.49/53, CR.61 and the recovery/UI work. CR.62 can land independently. Preserve
+existing mutation identities, immutable media, conflict alternatives and offline copies.
+
+- [x] CR.58 — Carry a typed managed-preparation kind through background completion so local XMP, DNG, external-editor copy and reload revisions commit while sync is off, without authorizing explicit cloud enrollment. Reproduce `wait:false` on a converted library and assert zero network requests.
+- [ ] CR.59 — Certify the final cloud-to-local result against the original owner snapshot, retaining all required archive proofs and append publication state across repeated receive-only scans. Exclude transport proofs from stability fingerprints. Test an older device converting after another device compacts receipts.
+- [ ] CR.60 — Separate permanent-local editing from the bounded cloud outbox. Durably preserve the rejoin baseline, pending mutation identities and local changes without eventually blocking local edits at 10,000 pending mutations; explicitly reconcile on re-enable. Test the capacity boundary, restart, rejoin and conflicts.
+- [ ] CR.61 — Drain causally ready append operations during bounded discovery on native and browser; share discovery planning while keeping platform I/O separate. Retain integrity checks and bounds for unresolved dependencies. Test a fresh reader catching up with 300 sequential 256 KiB caption replacements and cross-author ordering.
+- [ ] CR.62 — Persist a stable absolute permanent-original destination before entering conversion, including relative `--library` paths; retain symlink/junction validation. Test conversion and offline reopening of `./photos`.
+- [ ] CR.63 — Add library-wide error Details with the original diagnostic, affected operation, retry state and cause-specific recovery. Use a typed UI status/action model across popup, Info and focused dialogs; offer Edit connection only for relevant configuration/authentication failures. Test an empty library and integrity/capacity/schema/disk errors.
+- [ ] CR.64 — Make saved keys, replacement keys and AWS profile explicit authentication choices; use the selected source consistently for probing and persistence. Test replacing saved-key credentials with a different profile.
+- [ ] CR.65 — Add bounded cursor pagination and search for conflicting fields, retained choices and deleted photos. Ensure conflict 17, value nine and deleted item 201 are reachable without resolving/restoring earlier items.
+- [ ] CR.66 — Derive Info and popup Sync/Retry/Resume labels and commands from shared state, including user pause. Test Info resumes paused sync rather than dispatching a rejected ordinary sync.
+- [ ] CR.67 — Reset retention's all-writers-paused assertion on closing/reopening or resuming; retain running-task identity separately. Test reopening requires fresh operator confirmation before reclamation.
+- [ ] CR.68 — Route control-channel and widget dialog confirmation through one lifecycle handler, preserving cloud dialogs and values on errors. Test both paths produce the same recovery state.
+- [ ] CR.69 — Extract managed media preparation/commit from cloud enrollment into an explicit subsystem with typed operation kinds, preserving durable staging, retries and ordinary local revision behavior. Keep public command/API compatibility.
+- [ ] CR.70 — Preserve typed compatibility, control and capacity failures through head decoding, scope validation, transport adaptation and append planning to health/presentation. Test complete transport-to-health paths, including newer-reader update recovery.
+- [ ] CR.71 — Replace unsupported backup assurance with precise Up to date/Synchronized status; expose secondary Sync now and accurate healthy/paused/retrying/read-only/local-only information using the shared model. Verify representative popup states.
+- [ ] CR.72 — Make conflict choices distinguishable with full readable metadata, useful device/version details and Compare/Preview for develop alternatives. Keep every retained alternative navigable and resolution explicit.
+- [ ] CR.73 — Define and implement Recently Deleted behavior during cloud-to-local conversion. Include recoverable deleted originals by default (with count/space in the review) so local-only restoration works offline; preserve retained content alternatives and test restore after conversion.
+- [ ] CR.74 — Explain re-enabling a local-only library as a merge with its existing library/connection, preserving local/new photos, cloud changes and retained conflicts. Test the re-enable confirmation and resulting merge semantics.
+
+Reaffirmed open work: CR.49 successor exposure/cancellation, CR.53 adopted-destination
+and lease-aware cache cleanup, CR.48 append epoch routing, CR.50 publication capability
+on every outcome, CR.51 lease renewal throughout expensive upgrade work, CR.52 browser
+blob/index recovery, CR.54 credential-record isolation and CR.55 paginated validated
+library discovery. Regression acceptance must cover cancellation after each successor
+stage, interrupted browser publication and forced cache-move fallback. CR.43's exclusive
+append barrier remains open; CR.44 requires an actual schema converter and CR.45 requires
+current live-provider/browser acceptance, so historical fixture success cannot close them.
 
 ## Follow-up review: completion ordering and shared semantics
 
@@ -1729,3 +1767,11 @@ migration is being prepared. The bounded retry policy itself (five retries over 
 is unchanged. Regression: `idle_hosts_learn_when_polling_is_due_and_reconnect_restarts_a_halted_scheduler`.
 A minimized desktop window may still receive no frames from the platform; that and browser background-tab
 throttling are not addressed.
+
+2026-10-17 — CR.58: Local background media revisions. Managed background completion retains its originating typed operation. XMP save, DNG conversion, external-editor copy and reload commit with cloud sync off; explicit cloud enrollment remains blocked. The managed-media subsystem extraction remains CR.69.
+
+The local-only engine regression covers all four operations and restart. Presented native control-channel acceptance covers asynchronous XMP, external copy and reload, asserting zero extra network requests and unchanged cloud objects. The local-only Info screenshot was inspected. Evidence: `target/cloud-cr58-engine-recheck.log`, `target/cloud-cr58-native-acceptance.log`, `target/cloud-cr58-native/toggle/off-info.png`.
+
+Final-source `cargo +1.95.0 xtask ci` passed fmt, strict Clippy, HEIF, workspace
+tests, parity, layers, assets and WASM: `target/cloud-review-cr58-cr62-ci-final.log`.
+These are disposable loopback/procedural fixtures, not live AWS/B2 acceptance.

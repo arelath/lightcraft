@@ -686,3 +686,7 @@ review remain available there. Setup and re-enabling remain short, explicit work
 Validation: all eight workspace CI gates, 40 focused import tests, seven final popup
 tests, and presented native 20-photo batches with both protocols passed. See the
 [dated acceptance record](cloud-acceptance-history.md#2026-10-17-batched-enrollment-and-focused-cloud-controls-cux12).
+
+### CR.58 — Local background media revisions (2026-10-17)
+
+Managed background completion retains its originating typed operation. XMP save, DNG conversion, external-editor copy and reload commit with cloud sync off; explicit cloud enrollment remains blocked. The managed-media subsystem extraction remains CR.69.

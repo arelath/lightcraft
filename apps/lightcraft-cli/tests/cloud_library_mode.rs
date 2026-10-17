@@ -71,6 +71,21 @@ impl Desktop {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+    fn prepared(&mut self, command: &str, photo: u64) -> Value {
+        let started = self.execute(command, json!({"ids":[photo],"wait":false}));
+        let task = started["task"].as_u64().or_else(|| started["managed"]["task"].as_u64()).expect("background media task");
+        let until = Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = self.execute("cloud.importStatus", json!({}));
+            if let Some(report) = status["reports"].as_array().unwrap().iter().find(|report| report["task"] == task) {
+                assert_eq!(report["ok"], true, "{command}: {report}");
+                assert_eq!(report["result"]["failed"], json!([]), "{command}: {report}");
+                return report["result"].clone();
+            }
+            assert!(Instant::now() < until, "{command}: {status}");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
 }
 fn photo(f: &support::Fixture, name: &str, shade: u8) -> (std::path::PathBuf, Vec<u8>, String) {
     let pixels = lightcraft_raster::Rgba8::from_fn(32, 24, |x, y| [x as u8 * 5, y as u8 * 7, shade, 255]);
@@ -194,6 +209,13 @@ fn cloud_toggle_native_confirmation_blocking_progress_and_durable_completion() {
     }
     app.ask("ui.screenshot", json!({"path":artifacts.join("off-cache-settings.png")}));
     app.ask("ui.dialog.cancel", json!({}));
+    let requests_before_local_work = f.state.lock().unwrap().requests.len();
+    app.prepared("photo.saveMetadataToFile", 1);
+    let edit = app.prepared("photo.editExternal", 1);
+    let derived = edit["id"].as_u64().unwrap();
+    std::fs::copy(&source, edit["path"].as_str().unwrap()).unwrap();
+    app.prepared("photo.reload", derived);
+    assert_eq!(f.state.lock().unwrap().requests.len(), requests_before_local_work, "local background revisions perform no network requests");
     app.ask("app.quit", json!({}));
     assert!(app.child.wait().unwrap().success());
     assert_eq!(std::fs::read(local.join("Local Originals").join("blobs").join(original.id.0)).unwrap(), std::fs::read(source).unwrap());

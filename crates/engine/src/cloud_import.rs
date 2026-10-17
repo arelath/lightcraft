@@ -251,7 +251,39 @@ struct RequestOptions {
     fresh: bool,
     policy: Option<requests::DuplicatePolicy>,
 }
+/// The completion context is frozen when preparation starts. Managed local
+/// revisions use their originating operation, independently of cloud enrollment.
+#[derive(Clone, Copy, Default)]
+enum PreparationKind {
+    #[default]
+    Enrollment,
+    Dng,
+    Xmp,
+    Returned,
+    ExternalCopy,
+}
+impl PreparationKind {
+    fn command(self) -> &'static str {
+        match self {
+            Self::Enrollment => "cloud.import",
+            Self::Dng => "photo.convertToDng",
+            Self::Xmp => "photo.saveMetadataToFile",
+            Self::Returned => "photo.reload",
+            Self::ExternalCopy => "photo.editExternal",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Enrollment => "Stage Cloud Originals",
+            Self::Dng => "Convert to DNG",
+            Self::Xmp => "Save Metadata to File",
+            Self::Returned => "Reload External Edit",
+            Self::ExternalCopy => "Prepare External Edit",
+        }
+    }
+}
 struct Job {
+    kind: PreparationKind,
     automatic: bool,
     paths: Vec<PathBuf>,
     adoption: Option<Vec<Photo>>,
@@ -439,6 +471,7 @@ impl Job {
             }
         }
         let mut job = Self {
+            kind: PreparationKind::Enrollment,
             paths,
             adoption: None,
             adoption_key: None,
@@ -1314,6 +1347,7 @@ pub(crate) fn reload_working(s: &mut Session, ids: &[PhotoId], params: &Value) -
     revise(s, ids, params, RevisionKind::Returned)
 }
 
+#[derive(Clone, Copy)]
 enum RevisionKind {
     Dng,
     Xmp,
@@ -1364,6 +1398,11 @@ fn revise(s: &mut Session, ids: &[PhotoId], params: &Value, kind: RevisionKind) 
             job = Some(Job::new(s, &json!({"connection":asset.original.remote.connection}), true)?);
         }
         if let Some(job) = &mut job {
+            job.kind = match kind {
+                RevisionKind::Dng => PreparationKind::Dng,
+                RevisionKind::Xmp => PreparationKind::Xmp,
+                RevisionKind::Returned => PreparationKind::Returned,
+            };
             job.revisions.push(revision);
             job.recover = false;
         }
@@ -1418,6 +1457,7 @@ pub(crate) fn edit_external(s: &mut Session, ids: &[PhotoId], options: &crate::e
         let packet = crate::sidecar::sidecar_packet(&rendered, &s.catalog);
         let asset = s.catalog.asset(&base_asset).ok_or_else(|| error("external edit asset disappeared"))?.clone();
         if let Some(job) = &mut job {
+            job.kind = PreparationKind::ExternalCopy;
             job.edits.push(std::sync::Mutex::new(Some(EditPlan { export, parent: *id, base_asset, asset, packet })));
             job.recover = false;
         }
@@ -1426,6 +1466,7 @@ pub(crate) fn edit_external(s: &mut Session, ids: &[PhotoId], options: &crate::e
 }
 
 struct Pending {
+    kind: PreparationKind,
     photos: usize,
     receiver: mpsc::Receiver<Result<Prepared>>,
     applied: bool,
@@ -1513,7 +1554,8 @@ fn launch_job(s: &mut Session, p: &Value, mut job: Job) -> Result<Value> {
         return Err(error("wait for background imports to finish before a blocking import"));
     }
     let coordinator = s.cloud_imports.coordinator.clone();
-    let task = s.activity.start("import", "Stage Cloud Originals", crate::activity::Cancel::Yes);
+    let kind = job.kind;
+    let task = s.activity.start("import", kind.label(), crate::activity::Cancel::Yes);
     let photos = job.paths.len();
     task.progress(0, photos as u64);
     let cancel = task.cancel_flag().ok_or_else(|| error("could not create import cancellation flag"))?;
@@ -1569,6 +1611,7 @@ fn launch_job(s: &mut Session, p: &Value, mut job: Job) -> Result<Value> {
         })
         .map_err(io)?;
     s.cloud_imports.pending.push(Pending {
+        kind,
         photos,
         receiver,
         applied: false,
@@ -1598,7 +1641,7 @@ impl Session {
                 } else {
                     result.and_then(|prepared| {
                         let mut skipped = Vec::new();
-                        self.execute_fn("cloud.import", |s| {
+                        self.execute_fn(pending.kind.command(), |s| {
                             let completed = complete(s, prepared)?;
                             skipped = completed.skipped;
                             Ok(completed.value)
@@ -1764,6 +1807,65 @@ mod tests {
         assert_eq!(packet_for(&session, id), packet.as_bytes());
     }
 
+    #[test]
+    fn local_only_background_media_revisions_commit_without_enrolling_cloud_imports() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        let raw = fixture.root.join("source.raw");
+        std::fs::write(&raw, crate::tests_xmp::synthetic_dng_with(None, Default::default())).unwrap();
+        let id = PhotoId(session.execute("cloud.import", &json!({"connection":"personal","paths":[raw]})).unwrap()["ids"][0].as_u64().unwrap());
+        let source = session.catalog.photo(id).unwrap().source.clone();
+        session.commit("Raw source", Op::Relink { id, source, file_name: "source.raw".into(), format: Some("RAW".into()) }).unwrap();
+        session.execute("cloud.syncEnable", &json!({"connection":"personal"})).unwrap();
+        let resolver = session.media.asset_resolver.clone().unwrap();
+        let destination = fixture.root.join("library/Local Originals");
+        let blobs = crate::cloud_local_transfer::plan(&session.catalog).unwrap();
+        crate::cloud_local_transfer::materialize(resolver, &destination, &blobs, &AtomicBool::new(false), |_| {}).unwrap();
+        session.close_library().unwrap();
+        drop(session);
+        std::fs::write(fixture.root.join("library/cloud-mode.json"), br#"{"version":1,"localOnly":true,"transition":null}"#).unwrap();
+        let mut session = Session::new().with_fs();
+        session.open_library(fixture.root.join("library"), false).unwrap();
+        assert!(session.cloud_transition.local_only());
+        assert!(session.execute("cloud.import", &fixture.params()).is_err(), "explicit enrollment stays prohibited");
+
+        fn background(session: &mut Session, command: &str, id: PhotoId) -> Value {
+            session.execute(command, &json!({"ids":[id.0],"wait":false})).unwrap();
+            assert_eq!(session.cloud_imports.pending.len(), 1, "{command} must exercise asynchronous completion");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !session.cloud_imports.pending.is_empty() {
+                session.poll_cloud_imports();
+                assert!(std::time::Instant::now() < deadline, "{command}: preparation timed out");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let report = session.cloud_imports.reports.last().unwrap();
+            assert_eq!(report["ok"], true, "{command}: {report}");
+            assert_eq!(report["result"]["failed"], json!([]), "{command}: {report}");
+            let result = report["result"].clone();
+            session.resume_cloud_uploads();
+            session.resume_cloud_replication();
+            assert_eq!(session.cloud_uploads.running(), 0);
+            assert!(!session.cloud_replication_jobs.running());
+            result
+        }
+        session.execute("photo.rate", &json!({"ids":[id.0],"rating":4})).unwrap();
+        background(&mut session, "photo.saveMetadataToFile", id);
+        assert_eq!(lightcraft_meta::parse_xmp(std::str::from_utf8(&packet_for(&session, id)).unwrap()).unwrap().metadata.rating, Some(4));
+        background(&mut session, "photo.convertToDng", id);
+        assert_eq!(session.catalog.photo(id).unwrap().format, "DNG");
+        let edit = background(&mut session, "photo.editExternal", id);
+        let derived = PhotoId(edit["id"].as_u64().unwrap());
+        std::fs::copy(&fixture.original, edit["path"].as_str().unwrap()).unwrap();
+        background(&mut session, "photo.reload", derived);
+        assert_eq!((session.catalog.photo(derived).unwrap().width, session.catalog.photo(derived).unwrap().height), (32, 24));
+        session.close_library().unwrap();
+        drop(session);
+        let mut reopened = Session::new().with_fs();
+        reopened.open_library(fixture.root.join("library"), false).unwrap();
+        assert!(reopened.cloud_transition.local_only());
+        assert_eq!(reopened.catalog.photo(id).unwrap().rating, 4);
+        assert!(reopened.catalog.photo(derived).is_some());
+    }
     #[test]
     fn supporting_xmp_survives_dng_xmp_write_external_render_and_returned_original_revisions() {
         let fixture = Fixture::new();

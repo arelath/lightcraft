@@ -258,6 +258,19 @@ Workflow acceptance (2026-10-14) passed on the final native release and browser 
 
 Quality gates (2026-10-14): all eight stages of `cargo +1.95.0 xtask ci` passed on the final source (`target/migration-ci-final.log`). Native release and WASM/browser builds passed (`target/migration-native-final.log`, `target/migration-web-final.log`). The fixture independently verified all 429 requests across the final workflow runs and retained legacy heads (`target/cloud-acceptance/migration-fixture-summary.json`). Owned fixture/static helpers were stopped. The final signed B2 GET recheck at 2026-10-13 21:56 UTC again returned the explicit cap-exceeded response, so MIG.B2 stays unchecked.
 
+## Cloud reliability review of CUX.12 — follow-up
+
+The supplied 2026-10-17 review is tracked before implementation in
+[cloud-reliability-tasks.md](docs/cloud-reliability-tasks.md#follow-up-review-local-conversion-recovery-and-focused-ux-2026-10-17).
+
+- [x] **CR.58** Repair local-only background media completion.
+- [ ] **CR.59** Certify conversion against the original owner after receipt compaction.
+- [ ] **CR.60** Separate permanent-local editing from the bounded cloud outbox and reconcile rejoin safely.
+- [ ] **CR.61** Drain ready append operations during bounded discovery.
+- [ ] **CR.62** Persist absolute conversion destinations for relative library paths.
+- [ ] **CR.63–CR.74** Complete typed diagnostics/actions, explicit authentication choice, navigable recovery/conflicts, confirmation lifecycle, managed-media boundaries and precise local/cloud UX.
+- [ ] **CR.48–CR.55** Recheck and close the previously tracked epoch, migration, status, lease, browser-cache, relocation, credential-isolation and discovery findings with current evidence. Detailed items remain individually tracked in the reliability checklist.
+
 ## Cloud queue UX — follow-up
 
 - [x] **CUX.1** Add indexed per-photo sync status and shared queue/data totals, including metadata pending work, failed uploads and virtual-copy deduplication; support filters/chips and backward-compatible catalog loading.
