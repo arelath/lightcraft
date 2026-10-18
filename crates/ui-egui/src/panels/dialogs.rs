@@ -1059,7 +1059,14 @@ fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
                     ui.label(crate::i18n::tr("Cancel leaves this device paused. Use Sync now to resume without migrating."));
                 }
                 Dialog::CloudConnect { connection, library, protocol } => {
-                    ui.label(crate::i18n::tr("Sync photos, edits and albums with this cloud library."));
+                    let local_only = app.run("cloud.overview", json!({})).ok().is_some_and(|status| status["localOnly"] == true);
+                    if local_only {
+                        ui.label(crate::i18n::tr("Turn cloud sync back on for this library."));
+                        ui.label(crate::i18n::tr("Your local edits and new photos will merge with changes in the same cloud library. Conflicting edits are kept for review."));
+                        ui.label(crate::i18n::tr("Permanent local originals stay on this device."));
+                    } else {
+                        ui.label(crate::i18n::tr("Sync photos, edits and albums with this cloud library."));
+                    }
                     ui.add_enabled_ui(app.session.catalog.sync_state().is_none(),|ui|{
                         field(ui, "Connection name", |ui| { crate::text_field::TextField::singleline("cloudSyncConnection", connection).width(f32::INFINITY).show(ui); });
                         egui::ComboBox::from_id_salt("cloudSyncProtocol").selected_text(if protocol.is_head(){"S3 conditional writes"}else{"Append-only (Backblaze B2)"}).show_ui(ui,|ui|{

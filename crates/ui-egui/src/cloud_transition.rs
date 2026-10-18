@@ -340,7 +340,10 @@ mod tests {
                     Some(Ok(value))
                 }
                 "cloud.connections" => Some(Ok(json!({"connections":[{"id":"another"},{"id":"personal"}]}))),
-                "cloud.overview" => Some(Ok(json!({"syncEnabled":read.lock().unwrap()["localOnly"] != true,"summary":{}}))),
+                "cloud.overview" => {
+                    let local_only = read.lock().unwrap()["localOnly"] == true;
+                    Some(Ok(json!({"syncEnabled":!local_only,"localOnly":local_only,"summary":{}})))
+                }
                 "cloud.syncStatus" => Some(Ok(json!({"enabled":read.lock().unwrap()["localOnly"] != true,"protocol":"conditional-head-v1"}))),
                 "cloud.syncEnable" | "cloud.sync" => {
                     recorded.lock().unwrap().push((command.into(), params.clone()));
@@ -534,6 +537,52 @@ mod tests {
             capture(&mut headless, stage);
             click(&mut headless, "button:cloudDisableQuit");
             assert!(headless.quit_requested(), "{stage}");
+        }
+    }
+    #[test]
+    fn local_only_reenable_explains_a_merge_with_or_without_a_local_edit_baseline() {
+        use lightcraft_catalog::{Op, local_sync::Baseline};
+        for (local_only, baseline) in [(true, false), (true, true), (false, true)] {
+            let initial = if local_only { status("complete") } else { Value::Null };
+            let (mut h, _, calls) = fixture(initial, [1100., 760.]);
+            if baseline {
+                h.app
+                    .session
+                    .catalog
+                    .apply(Op::SetLocalSyncBaseline {
+                        baseline: Some(Box::new(Baseline {
+                            library: "library".into(),
+                            connection: "personal".into(),
+                            clock: Default::default(),
+                            documents: Default::default(),
+                            imports: Default::default(),
+                        })),
+                    })
+                    .unwrap();
+            }
+            h.app.run("dialog.cloudSync", json!({})).unwrap();
+            frames(&mut h);
+            let text = h.painted_text();
+            if !local_only {
+                assert!(h.app.ui.dialog.is_none(), "active sync opens the popup");
+                assert!(
+                    !text.iter().any(|s| s.contains("local edits and new photos will merge")),
+                    "an edit baseline alone must not select the local-only copy"
+                );
+                assert!(calls.lock().unwrap().is_empty());
+                continue;
+            }
+            assert!(matches!(&h.app.ui.dialog,Some(Dialog::CloudConnect {connection,library,..}) if connection=="personal" && library=="library"));
+            for phrase in
+                ["local edits and new photos will merge", "Conflicting edits are kept for review", "Permanent local originals stay on this device"]
+            {
+                assert!(text.iter().any(|s| s.contains(phrase)), "{phrase}: {text:?}");
+            }
+            click(&mut h, "button:dialogOk");
+            let calls = calls.lock().unwrap();
+            let enabled = calls.iter().find(|(id, _)| id == "cloud.syncEnable").unwrap();
+            assert_eq!(enabled.1, json!({"connection":"personal","library":"library","protocol":"conditional-head-v1"}));
+            assert!(calls.iter().any(|(id, _)| id == "cloud.sync"));
         }
     }
 }

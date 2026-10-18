@@ -777,13 +777,19 @@ fn local_only_rejoin_uploads_final_revisions_and_new_local_photos() {
     use lightcraft_engine::catalog::{FsStore, Journal, Source, uploads::UploadState};
     let f = support::Fixture::new();
     let local = f.dir.join("local-rejoin");
-    let (import, _) = f.import(&local, false);
+    let (import, source) = f.import(&local, false);
     let (out, rows) = f.run(
         &local,
         &[("cloud.upload", json!({"imports":[import]})), ("cloud.sync", json!({})), ("cloud.syncDisable", json!({"confirm":true,"wait":true}))],
     );
     assert!(out.status.success(), "{rows:?}");
     assert_eq!(rows[2]["result"]["stage"], "complete");
+    let before = Journal::open(Box::new(FsStore::open(&local).unwrap())).unwrap().1;
+    let library = before.sync_state().unwrap().library.clone();
+    let original = before.assets().values().next().unwrap().original.clone();
+    let permanent = local.join("Local Originals").join("blobs").join(&original.id.0);
+    let expected = std::fs::read(&source).unwrap();
+    assert_eq!(std::fs::read(&permanent).unwrap(), expected);
     let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("local-rejoin");
     std::fs::create_dir_all(&artifacts).unwrap();
     let mut app = Desktop::start(&f, &local, &artifacts);
@@ -796,7 +802,10 @@ fn local_only_rejoin_uploads_final_revisions_and_new_local_photos() {
     app.execute("library.import", json!({"paths":[source]}));
     app.execute("photo.rate", json!({"ids":[2],"rating":2}));
     assert_eq!(f.state.lock().unwrap().requests.len(), requests, "local revisions and imports never access cloud storage");
-    app.execute("cloud.syncEnable", json!({"connection":"personal"}));
+    app.execute("dialog.cloudSync", json!({}));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("local-only-connect.png"),"headless":true}));
+    app.ask("ui.clickWidget", json!({"id":"button:dialogOk"}));
+    app.ask("ui.screenshot", json!({"path":artifacts.join("reenabling.png"),"headless":true}));
     let until = Instant::now() + Duration::from_secs(45);
     loop {
         let status = app.execute("cloud.overview", json!({}));
@@ -814,6 +823,9 @@ fn local_only_rejoin_uploads_final_revisions_and_new_local_photos() {
     assert!(app.child.wait().unwrap().success());
     let saved = Journal::open(Box::new(FsStore::open(&local).unwrap())).unwrap().1;
     assert!(saved.local_sync_baseline().is_none());
+    assert_eq!(saved.sync_state().unwrap().library, library);
+    assert_eq!(saved.sync_state().unwrap().connection, "personal");
+    assert_eq!(std::fs::read(&permanent).unwrap(), expected, "reenabling preserves permanent local originals");
     assert_eq!(saved.photos().count(), 2);
     assert!(saved.photos().all(|photo| matches!(photo.source, Source::Managed { .. })));
     assert!(saved.upload_intents().values().any(|intent| intent.state == UploadState::Superseded));
