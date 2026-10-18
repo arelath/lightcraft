@@ -149,3 +149,52 @@ fn migration_preparation_offers_explicit_sync_without_an_ordinary_resume() {
     click(&mut h, "button:cloudSyncNow");
     assert_eq!(calls.lock().unwrap().iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["cloud.resume", "cloud.resume"]);
 }
+
+#[test]
+fn secondary_sync_now_and_info_use_the_same_command_and_disable_while_running() {
+    for running in [false, true] {
+        let mut data = overview();
+        data["health"]["sync"]["running"] = json!(running);
+        let (mut h, calls) = fixture(data);
+        click(&mut h, "icon:cloud");
+        assert!(h.app.widgets.iter().any(|(id, _)| id == "button:cloudPopupSyncNow"));
+        assert!(!h.painted_text().iter().any(|text| text.contains("backed up")));
+        click(&mut h, "button:cloudPopupSyncNow");
+        // Manual navigation closes the popup only when enabled.
+        if running {
+            click(&mut h, "icon:cloud");
+        }
+        h.app.run("panel.info", json!({})).unwrap();
+        frames(&mut h);
+        let expected = if running { "Syncing library…" } else { "Up to date" };
+        assert!(h.painted_text().iter().any(|text| text == expected), "{:?}", h.painted_text());
+        click(&mut h, "button:cloudSyncNow");
+        let expected =
+            if running { vec![] } else { vec![("cloud.sync".into(), json!({"wait":false})), ("cloud.sync".into(), json!({"wait":false}))] };
+        assert_eq!(*calls.lock().unwrap(), expected);
+    }
+}
+
+#[test]
+fn popup_and_info_share_precise_paused_retry_read_only_and_local_status() {
+    for (label, extra) in [
+        ("Syncing paused", json!({"userPaused":true,"paused":true})),
+        ("Publishing paused", json!({"publicationBlocked":"Another device is upgrading the library."})),
+        ("Cloud sync is off", json!({"syncEnabled":false,"localOnly":true,"localDestination":"D:/Photos/Local Originals"})),
+    ] {
+        let mut data = overview();
+        for (key, value) in extra.as_object().unwrap() {
+            data[key] = value.clone();
+        }
+        let (mut h, _) = fixture(data);
+        click(&mut h, "icon:cloud");
+        assert!(h.painted_text().iter().any(|text| text == label), "{:?}", h.painted_text());
+        click(&mut h, "icon:cloud");
+        h.app.run("panel.info", json!({})).unwrap();
+        frames(&mut h);
+        assert!(h.painted_text().iter().any(|text| text == label), "{:?}", h.painted_text());
+        if label == "Cloud sync is off" {
+            assert!(h.painted_text().iter().any(|text| text == "D:/Photos/Local Originals"));
+        }
+    }
+}

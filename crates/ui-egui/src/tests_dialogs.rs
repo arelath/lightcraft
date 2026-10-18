@@ -35,7 +35,7 @@ fn cloud_retry_headline_displays_bounded_countdown_and_manual_recovery_actions()
         for label in [expected, "Details", "Retry"] {
             assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
         }
-        assert!(!text.iter().any(|value| value == "Synced and backed up"));
+        assert!(!text.iter().any(|value| value == "Up to date"));
     }
 }
 
@@ -67,7 +67,7 @@ fn cloud_health_headline_covers_halted_polling_and_structural_only_conflicts() {
         }
         let text = h.view.painted_text();
         assert!(text.iter().any(|value| value.contains("Sync needs attention")), "{text:?}");
-        assert!(!text.iter().any(|value| value == "Synced and backed up"));
+        assert!(!text.iter().any(|value| value == "Up to date"));
         let cause = if structural { "Album or stack choices need attention" } else { "Open Details for the diagnostic." };
         assert!(text.iter().any(|value| value.contains(cause)), "{text:?}");
         assert!(!text.iter().any(|value| value.contains("Last checked")), "{text:?}");
@@ -100,7 +100,7 @@ fn cloud_health_headline_covers_halted_polling_and_structural_only_conflicts() {
         for _ in 0..4 {
             h.step();
         }
-        assert!(h.view.painted_text().iter().any(|value| value == "Synced and backed up"));
+        assert!(h.view.painted_text().iter().any(|value| value == "Up to date"));
     }
 }
 
@@ -133,7 +133,7 @@ fn cloud_popup_exposes_preflight_reason_and_dispatches_exact_import_retry() {
     for label in ["Sync needs attention", "camera.dng", "invalid revision manifest", "Retry upload"] {
         assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
     }
-    assert!(!text.iter().any(|value| value == "Synced and backed up"));
+    assert!(!text.iter().any(|value| value == "Up to date"));
     assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudRetryImport:blocked-import"}), T)["ok"], true);
     for _ in 0..4 {
         h.step();
@@ -411,7 +411,7 @@ fn cloud_popup_says_publishing_is_blocked_and_counts_field_conflicts() {
     ] {
         assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
     }
-    assert!(!text.iter().any(|value| value == "Synced and backed up"));
+    assert!(!text.iter().any(|value| value == "Up to date"));
 }
 
 #[test]

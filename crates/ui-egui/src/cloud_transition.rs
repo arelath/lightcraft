@@ -496,7 +496,7 @@ mod tests {
         headless.app.run("panel.info", json!({})).unwrap();
         frames(&mut headless);
         let text = headless.painted_text();
-        assert!(text.iter().any(|s| s.contains("Cloud sync is off on this device")), "{text:?}");
+        assert!(text.iter().any(|s| s.contains("Cloud sync is off")), "{text:?}");
         assert!(text.iter().any(|s| s.contains("Turn on cloud sync")), "{text:?}");
         for label in ["Sync now", "Reconnect and retry", "Remove local original copy", "Keep original offline", "Migrate to append-only"] {
             assert!(!text.iter().any(|s| s.contains(label)), "{label}: {text:?}");

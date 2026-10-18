@@ -8,34 +8,7 @@ use crate::{
 use serde_json::{Value, json};
 
 pub(crate) fn needs_attention(data: &Value) -> bool {
-    if data["syncEnabled"] == false && !data["erasure"].is_object() {
-        return false;
-    }
-    let summary = &data["summary"];
-    let health = &data["health"];
-    data["erasure"].is_object()
-        || summary["issues"].as_u64().unwrap_or(0) > 0
-        || summary["failedFiles"].as_u64().unwrap_or(0) > 0
-        || summary["blockedImportCount"].as_u64().unwrap_or(0) > 0
-        || data["error"].is_string()
-        || health["imports"]["failed"].as_array().is_some_and(|items| !items.is_empty())
-        || health["offline"]["persistentCache"]["temporaryBlobs"].as_u64().unwrap_or(0) > 0
-        || health["sync"]["pollingHalted"] == true
-        || health["sync"]["lastError"].is_object()
-        || health["uploads"]["failedImports"].as_u64().unwrap_or(0) > 0
-        || health["uploads"]["activity"]["failedResources"].as_u64().unwrap_or(0) > 0
-        || health["media"]["failedResources"].as_u64().unwrap_or(0) > 0
-        || health["offline"]["offlineErrors"].as_object().is_some_and(|errors| !errors.is_empty())
-        || health["receipts"]["failed"].as_u64().unwrap_or(0) > 0
-        || health["conflicts"]["fields"].as_u64().unwrap_or(0) > 0
-        || health["conflicts"]["structural"].as_u64().unwrap_or(0) > 0
-        || data["conflicts"].as_array().is_some_and(|items| !items.is_empty())
-        || data["structuralConflicts"].as_array().is_some_and(|items| !items.is_empty())
-        || data["capacityWarnings"].as_array().is_some_and(|items| !items.is_empty())
-        || data["publicationBlocked"].is_string()
-}
-fn verified_scan(data: &Value) -> bool {
-    data["health"]["sync"]["lastSuccessfulRemoteScan"].is_object() && matches!(data["health"]["sync"]["state"].as_str(), Some("healthy" | "checking"))
+    lightcraft_engine::cloud_status::Presentation::from_overview(data, false).needs_attention
 }
 pub(crate) fn retry_text(health: &Value) -> Option<String> {
     (health["state"] == "retrying").then(|| {
@@ -163,6 +136,13 @@ fn metric(ui: &mut egui::Ui, label: &str, value: &str) -> egui::Response {
     })
     .inner
 }
+pub(super) fn pending_metric(ui: &mut egui::Ui, pending: u64) {
+    metric(ui, "Changes to publish", &pending.to_string());
+}
+pub(super) fn checked_metric(ui: &mut egui::Ui, age: Option<u64>) {
+    let value = age.map(ago).unwrap_or_else(|| crate::i18n::tr("Not yet checked").to_owned());
+    metric(ui, "Last checked", &value);
+}
 fn invoke(app: &mut LightcraftApp, ui: &mut egui::Ui, command: &str, params: Value) {
     if let Err(error) = app.run(command, params) {
         app.toast(ui.ctx(), error);
@@ -231,48 +211,17 @@ fn attention_row(app: &mut LightcraftApp, ui: &mut egui::Ui, icon: Icon, title: 
     });
     ui.add_space(12.);
 }
-fn busy(data: &Value) -> bool {
-    data["waitingFiles"].as_u64().unwrap_or(0) > 0
-        || data["uploadingFiles"].as_u64().unwrap_or(0) > 0
-        || data["preparingFiles"].as_u64().unwrap_or(0) > 0
-        || data["health"]["receipts"]["pending"].as_u64().unwrap_or(0) > 0
-        || data["health"]["remoteHistoryWaiting"] == true
-        || data["summary"]["pendingChanges"].as_u64().unwrap_or(0) > 0
-}
-fn footer_text(data: &Value, unsaved: bool) -> &'static str {
-    if !unsaved && data["erasure"].is_object() {
-        return if data["erasure"]["complete"] == true { "Cloud library deleted" } else { "Deletion incomplete" };
-    }
-    if !unsaved && data["syncEnabled"] == false {
-        return "Cloud sync is off";
-    }
-    if unsaved || needs_attention(data) {
-        "Sync needs attention"
-    } else if data["migrating"] == true || data["preparingMigration"] == true {
-        "Migrating cloud library…"
-    } else if data["paused"] == true {
-        "Syncing paused"
-    } else if busy(data) {
-        "Syncing library…"
-    } else if data["syncEnabled"] == true && verified_scan(data) {
-        "Synced and backed up"
-    } else if data["syncEnabled"] == true {
-        "Checking cloud library…"
-    } else {
-        "Local library"
-    }
-}
-
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let t = Tokens::get(ui.ctx());
     let summary = &data["summary"];
     let off = data["syncEnabled"] == false;
     let paused = data["paused"] == true;
-    let controls = lightcraft_engine::cloud_status::Actions::from_overview(data);
+    let presentation = lightcraft_engine::cloud_status::Presentation::from_overview(data, app.session.unsaved().is_some());
+    let controls = presentation.actions;
     let waiting = data["waitingFiles"].as_u64().unwrap_or(0).saturating_add(data["preparingPhotos"].as_u64().unwrap_or(0));
     let active = data["uploadingFiles"].as_u64().unwrap_or(0);
     let changes = summary["pendingChanges"].as_u64().unwrap_or(0);
-    let attention = needs_attention(data) || app.session.unsaved().is_some();
+    let attention = presentation.needs_attention;
     ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
     ui.set_width(214.);
     ui.style_mut().override_font_id = Some(t.font(12.));
@@ -292,9 +241,13 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
             metric(ui, if off {"Last known cloud storage"} else {"Storage space used"}, &storage).on_hover_text(crate::i18n::tr(
                 if off {"Cloud sync is off. This is the last known size of cloud originals, not a current cloud scan or local disk usage."} else if data["erasure"].is_object() {"Library deletion retains local copies. Review deletion to inspect any remaining cloud data."} else {"Storage used by cloud originals represented in this catalog; shared originals count once. Previews, sidecars, sync metadata, and other libraries are not included."},
             ));
-            if !off && !attention && !busy(data) && let Some(age) = data["health"]["sync"]["secondsSinceLastRemoteScan"].as_u64() {
+            if off && let Some(path)=&presentation.local_destination {
+                ui.label(crate::i18n::tr("Permanent originals"));
+                ui.add(egui::Label::new(egui::RichText::new(path).color(t.text_dim)).wrap());
+            }
+            if !off && !attention && !presentation.busy && let Some(age) = presentation.seconds_since_scan {
                 metric(ui, "Last checked", &ago(age));
-            } else if !attention && !busy(data) && data["syncEnabled"] == true {
+            } else if !attention && !presentation.busy && data["syncEnabled"] == true {
                 metric(ui, "Last checked", crate::i18n::tr("Not yet checked"));
             }
         });
@@ -331,8 +284,15 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         }
         divider(ui);
         section(ui, |ui| {
-            if !off && !attention && (busy(data) || paused) {
+            if !off && !attention && (presentation.busy || paused) {
                 navigation(app, ui, "button:cloudShowWaiting", "Show waiting photos", "library.filter", json!({"syncStatus":"pending"}));
+            }
+            if let Some(action)=controls.manual.filter(|action|action.kind==lightcraft_engine::cloud_status::ActionKind::SyncNow) {
+                let response=ui.add_enabled(action.enabled,egui::Button::new(crate::i18n::tr(action.kind.label())).frame(false));
+                register(ui.ctx(),"button:cloudPopupSyncNow",response.rect);
+                let response=response.on_hover_text(crate::i18n::tr(action.kind.description()));
+                let response=if let Some(reason)=action.reason {response.on_disabled_hover_text(crate::i18n::tr(reason))}else{response};
+                if response.clicked(){invoke(app,ui,action.kind.command(),action.kind.params());}
             }
             if off {
                 navigation(app, ui, "button:cloudSetup", "Turn on cloud sync…", "dialog.cloudSync", json!({}));
@@ -360,7 +320,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
-            if !off && !busy(data) && !attention {
+            if !off && !presentation.busy && !attention {
                 navigation(app, ui, "button:cloudImport", "Import to cloud storage…", "file.importCloud", json!({}));
             }
         });
@@ -368,12 +328,13 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         section(ui, |ui| {
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(20., 24.), egui::Sense::hover());
-                let status = footer_text(data, app.session.unsaved().is_some());
-                let icon = match status {
-                    "Sync needs attention" | "Cloud library deleted" | "Deletion incomplete" => Icon::Warning,
-                    "Syncing paused" => Icon::Pause,
-                    "Synced and backed up" => Icon::CheckCircle,
-                    "Local library" | "Cloud sync is off" => Icon::Cloud,
+                let status = presentation.status.label();
+                use lightcraft_engine::cloud_status::SyncStatus;
+                let icon = match presentation.status {
+                    SyncStatus::NeedsAttention | SyncStatus::Erased | SyncStatus::DeletionIncomplete | SyncStatus::PublishingPaused | SyncStatus::Retrying => Icon::Warning,
+                    SyncStatus::UserPaused => Icon::Pause,
+                    SyncStatus::UpToDate => Icon::CheckCircle,
+                    SyncStatus::Local | SyncStatus::Off => Icon::Cloud,
                     _ => Icon::Sync,
                 };
                 icons::paint(ui.painter(), rect.shrink(2.), icon, if attention { t.caution } else { t.accent });
@@ -662,11 +623,11 @@ mod tests {
     fn cloud_popup_redesign_idle_has_summary_navigation_and_one_footer_action() {
         let mut h = open(overview(), [1200., 900.]);
         for expected in
-            ["CLOUD LIBRARY", "3 photos in 1 album", "Storage space used", "1.2 GB", "Last checked", "2 min ago", "Synced and backed up", "Pause"]
+            ["CLOUD LIBRARY", "3 photos in 1 album", "Storage space used", "1.2 GB", "Last checked", "2 min ago", "Up to date", "Sync now", "Pause"]
         {
             text(&h, expected);
         }
-        for id in ["button:cloudStorage", "button:cloudImport", "button:cloudPauseResume"] {
+        for id in ["button:cloudStorage", "button:cloudImport", "button:cloudPauseResume", "button:cloudPopupSyncNow"] {
             assert!(has(&h, id), "{id}");
         }
         assert!(!has(&h, "button:cloudShowWaiting"));
@@ -749,7 +710,7 @@ mod tests {
                 "beach.jpg · Rating",
                 "Can't reach storage",
                 "Retrying in 8 s (2 of 5)",
-                "Sync needs attention",
+                "Retrying synchronization…",
             ] {
                 text(&h, expected);
             }

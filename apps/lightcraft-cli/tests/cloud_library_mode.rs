@@ -954,3 +954,83 @@ fn control_confirmation_advances_cloud_setup_and_preserves_a_failed_form() {
     assert_eq!(state.signature_errors, 0);
     assert!(state.requests.iter().all(|(method, _)| method != "DELETE"));
 }
+
+#[test]
+#[ignore = "explicit native precise cloud status acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn popup_sync_now_checks_the_library_and_pause_resume_stays_explicit() {
+    let f = support::Fixture::new();
+    let local = f.dir.join("precise-status");
+    let (out, rows) = f.run(
+        &local,
+        &[
+            (
+                "cloud.configure",
+                json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"}),
+            ),
+            ("cloud.syncEnable", json!({"connection":"personal"})),
+            ("cloud.sync", json!({})),
+        ],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("precise-status");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    app.execute("cloud.sync", json!({"wait":false}));
+    app.settled(&f, &[]);
+    app.click_when_ready("icon:cloud");
+    app.wait_widget("indicator:cloudFooterCheckCircle");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("up-to-date.png"),"headless":true}));
+    let head_reads = |f: &support::Fixture| {
+        f.state.lock().unwrap().requests.iter().filter(|(method, key)| method == "GET" && key.ends_with("catalog/head.json")).count()
+    };
+    let before = head_reads(&f);
+    app.click_when_ready("button:cloudPopupSyncNow");
+    let until = Instant::now() + Duration::from_secs(30);
+    while head_reads(&f) <= before {
+        assert!(Instant::now() < until, "Sync now did not perform a remote check");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.settled(&f, &[]);
+    app.click_when_ready("icon:cloud");
+    app.wait_widget("indicator:cloudFooterCheckCircle");
+    app.click_when_ready("button:cloudPauseResume");
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        if app.execute("cloud.overview", json!({}))["userPaused"] == true {
+            break;
+        }
+        assert!(Instant::now() < until, "pause was not applied");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The input reply reports the action before the popup's next layout is visible.
+    app.ask("ui.screenshot", json!({"path":artifacts.join("paused.png"),"headless":true}));
+    if !app.ask("ui.widgets", json!({"filter":"popup:cloud"})).to_string().contains("popup:cloud") {
+        app.click_when_ready("icon:cloud");
+    }
+    app.wait_widget("indicator:cloudFooterPause");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("paused.png"),"headless":true}));
+    app.click_when_ready("button:cloudPauseResume");
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = app.execute("cloud.overview", json!({}));
+        if status["userPaused"] == false && status["health"]["sync"]["state"] == "healthy" {
+            break;
+        }
+        assert!(Instant::now() < until, "resume did not finish: {status}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.settled(&f, &[]);
+    app.ask("app.quit", json!({}));
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = app.child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < until, "native app did not exit after sync settled");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let state = f.state.lock().unwrap();
+    assert_eq!(state.signature_errors, 0);
+    assert!(state.requests.iter().all(|(method, _)| method != "DELETE"));
+}

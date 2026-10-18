@@ -6,6 +6,7 @@ mod diagnostic;
 mod failure;
 mod health;
 mod polling;
+mod presentation;
 pub use actions::{ActionKind, Actions, DeviceMode, ManualAction};
 pub use diagnostic::{Diagnostic, RetryState};
 pub use failure::{CloudFailure, FailureKind, Recovery, RetryBudget};
@@ -13,6 +14,7 @@ pub use failure::{CloudFailure, FailureKind, Recovery, RetryBudget};
 pub(crate) use health::now_ms;
 pub use health::{Failure, PollHealth, ResourceHealth};
 pub use polling::PollCadence;
+pub use presentation::{Presentation, SyncStatus};
 
 pub(crate) fn can_resume(s: &Session) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
@@ -37,6 +39,9 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
     {
         out["syncEnabled"] = json!(s.catalog.sync_state().is_some() && !s.cloud_transition.local_only());
         out["localOnly"] = json!(s.cloud_transition.local_only());
+        if s.cloud_transition.local_only() {
+            out["localDestination"] = json!(s.library.as_ref().map(|lib| lib.dir.join("Local Originals").to_string_lossy().into_owned()));
+        }
         out["transition"] = crate::cloud_transition::snapshot(s);
         let active = s.cloud_uploads.active_files(&s.catalog) as u64;
         out["uploadingFiles"] = json!(active);

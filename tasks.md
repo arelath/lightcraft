@@ -276,7 +276,8 @@ The supplied 2026-10-17 review is tracked before implementation in
 - [x] **CR.68** Unify control and widget dialog confirmation, preserve failed forms and discard stale cloud dialogs after library changes.
 - [x] **CR.69** Extract verified managed-media preparation and catalog plans from cloud enrollment while retaining durable completion order.
 - [x] **CR.70** Preserve compatibility, HTTP, capacity and local-resource failures through native/browser producers into health and recovery.
-- [ ] **CR.71–CR.74** Refine shared cloud status, add nonmutating conflict previews, retain Recently Deleted when going local and explain rejoin merges.
+- [x] **CR.71** Share typed status, diagnostics and actions across popup/Info; use verified Up to date wording and a secondary Sync now.
+- [ ] **CR.72–CR.74** Add exact nonmutating conflict previews, retain Recently Deleted during local conversion and explain rejoin merges.
 - [x] **CR.49** Fence successor publication, refuse unsafe cancellation and preserve explicit finish-upgrade recovery.
 - [x] **CR.53** Verify cache destination adoption, honor old byte leases and fence cleanup before folder reuse.
 - [ ] **CR.48, CR.50–CR.52, CR.54–CR.55** Recheck and close the previously tracked epoch, migration, status, lease, browser-cache, relocation, credential-isolation and discovery findings with current evidence. Detailed items remain individually tracked in the reliability checklist.

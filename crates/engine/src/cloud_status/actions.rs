@@ -22,6 +22,7 @@ pub enum ActionKind {
     Pause,
     Enable,
     Details,
+    ReviewDeletion,
     /// Explicitly leave local preparation, before any upgrade worker starts.
     ContinueWithoutMigration,
 }
@@ -34,6 +35,7 @@ impl ActionKind {
             Self::Pause => "Pause",
             Self::Enable => "Turn on cloud sync…",
             Self::Details => "Details…",
+            Self::ReviewDeletion => "Review deletion…",
         }
     }
     pub fn compact_label(self) -> &'static str {
@@ -41,6 +43,7 @@ impl ActionKind {
             Self::Retry => "Retry",
             Self::Enable => "Turn on",
             Self::Details => "Details",
+            Self::ReviewDeletion => "Review",
             _ => self.label(),
         }
     }
@@ -52,6 +55,7 @@ impl ActionKind {
             Self::Pause => "Uploads and library publication pause on this device. Photos remain available for editing.",
             Self::Enable => "Turn on cloud sync explicitly to merge this local library with cloud storage.",
             Self::Details => "Review the original diagnostic and its recovery actions.",
+            Self::ReviewDeletion => "Review the cloud deletion result and any remaining cloud data.",
             Self::ContinueWithoutMigration => "Stop preparing the migration and continue syncing without migrating.",
         }
     }
@@ -64,6 +68,7 @@ impl ActionKind {
             Self::Pause => "cloud.pause",
             Self::Enable => "dialog.cloudSync",
             Self::Details => "dialog.cloudError",
+            Self::ReviewDeletion => "dialog.cloudDelete",
         }
     }
     pub fn params(self) -> Value {
@@ -89,7 +94,7 @@ impl Actions {
         Self::from_overview(&json!({"syncEnabled":status["enabled"],"userPaused":status["userPaused"],
             "paused":status["paused"],"canResume":status["canResume"],"running":status["running"],
             "preparingMigration":status["preparingMigration"],"migrating":status["migrating"],
-            "health":{"sync":status["health"]}}))
+            "health":{"sync":status["health"]},"erasure":status["erasure"]}))
     }
     pub fn from_overview(data: &Value) -> Self {
         let health = &data["health"]["sync"];
@@ -100,6 +105,9 @@ impl Actions {
         let user_paused = data["userPaused"].as_bool().or_else(|| health["userPaused"].as_bool()).unwrap_or(data["paused"] == true && !preparing);
         let action = |kind, enabled, reason| ManualAction { kind, enabled, reason };
         let same = |mode, action| Self { mode, manual: action, footer: action };
+        if data["erasure"].is_object() {
+            return same(DeviceMode::Off, Some(action(ActionKind::ReviewDeletion, true, None)));
+        }
         if data["syncEnabled"] == false {
             return same(DeviceMode::Off, Some(action(ActionKind::Enable, true, None)));
         }
@@ -140,7 +148,7 @@ impl Actions {
                 Some(action(ActionKind::Resume, can_resume, (!can_resume).then_some("Wait for current cloud tasks to stop."))),
             );
         }
-        if health["lastError"].is_object() || health["pollingHalted"] == true {
+        if diagnostic.is_some() || health["pollingHalted"] == true {
             let kind = if diagnostic.as_ref().is_some_and(|d| d.failure.kind.is_none()) { ActionKind::Details } else { ActionKind::Retry };
             let enabled = kind == ActionKind::Details || can_resume;
             return same(DeviceMode::Active, Some(action(kind, enabled, (!enabled).then_some("Wait for current cloud tasks to stop."))));
@@ -226,6 +234,18 @@ mod tests {
         data["running"] = json!(true);
         assert!(!agree(&data).manual.unwrap().enabled);
         assert!(agree(&data).footer.unwrap().enabled, "Pause can stop running publication");
+    }
+    #[test]
+    fn upload_diagnostics_share_retry_and_unknown_failure_review_actions() {
+        let mut data = overview();
+        data["error"] = json!("Exact upload failure");
+        data["health"]["uploads"]["activity"]["failures"] =
+            json!({"original":{"message":"Exact upload failure","kind":"connectivity","retryable":true}});
+        let model = Actions::from_overview(&data);
+        assert_eq!(model.manual.unwrap().kind, ActionKind::Retry);
+        assert_eq!(model.footer, model.manual);
+        data["health"]["uploads"]["activity"]["failures"] = json!({});
+        assert_eq!(Actions::from_overview(&data).manual.unwrap().kind, ActionKind::Details, "unknown storage failure requires diagnosis");
     }
     #[test]
     fn info_action_actually_resumes_a_device_that_rejects_ordinary_sync() {

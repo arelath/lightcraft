@@ -755,39 +755,33 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             };
             ui.add_space(6.0);
             {
-                if let Some((library, pending, generation)) = sync {
-                    let controls = lightcraft_engine::cloud_status::Actions::from_sync_status(&status);
-                    let running = status["running"].as_bool().unwrap_or(false);
-                    ui.label(
-                        egui::RichText::new(if off {
-                            crate::i18n::tr("Cloud sync is off on this device.").to_owned()
-                        } else if status["migrating"].as_bool() == Some(true) {
-                            "Migrating cloud library…".to_owned()
-                        } else if let Some(retry) = super::cloud::retry_text(&status["health"]) {
-                            retry
-                        } else if status["health"]["pollingHalted"] == true {
-                            crate::i18n::tr("Automatic checking stopped after an error.").to_owned()
-                        } else if status["publicationBlocked"].is_string() {
-                            crate::i18n::tr("Publishing paused by the cloud library").to_owned()
-                        } else if running {
-                            "Synchronizing library…".to_owned()
-                        } else if status["protocol"].as_str() == Some("append-log-v1") {
-                            let gaps = status["gaps"].as_array().map_or(0, Vec::len);
-                            let authors = status["frontiers"].as_object().map_or(0, serde_json::Map::len);
-                            format!("Append synchronization · {authors} authors · {pending} pending changes · {gaps} gaps")
-                        } else if status["preparingMigration"].as_bool() == Some(true) {
-                            format!("Synchronization paused for migration · {pending} pending changes")
-                        } else {
-                            format!("Library generation {generation} · {pending} pending changes")
-                        })
-                        .color(t.text_dim),
-                    );
+                if let Some((library, _, _)) = sync {
+                    let overview = app.run("cloud.overview", json!({})).unwrap_or_default();
+                    let presentation = lightcraft_engine::cloud_status::Presentation::from_overview(&overview, app.session.unsaved().is_some());
+                    let controls = presentation.actions;
+                    let label = if presentation.status == lightcraft_engine::cloud_status::SyncStatus::Retrying {
+                        super::cloud::retry_text(&overview["health"]["sync"])
+                            .unwrap_or_else(|| crate::i18n::tr(presentation.status.label()).to_owned())
+                    } else {
+                        crate::i18n::tr(presentation.status.label()).to_owned()
+                    };
+                    ui.label(egui::RichText::new(label).color(t.text_dim));
+                    if let Some(path) = &presentation.local_destination {
+                        ui.label(crate::i18n::tr("Permanent originals"));
+                        ui.add(egui::Label::new(path).wrap());
+                    }
+                    if !off && presentation.pending_changes > 0 {
+                        super::cloud::pending_metric(ui, presentation.pending_changes);
+                    }
+                    if !off {
+                        super::cloud::checked_metric(ui, presentation.seconds_since_scan);
+                    }
                     ui.label(egui::RichText::new(format!("Library ID: {library}")).small().color(t.text_dim));
                     super::cloud::capacity(app, ui, &status, false);
-                    if !off && let Some(reason) = status["publicationBlocked"].as_str() {
+                    if !off && let Some(reason) = &presentation.publication_blocked {
                         ui.label(egui::RichText::new(reason).color(t.caution));
                     }
-                    if !off && let Some(diagnostic) = lightcraft_engine::cloud_status::Diagnostic::from_sync_status(&status) {
+                    if !off && let Some(diagnostic) = &presentation.diagnostic {
                         ui.label(egui::RichText::new(&diagnostic.failure.message).color(t.text_dim));
                         if text_button(ui, "cloudErrorInfoDetails", crate::i18n::tr("Details…"), false).clicked()
                             && let Err(error) = app.run(lightcraft_engine::cloud_status::ActionKind::Details.command(), json!({}))
