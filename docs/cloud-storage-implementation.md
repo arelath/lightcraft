@@ -1,6 +1,6 @@
 # Cloud storage implementation
 
-Last updated: 2026-10-17. This document describes current behavior and operational limits. The normative wire and
+Last updated: 2026-10-18. This document describes current behavior and operational limits. The normative wire and
 durability contract is [cloud-sync-protocol.md](cloud-sync-protocol.md); its receipt-history
 contract is [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
 [browser-cloud.md](browser-cloud.md) defines the browser adapter contract.
@@ -789,3 +789,8 @@ A durable cache transaction marker spans verified blob/index publication, policy
 ### CR.55 — Validate complete guided cloud library discovery (2026-10-17)
 
 Native guided setup and cloud.testConnection now use one bounded read-only discovery scanner. It follows every continuation page, rejects repeated tokens, checks cancellation before each request and limits total requests, records and libraries. Candidate folders require the exact supported immutable manifest and canonical effective control records. Readable maintenance/newer-writer libraries remain discoverable; deleted, conflicting, malformed or unsupported namespace controls and unknown root metadata refuse discovery. A retired conditional head keeps its occupied-folder flag but offers only its validated supported append successor; a missing successor, wrong manifest or ambiguous same-ID active head plus append metadata returns an actionable error. Distinct library identities/protocols remain available. Later-page failure returns no partial list. A reachable empty prefix remains available for new-library setup, without a probe PUT or destructive permission test. Browser manual configuration is unchanged; the guided wizard is native. No catalog or cloud wire-format change.
+
+
+### 2026-10-18 — CR.43 partial: native B2 revision CAS
+
+A native pure-Rust Backblaze control primitive reads one destination/prefix-bound bucket-info entry, stages and verifies exact content-addressed Head bytes, and changes visibility only with b2_update_bucket ifRevisionIs. Its opaque observed snapshot preserves every unrelated bucket-info value and omits all other bucket settings from updates. Full destination binding detects shortened-key collisions; pointer/key/response sizes and the 10,000-byte bucket-info limit are bounded. Unusable catalog library names refuse staging and pointer publication, while missing control permissions retain explicit Edit connection recovery. Official HTTPS API/region validation, no redirects, native-only tokens, short-lived bounded auth caching and one forced refresh on HTTP 401 keep credentials outside serialized settings and browser surfaces. Lost, malformed or oversized success responses require rereading. Append immutable-write validation is unchanged; only the exact B2 head adapter reaches a private verified metadata PUT helper. One conditional authority owns a dedicated storage prefix, matching current conditional catalog and deletion ownership. This is a provider primitive only: ordinary native/browser synchronization, maintenance election, append upgrade/rejoin and late-legacy-write recovery do not use it yet. CR.43 stays unchecked; CR.44 remains conditional on a real semantic schema change, and CR.45 live upgrade acceptance remains open. No existing catalog or cloud wire format is changed.

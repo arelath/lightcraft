@@ -238,6 +238,14 @@ impl S3Connection {
     /// Success always includes a full readback; response loss retries the same bytes/key.
     pub fn put_immutable_verified(&self, key: &str, bytes: &[u8], cancel: &AtomicBool) -> Result<()> {
         crate::cloud_append::immutable_metadata(key, bytes)?;
+        self.put_verified_metadata(key, bytes, cancel)
+    }
+    /// The owning metadata adapter must validate its exact content-addressed namespace.
+    /// This is intentionally unavailable outside the native S3 implementation.
+    pub(super) fn put_verified_metadata(&self, key: &str, bytes: &[u8], cancel: &AtomicBool) -> Result<()> {
+        if bytes.is_empty() || bytes.len() > MAX_CHECKPOINT {
+            return Err(AssetError::Invalid("immutable metadata exceeds its bounded length".into()));
+        }
         if let Some(existing) = self.get_small(key, MAX_CHECKPOINT, cancel)? {
             return if existing.bytes == bytes { Ok(()) } else { Err(AssetError::Integrity) };
         }

@@ -468,6 +468,7 @@ fn http_error(error: http::HttpError) -> AssetError {
     }
 }
 
+pub mod b2;
 mod presign;
 pub use presign::{BrowserAuthorization, BrowserRequest};
 
