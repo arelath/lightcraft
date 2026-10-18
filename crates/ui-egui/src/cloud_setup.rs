@@ -11,7 +11,7 @@
 //!    (append-only on B2 and other services, conditional writes on AWS S3).
 //!
 //! Typed keys reach only the check and, on finishing, the AWS shared credentials file (profile
-//! `lightcraft-<name>`, `lightcraft_engine::assets::s3::save_profile`): never command
+//! a unique `lightcraft-key-<id>`, `lightcraft_engine::assets::s3::save_profile`): never command
 //! parameters, settings or the catalog.
 
 use crate::LightcraftApp;
@@ -69,6 +69,20 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// A fresh, device-local credential binding for new keys. Cloning the form keeps
+/// this binding stable through probing and saving; restoring a form requires a new probe.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewProfile(pub Option<String>);
+impl Default for NewProfile {
+    fn default() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let profile = lightcraft_engine::cloud_setup::fresh_profile().ok();
+        #[cfg(target_arch = "wasm32")]
+        let profile = None;
+        Self(profile)
+    }
+}
+
 /// The connection check of step 2.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
@@ -119,6 +133,8 @@ pub struct Setup {
     pub authentication: Authentication,
     /// The original saved credential binding survives a connection-name edit.
     pub saved_profile: Option<String>,
+    #[serde(skip)]
+    pub new_profile: NewProfile,
     pub check: Check,
     /// What the check checked ([`fingerprint`]): a passed check is for these settings only.
     pub checked: u64,
@@ -210,9 +226,12 @@ impl Setup {
     /// Only the selected authentication source can supply credentials to probe/save.
     fn profile_name(&self) -> Result<Option<String>, String> {
         match self.authentication {
-            Authentication::SavedKeys if self.saved_keys => {
-                Ok(Some(self.saved_profile.clone().unwrap_or_else(|| lightcraft_engine::cloud_setup::profile_for(self.name.trim()))))
-            }
+            Authentication::SavedKeys if self.saved_keys => self
+                .saved_profile
+                .clone()
+                .filter(|profile| !profile.trim().is_empty())
+                .map(Some)
+                .ok_or_else(|| crate::i18n::tr("The saved credential binding is missing; choose new keys or a named profile.").into()),
             Authentication::SavedKeys => {
                 Err(crate::i18n::tr("Choose new keys, a named profile or default credentials; this connection has no saved keys.").into())
             }
@@ -220,7 +239,12 @@ impl Setup {
                 if self.key_id.trim().is_empty() || self.secret.0.trim().is_empty() {
                     return Err(crate::i18n::tr("Enter both the key ID and its secret key.").into());
                 }
-                Ok(Some(lightcraft_engine::cloud_setup::profile_for(self.name.trim())))
+                self.new_profile
+                    .0
+                    .clone()
+                    .filter(|profile| lightcraft_engine::cloud_setup::managed_profile(profile))
+                    .map(Some)
+                    .ok_or_else(|| crate::i18n::tr("Could not create a credentials profile; reopen cloud setup and retry.").into())
             }
             Authentication::Profile => {
                 let profile = self.profile.trim();
@@ -307,7 +331,7 @@ pub fn fingerprint(setup: &Setup) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (setup.provider as u8, &setup.name, &setup.bucket, &setup.endpoint, &setup.region, &setup.prefix).hash(&mut hasher);
     (&setup.key_id, &setup.secret.0, &setup.profile, setup.saved_keys).hash(&mut hasher);
-    (setup.authentication as u8, &setup.saved_profile).hash(&mut hasher);
+    (setup.authentication as u8, &setup.saved_profile, &setup.new_profile.0).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -333,7 +357,7 @@ pub fn open(app: &mut LightcraftApp, connection: Option<&str>, storage_only: boo
     if let Some(c) = found {
         setup.provider = Provider::of(&c);
         setup.step = Step::Connect;
-        setup.saved_keys = c.profile.as_deref() == Some(lightcraft_engine::cloud_setup::profile_for(&c.id).as_str());
+        setup.saved_keys = c.profile.as_deref().is_some_and(|profile| lightcraft_engine::cloud_setup::saved_profile(&c.id, profile));
         setup.authentication = if setup.saved_keys {
             setup.saved_profile = c.profile.clone();
             Authentication::SavedKeys
@@ -479,7 +503,7 @@ pub fn finish(app: &mut LightcraftApp, setup: &Setup) -> Result<Value, String> {
     let params = setup.params()?;
     lightcraft_engine::cloud_setup::validate_destination(&mut app.session, &params)?;
     if let Some(keys) = typed_keys(setup)? {
-        lightcraft_engine::assets::s3::save_profile(&lightcraft_engine::cloud_setup::profile_for(setup.name.trim()), &keys)
+        lightcraft_engine::assets::s3::save_profile(params["profile"].as_str().ok_or("new keys have no credential binding")?, &keys)
             .map_err(|e| e.to_string())?;
     }
     let saved = app.run("cloud.configure", params)?;
@@ -722,6 +746,7 @@ mod tests {
             bucket: "my-photos".into(),
             endpoint: "s3.us-west-004.backblazeb2.com".into(),
             prefix: "lightcraft".into(),
+            new_profile: NewProfile(Some(format!("lightcraft-key-{}", "ab".repeat(32)))),
             key_id: "0042".into(),
             secret: Secret("K004secret".into()),
             ..Default::default()
@@ -729,12 +754,33 @@ mod tests {
     }
 
     #[test]
+    fn independent_setup_forms_never_share_a_name_derived_credential_record() {
+        let make = || Setup {
+            name: "b2".into(),
+            bucket: "my-photos".into(),
+            endpoint: "s3.us-west-004.backblazeb2.com".into(),
+            prefix: "lightcraft".into(),
+            key_id: "KEY".into(),
+            secret: Secret("SECRET".into()),
+            ..Default::default()
+        };
+        let a = make();
+        let mut b = make();
+        b.key_id = "OTHER_KEY".into();
+        b.secret = Secret("OTHER_SECRET".into());
+        assert_ne!(
+            a.params().unwrap()["profile"],
+            b.params().unwrap()["profile"],
+            "independent libraries must not overwrite each other's credentials"
+        );
+    }
+    #[test]
     fn providers_fill_in_endpoint_region_and_profile() {
         let params = b2().params().unwrap();
         assert_eq!(
             params,
             json!({"id":"b2","bucket":"my-photos","region":"us-west-004","prefix":"lightcraft",
-                "endpoint":"https://s3.us-west-004.backblazeb2.com","profile":"lightcraft-b2"})
+                "endpoint":"https://s3.us-west-004.backblazeb2.com","profile":format!("lightcraft-key-{}", "ab".repeat(32))})
         );
         let aws = Setup {
             provider: Provider::Aws,
@@ -785,7 +831,7 @@ mod tests {
         setup.authentication = Authentication::NewKeys;
         assert!(setup.params().is_err(), "incomplete new keys cannot fall back to saved keys");
         setup.secret = Secret("replacement-secret".into());
-        assert_eq!(setup.params().unwrap()["profile"], "lightcraft-renamed");
+        assert_eq!(setup.params().unwrap()["profile"], format!("lightcraft-key-{}", "ab".repeat(32)));
         assert!(typed_keys(&setup).unwrap().is_some());
     }
 
@@ -829,6 +875,48 @@ mod tests {
         setup.authentication = Authentication::Environment;
         assert!(finish(&mut app, &setup).unwrap_err().contains("Test the current connection"));
         assert_eq!(app.run("cloud.connections", json!({})).unwrap()["connections"], json!([]));
+    }
+
+    #[test]
+    fn independent_new_keys_do_not_alias_and_missing_saved_bindings_never_fall_back() {
+        let a = Setup { new_profile: NewProfile::default(), ..b2() };
+        let mut b = Setup { new_profile: NewProfile::default(), ..b2() };
+        assert_ne!(a.params().unwrap()["profile"], b.params().unwrap()["profile"]);
+        let profile = b.params().unwrap()["profile"].clone();
+        b.name = "renamed".into();
+        assert_eq!(b.params().unwrap()["profile"], profile);
+        b.authentication = Authentication::SavedKeys;
+        b.saved_keys = true;
+        b.saved_profile = None;
+        assert!(b.params().is_err());
+        b.saved_profile = profile.as_str().map(str::to_owned);
+        assert_eq!(b.params().unwrap()["profile"], profile);
+        b.authentication = Authentication::NewKeys;
+        b.new_profile = NewProfile(None);
+        assert!(b.params().is_err());
+    }
+    #[test]
+    fn reopened_managed_connections_keep_their_exact_binding_and_rotation_gets_a_new_one() {
+        for profile in ["lightcraft-b2".to_owned(), format!("lightcraft-key-{}", "ab".repeat(32))] {
+            let saved = profile.clone();
+            let services = crate::Services {
+                cloud_action: Some(Box::new(move |_, id, _| {
+                    (id=="cloud.connections").then(||Ok(json!({"connections":[{"id":"b2","bucket":"photos","region":"us-west-004","endpoint":"https://s3.us-west-004.backblazeb2.com","prefix":"lightcraft","profile":saved}]})))
+                })),
+                ..Default::default()
+            };
+            let mut app = LightcraftApp::new(lightcraft_engine::Session::new(), services);
+            open(&mut app, Some("b2"), true).unwrap();
+            let Some(Dialog::CloudSetup { setup }) = &mut app.ui.dialog else {
+                panic!("setup not open");
+            };
+            assert_eq!(setup.authentication, Authentication::SavedKeys);
+            assert_eq!(setup.params().unwrap()["profile"], profile);
+            setup.authentication = Authentication::NewKeys;
+            setup.key_id = "ROTATED".into();
+            setup.secret = Secret("rotation-secret".into());
+            assert_ne!(setup.params().unwrap()["profile"], profile);
+        }
     }
 
     #[test]

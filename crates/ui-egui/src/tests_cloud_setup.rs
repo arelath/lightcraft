@@ -172,11 +172,13 @@ fn run_wizard(control: bool) {
     assert!(setup(&h).passed().is_some(), "going back keeps the passed check");
     confirm(&mut h, control);
     assert_eq!(setup(&h).step, Step::Library, "a passed check isn't run again");
+    let saved_profile = setup(&h).params().unwrap()["profile"].as_str().unwrap().to_owned();
     // finish with the keys an earlier setup saved (typed keys would go to the real AWS file)
     if let Some(Dialog::CloudSetup { setup }) = &mut h.app.ui.dialog {
         setup.key_id.clear();
         setup.secret = Secret::default();
         setup.saved_keys = true;
+        setup.saved_profile = Some(saved_profile.clone());
         setup.authentication = Authentication::SavedKeys;
         // This test substitutes the same already-probed fixture keys as a saved
         // binding, avoiding a write to the real credentials file.
@@ -193,7 +195,7 @@ fn run_wizard(control: bool) {
         vec![
             (
                 "cloud.configure".to_owned(),
-                json!({"id":"storage","bucket":"photos","region":"us-east-1","prefix":"lightcraft","endpoint":endpoint,"profile":"lightcraft-storage"})
+                json!({"id":"storage","bucket":"photos","region":"us-east-1","prefix":"lightcraft","endpoint":endpoint,"profile":saved_profile})
             ),
             ("cloud.syncEnable".to_owned(), json!({"connection":"storage","protocol":"append-log-v1","library":LIBRARY})),
             ("cloud.sync".to_owned(), json!({"wait":false})),
@@ -412,6 +414,7 @@ fn failed_final_setup_configuration_retains_the_successfully_checked_form() {
             prefix: "library".into(),
             authentication: Authentication::SavedKeys,
             saved_keys: true,
+            saved_profile: Some("lightcraft-fixture".into()),
             check: Check::Passed { found: Default::default() },
             ..Default::default()
         };

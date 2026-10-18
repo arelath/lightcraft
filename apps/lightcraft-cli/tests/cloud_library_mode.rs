@@ -1346,3 +1346,144 @@ fn clean_head_capability_survives_polls_and_opens_cause_specific_details() {
         }
     }
 }
+
+#[test]
+#[ignore = "explicit native isolated-credential acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn independent_wizard_keys_and_rotation_do_not_overwrite_other_libraries_or_rejected_retargets() {
+    fn section(text: &str, profile: &str) -> String {
+        let mut selected = false;
+        let mut lines = Vec::new();
+        for line in text.lines() {
+            if line.trim().starts_with('[') {
+                selected = line.trim() == format!("[{profile}]");
+            }
+            if selected && !line.trim().is_empty() {
+                lines.push(line);
+            }
+        }
+        assert!(!lines.is_empty(), "missing fake fixture profile {profile}");
+        lines.join("\n")
+    }
+    fn input(app: &mut Desktop, artifacts: &Path, field: &str, value: &str) {
+        app.click_when_ready(field);
+        app.ask("ui.key", json!({"key":"A","cmd":true}));
+        app.ask("ui.text", json!({"text":value}));
+        app.ask("ui.screenshot", json!({"path":artifacts.join("input-barrier.png"),"headless":true}));
+    }
+    fn new_keys(app: &mut Desktop, artifacts: &Path, access: &str, secret: &str) {
+        app.execute("dialog.cloudStorage", json!({"id":"personal"}));
+        app.click_when_ready("dropdown:cloudSetupAuthentication");
+        app.click_when_ready("cloudSetupAuthentication:newKeys");
+        input(app, artifacts, "cloudSetupKeyId", access);
+        input(app, artifacts, "cloudSetupSecret", secret);
+    }
+    fn save(app: &mut Desktop, artifacts: &Path, old: &str) -> String {
+        app.click_when_ready("button:cloudSetupTest");
+        app.wait_widget("status:cloudSetupConnected");
+        app.ask("ui.screenshot", json!({"path":artifacts.join("checked.png"),"headless":true}));
+        app.ask("ui.dialog.confirm", json!({}));
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            let connections = app.execute("cloud.connections", json!({}));
+            let profile = connections["connections"].as_array().unwrap().iter().find(|c| c["id"] == "personal").unwrap()["profile"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            if profile != old {
+                assert!(lightcraft_engine::cloud_setup::managed_profile(&profile));
+                return profile;
+            }
+            assert!(Instant::now() < until, "wizard did not save its new binding");
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+    fn quit(app: &mut Desktop) {
+        app.ask("app.quit", json!({}));
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = app.child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+    let f = support::Fixture::new();
+    {
+        let mut state = f.state.lock().unwrap();
+        state.allow_typed_keys = true;
+        state.additional_keys.extend([
+            ("FAKE_LIBRARY_A".into(), "FAKE_SECRET_A".into()),
+            ("FAKE_LIBRARY_B".into(), "FAKE_SECRET_B".into()),
+            ("FAKE_ROTATION_A".into(), "FAKE_ROTATION_SECRET".into()),
+            ("FAKE_REJECTED".into(), "FAKE_REJECTED_SECRET".into()),
+        ]);
+    }
+    let root = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("isolated-credentials");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut profiles = Vec::new();
+    for (name, access, secret) in [("a", "FAKE_LIBRARY_A", "FAKE_SECRET_A"), ("b", "FAKE_LIBRARY_B", "FAKE_SECRET_B")] {
+        let local = f.dir.join(format!("independent-{name}"));
+        let(out,rows)=f.run(&local,&[("cloud.configure",json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":format!("library/{name}"),"endpoint":f.endpoint,"profile":"acceptance"}))]);
+        assert!(out.status.success(), "{rows:?}");
+        let artifacts = root.join(name);
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let mut app = Desktop::start(&f, &local, &artifacts);
+        new_keys(&mut app, &artifacts, access, secret);
+        profiles.push(save(&mut app, &artifacts, "acceptance"));
+        quit(&mut app);
+    }
+    assert_ne!(profiles[0], profiles[1]);
+    let credentials = f.dir.join("credentials");
+    let before = std::fs::read_to_string(&credentials).unwrap();
+    assert!(section(&before, &profiles[0]).contains("FAKE_SECRET_A"));
+    assert!(section(&before, &profiles[1]).contains("FAKE_SECRET_B"));
+    let artifacts = root.join("rotation");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &f.dir.join("independent-a"), &artifacts);
+    new_keys(&mut app, &artifacts, "FAKE_ROTATION_A", "FAKE_ROTATION_SECRET");
+    let rotated = save(&mut app, &artifacts, &profiles[0]);
+    assert!(!profiles.contains(&rotated));
+    let after = std::fs::read_to_string(&credentials).unwrap();
+    for profile in &profiles {
+        assert_eq!(section(&after, profile), section(&before, profile));
+    }
+    assert!(section(&after, &rotated).contains("FAKE_ROTATION_SECRET"));
+    app.execute("cloud.syncEnable", json!({"connection":"personal","protocol":"conditional-head-v1"}));
+    let started = app.raw("engine.execute", json!({"command":"cloud.sync","params":{"wait":false}}));
+    assert!(started["ok"] == true || started["error"].as_str().is_some_and(|error| error.contains("already running")), "{started}");
+    app.settled(&f, &[]);
+    new_keys(&mut app, &artifacts, "FAKE_REJECTED", "FAKE_REJECTED_SECRET");
+    if !app.ask("ui.widgets", json!({"filter":"cloudSetupPrefix"})).to_string().contains("cloudSetupPrefix") {
+        app.click_when_ready("button:cloudSetupMore");
+        app.ask("ui.screenshot", json!({"path":artifacts.join("input-barrier.png"),"headless":true}));
+    }
+    input(&mut app, &artifacts, "cloudSetupPrefix", "library/rejected");
+    app.click_when_ready("button:cloudSetupTest");
+    app.wait_widget("status:cloudSetupConnected");
+    assert_eq!(app.raw("ui.dialog.confirm", json!({}))["ok"], false);
+    app.wait_widget("cloudSetupEndpoint");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("rejected.png"),"headless":true}));
+    assert_eq!(std::fs::read_to_string(&credentials).unwrap(), after);
+    let connections = app.execute("cloud.connections", json!({}));
+    let saved = connections["connections"].as_array().unwrap().iter().find(|c| c["id"] == "personal").unwrap();
+    assert_eq!(saved["profile"], rotated);
+    assert_eq!(saved["prefix"], "library/a");
+    app.ask("ui.dialog.cancel", json!({}));
+    quit(&mut app);
+    let artifacts = root.join("reopened-b");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &f.dir.join("independent-b"), &artifacts);
+    app.execute("dialog.cloudStorage", json!({"id":"personal"}));
+    app.wait_widget("dropdown:cloudSetupAuthentication");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("saved-keys.png"),"headless":true}));
+    let connections = app.execute("cloud.connections", json!({}));
+    assert_eq!(connections["connections"][0]["profile"], profiles[1]);
+    app.ask("ui.dialog.cancel", json!({}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    quit(&mut app);
+    let state = f.state.lock().unwrap();
+    assert_eq!(state.signature_errors, 0);
+    assert!(!state.requests.iter().any(|(m, _)| m == "DELETE"));
+}

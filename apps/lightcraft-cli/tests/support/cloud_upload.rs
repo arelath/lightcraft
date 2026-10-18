@@ -54,16 +54,30 @@ fn encode(value: &str) -> String {
         .map(|byte| if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) { char::from(byte).to_string() } else { format!("%{byte:02X}") })
         .collect()
 }
-fn signature(method: &str, target: &str, headers: &BTreeMap<String, String>, body: &[u8]) -> bool {
+fn signature(
+    method: &str,
+    target: &str,
+    headers: &BTreeMap<String, String>,
+    body: &[u8],
+    allow_typed: bool,
+    additional: &BTreeMap<String, String>,
+) -> bool {
     let Some(auth) = headers.get("authorization").and_then(|value| value.strip_prefix("AWS4-HMAC-SHA256 ")) else { return false };
     let fields = auth.split(',').filter_map(|item| item.trim().split_once('=')).collect::<BTreeMap<_, _>>();
     let Some(credential) = fields.get("Credential") else { return false };
     let scope = credential.split('/').collect::<Vec<_>>();
-    if scope.len() != 5 || scope[0] != "EXAMPLE_ACCESS" || scope[3] != "s3" || scope[4] != "aws4_request" {
+    if scope.len() != 5 || scope[3] != "s3" || scope[4] != "aws4_request" {
         return false;
     }
-    if headers.get("x-amz-content-sha256") != Some(&hash(body)) || headers.get("x-amz-security-token").map(String::as_str) != Some("EXAMPLE_SESSION")
-    {
+    let secret = if scope[0] == "EXAMPLE_ACCESS" {
+        "EXAMPLE_SECRET"
+    } else if let Some(secret) = additional.get(scope[0]) {
+        secret.as_str()
+    } else {
+        return false;
+    };
+    let token = headers.get("x-amz-security-token").map(String::as_str);
+    if headers.get("x-amz-content-sha256") != Some(&hash(body)) || (token != Some("EXAMPLE_SESSION") && !(allow_typed && token.is_none())) {
         return false;
     }
     let Some(signed) = fields.get("SignedHeaders") else { return false };
@@ -86,7 +100,7 @@ fn signature(method: &str, target: &str, headers: &BTreeMap<String, String>, bod
     let canonical = format!("{method}\n{path}\n{query}\n{canonical_headers}\n{signed}\n{}", hash(body));
     let Some(date) = headers.get("x-amz-date") else { return false };
     let string = format!("AWS4-HMAC-SHA256\n{date}\n{}\n{}", scope[1..].join("/"), hash(canonical.as_bytes()));
-    let mut key = b"AWS4EXAMPLE_SECRET".to_vec();
+    let mut key = format!("AWS4{secret}").into_bytes();
     for item in &scope[1..] {
         key = mac(&key, item.as_bytes());
     }
@@ -106,6 +120,8 @@ pub struct Traffic {
 }
 #[derive(Default)]
 pub struct State {
+    pub allow_typed_keys: bool,
+    pub additional_keys: BTreeMap<String, String>,
     pub append_mode: bool,
     pub list_page_size: usize,
     pub list_calls: usize,
@@ -205,8 +221,8 @@ impl Fixture {
                 assert!(size <= 16 << 20);
                 let mut body = vec![0u8; size];
                 reader.read_exact(&mut body).unwrap();
-                let valid = signature(&method, &target, &headers, &body);
                 let mut state = worker_state.lock().unwrap();
+                let valid = signature(&method, &target, &headers, &body, state.allow_typed_keys, &state.additional_keys);
                 state.requests.push((method.clone(), target.clone()));
                 let request_bytes = body.len() as u64;
                 let (status, response, etag, lose) = if !valid || state.unauthorized {

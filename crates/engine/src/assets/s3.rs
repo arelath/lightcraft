@@ -261,14 +261,43 @@ pub fn save_profile(profile: &str, keys: &AccessKeys) -> Result<std::path::PathB
 }
 
 fn save_profile_at(path: &std::path::Path, profile: &str, keys: &AccessKeys) -> Result<()> {
-    let old = match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > 1 << 20 => return Err(AssetError::Invalid("AWS credentials file exceeds 1 MiB".into())),
-        Ok(_) => std::fs::read_to_string(path).map_err(|e| AssetError::Disk(format!("could not read {}: {e}", path.display())))?,
+    let _lock = profile_lock(path)?;
+    let old = match std::fs::File::open(path) {
+        Ok(file) => {
+            let mut text = String::new();
+            file.take((1 << 20) + 1).read_to_string(&mut text).map_err(|e| AssetError::Disk(format!("could not read {}: {e}", path.display())))?;
+            if text.len() > 1 << 20 {
+                return Err(AssetError::Invalid("AWS credentials file exceeds 1 MiB".into()));
+            }
+            text
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(AssetError::Disk(format!("could not read {}: {e}", path.display()))),
     };
     let text = with_profile(&old, profile, &keys.0);
+    if text.len() > 1 << 20 {
+        return Err(AssetError::Invalid("AWS credentials file would exceed 1 MiB; remove unused profiles before saving".into()));
+    }
     write_private(path, text.as_bytes()).map_err(|e| AssetError::Disk(format!("could not save keys to {}: {e}", path.display())))
+}
+
+fn profile_lock(path: &std::path::Path) -> Result<std::fs::File> {
+    let dir = path.parent().ok_or_else(|| AssetError::Invalid("credentials file has no folder".into()))?;
+    std::fs::create_dir_all(dir).map_err(|e| AssetError::Disk(format!("could not create credentials folder: {e}")))?;
+    let name = path.file_name().ok_or_else(|| AssetError::Invalid("credentials file has no name".into()))?;
+    let lock_path = dir.join(format!(".{}.lightcraft.lock", name.to_string_lossy()));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(lock_path).map_err(|e| AssetError::Disk(format!("could not coordinate credentials save: {e}")))?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => {
+            AssetError::Disk("credentials are being saved by another LightCraft instance; retry saving this connection".into())
+        }
+        error => AssetError::Disk(format!("could not coordinate credentials save: {error}")),
+    })?;
+    Ok(file)
 }
 
 /// `text` with `profile`'s section replaced by `keys` (appended last).
@@ -542,9 +571,84 @@ aws_secret_access_key=y
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
-        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1, "no temp file left");
+        assert!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")),
+            "no temp file left"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
+    #[test]
+    fn independent_default_connections_and_rotation_keep_exact_saved_keys() {
+        let dir = std::env::temp_dir().join(format!("lightcraft-isolated-{}", crate::cloud_control::token().unwrap()));
+        let path = dir.join("credentials");
+        let a = crate::cloud_setup::fresh_profile().unwrap();
+        let b = crate::cloud_setup::fresh_profile().unwrap();
+        assert_ne!(a, b);
+        save_profile_at(&path, "lightcraft-b2", &AccessKeys::new("LEGACY", "legacy-secret").unwrap()).unwrap();
+        save_profile_at(&path, &a, &AccessKeys::new("LIBRARY_A", "secret-a").unwrap()).unwrap();
+        save_profile_at(&path, &b, &AccessKeys::new("LIBRARY_B", "secret-b").unwrap()).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let rotated = crate::cloud_setup::fresh_profile().unwrap();
+        save_profile_at(&path, &rotated, &AccessKeys::new("ROTATED_A", "rotated-secret").unwrap()).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        for (profile, key) in [(a.as_str(), "LIBRARY_A"), (b.as_str(), "LIBRARY_B"), ("lightcraft-b2", "LEGACY"), (rotated.as_str(), "ROTATED_A")] {
+            assert_eq!(Credentials::parse_profile(&after, profile).unwrap().access, key);
+        }
+        assert!(after.starts_with(&before));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn concurrent_credential_writers_preserve_both_sections_and_busy_saves_do_not_write() {
+        let dir = std::env::temp_dir().join(format!("lightcraft-profile-lock-{}", crate::cloud_control::token().unwrap()));
+        let path = dir.join("credentials");
+        save_profile_at(&path, "existing", &AccessKeys::new("EXISTING", "secret").unwrap()).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let lock = profile_lock(&path).unwrap();
+        assert!(
+            save_profile_at(&path, "busy", &AccessKeys::new("BUSY", "secret").unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("another LightCraft instance")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        drop(lock);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = ["writer-a", "writer-b"]
+            .into_iter()
+            .map(|profile| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (profile, save_profile_at(&path, profile, &AccessKeys::new(profile, "secret").unwrap()))
+                })
+            })
+            .collect();
+        let results: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
+        for (profile, result) in results {
+            if let Err(error) = result {
+                assert!(error.to_string().contains("another LightCraft instance"));
+                save_profile_at(&path, profile, &AccessKeys::new(profile, "secret").unwrap()).unwrap();
+            }
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        for profile in ["existing", "writer-a", "writer-b"] {
+            assert!(Credentials::parse_profile(&text, profile).is_ok());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn credential_growth_limit_preserves_the_previous_file() {
+        let dir = std::env::temp_dir().join(format!("lightcraft-profile-size-{}", crate::cloud_control::token().unwrap()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials");
+        let bytes = vec![b'#'; (1 << 20) - 1];
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(save_profile_at(&path, "new", &AccessKeys::new("NEW", "secret").unwrap()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn typed_keys_sign_requests_and_never_print() {
         let connection = S3Connection {

@@ -55,9 +55,24 @@ pub fn b2_endpoint(typed: &str) -> Option<(String, String)> {
     valid.then(|| (format!("https://s3.{region}.backblazeb2.com"), region))
 }
 
-/// The AWS credentials profile cloud setup saves a connection's keys under.
+/// The legacy name-derived binding, retained only for existing saved connections.
 pub fn profile_for(connection: &str) -> String {
     format!("lightcraft-{connection}")
+}
+
+/// Legacy bindings remain readable. New setups and rotations always get a fresh
+/// profile, independent of a connection's display name or copied library path.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fresh_profile() -> Result<String, String> {
+    Ok(format!("lightcraft-key-{}", crate::cloud_control::token()?))
+}
+
+pub fn managed_profile(profile: &str) -> bool {
+    profile.strip_prefix("lightcraft-key-").is_some_and(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')))
+}
+
+pub fn saved_profile(connection: &str, profile: &str) -> bool {
+    managed_profile(profile) || profile == profile_for(connection)
 }
 
 /// Run before the wizard saves typed credentials. Rejecting a destination edit
