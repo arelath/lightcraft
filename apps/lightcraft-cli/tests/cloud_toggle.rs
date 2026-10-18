@@ -184,3 +184,92 @@ fn failed_download_stays_enabled_and_blocked_across_restart_until_retry_or_cance
     let rows = run(&f, &library, &[("cloud.syncDisable", json!({"confirm":true,"wait":true}))]);
     assert_eq!(rows[0]["result"]["stage"], "complete");
 }
+
+#[test]
+fn turning_off_includes_unmaterialized_recently_deleted_originals_and_sidecars_for_offline_restore() {
+    for protocol in ["conditional-head-v1", "append-log-v1"] {
+        let f = support::Fixture::new();
+        f.state.lock().unwrap().append_mode = protocol == "append-log-v1";
+        let publisher = f.dir.join("deleted-publisher");
+        let reader = f.dir.join("deleted-reader");
+        let (_, source) = f.import_unsynchronized(&publisher, false);
+        let rows = run(
+            &f,
+            &publisher,
+            &[
+                ("cloud.syncEnable", json!({"connection":"personal","protocol":protocol})),
+                ("cloud.upload", json!({})),
+                ("cloud.sync", json!({})),
+                ("photo.saveMetadataToFile", json!({"ids":[1],"wait":true})),
+                ("cloud.upload", json!({})),
+                ("cloud.sync", json!({})),
+                ("photo.delete", json!({"ids":[1]})),
+                ("cloud.sync", json!({})),
+            ],
+        );
+        assert!(rows[3]["result"]["failed"].as_array().unwrap().is_empty(), "{rows:?}");
+        let published = catalog(&publisher);
+        let state = published.sync_state().unwrap();
+        let library = state.library.clone();
+        let global = published.cloud_identity("photo:1").unwrap();
+        let content = state.documents.get(&format!("photo:{global}")).unwrap().get("content").unwrap();
+        let expected: std::collections::BTreeMap<String, u64> = content
+            .0
+            .values()
+            .flat_map(|value| {
+                let asset: lightcraft_engine::catalog::assets::Asset = serde_json::from_value(value["asset"].clone()).unwrap();
+                asset.blobs().map(|blob| (blob.id.0.clone(), blob.size)).collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(expected.len() >= 2, "original and immutable XMP must both be included");
+        run(
+            &f,
+            &reader,
+            &[
+                ("cloud.configure", config(&f)),
+                ("cloud.syncEnable", json!({"connection":"personal","protocol":protocol,"library":library})),
+                ("cloud.sync", json!({})),
+            ],
+        );
+        let fresh = catalog(&reader);
+        assert_eq!(fresh.photos().count(), 0, "a fresh ordinary reader does not project tombstones");
+        assert!(fresh.sync_state().unwrap().winning(&format!("photo:{global}"), "deleted").unwrap().1.as_bool().unwrap());
+        let remote = f.state.lock().unwrap().objects.clone();
+        let rows = run(&f, &reader, &[("cloud.syncDisablePreview", json!({})), ("cloud.syncDisable", json!({"confirm":true,"wait":true}))]);
+        assert_eq!(rows[0]["result"]["recentlyDeletedPhotos"], 1);
+        assert_eq!(rows[0]["result"]["totalFiles"].as_u64().unwrap(), expected.len() as u64);
+        assert_eq!(rows[0]["result"]["recentlyDeletedBytes"].as_u64().unwrap(), expected.values().sum::<u64>());
+        assert_eq!(rows[1]["result"]["stage"], "complete", "{rows:?}");
+        let saved = catalog(&reader);
+        let deleted = saved.photos().find(|photo| photo.deleted).unwrap();
+        let id = deleted.id.0;
+        for (hash, size) in &expected {
+            let bytes = std::fs::read(reader.join("Local Originals").join("blobs").join(hash)).unwrap();
+            assert_eq!(bytes.len() as u64, *size);
+            assert_eq!(&support::hash(&bytes), hash);
+        }
+        assert_eq!(f.state.lock().unwrap().objects, remote, "conversion never rewrites cloud data");
+        for name in ["Managed", "assets-cache"] {
+            let disposable = reader.join(name);
+            if disposable.exists() {
+                assert!(disposable.canonicalize().unwrap().starts_with(f.dir.canonicalize().unwrap()));
+                std::fs::remove_dir_all(disposable).unwrap();
+            }
+        }
+        let requests = f.state.lock().unwrap().requests.len();
+        let exported = f.dir.join(format!("restored-deleted-{protocol}.png"));
+        run(
+            &f,
+            &reader,
+            &[
+                ("library.select", json!({"ids":[id]})),
+                ("photo.restore", json!({"ids":[id]})),
+                ("app.export", json!({"ids":[id],"path":exported,"format":"original"})),
+            ],
+        );
+        assert_eq!(std::fs::read(exported).unwrap(), std::fs::read(&source).unwrap());
+        assert!(!catalog(&reader).photo(lightcraft_engine::catalog::PhotoId(id)).unwrap().deleted);
+        assert_eq!(f.state.lock().unwrap().requests.len(), requests, "restoration/export remain offline after cache and staging removal");
+        assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+    }
+}

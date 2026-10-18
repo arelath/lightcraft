@@ -53,12 +53,49 @@ pub(crate) fn plan(catalog: &Catalog) -> Result<Vec<Blob>> {
     Ok(blobs.into_values().collect())
 }
 
+/// Additional unique bytes required by Recently Deleted are counted separately
+/// from the union of live/deleted immutable files. Photos remain separate identities.
+pub(crate) struct ConversionPlan {
+    pub blobs: Vec<Blob>,
+    pub deleted_photos: u64,
+    pub deleted_bytes: u64,
+}
+pub(crate) fn conversion_plan(catalog: &Catalog) -> Result<ConversionPlan> {
+    let mut catalog = catalog.clone();
+    catalog.apply(lightcraft_catalog::Op::Batch { ops: crate::cloud_sync::materialize_deleted_for_local(&catalog)? })?;
+    let mut live = BTreeMap::new();
+    let mut deleted = BTreeMap::new();
+    let deleted_photos = catalog.photos().filter(|photo| photo.deleted && !photo.local).fold(0u64, |count, _| count.saturating_add(1));
+    for photo in catalog.photos() {
+        let Source::Managed { asset_id } = &photo.source else { continue };
+        let blobs = if photo.deleted { &mut deleted } else { &mut live };
+        let asset = catalog.asset(asset_id).ok_or_else(|| error(format!("photo {} has no asset manifest", photo.id.0)))?;
+        insert(blobs, asset)?;
+        if let Some(state) = catalog.sync_state()
+            && let Some(global) = catalog.cloud_identity(&format!("photo:{}", photo.id.0))
+            && let Some(register) = state.documents.get(&format!("photo:{global}")).and_then(|fields| fields.get("content"))
+        {
+            for value in register.0.values() {
+                insert(blobs, &crate::cloud_sync::retained_content_asset(value.clone(), &state.connection)?)?;
+            }
+        }
+    }
+    let deleted_bytes = deleted.iter().filter(|(id, _)| !live.contains_key(*id)).fold(0u64, |n, (_, blob)| n.saturating_add(blob.size));
+    for (id, blob) in deleted {
+        if live.get(&id).is_some_and(|old| old.size != blob.size) {
+            return Err(error("one immutable blob has conflicting lengths; library retained"));
+        }
+        live.entry(id).or_insert(blob);
+    }
+    Ok(ConversionPlan { blobs: live.into_values().collect(), deleted_photos, deleted_bytes })
+}
+
 /// Existing file-backed library originals already have durable locations. Verify
 /// those references too; browsed Local records are outside the added library.
 pub(crate) fn verify_local_files(catalog: &Catalog, cancel: &AtomicBool) -> Result<()> {
     let mut checked = std::collections::BTreeSet::new();
     let mut buffer = vec![0; BUFFER_BYTES];
-    for photo in catalog.photos().filter(|p| !p.deleted && !p.local) {
+    for photo in catalog.photos().filter(|p| !p.local) {
         let Source::File { path } = &photo.source else { continue };
         if !checked.insert(path) {
             continue;
@@ -415,6 +452,10 @@ mod tests {
         assert!(verify_local_files(&catalog, &AtomicBool::new(false)).is_err());
         fs::write(&path, b"original").unwrap();
         verify_local_files(&catalog, &AtomicBool::new(false)).unwrap();
+        catalog.apply(Op::SetDeleted { id: PhotoId(1), deleted: true }).unwrap();
+        assert_eq!(conversion_plan(&catalog).unwrap().deleted_photos, 1);
+        fs::remove_file(&path).unwrap();
+        assert!(verify_local_files(&catalog, &AtomicBool::new(false)).is_err(), "Recently Deleted local originals must remain recoverable too");
     }
     #[test]
     fn permanent_copies_are_protected_from_cache_overlap_and_outputs() {
@@ -491,6 +532,16 @@ mod tests {
         assert_eq!(planned.len(), 2);
         assert!(planned.contains(&original));
         assert!(planned.contains(&xmp));
+        catalog.apply(Op::SetDeleted { id: PhotoId(2), deleted: true }).unwrap();
+        let converted = conversion_plan(&catalog).unwrap();
+        assert_eq!(converted.deleted_photos, 1);
+        assert_eq!(converted.deleted_bytes, 0, "a live virtual copy already requires the same immutable files");
+        assert_eq!(converted.blobs.len(), 2);
+        catalog.apply(Op::SetDeleted { id: PhotoId(1), deleted: true }).unwrap();
+        let converted = conversion_plan(&catalog).unwrap();
+        assert_eq!(converted.deleted_photos, 2, "photo identities remain distinct");
+        assert_eq!(converted.deleted_bytes, original.size + xmp.size);
+        assert_eq!(converted.blobs.len(), 2, "shared originals and sidecars are copied once");
     }
     #[test]
     fn plan_keeps_concurrent_content_revisions_of_live_photos() {
@@ -509,6 +560,7 @@ mod tests {
         let mut state = catalog.sync_state().unwrap().clone();
         let mut content = state.winning(&entity, "content").unwrap().1.clone();
         content["asset"]["original"] = serde_json::to_value(&previous).unwrap();
+        content["assetId"] = serde_json::json!("retained-asset");
         state
             .receive(&Mutation {
                 version: 2,
@@ -523,5 +575,13 @@ mod tests {
         assert_eq!(planned.len(), 2);
         assert!(planned.contains(&original));
         assert!(planned.contains(&previous));
+        catalog.apply(Op::SetDeleted { id: PhotoId(1), deleted: true }).unwrap();
+        assert!(plan(&catalog).unwrap().is_empty(), "ordinary live-original protection keeps its existing scope");
+        let converted = conversion_plan(&catalog).unwrap();
+        assert_eq!(converted.deleted_photos, 1);
+        assert_eq!(converted.deleted_bytes, original.size + previous.size);
+        assert_eq!(converted.blobs.len(), 2);
+        assert!(converted.blobs.contains(&original));
+        assert!(converted.blobs.contains(&previous));
     }
 }

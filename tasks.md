@@ -278,7 +278,8 @@ The supplied 2026-10-17 review is tracked before implementation in
 - [x] **CR.70** Preserve compatibility, HTTP, capacity and local-resource failures through native/browser producers into health and recovery.
 - [x] **CR.71** Share typed status, diagnostics and actions across popup/Info; use verified Up to date wording and a secondary Sync now.
 - [x] **CR.72** Add full retained metadata, writer/revision details and independent read-only Preview/Compare panes with context and render cleanup.
-- [ ] **CR.73–CR.74** Retain Recently Deleted originals during local conversion and explain re-enabling sync as a merge.
+- [x] **CR.73** Include Recently Deleted originals, supporting data and retained content alternatives in verified permanent local storage; show count/space and prove offline restore.
+- [ ] **CR.74–CR.74** Explain re-enabling local-only sync as a merge with the existing cloud library.
 - [x] **CR.49** Fence successor publication, refuse unsafe cancellation and preserve explicit finish-upgrade recovery.
 - [x] **CR.53** Verify cache destination adoption, honor old byte leases and fence cleanup before folder reuse.
 - [ ] **CR.48, CR.50–CR.52, CR.54–CR.55** Recheck and close the previously tracked epoch, migration, status, lease, browser-cache, relocation, credential-isolation and discovery findings with current evidence. Detailed items remain individually tracked in the reliability checklist.

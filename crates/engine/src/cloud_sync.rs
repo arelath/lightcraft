@@ -545,6 +545,8 @@ pub use materialize::resolve;
 pub use materialize::restore_deleted;
 pub use materialize::structural_conflicts;
 pub use materialize::{completed_checkpoint, completed_outcome};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use materialize::{completed_outcome_for_local, materialize_deleted_for_local};
 
 /// Old verified results can lack witnesses for archives installed since they
 /// started. Retain newer state and refresh rather than pausing on missing proofs.

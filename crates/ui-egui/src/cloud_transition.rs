@@ -218,10 +218,17 @@ pub(crate) fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, review: &mut Revi
         }
     } else {
         ui.strong(crate::i18n::tr("Turn off cloud sync on this device?"));
-        ui.label(crate::i18n::tr("LightCraft will finish current cloud work, read the latest library, and save and verify permanent local copies of all live library originals and sidecars before turning sync off."));
-        ui.label(crate::i18n::tr("This does not delete anything from cloud storage. Historical or deleted cloud files are not downloaded. Other devices can keep editing; new remote files are checked again before completion."));
+        ui.label(crate::i18n::tr("LightCraft will finish current cloud work, read the latest library, and save and verify permanent local copies of live and Recently Deleted library originals and sidecars before turning sync off."));
+        ui.label(crate::i18n::tr("This does not delete anything from cloud storage. Recently Deleted cloud photos and retained conflict originals are included. Other devices can keep editing; new remote files are checked again before completion."));
         if let Some(preview) = &review.preview {
             destination(ui, preview);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(crate::i18n::tr("Recently Deleted photos:"));
+                ui.label(number(preview, "recentlyDeletedPhotos", "estimatedRecentlyDeletedPhotos").to_string());
+                ui.label("·");
+                ui.label(crate::i18n::tr("Additional space:"));
+                ui.label(crate::panels::cloud::bytes(number(preview, "recentlyDeletedBytes", "estimatedRecentlyDeletedBytes")));
+            });
             ui.label(crate::i18n::tr_format!(
                 "Estimated: {files} files · {bytes}",
                 files = number(preview, "totalFiles", "estimatedFiles"),
@@ -321,9 +328,8 @@ mod tests {
         let services = Services {
             cloud_action: Some(Box::new(move |_, command, params| match command {
                 "cloud.transitionStatus" => Some(Ok(read.lock().unwrap().clone())),
-                "cloud.syncDisablePreview" => {
-                    Some(Ok(json!({"destination":"C:/Photos/My Library/originals","totalFiles":8,"totalBytes":80_000_000})))
-                }
+                "cloud.syncDisablePreview" => Some(Ok(json!({"destination":"C:/Photos/My Library/originals","totalFiles":8,"totalBytes":80_000_000,
+                        "recentlyDeletedPhotos":3,"recentlyDeletedBytes":12_000_000}))),
                 "cloud.syncDisable" => {
                     recorded.lock().unwrap().push((command.into(), params.clone()));
                     if let Some(error) = read.lock().unwrap()["actionError"].as_str() {
@@ -384,9 +390,20 @@ mod tests {
         headless.app.run("dialog.cloudDisable", json!({})).unwrap();
         frames(&mut headless);
         let text = headless.painted_text();
-        for label in ["does not delete anything", "Other devices can keep editing", "8 files", "80.0 MB", "Permanent local destination"] {
+        for label in [
+            "does not delete anything",
+            "Other devices can keep editing",
+            "8 files",
+            "80.0 MB",
+            "Permanent local destination",
+            "Recently Deleted photos:",
+            "Additional space:",
+            "12.0 MB",
+            "Recently Deleted cloud photos and retained conflict originals are included",
+        ] {
             assert!(text.iter().any(|text| text.contains(label)), "{label}: {text:?}");
         }
+        assert!(text.iter().any(|text| text == "3"), "Recently Deleted count is visible: {text:?}");
         assert!(calls.lock().unwrap().is_empty());
         capture(&mut headless, "confirmation");
         click(&mut headless, "button:cloudDisableConfirm");

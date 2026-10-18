@@ -1483,7 +1483,11 @@ mod tests {
 
     #[test]
     fn obsolete_failure_cannot_undo_shared_ack_but_confirmed_remote_damage_remains_visible() {
-        let root = std::env::temp_dir().join(format!("lightcraft-upload-order-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "lightcraft-upload-order-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
         let (mut s, _) = session(&root);
         for (remote_invalid, wrong_attempt) in [(false, false), (false, true), (true, false)] {
             let mut intent = s.catalog.upload_intents()["upload-ack-test"].clone();
@@ -1534,6 +1538,9 @@ mod tests {
             drop(sender);
             s.poll_cloud_uploads();
         }
+        s.close_library().unwrap();
+        drop(s);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn replacing_a_library_cancels_uploads_and_resets_resource_health_and_attempts() {

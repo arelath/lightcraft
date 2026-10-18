@@ -143,6 +143,17 @@ fn device_local_photo(catalog: &Catalog, connection: &str, id: PhotoId) -> bool 
 }
 
 fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
+    install_with_policy(catalog, state, false)
+}
+
+/// Conversion alone materializes retained tombstones, including on a fresh reader.
+/// Ordinary synchronization keeps its existing projection and withdrawal policy.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn materialize_deleted_for_local(catalog: &Catalog) -> Result<Vec<Op>> {
+    let Some(state) = catalog.sync_state() else { return Ok(Vec::new()) };
+    install_with_policy(catalog, state, true)
+}
+fn install_with_policy(catalog: &Catalog, state: &SyncState, include_deleted: bool) -> Result<Vec<Op>> {
     if catalog.local_sync_baseline().is_some() {
         return Err(error("local edits await explicit rejoin; turn on cloud sync on desktop before receiving cloud changes"));
     }
@@ -153,6 +164,22 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
         .filter(|(entity, fields)| old.and_then(|old| old.documents.get(*entity)) != Some(*fields))
         .map(|(entity, _)| entity.as_str())
         .collect();
+    let forced: BTreeSet<_> = if include_deleted {
+        state
+            .documents
+            .iter()
+            .filter_map(|(entity, fields)| {
+                let global = entity.strip_prefix("photo:")?;
+                (fields.contains_key("content")
+                    && state.winning(entity, "deleted").is_some_and(|(_, value)| value.as_bool() == Some(true))
+                    && local(catalog, "photo", global).map(PhotoId).is_none_or(|id| catalog.photo(id).is_none()))
+                .then_some(entity.as_str())
+            })
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    selected.extend(forced.iter().copied());
     if selected.is_empty() {
         return Ok(Vec::new());
     }
@@ -162,10 +189,11 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
         .iter()
         .filter_map(|entity| {
             entity.strip_prefix("photo:").filter(|_| {
-                ["content", "deleted"].iter().any(|field| {
-                    old.and_then(|old| old.documents.get(*entity)).and_then(|fields| fields.get(*field))
-                        != state.documents.get(*entity).and_then(|fields| fields.get(*field))
-                })
+                forced.contains(entity)
+                    || ["content", "deleted"].iter().any(|field| {
+                        old.and_then(|old| old.documents.get(*entity)).and_then(|fields| fields.get(*field))
+                            != state.documents.get(*entity).and_then(|fields| fields.get(*field))
+                    })
             })
         })
         .collect();
@@ -202,7 +230,10 @@ fn install(catalog: &Catalog, state: &SyncState) -> Result<Vec<Op>> {
         match kind {
             "photo" if values.contains_key("content") => {
                 let known = local(&next, kind, global).map(PhotoId);
-                if deleted && known.is_none_or(|id| next.photo(id).is_none_or(|photo| matches!(photo.source, Source::File { .. }))) {
+                if deleted
+                    && (known.is_some_and(|id| next.photo(id).is_some_and(|photo| matches!(photo.source, Source::File { .. })))
+                        || !include_deleted && known.is_none_or(|id| next.photo(id).is_none()))
+                {
                     // Undoing adoption withdraws the shared photo while keeping
                     // its original local record. Later metadata on that retained
                     // tombstone must not relink or delete the local-file photo.
@@ -709,5 +740,26 @@ pub fn completed_outcome(catalog: &Catalog, outcome: &crate::cloud_outcome::Outc
     state.merge(outcome.state())?;
     let mut ops = install(catalog, &state)?;
     ops.push(Op::SetSyncState { state: Some(Box::new(state)) });
+    Ok(Op::Batch { ops })
+}
+
+/// Preserve normal certification/ACK checks, then include retained deleted media
+/// in the same atomic owner operation used to turn cloud sync off.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn completed_outcome_for_local(
+    catalog: &Catalog,
+    outcome: &crate::cloud_outcome::Outcome,
+    ids: &BTreeSet<String>,
+    started_generation: u64,
+) -> Result<Op> {
+    let completed = completed_outcome(catalog, outcome, ids, started_generation)?;
+    let mut next = catalog.clone();
+    next.apply(completed.clone())?;
+    let local = materialize_deleted_for_local(&next)?;
+    if local.is_empty() {
+        return Ok(completed);
+    }
+    let mut ops = vec![completed];
+    ops.extend(local);
     Ok(Op::Batch { ops })
 }

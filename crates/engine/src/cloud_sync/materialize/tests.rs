@@ -259,3 +259,38 @@ fn withdrawn_adoption_keeps_local_file_through_later_tombstone_metadata() {
     assert_eq!(catalog.photo(PhotoId(1)).unwrap().source, original);
     assert!(!catalog.photo(PhotoId(1)).unwrap().deleted);
 }
+
+#[test]
+fn local_conversion_materializes_unchanged_deleted_content_without_relinking_withdrawn_files() {
+    let original = fixture(1);
+    let mut state = original.sync_state().unwrap().clone();
+    state
+        .enqueue(vec![
+            Change { entity: "photo:p000000".into(), field: "deleted".into(), base: None, value: json!(true) },
+            Change { entity: "album:container".into(), field: "name".into(), base: None, value: json!("Retained album") },
+            Change { entity: "album:container".into(), field: "member:p000000".into(), base: None, value: json!(true) },
+        ])
+        .unwrap();
+    let mut fresh = Catalog::new();
+    fresh.apply(Op::SetSyncState { state: Some(Box::new(state.clone())) }).unwrap();
+    assert!(install(&fresh, &state).unwrap().is_empty(), "ordinary unchanged state stays unmaterialized");
+    let portable = fresh.sync_state().unwrap().portable();
+    let pending = fresh.sync_state().unwrap().pending.clone();
+    fresh.apply(Op::Batch { ops: materialize_deleted_for_local(&fresh).unwrap() }).unwrap();
+    let photo = fresh.photos().next().unwrap();
+    assert!(photo.deleted);
+    assert!(matches!(photo.source, Source::Managed { .. }));
+    assert_eq!(fresh.cloud_identity(&format!("photo:{}", photo.id.0)), Some("p000000"));
+    assert!(fresh.albums().any(|album| album.name == "Retained album" && album.photos.contains(&photo.id)), "retained references reproject too");
+    assert!(fresh.sync_state().unwrap().portable() == portable);
+    assert!(fresh.sync_state().unwrap().pending == pending);
+    assert!(materialize_deleted_for_local(&fresh).unwrap().is_empty(), "conversion is idempotent");
+    let mut withdrawn = original;
+    withdrawn
+        .apply(Op::Relink { id: PhotoId(1), source: Source::File { path: "withdrawn.dng".into() }, file_name: "withdrawn.dng".into(), format: None })
+        .unwrap();
+    withdrawn.apply(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+    let before = withdrawn.to_snapshot();
+    assert!(materialize_deleted_for_local(&withdrawn).unwrap().is_empty());
+    assert!(withdrawn.to_snapshot() == before, "a withdrawn local original must not be relinked, duplicated or deleted");
+}

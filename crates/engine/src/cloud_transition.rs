@@ -127,10 +127,11 @@ pub fn preview(s: &mut Session, _: &Value) -> Result<Value> {
     if s.catalog.sync_state().is_none() {
         return Err(error("cloud sync is not enabled"));
     }
-    let blobs = crate::cloud_local_transfer::plan(&s.catalog)?;
-    Ok(json!({"destination":destination(s)?,"totalFiles":blobs.len(),
-        "totalBytes":blobs.iter().fold(0u64,|n,b|n.saturating_add(b.size)),"estimate":true,
-        "scope":"All live library originals, retained conflict originals and supporting data observed in the final verified cloud scan; cloud history and unrelated bucket files are not downloaded."}))
+    let plan = crate::cloud_local_transfer::conversion_plan(&s.catalog)?;
+    Ok(json!({"destination":destination(s)?,"totalFiles":plan.blobs.len(),
+        "totalBytes":plan.blobs.iter().fold(0u64,|n,b|n.saturating_add(b.size)),"estimate":true,
+        "recentlyDeletedPhotos":plan.deleted_photos,"recentlyDeletedBytes":plan.deleted_bytes,
+        "scope":"All live and Recently Deleted library originals, retained conflict originals and supporting data observed in the final verified cloud scan; cloud history and unrelated bucket files are not downloaded."}))
 }
 pub(crate) fn ensure_command(s: &Session, id: &str) -> Result<()> {
     if s.cloud_transition.blocking()
@@ -333,9 +334,9 @@ fn copy_library(
         }
         acknowledged.extend(outcome.acknowledged().iter().cloned());
         let fingerprint = stable_fingerprint(&outcome, &acknowledged)?;
-        let op = crate::cloud_sync::completed_outcome(&catalog, &outcome, outcome.acknowledged(), state.generation)?;
+        let op = crate::cloud_sync::completed_outcome_for_local(&catalog, &outcome, outcome.acknowledged(), state.generation)?;
         catalog.apply(op)?;
-        let blobs = crate::cloud_local_transfer::plan(&catalog)?;
+        let blobs = crate::cloud_local_transfer::conversion_plan(&catalog)?.blobs;
         if previous.as_ref() == Some(&fingerprint) {
             // Intermediate scans certify against the progressively merged worker
             // catalog. The final owner still has the original snapshot, including
@@ -363,7 +364,7 @@ fn copy_library(
                 _ => {}
             }
             // Prove the exact owner operation before reporting a finished download.
-            crate::cloud_sync::completed_outcome(&owner_catalog, &outcome, outcome.acknowledged(), owner.generation)?;
+            crate::cloud_sync::completed_outcome_for_local(&owner_catalog, &outcome, outcome.acknowledged(), owner.generation)?;
             crate::cloud_local_transfer::verify_local_files(&catalog, cancel)?;
             // Read-back every complete local reference immediately before owner commit.
             for blob in &blobs {
@@ -522,7 +523,7 @@ impl Session {
                     return Err(error("Local download cancelled or library binding changed; sync remains enabled."));
                 }
                 let generation = self.catalog.sync_state().map_or(0, |s| s.generation);
-                let op = crate::cloud_sync::completed_outcome(&self.catalog, &outcome, outcome.acknowledged(), generation)?;
+                let op = crate::cloud_sync::completed_outcome_for_local(&self.catalog, &outcome, outcome.acknowledged(), generation)?;
                 self.apply_received(op)?;
                 self.persist()?;
                 // Catalog commit precedes the single atomic mode record write.
