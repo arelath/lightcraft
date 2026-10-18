@@ -1,6 +1,6 @@
 # Cloud acceptance history
 
-Last updated: 2026-10-17
+Last updated: 2026-10-18
 
 These are historical reports from specific releases, not a current acceptance claim.
 Statements such as "not implemented", format versions, test counts and "remaining"
@@ -622,3 +622,8 @@ All eight cargo +1.95.0 xtask ci gates pass (target/cloud-cr55-ci-final.log). Si
 ### 2026-10-18 — CR.43 partial: native B2 revision CAS
 
 Nine pure/loopback regressions pass, covering scoped canonical pointers, capacity, credentials/API endpoint refusal, one winner from competing revisions, unchanged unrelated metadata, lost/unconfirmed responses, redirects/authentication/cancellation, malformed/oversized success bodies and permission/scope refusal before writes and catalog-readable library identities. All eight workspace CI gates pass (target/cloud-cr43-primitive-ci-accepted.log). The explicit ignored Rust live CAS test passes against authorized disposable dykstrap-lightcraft using saved lightcraft-b2 (target/cloud-cr43-native-live-cas-accepted.log): two contenders on one revision yield one success and one conflict; the committed pointer is verified; cleanup rereads and removes only its generated entry plus the two exact probe object versions; all unrelated bucket info, type, CORS, lifecycle/encryption/lock/replication settings remain unchanged. A prior live attempt was refused before remote output by the append-only namespace validator; the narrow B2 staging helper fixes that without weakening append validation. CI caught one nested-if style warning in the new adapter; the corrected final run passes. This test validates the provider primitive, not the desktop/browser upgrade workflow or live AWS interoperability.
+
+
+### 2026-10-18 — CR.43 partial: native B2 head transitions and legacy intake
+
+Eighteen B2 pure/loopback tests plus three legacy model tests and the retired-source fence regression pass. Readable future-writer and unsupported-converter transitions refuse authority modification, and newer descriptor/pointer formats retain Update recovery. The explicit ignored Rust adapter test passes on the authorized disposable dykstrap-lightcraft bucket using saved lightcraft-b2: initial exposed maintenance, epoch-2 activation, late existing-author and previously unseen-author append operations with original IDs/digests, committed checkpoint/intake reread without duplicate effects, historical audit rejection of a conflicting operation behind its author cursor, permanent nonpersonal deletion and rejected revival. Its fresh random prefix and exact tracked object versions plus its own bucket-info entry are cleaned; unrelated bucket info/type/CORS/lifecycle/encryption/lock/replication settings are checked unchanged. Evidence: target/cloud-cr43-head-adapter-live-final.log. All eight CI gates pass at target/cloud-cr43-head-adapter-ci-final.log. An earlier opt-in test invocation omitted its bucket environment and refused before remote I/O; an earlier successful live run covered late-author recovery before the explicit historical-audit case. This does not certify the desktop/browser upgrade workflows or live AWS interoperability.

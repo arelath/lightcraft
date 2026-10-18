@@ -15,7 +15,7 @@ pub use capability::{Converter, MigrationSpec};
 
 /// Envelope format this build understands. A newer envelope is refused before any
 /// other field of the library is interpreted.
-pub const CONTROL_VERSION: u32 = 2;
+pub const CONTROL_VERSION: u32 = 3;
 /// Highest library schema this build can read.
 pub const READER: u32 = 1;
 /// Highest library schema this build can publish without losing fields.
@@ -288,6 +288,16 @@ impl Control {
             }
             _ => return bad("state does not match its migration/successor fields"),
         }
+        // Format 3 has one specific purpose: stop older append writers after a
+        // native B2 head takes authority. It never enables a new semantic schema.
+        if self.control_version == 3
+            && (self.epoch != 1
+                || self.active_metadata_root != append_root(&self.library, 1)
+                || !matches!(self.state, State::Retired | State::Deleted)
+                || self.successor.as_ref().is_some_and(|s| s.protocol != "conditional-head-v1" || s.epoch != 2))
+        {
+            return bad("unsupported retired append fence");
+        }
         Ok(())
     }
     /// Reading: any valid, readable control (including maintenance and retirement).
@@ -331,9 +341,30 @@ impl Control {
         next.validate()?;
         Ok(next)
     }
+    /// Fence the original append root after a B2 head has won its initial CAS.
+    /// The caller must confirm that authority first; this cooperative record is
+    /// compatibility protection, never the maintenance election itself.
+    pub fn retire_append_source(&self, manifest: &str) -> Outcome<Self> {
+        self.may_publish()?;
+        if self.epoch != 1 || self.active_metadata_root != append_root(&self.library, 1) || self.schema != SCHEMA {
+            return Err(Blocked::Invalid("only the original supported append source can be retired".into()));
+        }
+        let bytes = crate::cloud_append::manifest(&self.library).map_err(|_| Blocked::Invalid("invalid append source library".into()))?;
+        if crate::assets::sha256(&bytes).0 != manifest {
+            return Err(Blocked::Invalid("retired source manifest does not match its library".into()));
+        }
+        let mut next = self.next()?;
+        next.control_version = 3;
+        next.state = State::Retired;
+        next.successor = Some(Successor { protocol: "conditional-head-v1".into(), epoch: 2, manifest: manifest.into() });
+        next.validate()?;
+        Ok(next)
+    }
     fn next(&self) -> Outcome<Self> {
         let mut next = self.clone();
-        next.control_version = CONTROL_VERSION;
+        // Version 3 fences the retired append source of a B2 head authority.
+        // Ordinary maintenance keeps its existing version-2 envelope.
+        next.control_version = self.control_version.max(2);
         next.revision = self.revision.checked_add(1).ok_or_else(|| Blocked::Invalid("control revision exhausted".into()))?;
         Ok(next)
     }

@@ -12,10 +12,12 @@ pub struct RecordRef {
     pub hash: BlobId,
     pub size: u64,
 }
-/// Head format written by this build. Version 4 carries the library control envelope;
-/// version 2/3 heads (written before it existed) read as Active epoch 1, schema 1, and
-/// are upgraded by the next conditional write. Older builds refuse version 4.
-pub const HEAD_VERSION: u32 = 4;
+/// Highest supported head format. Ordinary heads remain version 4; version 5 also
+/// binds recovery of a retired append source to this same publication authority.
+pub const HEAD_VERSION: u32 = 5;
+const BASE_HEAD_VERSION: u32 = 4;
+mod legacy;
+pub use legacy::{LegacyIntake, MAX_INTAKE};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Head {
@@ -28,6 +30,8 @@ pub struct Head {
     pub checkpoint: Option<CheckpointRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<Control>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_append: Option<RecordRef>,
 }
 use crate::cloud_control::{Blocked, Control};
 /// Key of a catalog object in an epoch namespace (see `cloud_control::epoch_root`).
@@ -44,7 +48,7 @@ pub fn object_epoch(prefix: &str, namespace: &str, key: &str, hash: &str) -> Opt
     };
     (key == object_key(prefix, epoch, namespace, hash)).then_some(epoch)
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CheckpointRef {
     pub object: RecordRef,
@@ -110,7 +114,7 @@ impl Head {
         serde_json::from_value(value)
             .map_err(|_| Blocked::Invalid("remote catalog head is malformed or from an unsupported version; preserved".into()))
     }
-    /// The authoritative control: embedded in version 4, implicit for older heads.
+    /// The authoritative control: embedded since version 4, implicit for older heads.
     pub fn control(&self) -> Result<Control, String> {
         let library = self.library.as_deref().ok_or("catalog head has no library identity")?;
         match &self.control {
@@ -128,7 +132,8 @@ impl Head {
             || !matches!(self.version, 1..=HEAD_VERSION)
             || (self.version == 1 && (self.library.is_some() || self.checkpoint.is_some()))
             || (self.version >= 2 && self.library.as_deref() != Some(library))
-            || ((self.version == HEAD_VERSION) != self.control.is_some())
+            || ((self.version >= BASE_HEAD_VERSION) != self.control.is_some())
+            || (self.version < 5 && self.legacy_append.is_some())
         {
             return Err(Blocked::Invalid("invalid catalog head or library identity".into()));
         }
@@ -158,13 +163,42 @@ impl Head {
         {
             return Err(Blocked::Invalid("migration source is not before the maintenance head".into()));
         }
+        if let Some(legacy) = &self.legacy_append
+            && legacy.validate_scope(prefix, "legacy", MAX_INTAKE).map_err(Blocked::Invalid)? != 1
+        {
+            return Err(Blocked::Invalid("legacy intake is outside its original namespace".into()));
+        }
+        Ok(())
+    }
+    /// The permanent deletion barrier has no personal history or live references.
+    /// Ordinary readers still refuse it with `Deleted`; erasure can verify it exactly.
+    pub fn validate_deleted(&self, prefix: &str, library: &str) -> Result<(), Blocked> {
+        let control = self.control.as_ref().ok_or_else(|| Blocked::Invalid("deletion barrier has no control".into()))?;
+        control.validate()?;
+        let zero = "0".repeat(64);
+        if !matches!(self.version, BASE_HEAD_VERSION..=HEAD_VERSION)
+            || self.library.as_deref() != Some(library)
+            || control.library != library
+            || control.state != crate::cloud_control::State::Deleted
+            || control.active_metadata_root != crate::cloud_control::epoch_root(control.epoch)
+            || self.generation != 1
+            || self.checkpoint.is_some()
+            || self.legacy_append.is_some()
+            || self.tip.hash.0 != zero
+            || self.tip.size != 1
+            || self.tip.key != object_key(prefix, control.epoch, "changes", &zero)
+        {
+            return Err(Blocked::Invalid("invalid permanent deletion barrier".into()));
+        }
         Ok(())
     }
     /// The head that replaces `previous`: always the current format, carrying the
     /// observed control forward (or a transition's new control) unchanged.
     pub fn next(previous: Option<&Head>, tip: RecordRef, library: &str, checkpoint: Option<CheckpointRef>, control: Control) -> Result<Self, String> {
         let generation = previous.map_or(Some(1), |head| head.generation.checked_add(1)).ok_or("catalog generation exhausted")?;
-        Ok(Self { version: HEAD_VERSION, generation, tip, library: Some(library.into()), checkpoint, control: Some(control) })
+        let legacy_append = previous.and_then(|head| head.legacy_append.clone());
+        let version = if legacy_append.is_some() { HEAD_VERSION } else { BASE_HEAD_VERSION };
+        Ok(Self { version, generation, tip, library: Some(library.into()), checkpoint, control: Some(control), legacy_append })
     }
 }
 /// Ordinary publication check, made on each reread immediately before its CAS.
@@ -254,6 +288,7 @@ mod typed_failure_tests {
             library: Some("library".into()),
             checkpoint: None,
             control: Some(control),
+            legacy_append: None,
         };
         assert!(matches!(head.validate_scope_typed("prefix", "library"), Err(Blocked::UpdateToRead(_))));
     }

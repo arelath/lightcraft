@@ -18,6 +18,8 @@ const MAX_JSON: usize = 1 << 20;
 const MAX_INFO: usize = 10_000;
 const MAX_AUTHORITY: u64 = 16 << 10;
 const AUTH_URL: &str = "https://api.backblazeb2.com/b2api/v4/b2_authorize_account";
+mod authority;
+mod throttle;
 fn unsupported(why: &str) -> AssetError {
     AssetError::Unsupported(format!("Backblaze library control {why}; cloud data and pending changes are retained"))
 }
@@ -106,8 +108,12 @@ impl Scope {
             return Err(invalid("pointer size"));
         }
         let value: Value = serde_json::from_str(text).map_err(|_| invalid("pointer encoding"))?;
-        if value.get("version").and_then(Value::as_u64) != Some(1) {
-            return Err(unsupported("entry needs a newer LightCraft"));
+        match value.get("version").and_then(Value::as_u64) {
+            Some(1) => {}
+            Some(version) if version > 1 => {
+                return Err(AssetError::Blocked(crate::cloud_control::Blocked::UpdateToRead("Backblaze authority pointer format".into())));
+            }
+            _ => return Err(invalid("pointer version")),
         }
         let pointer: Pointer = serde_json::from_value(value).map_err(|_| unsupported("entry is unreadable; repair it before upgrading"))?;
         if pointer.binding != self.binding {
@@ -152,6 +158,7 @@ fn endpoint(raw: &str) -> Result<String> {
 }
 fn request(url: &str, authorization: &str, body: Option<&Value>, cancel: &AtomicBool) -> Result<Value> {
     let url = Url::parse(url).map_err(http_error)?;
+    throttle::check(&url, cancel)?;
     let encoded = body.map(serde_json::to_vec).transpose().map_err(|_| invalid("request"))?.unwrap_or_default();
     if encoded.len() > MAX_JSON {
         return Err(invalid("request size"));
@@ -171,6 +178,7 @@ fn request(url: &str, authorization: &str, body: Option<&Value>, cancel: &Atomic
     match response.status {
         200 => {}
         409 | 412 => return Err(AssetError::Conflict),
+        code @ (429 | 503) => return Err(throttle::defer(&url, code, response.header("retry-after"))),
         301 | 302 | 303 | 307 | 308 => return Err(configuration("API redirected; check the storage region")),
         code => return Err(AssetError::Http(code)),
     }
@@ -367,6 +375,9 @@ impl S3Connection {
 
 fn validate_head(connection: &S3Connection, head: &crate::cloud_records::Head) -> Result<()> {
     let library = head.library.as_deref().filter(|id| lightcraft_catalog::assets::identifier(id)).ok_or_else(|| invalid("head library"))?;
+    if head.control.as_ref().is_some_and(|control| control.state == crate::cloud_control::State::Deleted) {
+        return head.validate_deleted(connection.prefix.trim_end_matches('/'), library).map_err(AssetError::Blocked);
+    }
     head.validate_scope_typed(connection.prefix.trim_end_matches('/'), library).map_err(AssetError::Blocked)
 }
 

@@ -43,7 +43,8 @@ impl AppendScan {
     pub fn is_empty(&self) -> bool {
         self == &Self::default()
     }
-    fn validate(&self) -> Result<()> {
+    /// Validate bounded root-relative checkpoint names and the resumable audit cursor.
+    pub fn validate(&self) -> Result<()> {
         if self.checkpoints.len() > super::MAX_RECORDS
             || self.checkpoints.iter().any(|key| !scan_key(key, "checkpoints"))
             || self.audit.after.as_ref().is_some_and(|key| !scan_key(key, "checkpoints") && !scan_key(key, "ops"))

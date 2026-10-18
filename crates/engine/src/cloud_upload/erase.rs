@@ -197,9 +197,10 @@ fn erase(
     let mut barriers = BTreeMap::<String, Vec<u8>>::new();
     if let Some((mut head, etag)) = head(connection, library, cancel)? {
         head.control = Some(head.control().map_err(error)?.delete().map_err(|b| error(b.to_string()))?);
-        head.version = crate::cloud_records::HEAD_VERSION;
+        head.version = 4;
         // Retain no checkpoint or recipe data in the permanent deletion barrier.
         head.checkpoint = None;
+        head.legacy_append = None;
         // The terminal head contains no references derived from erased personal history.
         let zero = "0".repeat(64);
         head.generation = 1;

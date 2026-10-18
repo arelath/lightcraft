@@ -2,6 +2,7 @@ use super::*;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::Ordering;
+mod integration;
 
 fn connection() -> S3Connection {
     serde_json::from_value(json!({"id":"personal","bucket":"photos-test","region":"us-east-005","prefix":"library/a","endpoint":"https://s3.us-east-005.backblazeb2.com"})).unwrap()
@@ -45,7 +46,7 @@ fn authority_pointers_bind_storage_prefix_and_are_small_and_canonical() {
     assert!(Scope::new(&renamed).is_err());
     let mut pointer: Value = serde_json::from_str(p.as_str().unwrap()).unwrap();
     pointer["version"] = json!(2);
-    assert!(matches!(a.decode(Some(&json!(pointer.to_string()))), Err(AssetError::Unsupported(_))));
+    assert!(matches!(a.decode(Some(&json!(pointer.to_string()))), Err(AssetError::Blocked(crate::cloud_control::Blocked::UpdateToRead(_)))));
     pointer["version"] = json!(1);
     let spaced = serde_json::to_string_pretty(&pointer).unwrap();
     assert!(a.decode(Some(&json!(spaced))).is_err());

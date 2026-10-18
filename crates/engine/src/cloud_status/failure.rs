@@ -54,6 +54,8 @@ pub struct CloudFailure {
     pub recovery: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remedy: Option<Recovery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 const UPDATE: &str = "Update LightCraft on this device, then use Retry Syncing. Local edits are kept and publish after the update.";
 const RETIRED: &str = "This cloud library moved to a new format. Use Migrate Cloud Library… to rejoin it; pending edits are kept and publish there.";
@@ -62,7 +64,14 @@ const MAINTENANCE: &str =
 impl CloudFailure {
     pub fn new(kind: FailureKind, message: impl Into<String>) -> Self {
         let message = message.into();
-        Self { kind, message: lightcraft_catalog::uploads::UploadBlock::new(&message, false).reason, http_status: None, recovery: None, remedy: None }
+        Self {
+            kind,
+            message: lightcraft_catalog::uploads::UploadBlock::new(&message, false).reason,
+            http_status: None,
+            recovery: None,
+            remedy: None,
+            retry_after_ms: None,
+        }
     }
     pub fn with_remedy(mut self, remedy: Recovery) -> Self {
         self.remedy = Some(remedy);
@@ -161,6 +170,11 @@ impl From<&crate::assets::AssetError> for CloudFailure {
         use crate::assets::AssetError;
         let kind = match error {
             AssetError::Http(status) => return Self::http("S3 request", *status),
+            AssetError::Throttled { status, retry_after_ms } => {
+                let mut failure = Self::http("Storage control request", *status);
+                failure.retry_after_ms = Some((*retry_after_ms).min(15 * 60 * 1000));
+                return failure;
+            }
             AssetError::Blocked(blocked) => return Self::from(blocked.clone()),
             AssetError::Network(_) | AssetError::Pending => FailureKind::Connectivity,
             AssetError::Conflict => FailureKind::Contention,
@@ -289,9 +303,10 @@ impl RetryBudget {
             5 => 30,
             _ => return None,
         };
+        let delay_ms = (seconds * 1000).max(error.retry_after_ms.unwrap_or(0).min(15 * 60 * 1000));
         self.scheduled = true;
-        self.next_at = now.map(|now| now.saturating_add(seconds * 1000));
-        Some(seconds)
+        self.next_at = now.map(|now| now.saturating_add(delay_ms));
+        Some(delay_ms.saturating_add(999) / 1000)
     }
     pub fn view(&self, now: Option<u64>) -> serde_json::Value {
         serde_json::json!({"scheduled":self.scheduled,"attempt":self.failures.min(Self::MAX),"maxAttempts":Self::MAX,"exhausted":self.failures>Self::MAX,"nextAtUnixMs":self.next_at,"secondsUntilRetry":self.next_at.zip(now).map(|(at,now)|at.saturating_sub(now).saturating_add(999)/1000)})

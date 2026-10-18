@@ -1,6 +1,6 @@
 # Direct bucket synchronization
 
-Last updated: 2026-10-17
+Last updated: 2026-10-18
 
 This is the current normative metadata protocol and owner-durability contract.
 [Current behavior and limits](cloud-storage-implementation.md), the
@@ -1154,3 +1154,41 @@ fixture (a commit losing its CAS to maintenance stays pending; takeover of an ex
 and rebase to epoch 2 with a lost activation response; a held lease refuses other upgraders;
 cancellation; append retirement and offline rejoin with identical pending mutations; append
 control records blocking and refusing publication). Live AWS/B2 runs were not repeated.
+
+
+### B2 head/intake adapter components (2026-10-18; integration pending)
+
+These components are not selected by ordinary native/browser synchronization or
+upgrade commands yet. CR.43 remains open. They add the following supported records
+without changing semantic schema 1 or ordinary AWS head emission:
+
+- Head v5 optionally carries `legacyAppend`, a content-addressed reference under the
+  original `catalog/legacy/<sha256>.json` root (maximum 64 MiB). Its v1 intake binds
+  library identity, exact original append manifest hash, and bounded append discovery
+  state. `Head::next` preserves the reference; heads without it still emit v4.
+- Control v3 is restricted to the original epoch-1 append root, retired toward
+  `conditional-head-v1` epoch 2, or permanently deleted. Its constructor validates
+  the exact original manifest. Ordinary maintenance emits v2. Older max-v2 control
+  readers refuse this fence before interpreting its fields.
+- A fixed `catalog/b2-authority.json` descriptor binds the complete configured
+  bucket/endpoint/region/prefix. Only the native bucket-info revision CAS commits
+  an immutable `catalog/authority/<sha256>.json` Head. An absent pointer after the
+  descriptor appears is an interrupted upgrade, not an empty writable authority.
+  Initialization validates an exposed maintenance head, frozen checkpoint/markers,
+  supported source control/manifest, native permissions and absent or exactly retired
+  raw head. Subsequent control transitions retain fencing/exposure/source evidence.
+- Legacy recovery reads only original epoch-1 append operations/checkpoints and
+  immutable archive proofs. Its result is uncommitted input: a future sync caller
+  must CAS both the causal checkpoint and updated intake before returning an outcome
+  or acknowledging anything. Scan-only progress can retain the causal head position;
+  historical audit rounds are explicitly requested and keep the existing budgets.
+- Deleted heads contain no checkpoint, legacy reference or personal-history tip.
+  Their exact nonpersonal zero-reference shape is validated separately; normal
+  readers continue to return Deleted. The native adapter rejects all revival writes.
+- Native B2 429/503 responses establish a bounded host cooldown and retain an integer
+  Retry-After delay through typed failure serialization and retry scheduling. They
+  stop immediate CAS retry loops; a scheduled attempt rereads authority first.
+
+The ordinary upgrade runner, shared authority selection, browser signer RPC,
+discovery/rejoin, ongoing recovery admission and full-erasure barriers still need
+integration and workflow acceptance before this protocol is usable from the app.

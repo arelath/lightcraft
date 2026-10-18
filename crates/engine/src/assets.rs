@@ -82,6 +82,10 @@ pub enum AssetError {
     Network(String),
     #[error("S3 returned HTTP {0}; check endpoint, permissions and region (pending work retained)")]
     Http(u16),
+    /// Unwind immediate CAS retries and respect the provider's delay. A scheduled
+    /// attempt rereads authority before making or acknowledging another commit.
+    #[error("storage returned HTTP {status}; retry after {retry_after_ms} ms (pending work retained)")]
+    Throttled { status: u16, retry_after_ms: u64 },
     #[error("download failed integrity verification")]
     Integrity,
     #[error("conditional object write conflicted; reread the remote object before retrying")]

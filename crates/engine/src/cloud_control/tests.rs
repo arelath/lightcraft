@@ -30,6 +30,27 @@ fn initial_control_is_active_epoch_one_in_the_legacy_root() {
 }
 
 #[test]
+fn retired_append_fence_is_specific_and_survives_permanent_erasure() {
+    let original = Control::initial_append("library");
+    let manifest = crate::assets::sha256(&crate::cloud_append::manifest("library").unwrap()).0;
+    let fence = original.retire_append_source(&manifest).unwrap();
+    assert_eq!(fence.control_version, 3);
+    assert_eq!(fence.state, State::Retired);
+    assert!(matches!(fence.may_publish(), Err(Blocked::Retired(_))));
+    assert_eq!(Control::decode(&serde_json::to_value(&fence).unwrap()).unwrap(), fence);
+    let deleted = fence.delete().unwrap();
+    assert_eq!(deleted.control_version, 3);
+    assert!(matches!(deleted.may_read(), Err(Blocked::Deleted)));
+    assert!(original.retire_append_source(&"0".repeat(64)).is_err());
+    assert!(Control::initial("library").retire_append_source(&manifest).is_err());
+    let mut bad = original;
+    bad.control_version = 3;
+    assert!(bad.validate().is_err(), "format 3 cannot silently authorize an old append writer");
+    let ordinary = Control::initial("library").begin("m", Plan::Rebase, source(), "owner", &tok(1), 0).unwrap();
+    assert_eq!(ordinary.control_version, 2);
+}
+
+#[test]
 fn migration_registry_uses_actual_schemas_and_converter_compatibility() {
     for plan in [Plan::Rebase, Plan::AppendLog] {
         let spec = MigrationSpec::resolve(plan, SCHEMA, SCHEMA).unwrap();

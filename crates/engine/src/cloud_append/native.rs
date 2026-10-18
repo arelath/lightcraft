@@ -33,13 +33,16 @@ fn list(prefix: String, delimiter: bool) -> ListRequest {
 }
 /// Fresh cooperative control check before original media can be recreated.
 pub(crate) fn ensure_readable(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result<()> {
+    library_control(connection, library, cancel)?.may_read().map_err(AssetError::Blocked)
+}
+pub(crate) fn library_control(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result<crate::cloud_control::Control> {
     let (keys, _) = scan(connection, list(control::prefix(&connection.prefix, library)?, false), cancel)?;
     let mut records = Vec::new();
     for key in control::latest(&keys) {
         let reply = connection.get_small(&key, control::MAX_CONTROL_BYTES, cancel)?.ok_or(AssetError::Missing)?;
         records.push((key, reply.bytes));
     }
-    control::effective(&connection.prefix, library, &records).and_then(|c| c.may_read()).map_err(AssetError::Blocked)
+    control::effective(&connection.prefix, library, &records).map_err(AssetError::Blocked)
 }
 pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint: bool, cancel: &AtomicBool) -> Result<crate::cloud_replication::Outcome> {
     synchronize_with_audit(connection, local, checkpoint, false, cancel)
@@ -61,18 +64,65 @@ pub(crate) fn synchronize_verified(
     cancel: &AtomicBool,
     media: &mut crate::cloud_replication::VerifiedMedia,
 ) -> Result<crate::cloud_replication::Outcome> {
-    synchronize_mode(connection, local, ScanOptions { checkpoint, audit, receive_only: false }, cancel, media)
+    synchronize_mode(connection, local, ScanOptions { checkpoint, audit, receive_only: false, legacy: false }, cancel, media)
 }
 
 /// Receive a verified library snapshot without publishing manifests, mutations or checkpoints.
 pub(crate) fn receive_only(connection: &S3Connection, local: &SyncState, cancel: &AtomicBool) -> Result<crate::cloud_replication::Outcome> {
-    synchronize_mode(connection, local, ScanOptions { checkpoint: false, audit: true, receive_only: true }, cancel, &mut Default::default())
+    synchronize_mode(
+        connection,
+        local,
+        ScanOptions { checkpoint: false, audit: true, receive_only: true, legacy: false },
+        cancel,
+        &mut Default::default(),
+    )
+}
+
+/// Uncommitted recovery input, never a synchronization outcome or local ACK.
+/// The owning head must commit this state and its next intake reference together.
+pub struct LegacyReceived {
+    pub state: lightcraft_catalog::replication::Portable,
+    pub intake: crate::cloud_records::LegacyIntake,
+}
+/// Audit the original append root after its B2 successor became active. Its old
+/// cooperative controls no longer grant authority and cannot block this read.
+/// Every operation/checkpoint still passes the ordinary content and causal checks.
+pub fn receive_legacy(
+    connection: &S3Connection,
+    head: &crate::cloud_records::Head,
+    committed: &lightcraft_catalog::replication::Portable,
+    audit: bool,
+    cancel: &AtomicBool,
+) -> Result<LegacyReceived> {
+    head.validate_scope_typed(&connection.prefix, &committed.library).map_err(AssetError::Blocked)?;
+    let control = head.control().map_err(invalid)?;
+    control.may_publish().map_err(AssetError::Blocked)?;
+    if control.epoch < 2 || !connection.b2_head_enabled(cancel)? {
+        return Err(invalid("legacy recovery requires the active upgraded B2 authority"));
+    }
+    let intake = connection.b2_legacy_intake(head, cancel)?;
+    let probe = intake.probe(committed, &connection.id).map_err(AssetError::Blocked)?;
+    let outcome = synchronize_mode(
+        connection,
+        &probe,
+        ScanOptions { checkpoint: false, audit, receive_only: true, legacy: true },
+        cancel,
+        &mut Default::default(),
+    )?;
+    let crate::cloud_replication::Outcome::Append { progress, .. } = outcome else {
+        return Err(invalid("legacy receive did not return an append snapshot"));
+    };
+    Ok(LegacyReceived {
+        state: progress.remote,
+        intake: crate::cloud_records::LegacyIntake::new(&committed.library, progress.scan).map_err(AssetError::Blocked)?,
+    })
 }
 
 struct ScanOptions {
     checkpoint: bool,
     audit: bool,
     receive_only: bool,
+    legacy: bool,
 }
 
 fn synchronize_mode(
@@ -82,20 +132,20 @@ fn synchronize_mode(
     cancel: &AtomicBool,
     media: &mut crate::cloud_replication::VerifiedMedia,
 ) -> Result<crate::cloud_replication::Outcome> {
-    let ScanOptions { checkpoint, audit, receive_only } = options;
+    let ScanOptions { checkpoint, audit, receive_only, legacy } = options;
     if local.protocol != SyncProtocol::AppendLog {
         return Err(invalid("append synchronization requires explicit protocol selection"));
     }
     let root = root(&connection.prefix, &local.library)?;
     // Cooperative barrier: read the latest library control before any write.
-    let (control_keys, _) = scan(connection, list(control::prefix(&connection.prefix, &local.library)?, false), cancel)?;
-    let mut records = Vec::new();
-    for key in control::latest(&control_keys) {
-        let reply = connection.get_small(&key, control::MAX_CONTROL_BYTES, cancel)?.ok_or(AssetError::Missing)?;
-        records.push((key, reply.bytes));
-    }
-    let blocked =
-        control::publication(control::effective(&connection.prefix, &local.library, &records)).map_err(crate::assets::AssetError::Blocked)?;
+    let blocked = if legacy {
+        if !receive_only {
+            return Err(invalid("legacy recovery cannot publish"));
+        }
+        None
+    } else {
+        control::publication(Ok(library_control(connection, &local.library, cancel)?)).map_err(AssetError::Blocked)?
+    };
     let can_publish = !receive_only && blocked.is_none();
     let bytes = manifest(&local.library)?;
     let manifest_key = manifest_key(&connection.prefix, &local.library)?;
