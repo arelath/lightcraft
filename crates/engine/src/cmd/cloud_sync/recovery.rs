@@ -7,6 +7,53 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const COMMAND: &str = "cloud.syncStatus";
+
+/// Full values are fetched one at a time; list pages retain their small previews.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChoiceRequest {
+    section: String,
+    entity: String,
+    field: String,
+    revision: String,
+    library: Option<String>,
+    library_generation: Option<u64>,
+}
+pub(super) fn choice(session: &Session, params: &Value) -> Result<Value> {
+    let request: ChoiceRequest = serde_json::from_value(params.clone()).map_err(|error| super::bad(COMMAND, error.to_string()))?;
+    if request.section != "choice"
+        || [&request.entity, &request.field, &request.revision]
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 256 || value.chars().any(char::is_control))
+    {
+        return Err(super::bad(COMMAND, "choose a bounded entity, field and retained revision"));
+    }
+    let state = session.catalog.sync_state().ok_or_else(|| super::bad(COMMAND, "open a cloud library to inspect its retained values"))?;
+    if request.library.as_ref().is_some_and(|library| library != &state.library)
+        || request.library_generation.is_some_and(|generation| generation != session.library_generation())
+    {
+        return Err(super::bad(COMMAND, "the library changed; refresh the choices"));
+    }
+    let value = state
+        .documents
+        .get(&request.entity)
+        .and_then(|fields| fields.get(&request.field))
+        .and_then(|register| register.0.get(&request.revision))
+        .ok_or_else(|| super::bad(COMMAND, "this value is no longer retained; refresh the choices"))?;
+    let writer = request.revision.rsplit_once('-');
+    let photo = request.entity.strip_prefix("photo:").and_then(|global| {
+        session.catalog.photos().find(|photo| session.catalog.cloud_identity(&format!("photo:{}", photo.id.0)).is_some_and(|id| id == global))
+    });
+    Ok(json!({"section":"choice","library":state.library,"libraryGeneration":session.library_generation(),
+        "catalogRevision":session.catalog.revision,"entity":request.entity,"field":request.field,"revision":request.revision,
+        "name":super::entity_name(state,&request.entity),"value":value,
+        "device":writer.map(|(device,_)|device),"sequence":writer.and_then(|(_,sequence)|sequence.parse::<u64>().ok()),
+        "thisDevice":writer.is_some_and(|(device,_)|device==state.device),
+        "current":state.winning(&request.entity,&request.field).is_some_and(|(stamp,_)|stamp.id()==request.revision),
+        "photoId":photo.map(|photo|photo.id.0),"deleted":photo.is_some_and(|photo|photo.deleted)
+            || state.winning(&request.entity,"deleted").is_some_and(|(_,value)|value.as_bool()==Some(true))}))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum Section {

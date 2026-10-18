@@ -19,6 +19,7 @@ fn is_cloud(dialog: &Dialog) -> bool {
         | Dialog::CloudConnect { .. }
         | Dialog::CloudMigration { .. }
         | Dialog::CloudImport { .. }
+        | Dialog::CloudChoice { .. }
         | Dialog::CloudConflicts
         | Dialog::CloudMaintenance
         | Dialog::CloudError { .. }
@@ -39,6 +40,7 @@ pub(crate) fn observe(app: &mut LightcraftApp) {
         crate::cloud_setup::cancel_check(app);
     }
     crate::cloud_retention::observe_view(app);
+    crate::cloud_conflicts::choice::observe(app);
 }
 
 pub(crate) fn confirm_current(app: &mut LightcraftApp, ctx: &egui::Context) -> Result<Value, String> {
@@ -127,7 +129,11 @@ pub(super) fn update(app: &mut LightcraftApp, ctx: &egui::Context, at_start: Dia
     if let Dialog::CloudDisable { review } = &dialog {
         close = review.dismissed || close && !review.blocking();
     }
-    app.ui.dialog = if close { None } else { Some(dialog) };
+    app.ui.dialog = if close {
+        if matches!(&dialog,Dialog::CloudChoice{view} if view.return_to_conflicts) { Some(Dialog::CloudConflicts) } else { None }
+    } else {
+        Some(dialog)
+    };
     observe(app);
     result
 }

@@ -109,6 +109,7 @@ impl SourceLevel {
 /// level is chosen from this, or a tight crop shown at its own pixels would be a stretched preview).
 fn source_edge_needed(p: &Photo, settings: &DevelopSettings, apply_crop: bool, out_long: usize) -> usize {
     let (w, h) = (f64::from(p.width.max(1)), f64::from(p.height.max(1)));
+    let (w, h) = if settings.orientation.swaps_axes() { (h, w) } else { (w, h) };
     let r = settings.crop.geometry.rect;
     let shown = if apply_crop { (r.width() * w).max(r.height() * h) } else { w.max(h) };
     if !shown.is_finite() || shown < 1.0 {
@@ -1239,6 +1240,14 @@ pub fn source_info(p: &Photo) -> SourceInfo {
     }
 }
 
+/// Temporary settings use their own render identity and select source resolution
+/// before acquisition. They never replace a photo's cached develop hash.
+enum JobSettings {
+    Current,
+    Before,
+    Preview(Arc<DevelopSettings>),
+}
+
 impl crate::Session {
     fn source_key(&self, p: &Photo) -> Hash128 {
         let mut hash = Hasher128::new();
@@ -1304,14 +1313,14 @@ impl crate::Session {
 
     /// Build a render job for `id` fitting `max_w × max_h`. `before` renders the unedited look.
     pub fn render_job(&mut self, id: PhotoId, max_w: usize, max_h: usize, before: bool, apply_crop: bool) -> Option<RenderJob> {
-        self.build_job(id, max_w, max_h, before, apply_crop, None)
+        self.build_job(id, max_w, max_h, if before { JobSettings::Before } else { JobSettings::Current }, apply_crop, None)
     }
 
     /// A grid/filmstrip thumbnail job: the long edge is rounded up to one of [`THUMB_SIZES`]
     /// (≥ `long_edge`) and the result comes from / goes to the thumbnail cache (memory + disk).
     pub fn thumb_job(&mut self, id: PhotoId, long_edge: usize) -> Option<RenderJob> {
         let b = thumb_bucket(long_edge);
-        self.build_job(id, b, b, false, true, Some(b))
+        self.build_job(id, b, b, JobSettings::Current, true, Some(b))
     }
 
     fn build_job(
@@ -1319,7 +1328,7 @@ impl crate::Session {
         id: PhotoId,
         max_w: usize,
         max_h: usize,
-        before: bool,
+        settings: JobSettings,
         apply_crop: bool,
         thumb_bucket: Option<usize>,
     ) -> Option<RenderJob> {
@@ -1331,7 +1340,12 @@ impl crate::Session {
                 self.media.managed_assets.remove(asset_id);
             }
         }
-        let settings = if before { Arc::new(self.before_settings(&p)) } else { p.develop.clone() };
+        let temporary = !matches!(settings, JobSettings::Current);
+        let settings = match settings {
+            JobSettings::Current => p.develop.clone(),
+            JobSettings::Before => Arc::new(self.before_settings(&p)),
+            JobSettings::Preview(settings) => settings,
+        };
         let level = SourceLevel::for_size(if thumb_bucket.is_some() {
             max_w.max(max_h) // (grid thumbnails of tight crops stay cheap)
         } else {
@@ -1346,7 +1360,7 @@ impl crate::Session {
         let source_key = self.source_key(&p);
         let content = source_key.0 as u64;
         // Temporary "before" settings must not replace the photo's cached develop hash.
-        let settings_hash = if before { settings.hash64() } else { self.media.settings_hashes.get(id, &settings) };
+        let settings_hash = if temporary { settings.hash64() } else { self.media.settings_hashes.get(id, &settings) };
         let salt = self.media.denoise_salt(id, &settings) ^ self.media.asset_salt(&p);
         let key = settings_hash
             ^ ((max_w as u64) << 40)
@@ -1383,6 +1397,12 @@ impl crate::Session {
             view_cache: None,
             display: None,
         })
+    }
+
+    /// Exact, nonpersistent revision preview. The retained crop and orientation
+    /// participate in source-level selection and the temporary render key.
+    pub fn exact_preview_job(&mut self, id: PhotoId, max_w: usize, max_h: usize, apply_crop: bool, settings: &DevelopSettings) -> Option<RenderJob> {
+        self.build_job(id, max_w, max_h, JobSettings::Preview(Arc::new(settings.clone())), apply_crop, None)
     }
 
     /// A render of `id` with `settings` in place of its own, fitting `max_w × max_h` (the loupe's
@@ -1846,6 +1866,38 @@ mod thumbnail_hash_tests {
         s.catalog.apply(undo).unwrap();
         s.thumb_job(PhotoId(1), 256).unwrap();
         assert_eq!(s.media.settings_hashes.computations, 3);
+    }
+    #[test]
+    fn exact_revision_preview_uses_its_own_geometry_and_never_changes_current_hashes() {
+        let mut s = session();
+        let id = PhotoId(1);
+        let before = s.catalog.to_snapshot();
+        let current = s.render_job(id, 1100, 1100, false, true).unwrap();
+        let computations = s.media.settings_hashes.computations;
+        let mut alternate = (*current.settings).clone();
+        alternate.light.exposure = 2.;
+        alternate.orientation = lightcraft_geom::Orientation::Rotate90;
+        alternate.crop.geometry.rect = lightcraft_geom::Rect { x0: 0.2, y0: 0.2, x1: 0.8, y1: 0.4 };
+        let mut unrotated = alternate.clone();
+        unrotated.orientation = lightcraft_geom::Orientation::Normal;
+        assert_eq!(s.exact_preview_job(id, 1100, 1100, true, &unrotated).unwrap().level, SourceLevel::Preview);
+        let job = s.exact_preview_job(id, 1100, 1100, true, &alternate).unwrap();
+        assert_eq!(*job.settings, alternate);
+        assert_eq!(
+            job.level,
+            SourceLevel::Full,
+            "a rotated 60% x 20% crop needs 2750 source pixels; unrotated dimensions incorrectly choose the 2560px preview"
+        );
+        assert_eq!(current.level, SourceLevel::Preview);
+        assert_ne!(job.key, current.key);
+        assert!(job.cache.is_none() && job.view_cache.is_none());
+        assert_eq!(s.render_job(id, 1100, 1100, false, true).unwrap().key, current.key);
+        assert_eq!(s.media.settings_hashes.computations, computations);
+        s.before.insert(id, Arc::new(alternate));
+        let ordinary = s.render_job(id, 1100, 1100, true, true).unwrap();
+        assert_eq!(ordinary.settings.crop, current.settings.crop);
+        assert_eq!(ordinary.settings.orientation, current.settings.orientation, "ordinary Before stays aligned");
+        assert_eq!(s.catalog.to_snapshot(), before);
     }
     #[test]
     fn hash_cache_is_bounded_weak_and_shared_settings_remain_independent() {

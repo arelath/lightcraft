@@ -184,6 +184,9 @@ fn selected_managed_photo_info_reaches_ninth_retained_choice() {
     frames(&mut h);
     search(&mut h, "choices:photo:selected:caption", "Caption 1");
     assert!(widgets(&mut h, "cloudKeepRevision:photo:selected:").contains("device-1-1"));
+    let ids = widgets(&mut h, "cloudKeepRevision:photo:selected:");
+    assert!(ids.contains("button:info:cloudKeepRevision:photo:selected:caption:device-9-1"));
+    assert!(ids.contains("button:cloudKeepRevision:photo:selected:caption:device-1-1"));
     h.request("ui.dialog.cancel", json!({}), TIMEOUT);
     frames(&mut h);
     assert!(widgets(&mut h, "cloudKeepRevision:photo:selected:").contains("device-9-1"), "dialog search must not change Info's search/page state");

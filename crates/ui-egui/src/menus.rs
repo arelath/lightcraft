@@ -178,6 +178,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("dialog.cloudStorage", "Cloud Storage…", None, "File"),
     ("dialog.cloudDelete", "Delete Entire Cloud Library…", None, ""),
     ("dialog.cloudSync", "Cloud Library…", None, "File"),
+    ("dialog.cloudChoice", "Inspect Retained Cloud Value…", None, ""),
     ("dialog.cloudConflicts", "Resolve Cloud Conflicts…", None, ""),
     ("dialog.cloudMaintenance", "Cloud Storage Tools…", None, ""),
     ("dialog.cloudError", "Cloud Error Details…", None, ""),
@@ -1350,6 +1351,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             None => Err("Enable or join a cloud library before reviewing deletion.".into()),
         },
         "dialog.cloudDisable" => crate::cloud_transition::open(app),
+        "dialog.cloudChoice" => crate::cloud_conflicts::choice::open(app, p),
         "dialog.cloudConflicts" => {
             app.ui.dialog = Some(Dialog::CloudConflicts);
             Ok(Value::Null)

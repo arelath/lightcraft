@@ -456,6 +456,8 @@ impl Session {
         self.interaction = None;
         self.pending_log.clear();
         self.selection = Selection::default();
+        // Photo IDs belong to this library; temporary Before looks must not cross it.
+        self.before.clear();
         self.source = LibrarySource::All;
         self.library_folder = None;
         if report.created && seed_demo {

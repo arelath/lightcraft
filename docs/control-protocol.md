@@ -45,6 +45,7 @@ Cocoa menu dispatch. Native menu activation and keyboard accelerator delivery re
 
 `cloud.syncStatus` accepts optional read-only recovery queries:
 `{"section":"conflicts|choices|deleted|structural","search":"…","cursor":"…","limit":16}`.
+For one complete retained value, use `{"section":"choice","entity":"photo:…","field":"develop","revision":"writer-1"}`; optional `library` and `libraryGeneration` reject a stale library context. This read-only query includes the full value, writer identity, sequence, current-choice flag and local photo identity, and never resolves a conflict.
 Use one section name, omit `cursor` on the first request, and include `entity` and `field`
 only for `choices`. The response's `page` contains `items`, `total`, `offset`, `limit`,
 `nextCursor` and `previousCursor`. Defaults are 16 fields/structures, eight values and

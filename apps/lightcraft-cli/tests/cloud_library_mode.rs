@@ -1034,3 +1034,109 @@ fn popup_sync_now_checks_the_library_and_pause_resume_stays_explicit() {
     assert_eq!(state.signature_errors, 0);
     assert!(state.requests.iter().all(|(method, _)| method != "DELETE"));
 }
+
+#[test]
+#[ignore = "explicit native retained-value acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn retained_values_show_full_metadata_and_independent_previews_without_resolving() {
+    let f = support::Fixture::new();
+    let local = f.dir.join("choice-local");
+    let peer = f.dir.join("choice-peer");
+    f.import(&local, false);
+    let (out, rows) = f.run(&local, &[("cloud.upload", json!({})), ("cloud.sync", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let (_, saved, _) = lightcraft_engine::catalog::Journal::open(Box::new(lightcraft_engine::catalog::FsStore::open(&local).unwrap())).unwrap();
+    let library = saved.sync_state().unwrap().library.clone();
+    let entity = format!("photo:{}", saved.cloud_identity("photo:1").unwrap());
+    let (out, rows) = f.run(
+        &peer,
+        &[
+            (
+                "cloud.configure",
+                json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"}),
+            ),
+            ("cloud.syncEnable", json!({"connection":"personal","library":library})),
+            ("cloud.sync", json!({})),
+        ],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    let (out, rows) = f.run(
+        &local,
+        &[
+            ("library.select", json!({"ids":[1],"active":1})),
+            ("develop.set", json!({"values":{"light.exposure":0.25}})),
+            ("photo.setMeta", json!({"ids":[1],"caption":"Shared prefix ".repeat(25)+"local caption tail"})),
+            ("cloud.sync", json!({})),
+        ],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    let (out, rows) = f.run(
+        &peer,
+        &[
+            ("library.select", json!({"ids":[1],"active":1})),
+            ("develop.set", json!({"values":{"light.exposure":1.5}})),
+            ("crop.set", json!({"rect":[0.2,0.1,0.6,0.9]})),
+            ("photo.setMeta", json!({"ids":[1],"caption":"Shared prefix ".repeat(25)+"peer caption tail"})),
+            ("cloud.sync", json!({})),
+        ],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    let (out, rows) = f.run(&local, &[("cloud.sync", json!({})), ("cloud.pause", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("retained-values");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let remote = f.state.lock().unwrap().objects.clone();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    let baseline = app.execute("cloud.syncStatus", json!({"section":"conflicts"}))["page"].clone();
+    app.execute("dialog.cloudConflicts", json!({}));
+    app.ask("ui.screenshot", json!({"headless":true,"path":artifacts.join("conflicts.png")}));
+    for (field, mode) in [("meta.caption", "details"), ("develop", "preview")] {
+        app.click_when_ready("field:cloudPageSearch:conflicts");
+        app.ask("ui.key", json!({"key":"A","cmd":true}));
+        app.ask("ui.text", json!({"text":field}));
+        app.ask("ui.screenshot", json!({"headless":true,"path":artifacts.join(format!("{mode}-filtered.png"))}));
+        let choices =
+            app.execute("cloud.syncStatus", json!({"section":"choices","entity":entity,"field":field}))["page"]["items"].as_array().unwrap().clone();
+        assert!(choices.len() >= 2, "{field}: {choices:?}");
+        let choice = choices.iter().find(|choice| choice["current"] != true).unwrap();
+        let revision = choice["revision"].as_str().unwrap();
+        let value = app.execute("cloud.syncStatus", json!({"section":"choice","entity":entity,"field":field,"revision":revision}));
+        if field == "meta.caption" {
+            assert!(value["value"].as_str().unwrap().ends_with("caption tail"));
+            assert!(value["value"].as_str().unwrap().len() > 300);
+        }
+        app.click_when_ready(&format!("button:cloudChoice:{mode}:{entity}:{field}:{revision}"));
+        if mode == "preview" {
+            app.wait_widget("image:cloudChoiceRetained");
+        } else {
+            app.wait_widget("button:cloudChoiceCopy");
+        }
+        app.ask("ui.screenshot", json!({"headless":true,"path":artifacts.join(format!("{mode}.png"))}));
+        if mode == "preview" {
+            app.click_when_ready("button:cloudChoiceCompare");
+            app.ask("ui.screenshot", json!({"headless":true,"path":artifacts.join("compare-layout.png")}));
+            app.wait_widget("image:cloudChoiceCurrent");
+            app.wait_widget("image:cloudChoiceRetained");
+            app.ask("ui.screenshot", json!({"headless":true,"path":artifacts.join("compare.png")}));
+        }
+        app.ask("ui.dialog.confirm", json!({}));
+        app.ask("ui.screenshot", json!({"headless":true,"path":artifacts.join(format!("{mode}-done.png"))}));
+    }
+    let after = app.execute("cloud.syncStatus", json!({"section":"conflicts"}))["page"].clone();
+    assert_eq!(after["revision"], baseline["revision"]);
+    assert_eq!(after["items"], baseline["items"]);
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.ask("ui.dialog.cancel", json!({}));
+    app.ask("app.quit", json!({}));
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = app.child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < until, "native app quit");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let storage = f.state.lock().unwrap();
+    assert_eq!(storage.objects, remote, "viewing never publishes or resolves a choice");
+    assert_eq!(storage.signature_errors, 0);
+}

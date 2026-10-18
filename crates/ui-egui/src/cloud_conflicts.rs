@@ -2,13 +2,14 @@
 //! `cloud.syncStatus` view, whose lists the engine bounds and caches per catalog revision.
 use crate::{LightcraftApp, theme::Tokens, widgets::register};
 use serde_json::{Value, json};
+pub(crate) mod choice;
 mod pages;
 #[cfg(test)]
 mod tests;
 
 /// A synchronized field's name as people know it.
 pub(crate) fn field_label(field: &str) -> &str {
-    crate::i18n::tr(match field {
+    crate::i18n::tr(match field.strip_prefix("meta.").unwrap_or(field) {
         "rating" => "Rating",
         "flag" => "Flag",
         "label" => "Color label",
@@ -67,13 +68,35 @@ fn choices_at(app: &mut LightcraftApp, ui: &mut egui::Ui, conflict: &Value, surf
             }
             ui.label(egui::RichText::new(text).color(if choice["current"] == true { t.text } else { t.text_dim }));
             let button = ui.small_button(crate::i18n::tr("Keep"));
-            register(ui.ctx(), format!("button:cloudKeepRevision:{entity}:{field}:{revision}"), button.rect);
+            let prefix = surface.map_or_else(String::new, |surface| format!("{surface}:"));
+            register(ui.ctx(), format!("button:{prefix}cloudKeepRevision:{entity}:{field}:{revision}"), button.rect);
             if button.clicked()
                 && let Err(error) = app.run("cloud.resolveConflict", json!({"entity":entity,"field":field,"revision":revision}))
             {
                 app.toast(ui.ctx(), error);
             }
         });
+        ui.horizontal(|ui| {
+            let prefix = surface.map_or_else(String::new, |surface| format!("{surface}:"));
+            let writer = revision.rsplit_once('-');
+            if let Some((device, sequence)) = writer {
+                let short: String = device.chars().take(12).collect();
+                ui.small(format!("{short} · {sequence}"));
+            }
+            for (mode, label) in [("details", "Full value"), ("preview", "Preview"), ("compare", "Compare")] {
+                if mode != "details" && field != "develop" {
+                    continue;
+                }
+                let response = ui.small_button(crate::i18n::tr(label));
+                register(ui.ctx(), format!("button:{prefix}cloudChoice:{mode}:{entity}:{field}:{revision}"), response.rect);
+                if response.clicked()
+                    && let Err(error) = app.run("dialog.cloudChoice", json!({"entity":entity,"field":field,"revision":revision,"mode":mode}))
+                {
+                    app.toast(ui.ctx(), error);
+                }
+            }
+        });
+        ui.add_space(4.);
     }
 }
 

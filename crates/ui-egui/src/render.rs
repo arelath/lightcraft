@@ -38,6 +38,8 @@ pub enum Slot {
     /// The loupe's stand-in until `Main` has the photo.
     Preview,
     Before,
+    /// Independent, read-only current/retained cloud revision panes.
+    CloudChoice(u8),
     Compare(u8),
     /// Compare or Reference zoomed past what `Compare(i)` holds: the window of pane `i`'s frame
     /// that is on screen, drawn over it (see [`crate::region`] and `panels::compare`).
@@ -729,9 +731,12 @@ impl Renderer {
                 if !newer_draft {
                     continue;
                 }
-                session.accept(&r);
             } else {
                 self.request_ids.remove(&slot);
+            }
+            // Inspection must not journal decoder-learned metadata such as WB.
+            // Discard its decoded source so normal views can still learn/cache it.
+            if !matches!(slot, Slot::CloudChoice(_)) {
                 session.accept(&r);
             }
             if slot.is_view() {
@@ -888,6 +893,18 @@ impl Renderer {
         self.quick_tried.retain(|s, _| !matches!(s, Slot::Import(_)));
     }
 
+    /// Retire preview requests too, so a late result cannot republish a closed view.
+    pub fn forget_cloud_choices(&mut self) {
+        self.pool.reprioritize(|slot, priority| if matches!(slot, Slot::CloudChoice(_)) { None } else { Some(priority) });
+        self.queue.retain(|job| !matches!(job.slot, Slot::CloudChoice(_)));
+        self.pending.retain(|slot, _| !matches!(slot, Slot::CloudChoice(_)));
+        self.request_ids.retain(|slot, _| !matches!(slot, Slot::CloudChoice(_)));
+        self.shown_ids.retain(|slot, _| !matches!(slot, Slot::CloudChoice(_)));
+        self.textures.retain(|slot, _| !matches!(slot, Slot::CloudChoice(_)));
+        self.stages.retain(|slot, _| !matches!(slot, Slot::CloudChoice(_)));
+        self.failed.retain(|slot, _| !matches!(slot, Slot::CloudChoice(_)));
+    }
+
     /// Drop thumbnails that aren't in `keep` (bounded memory for huge libraries), and queued
     /// thumbnail jobs for photos that scrolled out of `keep`.
     pub fn evict_thumbs(&mut self, keep: &std::collections::HashSet<PhotoId>, max: usize) {
@@ -924,6 +941,46 @@ impl Renderer {
 mod thumbnail_tests {
     use super::*;
     use lightcraft_catalog::{Catalog, Op, Photo, Source};
+
+    #[test]
+    fn cloud_choice_raw_decode_does_not_learn_or_journal_white_balance() {
+        use lightcraft_engine::pipeline::SourceInfo;
+        use lightcraft_raster::Rgb32f;
+        use std::time::{Duration, Instant};
+        let mut session = Session::new();
+        let id = PhotoId(1);
+        let mut photo = Photo::new(id, Source::File { path: "readonly-choice.ARW".into() }, "readonly-choice.ARW", "ARW", 64, 64, "");
+        photo.kind = lightcraft_catalog::MediaKind::Raw;
+        photo.meta.camera = "SONY ILCE-7M3".into();
+        photo.as_shot_wb = Some((6500., 0.));
+        photo.develop = Arc::new(lightcraft_develop::DevelopSettings::for_raw(6500., 0.));
+        session.catalog.apply(Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+        let decoded = SourceInfo { raw: true, legacy_relative_wb: true, as_shot_temp: 4986., as_shot_tint: -2., ..Default::default() };
+        session.media.file_loader = Some(Arc::new(move |_, _| Ok((Rgb32f::new(64, 64), decoded.clone()))));
+        let mut renderer = Renderer::with_worker_threads(1);
+        let ctx = egui::Context::default();
+        renderer.poll(&ctx, &mut session);
+        let wait = |renderer: &mut Renderer, session: &mut Session, slot| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !renderer.textures.contains_key(&slot) {
+                renderer.poll(&ctx, session);
+                assert!(Instant::now() < until, "render failed: {:?}", renderer.failure(slot));
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let before = session.catalog.to_snapshot();
+        let settings = (*session.catalog.photo(id).unwrap().develop).clone();
+        let job = session.exact_preview_job(id, 64, 64, true, &settings).unwrap();
+        let level = job.level;
+        renderer.request(Slot::CloudChoice(1), job, 0);
+        wait(&mut renderer, &mut session, Slot::CloudChoice(1));
+        assert!(session.catalog.to_snapshot() == before, "inspection must not update the catalog or synchronization state");
+        assert!(!session.media.has_source(id, level), "normal views must retain their opportunity to learn decoded metadata");
+        renderer.request(Slot::Main, session.render_job(id, 64, 64, false, true).unwrap(), 0);
+        wait(&mut renderer, &mut session, Slot::Main);
+        assert_eq!(session.catalog.photo(id).unwrap().as_shot_wb, Some((4986., -2.)), "ordinary view bookkeeping is preserved");
+        assert!(session.media.has_source(id, level));
+    }
 
     #[test]
     fn completed_cloud_download_retries_a_failed_render_without_a_catalog_edit() {

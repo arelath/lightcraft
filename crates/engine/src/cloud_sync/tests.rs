@@ -1397,6 +1397,36 @@ fn recovery_pages_reach_field_seventeen_value_nine_and_deleted_two_hundred_one_w
         .execute("cloud.syncStatus", &json!({"section":"choices","entity":field["entity"],"field":"caption","search":"unique-alternative-9"}))
         .unwrap();
     assert_eq!(search["page"]["total"], 1, "search reads the value beyond the shortened preview");
+    let exact = s
+        .execute(
+            "cloud.syncStatus",
+            &json!({"section":"choice","entity":field["entity"],"field":"caption","revision":ninth_id,
+        "library":"library","libraryGeneration":s.library_generation()}),
+        )
+        .unwrap();
+    assert_eq!(exact["revision"], ninth_id);
+    assert_eq!(exact["value"].as_str().unwrap().len(), "same preview ".repeat(10).len() + " unique-alternative-1".len());
+    assert!(exact["value"].as_str().unwrap().contains("unique-alternative-"));
+    assert!(exact["device"].as_str().unwrap().starts_with("alternative-"));
+    assert!(exact["sequence"].as_u64().is_some());
+    let queried_photo = s
+        .catalog
+        .photos()
+        .find(|photo| format!("photo:{}", s.catalog.cloud_identity(&format!("photo:{}", photo.id.0)).unwrap()) == field["entity"].as_str().unwrap())
+        .unwrap()
+        .id;
+    assert_eq!(exact["photoId"], queried_photo.0);
+    assert_eq!(exact["deleted"], false);
+    for invalid in [
+        json!({"section":"choice","entity":field["entity"],"field":"caption","revision":"missing-1"}),
+        json!({"section":"choice","entity":field["entity"],"field":"caption","revision":ninth_id,"library":"other"}),
+        json!({"section":"choice","entity":field["entity"],"field":"caption","revision":ninth_id,"libraryGeneration":s.library_generation()+1}),
+        json!({"section":"choice","entity":"x".repeat(257),"field":"caption","revision":ninth_id}),
+        json!({"section":"choice","entity":field["entity"],"field":"caption","revision":"bad\nrevision"}),
+        json!({"section":"choice","entity":field["entity"],"field":"caption","revision":ninth_id,"unexpected":true}),
+    ] {
+        assert!(s.execute("cloud.syncStatus", &invalid).is_err(), "{invalid}");
+    }
     let legacy: BTreeSet<_> = original["deletedPhotos"].as_array().unwrap().iter().map(|item| item["entity"].as_str().unwrap().to_owned()).collect();
     let mut cursor = Value::Null;
     let mut all = Vec::new();

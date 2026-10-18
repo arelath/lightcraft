@@ -1178,3 +1178,21 @@ fn hdr_edits_render_with_their_hdr_histogram() {
     assert!(r.histogram.above_sdr() > 0.0);
     assert!(r.deep.is_none(), "the preview itself stays the 8-bit SDR rendition");
 }
+
+#[test]
+fn opening_another_library_clears_before_settings_even_when_photo_ids_are_reused() {
+    use crate::library::LibraryStores;
+    use lightcraft_catalog::{MemStore, Op, Photo, PhotoId, Source};
+    let mut s = demo();
+    let id = s.active().unwrap();
+    s.execute("beforeAfter.copyAfterToBefore", &json!({})).unwrap();
+    assert!(s.before.contains_key(&id));
+    s.open_library_in(
+        LibraryStores { dir: "another-library".into(), catalog: Box::new(MemStore::new()), files: Box::new(MemStore::new()), on_disk: false },
+        false,
+    )
+    .unwrap();
+    s.commit("new photo", Op::AddPhoto { photo: Box::new(Photo::new(id, Source::Demo { scene: 0 }, "new.jpg", "JPEG", 32, 24, "")) }).unwrap();
+    assert!(s.before.is_empty());
+    assert_eq!(s.before_settings(s.catalog.photo(PhotoId(id.0)).unwrap()), s.catalog.photo(id).unwrap().import_defaults());
+}

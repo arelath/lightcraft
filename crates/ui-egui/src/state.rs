@@ -772,6 +772,9 @@ pub struct NameEdit {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Dialog {
     CloudConflicts,
+    CloudChoice {
+        view: Box<crate::cloud_conflicts::choice::View>,
+    },
     CloudMaintenance,
     CloudError {
         diagnostic: Box<lightcraft_engine::cloud_status::Diagnostic>,

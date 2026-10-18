@@ -240,6 +240,11 @@ fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::Import { .. } => "Import Photos",
         Dialog::CloudStorage { .. } => "Cloud Storage",
         Dialog::CloudConnect { .. } => "Turn on cloud sync",
+        Dialog::CloudChoice { view } => match view.mode {
+            crate::cloud_conflicts::choice::Mode::Details => "Retained cloud value",
+            crate::cloud_conflicts::choice::Mode::Preview => "Preview cloud edit",
+            crate::cloud_conflicts::choice::Mode::Compare => "Compare cloud edits",
+        },
         Dialog::CloudConflicts => "Resolve cloud conflicts",
         Dialog::CloudMaintenance => "Cloud storage tools",
         Dialog::CloudError { .. } => "Cloud error details",
@@ -310,6 +315,7 @@ fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
         .frame(frame)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .default_width(match dlg {
+            Dialog::CloudChoice {..} => (screen.width()-64.).clamp(200.,900.),
             Dialog::Import { .. } => crate::import::DIALOG_SIZE[0],
             Dialog::CloudStorage { .. }
             | Dialog::CloudImport { .. }
@@ -1064,6 +1070,7 @@ fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
                     });
                 }
                 Dialog::CloudError { diagnostic, action_error } => super::cloud_error::body(app, ui, diagnostic, action_error),
+                Dialog::CloudChoice {view}=>crate::cloud_conflicts::choice::body(app,ui,view),
                 Dialog::CloudConflicts => {
                     let status = app.run("cloud.syncStatus", json!({})).unwrap_or_default();
                     crate::cloud_conflicts::structure(app, ui, &status);
@@ -1295,7 +1302,7 @@ fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
                 let informational = unusable_model
                     || matches!(
                         dlg,
-                        Dialog::CloudConflicts | Dialog::CloudMaintenance | Dialog::CloudError { .. } | Dialog::CloudDisable { .. } | Dialog::CloudDelete { .. } | Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
+                        Dialog::CloudChoice {..} | Dialog::CloudConflicts | Dialog::CloudMaintenance | Dialog::CloudError { .. } | Dialog::CloudDisable { .. } | Dialog::CloudDelete { .. } | Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
                     );
                 let sam = &app.session.segmenter;
                 let (sam_installed, sam_running, sam_failed) = (sam.installed(), sam.download_status().running, sam.download_status().error.is_some());
@@ -1333,7 +1340,7 @@ fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::CloudStorage { .. } => "Save Connection",
                     Dialog::CloudConnect { .. } => if app.run("cloud.overview", json!({})).ok().is_some_and(|v| v["syncEnabled"] == true) { "Done" } else { "Turn on cloud sync" },
                     Dialog::CloudDisable { .. } => "",
-                    Dialog::CloudConflicts | Dialog::CloudMaintenance => "Done",
+                    Dialog::CloudChoice {..} | Dialog::CloudConflicts | Dialog::CloudMaintenance => "Done",
                     #[cfg(not(target_arch = "wasm32"))]
                     Dialog::CloudSetup { setup } => setup.ok_label(),
                     Dialog::CloudMigration { .. } => "Migrate Library",
@@ -1848,7 +1855,8 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         }
         Dialog::RemoveFolder { path, disk, .. } => app.run("library.removeFolder", json!({"path": path, "disk": disk})),
         d @ Dialog::SynchronizeFolder { .. } => crate::sync::confirm(app, d),
-        Dialog::CloudConflicts
+        Dialog::CloudChoice { .. }
+        | Dialog::CloudConflicts
         | Dialog::CloudMaintenance
         | Dialog::CloudError { .. }
         | Dialog::CloudDisable { .. }
