@@ -51,10 +51,17 @@ struct Mirror {
     dirty: Vec<(String, Dirty)>,
     /// Why the last flush to browser storage failed (quota, eviction…), until one succeeds.
     error: Option<String>,
+    protection_revision: u64,
+    protection_pending: bool,
+    in_flight_bytes: u64,
 }
 
 impl Mirror {
     fn mark(&mut self, name: &str, d: Dirty) {
+        if protects_cache(name) {
+            self.protection_revision = self.protection_revision.saturating_add(1);
+            self.protection_pending = true;
+        }
         let prev = self.dirty.iter().position(|(n, _)| n == name).map(|i| self.dirty.remove(i).1);
         let d = match (prev, d) {
             // appends after appends keep the original offset; anything else needs a rewrite
@@ -70,6 +77,16 @@ impl Mirror {
 #[derive(Clone, Default)]
 pub struct Files(Arc<Mutex<Mirror>>);
 
+/// A catalog/selection certificate remains invalid while its flush is in flight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Protection {
+    pub revision: u64,
+    pub pending: bool,
+}
+pub fn protects_cache(name: &str) -> bool {
+    matches!(name, "catalog.snap" | "catalog.log" | "browser-offline.json")
+}
+
 impl Files {
     fn lock(&self) -> std::sync::MutexGuard<'_, Mirror> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
@@ -81,7 +98,19 @@ impl Files {
         let g = self.lock();
         let largest = g.files.values().map(|bytes| bytes.len() as u64).max().unwrap_or(0);
         let dirty = g.dirty.iter().filter_map(|(name, _)| g.files.get(name)).fold(0u64, |sum, bytes| sum.saturating_add(bytes.len() as u64));
-        (64u64 << 20).saturating_add(largest.saturating_mul(2)).saturating_add(dirty.saturating_mul(2))
+        (64u64 << 20).saturating_add(largest.saturating_mul(2)).saturating_add(dirty.saturating_add(g.in_flight_bytes).saturating_mul(2))
+    }
+    pub fn protection(&self) -> Protection {
+        let m = self.lock();
+        Protection { revision: m.protection_revision, pending: m.protection_pending || m.error.is_some() || m.protection_revision == u64::MAX }
+    }
+    /// Called only after the entire ordered flush succeeds, including newer writes.
+    pub fn flushed(&self) {
+        let mut m = self.lock();
+        m.in_flight_bytes = 0;
+        if m.dirty.is_empty() && m.error.is_none() {
+            m.protection_pending = false;
+        }
     }
     /// Set a file's stored content (start-up; not dirty).
     pub fn preload(&self, name: &str, data: Vec<u8>) {
@@ -119,11 +148,12 @@ impl Files {
         !self.lock().dirty.is_empty()
     }
 
-    /// Everything to write, in modification order; the files count as clean afterwards (call
-    /// [`Files::failed`] for ops that couldn't be written).
+    /// Drain the queue in modification order. The protection fence and space reservation
+    /// remain until [`Files::flushed`]; failed operations must be requeued.
     pub fn take_dirty(&self) -> Vec<FlushOp> {
         let mut m = self.lock();
         let dirty = std::mem::take(&mut m.dirty);
+        m.in_flight_bytes = dirty.iter().filter_map(|(name, _)| m.files.get(name)).fold(0u64, |sum, bytes| sum.saturating_add(bytes.len() as u64));
         dirty
             .into_iter()
             .map(|(name, d)| {
@@ -139,6 +169,7 @@ impl Files {
     /// A flush failed: write these files in full next time (keeps any newer modification order).
     pub fn failed(&self, ops: &[FlushOp]) {
         let mut m = self.lock();
+        m.in_flight_bytes = 0;
         for op in ops.iter().rev() {
             if !m.dirty.iter().any(|(n, _)| n == op.name()) {
                 m.dirty.insert(0, (op.name().to_string(), Dirty::Rewrite));
@@ -237,6 +268,35 @@ mod tests {
                 }
             }
         }
+        files.flushed();
+    }
+
+    #[test]
+    fn cache_protection_and_headroom_survive_drained_and_failed_flushes() {
+        let f = Files::default();
+        f.write("catalog.log", b"pending");
+        let revision = f.protection().revision;
+        let reserved = f.save_headroom();
+        let ops = f.take_dirty();
+        assert!(!f.is_dirty());
+        assert!(f.protection().pending);
+        assert_eq!(f.save_headroom(), reserved);
+        f.failed(&ops);
+        f.set_error(Some("quota".into()));
+        f.flushed();
+        assert!(f.protection().pending);
+        let _ = f.take_dirty();
+        f.write("browser-offline.json", b"new selection");
+        f.set_error(None);
+        f.flushed();
+        assert!(f.protection().pending, "newer queued intent still needs saving");
+        let _ = f.take_dirty();
+        f.flushed();
+        assert!(!f.protection().pending);
+        assert!(f.protection().revision > revision);
+        let before = f.protection();
+        f.write("view.json", b"view");
+        assert_eq!(f.protection(), before, "view saves do not invalidate offline membership");
     }
 
     #[test]

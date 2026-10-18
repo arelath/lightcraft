@@ -29,7 +29,8 @@ struct Job {
     lease: Option<ByteLease>,
     guard: TaskGuard,
     saved: bool,
-    conservative: bool,
+    clear: bool,
+    budget: Option<u64>,
 }
 struct State {
     loaded: bool,
@@ -61,6 +62,7 @@ fn reply<T>() -> Reply<T> {
 }
 impl Offline {
     pub fn new(backend: Option<Backend>, dir: String, memory: ManagedBytes, files: Files) -> Self {
+        storage::bind(dir.clone(), files.clone());
         Self {
             backend,
             dir,
@@ -96,13 +98,14 @@ impl Offline {
             && d.attempted == Some((s.catalog.revision, d.epoch))
             && d.job.is_none()
             && errors.is_empty()
-            && !self.files.is_dirty()
+            && !self.files.protection().pending
+            && storage::certified()
             && self.files.error().is_none();
         let health = storage::status(&self.memory.resident_ids());
         json!({"browser":true,"location":"Browser storage","budgetBytes":d.budget,"usedBytes":health["bytes"],"pins":d.owners,
             "photoCacheBytes":health["bytes"],"offlineBytes":Value::Null,"keepAll":{"originals":d.owners.contains_key("all:originals"),"previews":d.owners.contains_key("all:previews")},
             "offlineReady":ready,"resolvingPins":!ready,"offlineErrors":errors,"error":health["error"],"persistentCache":health,
-            "savePending":self.files.is_dirty()||d.job.as_ref().is_some_and(|job|!job.saved),"background":d.job.is_some()})
+            "savePending":self.files.is_dirty()||self.files.protection().pending||d.job.as_ref().is_some_and(|job|!job.saved),"background":d.job.is_some()})
     }
     pub fn handle(&self, s: &mut Session, id: &str, p: &Value) -> Option<Result<Value, String>> {
         if !matches!(id, "cloud.cache" | "cloud.storage" | "cloud.pin" | "cloud.unpin" | "cloud.clearCache") {
@@ -219,6 +222,12 @@ impl Offline {
             };
             match result {
                 Err(error) => {
+                    if storage::deferred(&error) {
+                        d.attempted = None;
+                        d.job = None;
+                        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                        return;
+                    }
                     d.error = Some(error);
                     if matches!(work, Work::Load(_)) {
                         d.loaded = true;
@@ -256,6 +265,15 @@ impl Offline {
                     Work::Save(_) => {
                         if let Some(job) = &mut d.job {
                             job.saved = true;
+                            let (epoch, clear, budget) = (job.key.1, job.clear, job.budget);
+                            if epoch == d.epoch {
+                                if clear {
+                                    d.clear = false;
+                                }
+                                if budget.is_some() {
+                                    d.budget_change = None;
+                                }
+                            }
                         }
                     }
                     Work::Bytes(_) => {
@@ -269,6 +287,10 @@ impl Offline {
             }
         }
         if !d.loaded {
+            if files.protection().pending || flushing {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                return;
+            }
             let ready = reply();
             let out = ready.clone();
             let ctx = ctx.clone();
@@ -294,12 +316,7 @@ impl Offline {
             }
             let Some(blob) = job.blobs.get(job.pos).cloned() else {
                 let completed = job.owners.clone();
-                let conservative = job.conservative;
                 d.completed = completed;
-                if conservative {
-                    d.confirm = true;
-                    d.attempted = None;
-                }
                 d.job = None;
                 return;
             };
@@ -345,28 +362,31 @@ impl Offline {
             return;
         }
         let key = (s.catalog.revision, d.epoch);
-        if d.attempted == Some(key) {
+        if d.attempted == Some(key) && (storage::certified() || d.error.is_some() || !d.errors.is_empty()) {
             return;
         }
-        let conservative = files.is_dirty() || flushing;
-        if conservative && !d.urgent {
+        if files.protection().pending || flushing {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
             return;
         }
         d.attempted = Some(key);
         let dependencies = lightcraft_engine::assets::offline::resolve(&s.catalog, &d.owners);
         d.errors = dependencies.errors;
+        if !d.errors.is_empty() {
+            return;
+        }
+        let revision = files.protection().revision;
         let owners: BTreeMap<_, _> = dependencies
             .pins
             .into_iter()
             .map(|(owner, pin)| (owner, Owner { quality: pin.quality, blobs: pin.blobs.into_iter().map(|id| id.0).collect() }))
             .collect();
-        if owners == d.completed && d.budget_change.is_none() && !d.clear && !d.confirm && !d.urgent {
+        if owners == d.completed && d.budget_change.is_none() && !d.clear && !d.confirm && !d.urgent && storage::certified() {
             return;
         }
         let guard = s.activity.start("download", "Save Browser Offline Copies", Cancel::Yes);
-        let budget = d.budget_change.take();
-        let clear = std::mem::take(&mut d.clear);
+        let budget = d.budget_change;
+        let clear = d.clear;
         d.urgent = false;
         d.confirm = false;
         let ready = reply();
@@ -375,19 +395,10 @@ impl Offline {
         let saved = owners.clone();
         let ctx = ctx.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            *out.borrow_mut() = Some(storage::update_owners(&backend, &dir, saved, budget, clear, conservative).await);
+            *out.borrow_mut() = Some(storage::update_owners(&backend, &dir, saved, budget, clear, revision).await);
             ctx.request_repaint();
         });
-        d.job = Some(Job {
-            key,
-            owners,
-            blobs: if conservative { Vec::new() } else { dependencies.blobs.into_values().collect() },
-            pos: 0,
-            lease: None,
-            guard,
-            saved: false,
-            conservative,
-        });
+        d.job = Some(Job { key, owners, blobs: dependencies.blobs.into_values().collect(), pos: 0, lease: None, guard, saved: false, clear, budget });
         d.work = Some(Work::Save(ready));
     }
 }

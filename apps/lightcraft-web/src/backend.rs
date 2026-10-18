@@ -26,8 +26,8 @@ fn err(e: JsValue) -> String {
         None => message,
     }
 }
-pub fn quota_error(error: &str) -> bool {
-    error.starts_with("QuotaExceededError:")
+fn missing(e: &JsValue) -> bool {
+    Reflect::get(e, &"name".into()).ok().and_then(|name| name.as_string()).as_deref() == Some("NotFoundError")
 }
 fn failure(event: JsValue, fallback: &JsValue) -> JsValue {
     Reflect::get(&event, &"target".into())
@@ -153,8 +153,7 @@ impl Backend {
             opts.set_create(create);
             match JsFuture::from(dir.get_directory_handle_with_options(p, &opts)).await {
                 Ok(d) => dir = d.unchecked_into(),
-                Err(e) if !create => {
-                    let _ = e;
+                Err(e) if !create && missing(&e) => {
                     return Ok(None);
                 }
                 Err(e) => return Err(err(e)),
@@ -169,7 +168,7 @@ impl Backend {
         opts.set_create(create);
         match JsFuture::from(dir.get_file_handle_with_options(&name, &opts)).await {
             Ok(h) => Ok(Some(h.unchecked_into())),
-            Err(_) if !create => Ok(None),
+            Err(e) if !create && missing(&e) => Ok(None),
             Err(e) => Err(err(e)),
         }
     }
@@ -314,6 +313,93 @@ impl Backend {
         }
     }
 
+    /// Bounded names including directory components, with matching OPFS/IDB root semantics.
+    pub async fn names_bounded(&self, dir: &str, limit: usize) -> Result<Vec<String>, String> {
+        match self {
+            Backend::Opfs(root) => {
+                let Some((handle, _)) = Self::parent(root, &format!("{dir}/-"), false).await? else { return Ok(Vec::new()) };
+                dir_keys_bounded(&handle, limit).await
+            }
+            Backend::Idb(db) => {
+                let (_tx, store) = Self::idb_store(db, false)?;
+                let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+                let range = web_sys::IdbKeyRange::bound(&prefix.as_str().into(), &format!("{prefix}\u{ffff}").into()).map_err(err)?;
+                const MAX_KEYS: u32 = 200_000;
+                let keys = idb_req(&store.get_all_keys_with_key_and_limit(&range, MAX_KEYS + 1).map_err(err)?).await?;
+                let keys: js_sys::Array = keys.unchecked_into();
+                if keys.length() > MAX_KEYS {
+                    return Err("Too many browser storage keys to check safely; saved copies retained.".into());
+                }
+                let mut names = std::collections::BTreeSet::new();
+                for key in keys.iter() {
+                    let key = key.as_string().ok_or("Unknown browser storage key format; saved copies retained.")?;
+                    let tail = key.strip_prefix(&prefix).ok_or("Browser storage returned a key outside its requested folder.")?;
+                    let name =
+                        tail.split('/').next().filter(|name| !name.is_empty()).ok_or("Invalid browser storage path; saved copies retained.")?;
+                    names.insert(name.to_owned());
+                    if names.len() > limit {
+                        return Err("Too many browser storage entries to check safely; saved copies retained.".into());
+                    }
+                }
+                Ok(names.into_iter().collect())
+            }
+        }
+    }
+    /// Verify actual bytes without copying a whole cached original into Rust memory.
+    pub async fn file_digest(&self, path: &str, limit: u64) -> Result<Option<(u64, String)>, String> {
+        use sha2::{Digest, Sha256};
+        const CHUNK: u32 = 64 << 10;
+        let mut digest = Sha256::new();
+        let size = match self {
+            Backend::Opfs(root) => {
+                let Some(handle) = Self::opfs_file(root, path, false).await? else { return Ok(None) };
+                let file: web_sys::File = JsFuture::from(handle.get_file()).await.map_err(err)?.unchecked_into();
+                if !file.size().is_finite() || file.size() < 0. || file.size() > limit as f64 {
+                    return Err("Browser cache file exceeds its recovery size limit; copies retained.".into());
+                }
+                let size = file.size() as u64;
+                let mut offset = 0u64;
+                while offset < size {
+                    let next = offset.saturating_add(u64::from(CHUNK)).min(size);
+                    let part = file.slice_with_f64_and_f64(offset as f64, next as f64).map_err(err)?;
+                    let bytes = Uint8Array::new(&JsFuture::from(part.array_buffer()).await.map_err(err)?);
+                    if u64::from(bytes.length()) != next.saturating_sub(offset) {
+                        return Err("Browser cache file changed during verification; copies retained.".into());
+                    }
+                    digest.update(bytes.to_vec());
+                    offset = next;
+                }
+                size
+            }
+            Backend::Idb(db) => {
+                let (_tx, store) = Self::idb_store(db, false)?;
+                let value = idb_req(&store.get(&path.into()).map_err(err)?).await?;
+                if value.is_undefined() || value.is_null() {
+                    return Ok(None);
+                };
+                if !value.is_instance_of::<Uint8Array>() {
+                    return Err("Unknown browser cache value; saved copies retained.".into());
+                }
+                let bytes: Uint8Array = value.unchecked_into();
+                let size = bytes.length();
+                if u64::from(size) > limit {
+                    return Err("Browser cache file exceeds its recovery size limit; copies retained.".into());
+                }
+                let mut offset = 0u32;
+                while offset < size {
+                    let next = offset.saturating_add(CHUNK).min(size);
+                    digest.update(bytes.subarray(offset, next).to_vec());
+                    offset = next;
+                    if offset % (4 << 20) == 0 {
+                        audit_yield().await?;
+                    }
+                }
+                u64::from(size)
+            }
+        };
+        Ok(Some((size, format!("{:x}", digest.finalize()))))
+    }
+
     /// Delete everything (the "reset" escape hatch: `?reset` in the URL).
     pub async fn clear(&self) -> Result<(), String> {
         match self {
@@ -336,6 +422,9 @@ impl Backend {
 
 /// Names of the entries in an OPFS directory.
 async fn dir_keys(dir: &FileSystemDirectoryHandle) -> Result<Vec<String>, String> {
+    dir_keys_bounded(dir, 200_000).await
+}
+async fn dir_keys_bounded(dir: &FileSystemDirectoryHandle, limit: usize) -> Result<Vec<String>, String> {
     let keys = dir.keys();
     let mut out = Vec::new();
     loop {
@@ -344,6 +433,9 @@ async fn dir_keys(dir: &FileSystemDirectoryHandle) -> Result<Vec<String>, String
             break;
         }
         if let Some(k) = Reflect::get(&next, &"value".into()).ok().and_then(|v| v.as_string()) {
+            if out.len() >= limit {
+                return Err("Too many browser storage entries to check safely; copies retained.".into());
+            }
             out.push(k);
         }
     }
@@ -371,4 +463,15 @@ pub fn request_persistence(on_result: impl FnOnce(bool) + 'static) {
         log::info!("lightcraft: persistent storage {}", if granted { "granted" } else { "not granted" });
         on_result(granted);
     });
+}
+
+async fn audit_yield() -> Result<(), String> {
+    let global = js_sys::global();
+    let timer = Reflect::get(&global, &"setTimeout".into()).map_err(err)?.dyn_into::<js_sys::Function>().map_err(err)?;
+    let pause = js_sys::Promise::new(&mut |resolve, reject| {
+        if let Err(error) = timer.call2(&global, resolve.as_ref(), &JsValue::from_f64(0.)) {
+            let _ = reject.call1(&JsValue::UNDEFINED, &error);
+        }
+    });
+    JsFuture::from(pause).await.map(|_| ()).map_err(err)
 }

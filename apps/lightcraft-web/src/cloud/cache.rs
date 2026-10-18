@@ -136,6 +136,8 @@ pub fn decode_intent(bytes: &[u8]) -> Result<BTreeMap<String, lightcraft_engine:
 
 #[cfg(target_arch = "wasm32")]
 pub mod offline;
+#[cfg(any(target_arch = "wasm32", test))]
+mod recovery;
 #[cfg(target_arch = "wasm32")]
 pub mod storage;
 

@@ -25,6 +25,7 @@ crc32fast = { workspace = true }
 web-time = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+sha2 = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "glow"] }
 egui = { workspace = true }
 wasm-bindgen = { workspace = true }

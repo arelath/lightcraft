@@ -251,6 +251,7 @@ async fn flush(files: Files, backend: Backend, dir: String, flushing: Rc<Cell<bo
                 log::info!("lightcraft: saving works again");
             }
             files.set_error(None);
+            files.flushed();
             break;
         }
         for (i, op) in ops.iter().enumerate() {

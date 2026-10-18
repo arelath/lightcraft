@@ -292,14 +292,16 @@ a saved catalog and verified persistent bytes; a successful temporary export is 
 Only SHA-256-verified, indexed `cloud/blobs/` entries are eviction candidates, in least
 recently used order. Imported originals, library snapshots/logs/outbox/acknowledgements,
 unknown files and every library's pinned dependencies are excluded. Pins can exceed the
-soft cache budget. Clear cache and a zero budget preserve them. Explicit unpinning can
-release space while unrelated catalog saves are blocked; other retained owners keep
-both old and current dependencies until their catalog save completes.
+soft cache budget. Clear cache and a zero budget preserve them. Unpins and cleanup
+wait for catalog and selection saves to complete, including writes already drained
+from the queue. Closed-library membership is reconstructed from durable catalogs and
+owner/quality intent before eviction; empty selections and shared files remain protected.
 
 Media admission leaves at least 64 MiB plus known snapshot/journal work for catalog saves
 and accounts for replacement copies. Origin-wide Web Locks serialize policy changes,
 eviction and writes across tabs and renderer workers. Storage estimates are hints;
-actual quota errors trigger bounded eligible-cache reclamation and one retry. Catalog
+media admission reclaims only verified eligible files. A failed media write stays
+temporary; catalog writes never reclaim against pending offline selections. Catalog
 write failure retains the dirty queue and pending edits. Retry follows normal save
 recovery after space is freed. No estimate can guarantee a future write will succeed.
 See [StorageManager estimates](https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/estimate)
@@ -315,6 +317,13 @@ Missing coordination or malformed policy disables cache mutation and reports rep
 instead of guessing which stored data is disposable. Browser original upload/adoption
 remains unsupported.
 
+Blob/index changes and deletions retain a durable recovery marker until their policy
+commit succeeds. Startup or interrupted transactions verify actual cache files in bounded
+chunks, adopt verified orphans and remove missing index entries. Missing, corrupt or future
+protection data disables cleanup and retains bytes. Ordinary catalog saves recertify only
+current-library membership, without rehashing the cache. Backup restore shares the same
+lock and recovery boundary.
+
 ## Revision history
 
 | Date | Change |
@@ -323,3 +332,5 @@ remains unsupported.
 | 2026-10-17 | CR.17: verified cache eviction, catalog headroom, live offline intent, temporary source delivery and quota recovery. |
 
 | 2026-10-17 | CR.19: explicit original decode budgets, shared descriptor limits and oversized-photo proxy selection after original caching. |
+
+| 2026-10-17 | CR.52: verified interrupted-cache recovery, all-library protection reconstruction and durable save fences. |

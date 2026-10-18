@@ -224,6 +224,12 @@ pub async fn restore(file: web_sys::File, backend: Backend) -> Result<String, St
         return Err("this isn't a LightCraft library backup (no library/catalog files)".into());
     }
     let dir = restored_dir_name(js_sys::Date::now());
+    let _transaction = crate::cloud::cache::storage::restoring(&backend).await?;
+    if !backend.names_bounded(&dir, 1).await?.is_empty() {
+        return Err("Restore directory already exists; retry the restore.".into());
+    }
+    let pending = format!("{dir}/{}", crate::cloud::cache::storage::RESTORE_PENDING);
+    backend.write(&pending, b"1").await?;
     let mut written = 0usize;
     for e in &entries {
         let Some(key) = restore_key(&e.name, &dir) else { continue };
@@ -248,6 +254,7 @@ pub async fn restore(file: web_sys::File, backend: Backend) -> Result<String, St
         backend.write(&key, &data).await.map_err(|err| format!("storing {}: {err}", e.name))?;
         written += 1;
     }
+    backend.remove(&pending).await?;
     backend.write(ACTIVE_LIBRARY, dir.as_bytes()).await?;
     log::info!("lightcraft: restored {written} files into {dir}");
     Ok(dir)
