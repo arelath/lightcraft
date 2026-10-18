@@ -282,7 +282,21 @@ The supplied 2026-10-17 review is tracked before implementation in
 - [x] **CR.74** Explain re-enablement as a merge into the existing library, retain bound connection/protocol identities and permanent originals, and test real dialog confirmation.
 - [x] **CR.49** Fence successor publication, refuse unsafe cancellation and preserve explicit finish-upgrade recovery.
 - [x] **CR.53** Verify cache destination adoption, honor old byte leases and fence cleanup before folder reuse.
-- [ ] **CR.48, CR.50–CR.52, CR.54–CR.55** Recheck and close the previously tracked epoch, migration, status, lease, browser-cache, relocation, credential-isolation and discovery findings with current evidence. Detailed items remain individually tracked in the reliability checklist.
+## Remaining cloud reliability — correctness first
+
+Execution order starts with the immediate publication guards needed by the exclusive
+append upgrade barrier. Keep each item open until its implementation and acceptance
+checks pass; provider access and an actual schema change are separate prerequisites.
+
+- [x] **CR.48** Prevent publication to an unsupported append epoch/root; verify native and browser paths preserve the typed refusal.
+- [ ] **CR.51** Renew upgrade ownership through expensive reads/writes and stop stale or cancelled workers before further output.
+- [ ] **CR.50** Preserve publication capability on every readable head outcome, including unchanged clean polls.
+- [ ] **CR.54** Isolate saved credential profiles for independent libraries with the same connection name.
+- [ ] **CR.52** Recover browser blob/index publication durably after interruption or policy-save failure, preserving all libraries' protections.
+- [ ] **CR.55** Paginate and validate guided library discovery, including retired heads, successors and duplicate identities.
+- [ ] **CR.43** Add the exclusive append-maintenance adapter, upgrade runner and late old-epoch operation recovery, with simultaneous-upgrader tests.
+- [ ] **CR.44** Add real mutation translation/provenance when a concrete schema change requires it; preserve the existing fail-closed boundary meanwhile.
+- [ ] **CR.45** Verify current desktop/browser upgrade workflows and request costs against live AWS S3 and, after the exclusive barrier, B2.
 
 ## Cloud queue UX — follow-up
 

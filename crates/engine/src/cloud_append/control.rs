@@ -60,7 +60,16 @@ pub fn effective(storage: &str, library: &str, records: &[(String, Vec<u8>)]) ->
 /// Reading is refused for a newer envelope/reader or an invalid record; any other
 /// blocked state permits receiving but not publication.
 pub fn publication(control: std::result::Result<Control, Blocked>) -> std::result::Result<Option<String>, Blocked> {
-    match control.and_then(|c| c.may_publish().map(|_| c)) {
+    match control.and_then(|c| {
+        c.may_read()?;
+        // Discovery and its durable cursors currently address epoch one only.
+        // Reading that old root after a namespace transition could acknowledge or
+        // publish against the wrong library position, even for a readable control.
+        if c.epoch != 1 || c.active_metadata_root != crate::cloud_control::append_root(&c.library, 1) {
+            return Err(Blocked::UpdateToRead(format!("append epoch {} namespace {} is unsupported by this build", c.epoch, c.active_metadata_root)));
+        }
+        c.may_publish()
+    }) {
         Ok(_) => Ok(None),
         Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_) | Blocked::Deleted)) => Err(blocked),
         Err(blocked) => Ok(Some(blocked.to_string())),
@@ -104,5 +113,26 @@ mod tests {
                 .to_string()
                 .contains("update")
         );
+    }
+
+    #[test]
+    fn readable_namespace_transitions_refuse_old_root_discovery_and_publication() {
+        use crate::cloud_status::{CloudFailure, FailureKind, Recovery};
+        for (epoch, root) in
+            [(2, crate::cloud_control::append_root("library", 2)), (1, crate::cloud_control::epoch_root(1)), (2, crate::cloud_control::epoch_root(2))]
+        {
+            let c = Control { epoch, active_metadata_root: root, revision: 3, ..Control::initial_append("library") };
+            c.may_read().unwrap();
+            c.may_publish().unwrap(); // The envelope alone does not route append I/O.
+            let blocked = publication(effective("p", "library", &[record(&c)])).unwrap_err();
+            assert!(matches!(&blocked, Blocked::UpdateToRead(why) if why.contains("namespace")));
+            let native = CloudFailure::from(AssetError::Blocked(blocked.clone()));
+            let browser = CloudFailure::from(blocked);
+            for failure in [native, browser] {
+                assert_eq!(failure.kind, FailureKind::Unsupported);
+                assert_eq!(failure.remedy, Some(Recovery::Update));
+                assert!(!failure.retryable());
+            }
+        }
     }
 }

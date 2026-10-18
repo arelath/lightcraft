@@ -1152,3 +1152,78 @@ fn retained_values_show_full_metadata_and_independent_previews_without_resolving
     assert_eq!(storage.objects, remote, "viewing never publishes or resolves a choice");
     assert_eq!(storage.signature_errors, 0);
 }
+
+#[test]
+#[ignore = "explicit native append epoch refusal acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn unsupported_append_epoch_preserves_pending_work_and_opens_update_details() {
+    use lightcraft_engine::{
+        catalog::{FsStore, Journal},
+        cloud_append::control,
+        cloud_control::{Control, append_root},
+    };
+    let f = support::Fixture::new();
+    f.state.lock().unwrap().append_mode = true;
+    let local = f.dir.join("unsupported-append-epoch");
+    let (out, rows) = f.run(
+        &local,
+        &[
+            (
+                "cloud.configure",
+                json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"}),
+            ),
+            ("cloud.syncEnable", json!({"connection":"personal","protocol":"append-log-v1"})),
+        ],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    f.import_unsynchronized(&local, false);
+    let (out, rows) = f.run(&local, &[("cloud.upload", json!({})), ("cloud.sync", json!({})), ("photo.rate", json!({"ids":[1],"rating":2}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let saved = Journal::open(Box::new(FsStore::open(&local).unwrap())).unwrap().1;
+    let state = saved.sync_state().unwrap();
+    let pending = state.pending.clone();
+    assert!(!pending.is_empty());
+    let c = Control { epoch: 2, revision: 1, active_metadata_root: append_root(&state.library, 2), ..Control::initial_append(&state.library) };
+    f.state.lock().unwrap().objects.insert(format!("/photos/{}", control::key("library", &c).unwrap()), control::encode(&c).unwrap());
+    let objects = f.state.lock().unwrap().objects.clone();
+    let puts = f.state.lock().unwrap().requests.iter().filter(|(m, _)| m == "PUT").count();
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("unsupported-append-epoch");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    app.execute("cloud.sync", json!({"wait":false}));
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let data = app.execute("cloud.overview", json!({}));
+        if data["health"]["sync"]["lastError"]["kind"] == "unsupported" && data["tasks"].as_array().is_some_and(Vec::is_empty) {
+            assert!(data["summary"]["pendingChanges"].as_u64().unwrap() > 0);
+            break;
+        }
+        assert!(Instant::now() < until, "namespace refusal not visible: {data}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    app.click_when_ready("icon:cloud");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("popup.png"),"headless":true}));
+    app.click_when_ready("button:cloudErrorDetails");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("details.png"),"headless":true}));
+    let inspect = app.ask("ui.inspect", json!({}));
+    assert_eq!(inspect["cloudDiagnostic"]["failure"]["kind"], "unsupported", "{inspect}");
+    assert_eq!(inspect["cloudDiagnostic"]["failure"]["recovery"], "update");
+    assert!(inspect["cloudDiagnostic"]["failure"]["message"].as_str().unwrap().contains("namespace"));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&inspect).unwrap()).unwrap();
+    app.ask("app.quit", json!({}));
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = app.child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < until, "native app did not quit");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let saved = Journal::open(Box::new(FsStore::open(&local).unwrap())).unwrap().1;
+    assert!(saved.sync_state().unwrap().pending == pending);
+    assert_eq!(saved.photos().count(), 1);
+    assert_eq!(saved.photo(lightcraft_engine::catalog::PhotoId(1)).unwrap().rating, 2);
+    assert_eq!(f.state.lock().unwrap().objects, objects);
+    assert_eq!(f.state.lock().unwrap().requests.iter().filter(|(m, _)| m == "PUT").count(), puts);
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+}

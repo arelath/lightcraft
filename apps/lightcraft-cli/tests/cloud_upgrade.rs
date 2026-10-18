@@ -401,6 +401,28 @@ fn append_control_records_pause_or_refuse_publication_while_receiving_and_keep_p
     assert!(!out.status.success());
     assert!(rows[0]["error"].as_str().unwrap().contains("update LightCraft to read"), "{rows:?}");
     assert_eq!(catalog(&a).to_snapshot(), snapshot);
+    // A valid readable envelope does not authorize this epoch-one append runner
+    // to use its old namespace or discovery cursors after an epoch/root change.
+    for (revision, epoch, root) in [
+        (3, 2, lightcraft_engine::cloud_control::append_root(&library, 2)),
+        (4, 1, lightcraft_engine::cloud_control::epoch_root(1)),
+        (5, 2, lightcraft_engine::cloud_control::epoch_root(2)),
+    ] {
+        let control = Control { revision, epoch, active_metadata_root: root, ..Control::initial_append(&library) };
+        control.may_read().unwrap();
+        control.may_publish().unwrap();
+        let key = publish(&control);
+        let puts = f.state.lock().unwrap().requests.iter().filter(|(m, _)| m == "PUT").count();
+        let objects = f.state.lock().unwrap().objects.clone();
+        let (out, rows) = f.run(&a, &[("cloud.sync", json!({"checkpoint":true}))]);
+        assert!(!out.status.success(), "{rows:?}");
+        assert!(rows[0]["error"].as_str().unwrap().contains("namespace"), "{rows:?}");
+        assert_eq!(f.state.lock().unwrap().requests.iter().filter(|(m, _)| m == "PUT").count(), puts, "no manifest, operation or checkpoint PUT");
+        assert_eq!(f.state.lock().unwrap().objects, objects);
+        assert_eq!(catalog(&a).to_snapshot(), snapshot);
+        assert_eq!(pending(&a), offline);
+        f.state.lock().unwrap().objects.remove(&key);
+    }
     // A later Active record (as a newer upgrader would write) resumes publication.
     f.state.lock().unwrap().objects.remove(&second);
     f.state.lock().unwrap().objects.remove(&first);
