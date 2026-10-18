@@ -81,6 +81,7 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
     // Receiving continues while the library refuses publication (maintenance, a moved library,
     // a newer writer): local changes then wait here, which the status must say.
     out["publicationBlocked"] = sync["publicationBlocked"].clone();
+    out["publicationFailure"] = sync["publicationFailure"].clone();
     out["health"]["publicationBlocked"] = sync["publicationBlocked"].clone();
     out["utilization"] = sync["utilization"].clone();
     out["capacityWarnings"] = sync["capacityWarnings"].clone();

@@ -6,7 +6,7 @@
 use crate::assets::AssetError;
 use crate::assets::s3::S3Connection;
 use crate::cloud_control::{Blocked, Boundary, Control, Plan, State, Successor};
-use crate::cloud_outcome::HeadPosition;
+use crate::cloud_outcome::{HeadPosition, Publication};
 use crate::cloud_publication::{self as publication, Batch, CheckpointRef, Head};
 use crate::cloud_replication::Outcome;
 use crate::cloud_status::{CloudFailure, FailureKind};
@@ -240,9 +240,10 @@ fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &At
         if control.state != State::Active || control.epoch != epoch || head.checkpoint.as_ref().map(|c| &c.object) != Some(&checkpoint.object) {
             return Err(taken_over());
         }
+        let capability = Publication::head(Some(&head), library)?;
         let state = crate::cloud_history::native::certify(connection, local, &confirmed.state.portable(), &mut proofs, cancel)?;
         let acknowledged = local.pending.keys().filter(|id| confirmed.state.received.contains_key(*id)).cloned().collect();
-        Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged))
+        Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged).with_publication(capability))
     })
 }
 
@@ -320,14 +321,16 @@ fn rejoin(connection: &S3Connection, local: &SyncState, manifest: &str, cancel: 
 /// device must wait for the lease to expire; the owning installation may cancel at once.
 fn cancel_upgrade(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &AtomicBool) -> Result<Outcome> {
     let token = crate::cloud_control::token().map_err(CloudFailure::local)?;
-    let head = transition(connection, &local.library, cancel, |_, control| {
+    transition(connection, &local.library, cancel, |_, control| {
         let Some(m) = &control.migration else { return Err(invalid("no upgrade in progress; nothing to cancel").into()) };
         Ok(control.takeover(owner, &token, now_ms(), m.owner == owner)?.cancel(&token)?)
     })?;
     let remote = crate::cloud_replication::read(connection, &local.library, cancel)?;
+    let (head, _) = remote.head.ok_or_else(|| invalid("cloud library has no head after cancellation"))?;
+    let capability = Publication::head(Some(&head), &local.library)?;
     let acknowledged = local.pending.keys().filter(|id| remote.state.received.contains_key(*id)).cloned().collect();
     let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut Default::default(), cancel)?;
-    Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged))
+    Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged).with_publication(capability))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

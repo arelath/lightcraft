@@ -45,6 +45,10 @@ pub fn status(s: &mut Session, params: &Value) -> Result<Value> {
     let publication_blocked = s.cloud_replication_jobs.publication_blocked().map(str::to_owned);
     #[cfg(target_arch = "wasm32")]
     let publication_blocked: Option<String> = None;
+    #[cfg(not(target_arch = "wasm32"))]
+    let publication_failure = s.cloud_replication_jobs.publication_failure().cloned();
+    #[cfg(target_arch = "wasm32")]
+    let publication_failure: Option<crate::cloud_status::Failure> = None;
     #[cfg(target_arch = "wasm32")]
     let (running, reports) = (false, Vec::<Value>::new());
     #[cfg(target_arch = "wasm32")]
@@ -56,7 +60,7 @@ pub fn status(s: &mut Session, params: &Value) -> Result<Value> {
     Ok(json!({"enabled":enabled,"library":state.library,"device":state.device,"connection":state.connection,
         "paused":s.cloud_paused,"userPaused":s.cloud_paused,"canResume":crate::cloud_status::can_resume(s),
         "health":health,
-        "publicationBlocked":publication_blocked,
+        "publicationBlocked":publication_blocked,"publicationFailure":publication_failure,
         "preparingMigration":preparing_migration(s),
         "migrating":migrating(s),
         "protocol":state.protocol,"frontiers":state.append.as_ref().map(|p|&p.frontiers),"gaps":state.append.as_ref().map(|p|&p.gaps),

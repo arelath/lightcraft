@@ -1361,8 +1361,12 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             Ok(Value::Null)
         }
         "dialog.cloudError" => app.run("cloud.overview", json!({})).and_then(|data| {
-            let diagnostic = lightcraft_engine::cloud_status::Diagnostic::from_overview(&data, p["storage"] == true)
-                .ok_or_else(|| "No current cloud error. Check the cloud status again.".to_owned())?;
+            let diagnostic = if p["publication"] == true {
+                lightcraft_engine::cloud_status::Diagnostic::from_publication(&data)
+            } else {
+                lightcraft_engine::cloud_status::Diagnostic::from_overview(&data, p["storage"] == true)
+            }
+            .ok_or_else(|| "No current cloud error. Check the cloud status again.".to_owned())?;
             app.ui.dialog = Some(Dialog::CloudError { diagnostic: Box::new(diagnostic), action_error: None });
             Ok(Value::Null)
         }),

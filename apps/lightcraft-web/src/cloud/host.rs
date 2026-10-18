@@ -80,6 +80,7 @@ struct Data {
     /// Why the last completed scan could not publish (maintenance, a moved library, a newer
     /// writer); receiving continues and local changes wait until it clears.
     publication_blocked: Option<String>,
+    publication_failure: Option<lightcraft_engine::cloud_status::Failure>,
 }
 #[derive(Clone)]
 pub struct Host {
@@ -344,6 +345,7 @@ impl Host {
         status["cache"] = self.memory.status();
         status["offline"] = self.cache.view(s);
         status["publicationBlocked"] = json!(data.publication_blocked);
+        status["publicationFailure"] = json!(data.publication_failure);
         status["savePending"] = json!(self.files.is_dirty());
         status["saveError"] = json!(self.files.error());
         Ok(status)
@@ -367,6 +369,7 @@ impl Host {
         out["health"]["media"] = data.media_health.view();
         out["health"]["offline"] = self.cache.view(s);
         out["publicationBlocked"] = json!(data.publication_blocked);
+        out["publicationFailure"] = json!(data.publication_failure);
         out["health"]["publicationBlocked"] = json!(data.publication_blocked);
         if let Some(message) = out["health"]["sync"]["lastError"]["message"].as_str() {
             out["error"] = json!(message);
@@ -589,6 +592,7 @@ impl Host {
                             }
                             if let Ok(value) = &result {
                                 data.publication_blocked = value.get("publicationBlocked").and_then(Value::as_str).map(str::to_owned);
+                                data.publication_failure = value.get("publicationFailure").and_then(|v| serde_json::from_value(v.clone()).ok());
                             }
                         }
                         data.cadence.scanned(web_time::Instant::now());
@@ -708,7 +712,7 @@ impl Host {
                         *ready.borrow_mut() = Some(Ok(outcome));
                         return Ok(None);
                     }
-                    let same_snapshot = matches!(&outcome, Outcome::Unchanged { state, position } if app.session.catalog.revision == *revision
+                    let same_snapshot = matches!(&outcome, Outcome::Unchanged { state, position, .. } if app.session.catalog.revision == *revision
                         && app.session.catalog.sync_state().is_some_and(|current| current.protocol.is_head() && current.pending.is_empty()
                             && current.connection == *connection && current.library == state.library && current.version == state.version
                             && current.clock == state.clock && current.cursor.as_deref() == Some(position.cursor()) && current.generation == position.generation()));

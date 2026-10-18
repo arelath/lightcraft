@@ -94,6 +94,7 @@ impl Actions {
         Self::from_overview(&json!({"syncEnabled":status["enabled"],"userPaused":status["userPaused"],
             "paused":status["paused"],"canResume":status["canResume"],"running":status["running"],
             "preparingMigration":status["preparingMigration"],"migrating":status["migrating"],
+            "publicationBlocked":status["publicationBlocked"],"publicationFailure":status["publicationFailure"],
             "health":{"sync":status["health"]},"erasure":status["erasure"]}))
     }
     pub fn from_overview(data: &Value) -> Self {
@@ -178,6 +179,28 @@ mod tests {
         let model = Actions::from_overview(data);
         assert_eq!(model, Actions::from_sync_status(&info(data)));
         model
+    }
+    #[test]
+    fn clean_publication_blocks_keep_info_and_popup_actions_in_agreement() {
+        use crate::{
+            cloud_control::{Blocked, Successor},
+            cloud_status::{CloudFailure, Failure},
+        };
+        for blocked in [
+            Blocked::UpdateToWrite("schema 2".into()),
+            Blocked::Retired(Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "ab".repeat(32) }),
+        ] {
+            let error = CloudFailure::from(blocked);
+            let mut data = overview();
+            data["publicationBlocked"] = json!(error.message);
+            data["publicationFailure"] = json!(Failure::classified(&error, None));
+            let model = agree(&data);
+            assert_eq!(model.manual.unwrap().kind, ActionKind::Details);
+            assert_eq!(model.manual, model.footer);
+        }
+        let mut legacy = overview();
+        legacy["publicationBlocked"] = json!("old unclassified reason");
+        assert_eq!(agree(&legacy).manual.unwrap().kind, ActionKind::Details);
     }
     #[test]
     fn surfaces_share_pause_retry_migration_and_local_actions() {

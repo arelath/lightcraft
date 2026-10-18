@@ -94,11 +94,9 @@ fn synchronize_mode(
         let reply = connection.get_small(&key, control::MAX_CONTROL_BYTES, cancel)?.ok_or(AssetError::Missing)?;
         records.push((key, reply.bytes));
     }
-    let mut blocked =
+    let blocked =
         control::publication(control::effective(&connection.prefix, &local.library, &records)).map_err(crate::assets::AssetError::Blocked)?;
-    if receive_only {
-        blocked = Some("Downloading a local library copy; publication stopped on this device".into());
-    }
+    let can_publish = !receive_only && blocked.is_none();
     let bytes = manifest(&local.library)?;
     let manifest_key = manifest_key(&connection.prefix, &local.library)?;
     if local.require_existing || receive_only {
@@ -110,7 +108,7 @@ fn synchronize_mode(
                 && local.append.as_ref().is_none_or(|p| p.frontiers.is_empty() && p.remote.clock.is_empty() && p.scan.checkpoints.is_empty()) => {}
             None => return Err(invalid("cannot join: append library is absent; verify its destination and library ID; local work retained")),
         }
-    } else if blocked.is_none() {
+    } else if can_publish {
         connection.put_immutable_verified(&manifest_key, &bytes, cancel)?;
     }
     let mut planner = Planner::new(local)?;
@@ -166,9 +164,9 @@ fn synchronize_mode(
     audit_history(connection, &mut planner, &root, audit || checkpoint || local.append.is_none(), &fetched, cancel)?;
     planner.drain()?;
     crate::cloud_history::native::hydrate(connection, &mut planner.remote, local, &mut planner.proofs, cancel)?;
-    let mut pending: Vec<_> = if blocked.is_some() { Vec::new() } else { local.pending.values().collect() };
+    let mut pending: Vec<_> = if !can_publish { Vec::new() } else { local.pending.values().collect() };
     pending.sort_by_key(|m| m.revision.clone());
-    let checkpoint = checkpoint && blocked.is_none();
+    let checkpoint = checkpoint && can_publish;
     // Each author advances only after its dependencies are remotely verified. Uploads can
     // publish an early prefix while later imports still wait for their media transfers.
     loop {
@@ -213,10 +211,9 @@ fn synchronize_mode(
     }
     let acknowledged = planner.acknowledged(local)?;
     progress.remote = crate::cloud_history::native::certify(connection, local, &progress.remote, &mut planner.proofs, cancel)?;
-    Ok(match blocked {
-        Some(blocked) => crate::cloud_replication::Outcome::append_blocked(progress, acknowledged, blocked),
-        None => crate::cloud_replication::Outcome::append(progress, acknowledged),
-    })
+    let capability = crate::cloud_outcome::Publication::from(blocked);
+    let capability = if receive_only { capability.receiving() } else { capability };
+    Ok(crate::cloud_replication::Outcome::append(progress, acknowledged).with_publication(capability))
 }
 
 fn read_checkpoint(connection: &S3Connection, planner: &mut Planner, root: &str, key: &str, cancel: &AtomicBool) -> Result<usize> {

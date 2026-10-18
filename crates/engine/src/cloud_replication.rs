@@ -203,8 +203,8 @@ pub(crate) fn dependencies_verified(connection: &S3Connection, mutations: &[Muta
 mod media;
 pub(crate) use media::{SharedMedia, VerifiedMedia};
 
-use crate::cloud_outcome::HeadPosition;
 pub use crate::cloud_outcome::Outcome;
+use crate::cloud_outcome::{HeadPosition, Publication};
 /// A detach reads cloud state but never creates or publishes cloud objects.
 pub(crate) fn receive_only(connection: &S3Connection, local: &SyncState, cancel: &AtomicBool) -> Result<Outcome> {
     if local.protocol == lightcraft_catalog::replication::SyncProtocol::AppendLog {
@@ -219,13 +219,14 @@ pub(crate) fn receive_only(connection: &S3Connection, local: &SyncState, cancel:
         if local.require_existing || local.generation > 0 {
             return Err(invalid("cloud library is absent; reconnect before turning sync off"));
         }
-        return Ok(Outcome::empty(remote.state.portable()));
+        return Ok(Outcome::empty(remote.state.portable()).with_publication(Publication::ReceiveOnly));
     };
     if head.generation < local.generation {
         return Err(invalid("cloud library rolled back; local work retained"));
     }
+    let capability = Publication::head(Some(&head), &local.library).map_err(AssetError::Blocked)?.receiving();
     let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut proofs, cancel)?;
-    Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, BTreeSet::new()))
+    Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, BTreeSet::new()).with_publication(capability))
 }
 /// Reconcile each failed conditional head update by reading the competing history. Mutation
 /// IDs and payloads never change across attempts, including uncertain publication responses.
@@ -257,7 +258,9 @@ pub(crate) fn synchronize_verified(
                 return Err(invalid("remote library/cursor generation changed inconsistently"));
             }
             if tail_length(&head) < AUTO_CHECKPOINT_BATCHES {
-                return Ok(Outcome::unchanged(local.portable(), HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?));
+                let capability = Publication::head(Some(&head), &local.library).map_err(AssetError::Blocked)?;
+                return Ok(Outcome::unchanged(local.portable(), HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?)
+                    .with_publication(capability));
             }
         }
     }
@@ -277,17 +280,13 @@ pub(crate) fn synchronize_verified(
             return Err(invalid("remote catalog rolled back below the acknowledged generation; local work retained"));
         }
         // Checked on every reread, against the exact head the CAS below will replace.
-        let blocked = match crate::cloud_records::publishable(remote.head.as_ref().map(|(head, _)| head), &local.library) {
-            Ok(_) => None,
-            Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => return Err(AssetError::Blocked(blocked)),
-            Err(blocked) => Some(blocked.to_string()),
-        };
+        let capability = Publication::head(remote.head.as_ref().map(|(head, _)| head), &local.library).map_err(AssetError::Blocked)?;
         if let Some((covers, generation)) = remote.recovery.take() {
             let Some((head, etag)) = &remote.head else {
                 return Err(invalid("recovery prefix has no head"));
             };
-            if let Some(blocked) = blocked {
-                return Err(invalid(blocked));
+            if let Publication::Blocked(blocked) = &capability {
+                return Err(AssetError::Blocked(blocked.clone()));
             }
             let checkpoint = checkpoint(connection, &mut remote.state, covers, generation, epoch(head)?, cancel)?;
             // Each prefix becomes durable through CAS before replaying the next.
@@ -321,12 +320,13 @@ pub(crate) fn synchronize_verified(
                 return Err(invalid("remote catalog is empty; initial library metadata must be queued first"));
             };
             let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
-            return Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged));
+            return Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged)
+                .with_publication(capability));
         }
-        if let Some(blocked) = blocked {
+        if let Publication::Blocked(blocked) = capability {
             // Receive-only: apply remote state, acknowledge what it already contains and
             // keep the rest pending until the library is publishable again.
-            let Some((head, _)) = &remote.head else { return Err(invalid(blocked)) };
+            let Some((head, _)) = &remote.head else { return Err(AssetError::Blocked(blocked)) };
             let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
             let position = HeadPosition::new(head.tip.hash.0.clone(), head.generation).map_err(invalid)?;
             return Ok(Outcome::head_blocked(state, position, acknowledged, blocked));
@@ -472,7 +472,7 @@ pub(crate) fn batch_ref(connection: &S3Connection, epoch: u64, bytes: &[u8]) -> 
 pub(crate) fn write_immutable(connection: &S3Connection, key: &str, bytes: &[u8], cancel: &AtomicBool) -> Result<()> {
     immutable(connection, key, bytes, cancel, MAX_CHECKPOINT)
 }
-use crate::cloud_control::{Blocked, Control};
+use crate::cloud_control::Control;
 
 mod worker;
 pub(crate) use worker::Coordinator;

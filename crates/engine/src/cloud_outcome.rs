@@ -1,10 +1,51 @@
-//! Certified protocol outcomes shared by native and browser transports.
-//! An unchanged scan retains evidence: the owner still decides whether its current
-//! catalog can skip a write after edits made while the scan was in flight.
+//! Certified outcomes retain publication capability independently of received state.
+use crate::cloud_control::Blocked;
 use lightcraft_catalog::replication::{AppendProgress, Portable};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
+
+#[derive(Clone, Debug, Default)]
+pub enum Publication {
+    #[default]
+    Allowed,
+    Blocked(Blocked),
+    /// An intentional snapshot download, independent of the remote capability.
+    ReceiveOnly,
+}
+impl Publication {
+    pub fn head(head: Option<&crate::cloud_records::Head>, library: &str) -> Result<Self, Blocked> {
+        match crate::cloud_records::publishable(head, library) {
+            Ok(_) => Ok(Self::Allowed),
+            Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_) | Blocked::Deleted)) => Err(blocked),
+            Err(blocked) => Ok(Self::Blocked(blocked)),
+        }
+    }
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, Self::Allowed)
+    }
+    pub fn receiving(self) -> Self {
+        if self.is_allowed() { Self::ReceiveOnly } else { self }
+    }
+    pub fn reason(&self) -> Option<String> {
+        match self {
+            Self::Allowed => None,
+            Self::Blocked(blocked) => Some(blocked.to_string()),
+            Self::ReceiveOnly => Some("Downloading a local library copy; publication stopped on this device".into()),
+        }
+    }
+    pub fn failure(&self) -> Option<crate::cloud_status::CloudFailure> {
+        match self {
+            Self::Blocked(blocked) => Some(blocked.clone().into()),
+            _ => None,
+        }
+    }
+}
+impl From<Option<Blocked>> for Publication {
+    fn from(blocked: Option<Blocked>) -> Self {
+        blocked.map_or(Self::Allowed, Self::Blocked)
+    }
+}
 
 /// A published position can be constructed only through validation.
 /// ```compile_fail
@@ -33,69 +74,67 @@ impl HeadPosition {
 }
 #[derive(Clone)]
 pub enum HeadOutcome {
-    Empty {
-        state: Box<Portable>,
-    },
-    /// `blocked` names why publication was refused (maintenance, retirement, newer
-    /// writer schema): remote state was still received and pending work retained.
-    Published {
-        state: Box<Portable>,
-        position: HeadPosition,
-        acknowledged: BTreeSet<String>,
-        blocked: Option<String>,
-    },
+    Empty { state: Box<Portable>, publication: Publication },
+    Published { state: Box<Portable>, position: HeadPosition, acknowledged: BTreeSet<String>, publication: Publication },
 }
 #[derive(Clone)]
 pub enum Outcome {
-    Unchanged {
-        state: Box<Portable>,
-        position: HeadPosition,
-    },
+    Unchanged { state: Box<Portable>, position: HeadPosition, publication: Publication },
     ConditionalHead(HeadOutcome),
-    /// `blocked`: append control refused publication; remote state was still received.
-    Append {
-        progress: Box<AppendProgress>,
-        acknowledged: BTreeSet<String>,
-        blocked: Option<String>,
-    },
+    Append { progress: Box<AppendProgress>, acknowledged: BTreeSet<String>, publication: Publication },
 }
 static NO_ACK: BTreeSet<String> = BTreeSet::new();
 impl Outcome {
     pub fn unchanged(state: Portable, position: HeadPosition) -> Self {
-        Self::Unchanged { state: Box::new(state), position }
+        Self::Unchanged { state: Box::new(state), position, publication: Publication::Allowed }
     }
     pub fn empty(state: Portable) -> Self {
-        Self::ConditionalHead(HeadOutcome::Empty { state: Box::new(state) })
+        Self::ConditionalHead(HeadOutcome::Empty { state: Box::new(state), publication: Publication::Allowed })
     }
     pub fn head(state: Portable, position: HeadPosition, acknowledged: BTreeSet<String>) -> Self {
-        Self::ConditionalHead(HeadOutcome::Published { state: Box::new(state), position, acknowledged, blocked: None })
+        Self::ConditionalHead(HeadOutcome::Published { state: Box::new(state), position, acknowledged, publication: Publication::Allowed })
     }
-    pub fn head_blocked(state: Portable, position: HeadPosition, acknowledged: BTreeSet<String>, blocked: String) -> Self {
-        Self::ConditionalHead(HeadOutcome::Published { state: Box::new(state), position, acknowledged, blocked: Some(blocked) })
+    pub fn head_blocked(state: Portable, position: HeadPosition, acknowledged: BTreeSet<String>, blocked: Blocked) -> Self {
+        Self::head(state, position, acknowledged).with_publication(Publication::Blocked(blocked))
     }
     pub fn append(progress: AppendProgress, acknowledged: BTreeSet<String>) -> Self {
-        Self::Append { progress: Box::new(progress), acknowledged, blocked: None }
+        Self::Append { progress: Box::new(progress), acknowledged, publication: Publication::Allowed }
     }
-    pub fn append_blocked(progress: AppendProgress, acknowledged: BTreeSet<String>, blocked: String) -> Self {
-        Self::Append { progress: Box::new(progress), acknowledged, blocked: Some(blocked) }
+    pub fn append_blocked(progress: AppendProgress, acknowledged: BTreeSet<String>, blocked: Blocked) -> Self {
+        Self::append(progress, acknowledged).with_publication(Publication::Blocked(blocked))
+    }
+    pub fn publication(&self) -> &Publication {
+        match self {
+            Self::Unchanged { publication, .. }
+            | Self::ConditionalHead(HeadOutcome::Empty { publication, .. })
+            | Self::ConditionalHead(HeadOutcome::Published { publication, .. })
+            | Self::Append { publication, .. } => publication,
+        }
+    }
+    pub fn with_publication(mut self, capability: Publication) -> Self {
+        match &mut self {
+            Self::Unchanged { publication, .. }
+            | Self::ConditionalHead(HeadOutcome::Empty { publication, .. })
+            | Self::ConditionalHead(HeadOutcome::Published { publication, .. })
+            | Self::Append { publication, .. } => *publication = capability,
+        }
+        self
     }
     pub fn state(&self) -> &Portable {
         match self {
             Self::Unchanged { state, .. }
-            | Self::ConditionalHead(HeadOutcome::Empty { state })
+            | Self::ConditionalHead(HeadOutcome::Empty { state, .. })
             | Self::ConditionalHead(HeadOutcome::Published { state, .. }) => state,
             Self::Append { progress, .. } => &progress.remote,
         }
     }
-    /// Replace certification evidence without discarding protocol position or ACKs.
-    /// The caller supplies a state certified for the same library and schema.
     pub fn replace_state(&mut self, state: Portable) -> Result<(), String> {
         if state.library != self.state().library || state.version != self.state().version {
             return Err("replacement cloud state has a different library or schema".into());
         }
         match self {
             Self::Unchanged { state: current, .. }
-            | Self::ConditionalHead(HeadOutcome::Empty { state: current })
+            | Self::ConditionalHead(HeadOutcome::Empty { state: current, .. })
             | Self::ConditionalHead(HeadOutcome::Published { state: current, .. }) => **current = state,
             Self::Append { progress, .. } => progress.remote = state,
         }
@@ -104,7 +143,7 @@ impl Outcome {
     pub fn acknowledged(&self) -> &BTreeSet<String> {
         match self {
             Self::ConditionalHead(HeadOutcome::Published { acknowledged, .. }) | Self::Append { acknowledged, .. } => acknowledged,
-            Self::Unchanged { .. } | Self::ConditionalHead(HeadOutcome::Empty { .. }) => &NO_ACK,
+            _ => &NO_ACK,
         }
     }
     pub fn head_position(&self) -> Option<&HeadPosition> {
@@ -120,24 +159,23 @@ impl Outcome {
         }
     }
     pub fn report(&self) -> Value {
-        let mut value = json!({"acknowledged":self.acknowledged().len()});
+        let capability = self.publication();
+        let mut value = json!({"acknowledged":self.acknowledged().len(),"publicationAllowed":capability.is_allowed()});
+        if let Some(reason) = capability.reason() {
+            value["publicationBlocked"] = json!(reason);
+        }
+        if let Some(failure) = capability.failure() {
+            value["publicationFailure"] = json!(crate::cloud_status::Failure::classified(&failure, None));
+        }
         match self {
             Self::Unchanged { .. } => value["outcome"] = json!("unchanged"),
             Self::ConditionalHead(HeadOutcome::Empty { .. }) => {
                 value["outcome"] = json!("conditionalHead");
                 value["head"] = json!("empty");
             }
-            Self::ConditionalHead(HeadOutcome::Published { blocked, .. }) => {
-                value["outcome"] = json!("conditionalHead");
-                if let Some(blocked) = blocked {
-                    value["publicationBlocked"] = json!(blocked);
-                }
-            }
-            Self::Append { progress, blocked, .. } => {
+            Self::ConditionalHead(HeadOutcome::Published { .. }) => value["outcome"] = json!("conditionalHead"),
+            Self::Append { progress, .. } => {
                 value["outcome"] = json!("append");
-                if let Some(blocked) = blocked {
-                    value["publicationBlocked"] = json!(blocked);
-                }
                 value["frontiers"] = json!(&progress.frontiers);
                 value["gaps"] = json!(&progress.gaps);
                 value["consumedCheckpoints"] = json!(progress.scan.checkpoints.len());
@@ -154,6 +192,52 @@ impl Outcome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capability_survives_every_outcome_and_recertification() {
+        use crate::cloud_control::{Blocked, Plan, Successor};
+        use crate::cloud_status::{FailureKind, Recovery};
+        let state = SyncState::new("library".into(), "device".into(), "personal".into()).unwrap();
+        let position = HeadPosition::new("a".repeat(64), 11).unwrap();
+        let progress = AppendProgress {
+            version: 1,
+            manifest: "b".repeat(64),
+            frontiers: Default::default(),
+            remote: state.portable(),
+            scan: Default::default(),
+            gaps: Default::default(),
+        };
+        let outcomes = [
+            Outcome::unchanged(state.portable(), position.clone()),
+            Outcome::empty(state.portable()),
+            Outcome::head(state.portable(), position, BTreeSet::from(["device:1".into()])),
+            Outcome::append(progress, BTreeSet::from(["device:1".into()])),
+        ];
+        for (blocked, kind, remedy) in [
+            (Blocked::UpdateToWrite("newer writer".into()), FailureKind::Unsupported, Recovery::Update),
+            (Blocked::Maintenance { migration: "m".into(), plan: Plan::Rebase, owner: "other".into() }, FailureKind::Contention, Recovery::Retry),
+            (
+                Blocked::Retired(Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "c".repeat(64) }),
+                FailureKind::Unsupported,
+                Recovery::Rejoin,
+            ),
+        ] {
+            for outcome in &outcomes {
+                let mut outcome = outcome.clone().with_publication(Publication::Blocked(blocked.clone()));
+                let before = outcome.report();
+                outcome.replace_state(state.portable()).unwrap();
+                assert_eq!(outcome.report(), before, "recertification preserves capability, position and acknowledgments");
+                assert_eq!(before["publicationAllowed"], false);
+                assert_eq!(before["publicationFailure"]["kind"], serde_json::to_value(kind).unwrap());
+                assert_eq!(before["publicationFailure"]["recovery"], serde_json::to_value(remedy).unwrap());
+                assert!(
+                    matches!(outcome.publication().clone().receiving(), Publication::Blocked(_)),
+                    "an intentional receive-only pass cannot erase a stronger remote refusal"
+                );
+            }
+        }
+        assert!(matches!(Publication::Allowed.receiving(), Publication::ReceiveOnly));
+    }
+
     use super::*;
     use crate::{
         Session,

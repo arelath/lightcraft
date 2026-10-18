@@ -832,6 +832,11 @@ separate an empty remote head from a published head. Published positions require
 SHA-256 cursor and nonzero generation. Empty-head results cannot carry ACKs; append
 results have one authoritative portable state inside progress and no head fields.
 
+Every variant also retains a typed publication capability: allowed, a specific
+`cloud_control::Blocked` reason, or an intentional receive-only snapshot. Clean clients
+and unchanged scans retain the observed maintenance, newer-writer or retirement refusal.
+Recertifying portable state preserves this capability alongside the position and ACKs.
+
 Owner application preserves newer head positions, merges append evidence, and
 checks requested ACKs against the result. Browser received state reaches storage
 before an ACK receipt retires pending mutations. Its head receipt uses the retained
@@ -845,6 +850,14 @@ or `append`). Only a published head includes `cursor` and `generation`; an empty
 head reports `head: "empty"`, and append reports `frontiers`/`gaps`. Poll status still
 exposes the saved catalog's protocol-specific state. Append request-cost and owner-application bounds are specified below;
 remaining state-sized work is recorded in the current implementation limits.
+
+Completion reports include `publicationAllowed`. A refusal retains the compatible
+`publicationBlocked` message and adds normalized `publicationFailure` provenance
+(`kind`, `recovery`, `action` and retryability). Poll status and overview retain that
+failure separately from polling's `lastError`: a readable blocked scan still succeeds
+and follows the regular activity-aware polling cadence, rather than spending failure
+retries. Capability is runtime evidence; an unchanged scan does not append a catalog
+operation merely to refresh its displayed refusal.
 
 
 ### Shared structural projection

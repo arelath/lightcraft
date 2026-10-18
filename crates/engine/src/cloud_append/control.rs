@@ -59,7 +59,7 @@ pub fn effective(storage: &str, library: &str, records: &[(String, Vec<u8>)]) ->
 }
 /// Reading is refused for a newer envelope/reader or an invalid record; any other
 /// blocked state permits receiving but not publication.
-pub fn publication(control: std::result::Result<Control, Blocked>) -> std::result::Result<Option<String>, Blocked> {
+pub fn publication(control: std::result::Result<Control, Blocked>) -> std::result::Result<Option<Blocked>, Blocked> {
     match control.and_then(|c| {
         c.may_read()?;
         // Discovery and its durable cursors currently address epoch one only.
@@ -72,7 +72,7 @@ pub fn publication(control: std::result::Result<Control, Blocked>) -> std::resul
     }) {
         Ok(_) => Ok(None),
         Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_) | Blocked::Deleted)) => Err(blocked),
-        Err(blocked) => Ok(Some(blocked.to_string())),
+        Err(blocked) => Ok(Some(blocked)),
     }
 }
 
@@ -98,7 +98,7 @@ mod tests {
         let keys: BTreeSet<_> = [record(&old).0, record(&maintenance).0, record(&other).0].into_iter().collect();
         let top = latest(&keys);
         assert_eq!(top.len(), 2, "only the greatest revision is fetched");
-        assert!(matches!(publication(effective("p", "library", &[record(&maintenance)])), Ok(Some(why)) if why.contains("moved")));
+        assert!(matches!(publication(effective("p", "library", &[record(&maintenance)])), Ok(Some(why)) if why.to_string().contains("moved")));
         assert!(matches!(effective("p", "library", &[record(&maintenance), record(&other)]), Err(Blocked::Conflict(_))));
         assert_eq!(publication(effective("p", "library", &[record(&other)])), Ok(None));
         let mut tampered = record(&other);

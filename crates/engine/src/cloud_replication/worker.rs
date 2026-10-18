@@ -54,7 +54,7 @@ impl Drop for Pending {
 // its captured portable state; an unchanged owner revision proves that exact
 // snapshot is still current. Any intervening operation uses full comparison.
 fn unchanged_snapshot(catalog: &lightcraft_catalog::Catalog, outcome: &Outcome, pending: &Pending) -> bool {
-    let Outcome::Unchanged { state, position } = outcome else { return false };
+    let Outcome::Unchanged { state, position, .. } = outcome else { return false };
     catalog.revision == pending.started_revision
         && catalog.sync_state().is_some_and(|current| {
             current.protocol.is_head()
@@ -81,10 +81,14 @@ pub struct Jobs {
     /// Why the last completed scan could not publish (maintenance, retirement, newer
     /// writer schema); pending work stays local until it clears.
     publication_blocked: Option<String>,
+    publication_failure: Option<crate::cloud_status::Failure>,
 }
 impl Jobs {
     pub fn publication_blocked(&self) -> Option<&str> {
         self.publication_blocked.as_deref()
+    }
+    pub fn publication_failure(&self) -> Option<&crate::cloud_status::Failure> {
+        self.publication_failure.as_ref()
     }
     pub(crate) fn publication_scan(&mut self, task: u64) {
         self.health.publication_scan(crate::cloud_status::now_ms(), Some(task));
@@ -508,6 +512,8 @@ impl Session {
         let blocked = result.as_ref().ok().and_then(|value| value.get("publicationBlocked")).and_then(Value::as_str).map(str::to_owned);
         if current_owner && result.is_ok() {
             self.cloud_replication_jobs.publication_blocked = blocked.clone();
+            self.cloud_replication_jobs.publication_failure =
+                result.as_ref().ok().and_then(|v| v.get("publicationFailure")).and_then(|v| serde_json::from_value(v.clone()).ok());
         }
         self.cloud_replication_jobs.cadence.scanned(web_time::Instant::now());
         self.cloud_replication_jobs.next_poll = next_delay.map(|delay| web_time::Instant::now() + delay);

@@ -6,7 +6,7 @@ use crate::backend::Backend;
 use lightcraft_engine::assets::sha256;
 use lightcraft_engine::catalog::assets::Asset;
 use lightcraft_engine::catalog::replication::{Mutation, Portable, SyncState};
-use lightcraft_engine::cloud_control::Blocked;
+use lightcraft_engine::cloud_outcome::Publication;
 use lightcraft_engine::cloud_records::replay::{AUTO_CHECKPOINT_BATCHES, Cycle, WINDOW_BATCHES, Window};
 use lightcraft_engine::cloud_records::{Batch, Checkpoint, CheckpointRef, Head, RecordRef};
 use lightcraft_engine::cloud_status::{CloudFailure, FailureKind};
@@ -200,7 +200,9 @@ pub async fn synchronize(
     let marker = lightcraft_engine::cloud_append::manifest_key(&provider.connection.prefix, &local.library).map_err(CloudFailure::from)?;
     let existing = provider.request("GET", &marker, None, None, None, 16 << 10).await?;
     if existing.status == 200 {
-        return Err("this library uses append mode; coordinate migration before continuing".into());
+        return Err(CloudFailure::from(lightcraft_engine::assets::AssetError::Moved(
+            "this library moved to append synchronization; rejoin it before continuing".into(),
+        )));
     }
     if existing.status != 404 {
         return Err("could not verify protocol compatibility; pending work retained".into());
@@ -217,14 +219,10 @@ pub async fn synchronize(
             return Err("remote catalog rolled back below the acknowledged generation; local work retained".into());
         }
         // Checked on every reread, against the exact head the CAS below will replace.
-        let blocked = match lightcraft_engine::cloud_records::publishable(remote.head.as_ref().map(|(head, _)| head), &local.library) {
-            Ok(_) => None,
-            Err(blocked @ (Blocked::UpdateToRead(_) | Blocked::Invalid(_))) => return Err(blocked.into()),
-            Err(blocked) => Some(blocked.to_string()),
-        };
+        let capability = Publication::head(remote.head.as_ref().map(|(head, _)| head), &local.library)?;
         if let Some((covers, generation)) = remote.recovery.take() {
-            if let Some(blocked) = blocked {
-                return Err(blocked.into());
+            if let Publication::Blocked(blocked) = &capability {
+                return Err(blocked.clone().into());
             }
             let epoch = remote.head.as_ref().map_or(Ok(1), |(head, _)| head.control().map(|c| c.epoch))?;
             let checkpoint = checkpoint(provider, &mut remote.state, covers, generation, epoch).await?;
@@ -256,15 +254,15 @@ pub async fn synchronize(
                     && local.cursor.as_deref() == Some(position.cursor())
                     && local.generation == position.generation()
                 {
-                    Outcome::unchanged(state, position)
+                    Outcome::unchanged(state, position).with_publication(capability)
                 } else {
-                    Outcome::head(state, position, local.pending.keys().cloned().collect())
+                    Outcome::head(state, position, local.pending.keys().cloned().collect()).with_publication(capability)
                 },
             );
         }
-        if let Some(blocked) = blocked {
+        if let Publication::Blocked(blocked) = capability {
             // Receive-only: apply remote state, keep pending work until publishable again.
-            let (head, _) = remote.head.ok_or(blocked.clone())?;
+            let (head, _) = remote.head.ok_or_else(|| CloudFailure::from(blocked.clone()))?;
             let state = super::history::certify(provider, local, &remote.state.portable(), &mut archive_proofs).await?;
             let acknowledged = local.pending.keys().filter(|id| remote.state.received.contains_key(*id)).cloned().collect();
             return Ok(Outcome::head_blocked(state, HeadPosition::new(head.tip.hash.0, head.generation)?, acknowledged, blocked));
@@ -380,7 +378,8 @@ pub(super) async fn receive_only(provider: &Provider, local: &SyncState) -> Resu
     let mut proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
     let remote = read(provider, &local.library, false, &mut proofs).await?;
     let (head, _) = remote.head.ok_or("cloud library has no head")?;
+    let capability = Publication::head(Some(&head), &local.library)?;
     let state = super::history::certify(provider, local, &remote.state.portable(), &mut proofs).await?;
     let acknowledged = local.pending.keys().filter(|id| remote.state.received.contains_key(*id)).cloned().collect();
-    Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation)?, acknowledged))
+    Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation)?, acknowledged).with_publication(capability))
 }

@@ -169,6 +169,67 @@ fn concurrent_edit_after_activation_never_advances_cursor_without_its_state() {
 }
 
 #[test]
+fn clean_readable_blocked_polls_preserve_typed_capability_without_journal_or_remote_writes() {
+    use lightcraft_engine::cloud_status::{Diagnostic, Recovery};
+    for (mode, kind, recovery) in [
+        ("maintenance", "contention", Recovery::Retry),
+        ("newer-writer", "unsupported", Recovery::Update),
+        ("retired", "unsupported", Recovery::Rejoin),
+    ] {
+        let f = Fixture::new();
+        let (a, _) = initialize(&f);
+        let library = catalog(&a).sync_state().unwrap().library.clone();
+        let mut value: Value = serde_json::from_slice(&upgrading_head(&f, 4_000_000_000_000)).unwrap();
+        match mode {
+            "newer-writer" => {
+                value["control"]["state"] = json!("active");
+                value["control"].as_object_mut().unwrap().remove("migration");
+                value["control"]["schema"] = json!(2);
+                value["control"]["minimumWriter"] = json!(2);
+            }
+            "retired" => {
+                value["control"]["state"] = json!("retired");
+                value["control"].as_object_mut().unwrap().remove("migration");
+                value["control"]["successor"] = json!({"protocol":"append-log-v1","epoch":1,
+                    "manifest":support::hash(&lightcraft_engine::cloud_append::manifest(&library).unwrap())});
+            }
+            _ => {}
+        }
+        f.state.lock().unwrap().objects.insert(HEAD.into(), serde_json::to_vec(&value).unwrap());
+        let objects = f.state.lock().unwrap().objects.clone();
+        // Receive the new head once, then exercise the unchanged fast path in a new
+        // CLI process. No pending edits are needed for compatibility to matter.
+        ok(&f, &a, &[("cloud.sync", json!({}))]);
+        let snapshot = catalog(&a).to_snapshot();
+        let files = ["catalog.snap", "catalog.log"].map(|name| (name, std::fs::read(a.join(name)).unwrap()));
+        let start = f.state.lock().unwrap().requests.len();
+        let rows =
+            ok(&f, &a, &[("cloud.sync", json!({})), ("cloud.syncStatus", json!({})), ("cloud.sync", json!({})), ("cloud.syncStatus", json!({}))]);
+        for pair in rows.chunks_exact(2) {
+            let result = &pair[0]["result"];
+            let status = &pair[1]["result"];
+            assert_eq!(result["unchanged"], true, "{mode}: {rows:?}");
+            assert_eq!(result["publicationAllowed"], false, "{mode}: {rows:?}");
+            assert!(result["publicationBlocked"].is_string(), "{mode}: {rows:?}");
+            assert_eq!(result["publicationFailure"]["kind"], kind, "{mode}: {rows:?}");
+            assert_eq!(status["publicationFailure"]["kind"], kind, "{mode}: {rows:?}");
+            assert_eq!(status["health"]["lastError"], Value::Null, "a readable scan succeeds");
+            assert_eq!(status["health"]["retry"]["attempt"], 0);
+            assert_eq!(status["health"]["retry"]["scheduled"], false);
+            assert_eq!(Diagnostic::from_sync_status(status).unwrap().recovery(), Some(recovery));
+        }
+        for (name, bytes) in files {
+            assert_eq!(std::fs::read(a.join(name)).unwrap(), bytes, "{mode}: {name}");
+        }
+        assert_eq!(catalog(&a).to_snapshot(), snapshot);
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.objects, objects);
+        assert!(state.requests[start..].iter().all(|(method, _)| method == "GET"));
+        assert_eq!(state.signature_errors, 0);
+    }
+}
+
+#[test]
 fn held_lease_refuses_other_upgraders_and_cancellation_restores_the_same_epoch() {
     let f = Fixture::new();
     let (a, b) = initialize(&f);

@@ -24,7 +24,8 @@ pub struct Failure {
     pub operation: Option<String>,
 }
 impl Failure {
-    fn classified(error: &CloudFailure, task: Option<u64>) -> Self {
+    /// Normalize producer-supplied provenance for status and readable publication blocks.
+    pub fn classified(error: &CloudFailure, task: Option<u64>) -> Self {
         let mut failure = Self::new(&error.message, task);
         failure.kind = Some(error.kind);
         failure.http_status = error.http_status;

@@ -402,16 +402,17 @@ fn cloud_popup_says_publishing_is_blocked_and_counts_field_conflicts() {
         h.step();
     }
     let text = h.view.painted_text();
-    for label in [
-        "Publishing paused",
-        "another device is upgrading this cloud library",
-        "Your 2 changes wait here.",
-        "1 conflicting edit",
-        "3 photos in 1 album",
-    ] {
+    for label in ["Publishing paused", "Open Details for the diagnostic.", "Your 2 changes wait here.", "1 conflicting edit", "3 photos in 1 album"] {
         assert!(text.iter().any(|value| value.contains(label)), "missing {label}: {text:?}");
     }
     assert!(!text.iter().any(|value| value == "Up to date"));
+    assert!(!text.iter().any(|value| value.contains("another device is upgrading this cloud library")));
+    assert_eq!(h.request("ui.clickWidget", json!({"id":"button:cloudPublicationDetails"}), T)["ok"], true);
+    for _ in 0..4 {
+        h.step();
+    }
+    assert!(h.painted_text().iter().any(|value| value.contains("another device is upgrading this cloud library")));
+    assert!(!h.app.widgets.iter().any(|(id, _)| id == "button:cloudErrorConnection"));
 }
 
 #[test]

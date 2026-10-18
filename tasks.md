@@ -290,7 +290,7 @@ checks pass; provider access and an actual schema change are separate prerequisi
 
 - [x] **CR.48** Prevent publication to an unsupported append epoch/root; verify native and browser paths preserve the typed refusal.
 - [x] **CR.51** Renew upgrade ownership through expensive reads/writes, stop stale or cancelled workers before further output, and keep activation state and its durable cursor coherent when another device publishes immediately after activation.
-- [ ] **CR.50** Preserve publication capability on every readable head outcome, including unchanged clean polls.
+- [x] **CR.50** Preserve publication capability on every readable head outcome, including unchanged clean polls.
 - [ ] **CR.54** Isolate saved credential profiles for independent libraries with the same connection name.
 - [ ] **CR.52** Recover browser blob/index publication durably after interruption or policy-save failure, preserving all libraries' protections.
 - [ ] **CR.55** Paginate and validate guided library discovery, including retired heads, successors and duplicate identities.

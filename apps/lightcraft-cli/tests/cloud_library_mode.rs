@@ -1227,3 +1227,122 @@ fn unsupported_append_epoch_preserves_pending_work_and_opens_update_details() {
     assert_eq!(f.state.lock().unwrap().requests.iter().filter(|(m, _)| m == "PUT").count(), puts);
     assert_eq!(f.state.lock().unwrap().signature_errors, 0);
 }
+
+#[test]
+#[ignore = "explicit native clean-head capability acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn clean_head_capability_survives_polls_and_opens_cause_specific_details() {
+    use lightcraft_engine::{
+        catalog::{FsStore, Journal},
+        cloud_control::{Boundary, Control, Plan, State, Successor},
+    };
+    for (mode, kind, remedy) in
+        [("maintenance", "contention", "retry"), ("newer-writer", "unsupported", "update"), ("retired", "unsupported", "rejoin")]
+    {
+        let f = support::Fixture::new();
+        let local = f.dir.join("clean-head");
+        f.import(&local, false);
+        let (out, rows) =
+            f.run(&local, &[("cloud.upload", json!({})), ("cloud.syncEnable", json!({"connection":"personal"})), ("cloud.sync", json!({}))]);
+        assert!(out.status.success(), "{rows:?}");
+        let saved = Journal::open(Box::new(FsStore::open(&local).unwrap())).unwrap().1;
+        let library = saved.sync_state().unwrap().library.clone();
+        assert!(saved.sync_state().unwrap().pending.is_empty());
+        let head_key = "/photos/library/catalog/head.json";
+        let mut head: Value = serde_json::from_slice(&f.state.lock().unwrap().objects[head_key]).unwrap();
+        let control = match mode {
+            "maintenance" => Control::initial(&library)
+                .begin(
+                    "review",
+                    Plan::Rebase,
+                    Boundary { tip: head["tip"]["hash"].as_str().unwrap().into(), generation: head["generation"].as_u64().unwrap() },
+                    "other-device",
+                    &"ab".repeat(32),
+                    4_000_000_000_000,
+                )
+                .unwrap(),
+            "newer-writer" => Control { schema: 2, minimum_writer: 2, revision: 1, ..Control::initial(&library) },
+            _ => Control {
+                state: State::Retired,
+                revision: 1,
+                successor: Some(Successor {
+                    protocol: "append-log-v1".into(),
+                    epoch: 1,
+                    manifest: support::hash(&lightcraft_engine::cloud_append::manifest(&library).unwrap()),
+                }),
+                ..Control::initial(&library)
+            },
+        };
+        control.may_read().unwrap();
+        let marker = serde_json::to_vec(&json!({"version":3,"parent":head["tip"],"imports":[],"checkpointMarker":true})).unwrap();
+        let hash = support::hash(&marker);
+        let key = format!("library/catalog/changes/{hash}.json");
+        head["tip"] = json!({"key":key,"hash":hash,"size":marker.len()});
+        head["generation"] = json!(head["generation"].as_u64().unwrap() + 1);
+        head["control"] = json!(control);
+        {
+            let mut state = f.state.lock().unwrap();
+            state.objects.insert(format!("/photos/{key}"), marker);
+            state.objects.insert(head_key.into(), serde_json::to_vec(&head).unwrap());
+        }
+        let objects = f.state.lock().unwrap().objects.clone();
+        let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join(mode);
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let mut app = Desktop::start(&f, &local, &artifacts);
+        let wait = |app: &mut Desktop| {
+            let until = Instant::now() + Duration::from_secs(30);
+            loop {
+                let status = app.execute("cloud.syncStatus", json!({}));
+                if !status["running"].as_bool().unwrap() && status["publicationFailure"]["kind"] == kind {
+                    return status;
+                }
+                assert!(Instant::now() < until, "{mode}: {status}");
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        };
+        if app.execute("cloud.syncStatus", json!({}))["running"] != true {
+            let initial = app.raw("engine.execute", json!({"command":"cloud.sync","params":{"wait":false}}));
+            assert!(initial["ok"] == true || initial["error"].as_str().is_some_and(|e| e.contains("already running")), "{initial}");
+        }
+        wait(&mut app);
+        let files = ["catalog.snap", "catalog.log"].map(|name| (name, std::fs::read(local.join(name)).unwrap()));
+        for _ in 0..3 {
+            let task = app.execute("cloud.sync", json!({"wait":false}))["task"].as_u64().unwrap();
+            let until = Instant::now() + Duration::from_secs(30);
+            loop {
+                let status = app.execute("cloud.syncStatus", json!({}));
+                if let Some(report) = status["reports"].as_array().unwrap().iter().find(|r| r["task"] == task) {
+                    assert_eq!(report["ok"], true, "{mode}: {report}");
+                    assert_eq!(report["result"]["unchanged"], true);
+                    assert_eq!(status["publicationFailure"]["kind"], kind);
+                    assert_eq!(status["health"]["retry"]["attempt"], 0);
+                    break;
+                }
+                assert!(Instant::now() < until, "{mode}: {status}");
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        }
+        for (name, bytes) in files {
+            assert_eq!(std::fs::read(local.join(name)).unwrap(), bytes, "{mode}: {name}");
+        }
+        app.click_when_ready("icon:cloud");
+        app.ask("ui.screenshot", json!({"path":artifacts.join("popup.png"),"headless":true}));
+        app.click_when_ready("button:cloudPublicationDetails");
+        app.ask("ui.screenshot", json!({"path":artifacts.join("details.png"),"headless":true}));
+        let inspect = app.ask("ui.inspect", json!({}));
+        assert_eq!(inspect["cloudDiagnostic"]["failure"]["kind"], kind);
+        assert_eq!(inspect["cloudDiagnostic"]["failure"]["recovery"], remedy);
+        std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&inspect).unwrap()).unwrap();
+        assert_eq!(f.state.lock().unwrap().objects, objects);
+        assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+        app.ask("app.quit", json!({}));
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = app.child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < until, "native app did not quit");
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+}

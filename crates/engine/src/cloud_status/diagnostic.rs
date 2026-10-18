@@ -30,7 +30,8 @@ impl Diagnostic {
     pub fn from_sync_status(status: &Value) -> Option<Self> {
         Self::from_overview(
             &serde_json::json!({"health":{"sync":status["health"]},"syncEnabled":status["enabled"],
-            "preparingMigration":status["preparingMigration"],"migrating":status["migrating"]}),
+            "preparingMigration":status["preparingMigration"],"migrating":status["migrating"],
+            "publicationBlocked":status["publicationBlocked"],"publicationFailure":status["publicationFailure"]}),
             false,
         )
     }
@@ -40,6 +41,10 @@ impl Diagnostic {
         let sync = &data["health"]["sync"];
         let (failure, operation, resource) = if !storage && sync["lastError"].is_object() {
             (decode_failure(&sync["lastError"])?, "Cloud synchronization", None)
+        } else if !storage && data["publicationFailure"].is_object() {
+            (decode_failure(&data["publicationFailure"])?, "Cloud synchronization", None)
+        } else if !storage && data["publicationBlocked"].is_string() {
+            return Self::from_publication(data);
         } else {
             let message = data["error"].as_str()?;
             let resource = data["health"]["uploads"]["activity"]["failures"]
@@ -51,8 +56,19 @@ impl Diagnostic {
                 (Failure::new(message, None), "Cloud storage", None)
             }
         };
+        Some(Self::snapshot(data, storage, failure, operation, resource))
+    }
+    /// Keep publication Details independent of a simultaneous polling failure.
+    /// Legacy reasons remain unclassified and cannot grant a repair action.
+    pub fn from_publication(data: &Value) -> Option<Self> {
+        let failure =
+            decode_failure(&data["publicationFailure"]).or_else(|| data["publicationBlocked"].as_str().map(|reason| Failure::new(reason, None)))?;
+        Some(Self::snapshot(data, true, failure, "Cloud synchronization", None))
+    }
+    fn snapshot(data: &Value, storage: bool, failure: Failure, operation: &str, resource: Option<String>) -> Self {
+        let sync = &data["health"]["sync"];
         let operation = failure.operation.clone().unwrap_or_else(|| operation.into());
-        Some(Self {
+        Self {
             failure,
             operation,
             resource,
@@ -62,7 +78,7 @@ impl Diagnostic {
             running: sync["running"] == true,
             enabled: data["syncEnabled"] != false,
             migration_paused: data["preparingMigration"] == true || data["migrating"] == true || sync["migrationPaused"] == true,
-        })
+        }
     }
     pub fn recovery(&self) -> Option<Recovery> {
         self.failure.recovery.or_else(|| self.failure.kind.map(Recovery::for_kind))

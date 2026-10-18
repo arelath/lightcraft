@@ -190,12 +190,16 @@ fn attention_row(app: &mut LightcraftApp, ui: &mut egui::Ui, icon: Icon, title: 
                     if response.clicked() {
                         let command = if id == "button:cloudChoose" {
                             "dialog.cloudConflicts"
-                        } else if id == "button:cloudStorageDetails" || id == "button:cloudErrorDetails" {
+                        } else if matches!(id, "button:cloudStorageDetails" | "button:cloudErrorDetails" | "button:cloudPublicationDetails") {
                             "dialog.cloudError"
                         } else {
                             "dialog.cloudMaintenance"
                         };
-                        let params = if command == "dialog.cloudError" { json!({"storage":id == "button:cloudStorageDetails"}) } else { json!({}) };
+                        let params = if command == "dialog.cloudError" {
+                            json!({"storage":id == "button:cloudStorageDetails", "publication":id == "button:cloudPublicationDetails"})
+                        } else {
+                            json!({})
+                        };
                         invoke(app, ui, command, params);
                     }
                 }
@@ -392,7 +396,7 @@ fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
     let summary = &data["summary"];
     let paused = data["paused"] == true;
     let blocked = summary["blockedImports"].as_array();
-    if let Some(reason) = data["publicationBlocked"].as_str() {
+    if let Some(diagnostic) = lightcraft_engine::cloud_status::Diagnostic::from_publication(data) {
         let changes = summary["pendingChanges"].as_u64().unwrap_or(0);
         let waiting = if changes == 1 {
             crate::i18n::tr("Your change waits here.").to_owned()
@@ -401,8 +405,8 @@ fn attention_details(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
         } else {
             String::new()
         };
-        let detail = format!("{reason} {waiting}");
-        attention_row(app, ui, Icon::Pause, "Publishing paused", &detail, None);
+        let detail = format!("{} {waiting}", crate::i18n::tr(diagnostic.short_cause()));
+        attention_row(app, ui, Icon::Pause, "Publishing paused", &detail, Some(("button:cloudPublicationDetails", "Details")));
     }
     let fields = data["health"]["conflicts"]["fields"].as_u64().unwrap_or_else(|| data["conflicts"].as_array().map_or(0, |v| v.len() as u64));
     let structural =
@@ -733,6 +737,43 @@ mod tests {
             }
             assert!(!has(&h, "popup:cloud"));
         }
+    }
+    #[test]
+    fn publication_details_keep_typed_recovery_separate_from_polling_errors() {
+        use lightcraft_engine::{
+            cloud_control::Blocked,
+            cloud_status::{CloudFailure, Failure},
+        };
+        for blocked in [
+            Blocked::Maintenance { migration: "review".into(), plan: lightcraft_engine::cloud_control::Plan::Rebase, owner: "another device".into() },
+            Blocked::UpdateToWrite("schema 2".into()),
+            Blocked::Retired(lightcraft_engine::cloud_control::Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "ab".repeat(32) }),
+        ] {
+            let error = CloudFailure::from(blocked);
+            let mut data = overview();
+            data["publicationBlocked"] = json!(error.message);
+            data["publicationFailure"] = json!(Failure::classified(&error, None));
+            // A different subsystem error must not replace this row's diagnostic.
+            data["health"]["sync"]["lastError"] = json!({"kind":"connectivity","message":"Different polling failure"});
+            let mut h = open(data, [1200., 900.]);
+            assert!(!h.painted_text().iter().any(|text| text == &error.message));
+            assert!(has(&h, "button:cloudErrorDetails"));
+            click(&mut h, "button:cloudPublicationDetails");
+            text(&h, &error.message);
+            let Some(crate::state::Dialog::CloudError { diagnostic, .. }) = &h.app.ui.dialog else {
+                panic!("Details did not open");
+            };
+            assert_eq!(diagnostic.failure.kind, Some(error.kind));
+            assert_eq!(diagnostic.recovery(), error.remedy);
+            assert!(!has(&h, "button:cloudErrorConnection"));
+        }
+        let mut data = overview();
+        data["publicationBlocked"] = json!("authentication schema words in an old unclassified reason");
+        let mut h = open(data, [1200., 900.]);
+        click(&mut h, "button:cloudPublicationDetails");
+        text(&h, "authentication schema words in an old unclassified reason");
+        assert!(!has(&h, "button:cloudErrorRetry"));
+        assert!(!has(&h, "button:cloudErrorConnection"));
     }
     #[test]
     fn empty_library_details_show_original_error_and_only_relevant_repair_actions() {
