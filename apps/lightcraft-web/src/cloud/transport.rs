@@ -50,6 +50,7 @@ struct TransferDeadline {
     window: web_sys::Window,
     timer: i32,
     _callback: Closure<dyn FnMut()>,
+    controller: web_sys::AbortController,
 }
 impl TransferDeadline {
     fn new(options: &RequestInit, cancel: Arc<AtomicBool>) -> Result<Self, CloudFailure> {
@@ -57,18 +58,20 @@ impl TransferDeadline {
         let controller = web_sys::AbortController::new().map_err(js_error)?;
         options.set_signal(Some(&controller.signal()));
         let deadline = web_time::Instant::now() + std::time::Duration::from_secs(120);
+        let abort = controller.clone();
         let callback = Closure::<dyn FnMut()>::new(move || {
             if cancel.load(Ordering::Relaxed) || web_time::Instant::now() >= deadline {
-                controller.abort();
+                abort.abort();
             }
         });
         let timer = window.set_interval_with_callback_and_timeout_and_arguments_0(callback.as_ref().unchecked_ref(), 200).map_err(js_error)?;
-        Ok(Self { window, timer, _callback: callback })
+        Ok(Self { window, timer, _callback: callback, controller })
     }
 }
 impl Drop for TransferDeadline {
     fn drop(&mut self) {
         self.window.clear_interval_with_handle(self.timer);
+        self.controller.abort();
     }
 }
 async fn fetch(request: &Request, cancel: &AtomicBool) -> Result<Response, CloudFailure> {

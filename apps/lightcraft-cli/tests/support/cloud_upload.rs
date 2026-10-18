@@ -125,6 +125,9 @@ pub struct State {
     pub lost_head: bool,
     /// Lose the response of the first accepted head PUT whose body contains this text.
     pub lost_head_matching: Option<String>,
+    /// Publish this valid mutation immediately after an epoch-two activation, before
+    /// the upgrader can confirm it (including when the activation response is lost).
+    pub after_activation_mutation: Option<Value>,
     /// Refuse matching object PUTs before mutation: (path fragment, body fragment).
     pub refuse_put: Option<(String, String)>,
     pub stop_after_recovery_prefix: bool,
@@ -638,6 +641,21 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
             }
             etag = Some(tag(&body));
             state.objects.insert(key.to_string(), body);
+            if key.ends_with("/catalog/head.json") {
+                let mut head: Value = serde_json::from_slice(&state.objects[key]).unwrap();
+                if head["control"]["state"] == "active"
+                    && head["control"]["epoch"] == 2
+                    && let Some(mutation) = state.after_activation_mutation.take()
+                {
+                    let batch = serde_json::to_vec(&json!({"version":3,"parent":head["tip"],"imports":[],"mutations":[mutation]})).unwrap();
+                    let digest = hash(&batch);
+                    let batch_key = format!("library/catalog/epochs/2/changes/{digest}.json");
+                    head["tip"] = json!({"key":batch_key,"hash":digest,"size":batch.len()});
+                    head["generation"] = json!(head["generation"].as_u64().unwrap() + 1);
+                    state.objects.insert(format!("/photos/{batch_key}"), batch);
+                    state.objects.insert(key.to_string(), serde_json::to_vec(&head).unwrap());
+                }
+            }
         }
     } else {
         status = 400;

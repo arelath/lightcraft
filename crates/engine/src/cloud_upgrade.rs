@@ -15,6 +15,9 @@ use std::sync::atomic::AtomicBool;
 
 type Result<T> = std::result::Result<T, CloudFailure>;
 const ATTEMPTS: usize = 16;
+mod lease;
+use crate::cloud_control::lease::Lease;
+use std::sync::Mutex;
 fn invalid(message: impl Into<String>) -> CloudFailure {
     CloudFailure::new(FailureKind::InvalidHistory, message)
 }
@@ -70,15 +73,15 @@ fn read(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result
 /// One control transition carried by an empty marker batch (so the tip and generation
 /// always advance together). Returns the confirmed head; a lost response is resolved
 /// by rereading and checking for exactly the control that was written.
-fn transition(
+fn transition_control(
     connection: &S3Connection,
     library: &str,
     cancel: &AtomicBool,
-    next: impl Fn(&Head, &Control) -> std::result::Result<Control, Failure>,
+    next: impl Fn(&Head, &Control) -> std::result::Result<Option<Control>, Failure>,
 ) -> std::result::Result<Head, Failure> {
     for _ in 0..ATTEMPTS {
         let (head, etag, control) = read(connection, library, cancel)?;
-        let wanted = next(&head, &control)?;
+        let Some(wanted) = next(&head, &control)? else { return Ok(head) };
         match crate::cloud_replication::commit(
             connection,
             Some((&head, &etag)),
@@ -103,6 +106,40 @@ fn transition(
         // Another commit or transition won; recompute from the new head.
     }
     Err(CloudFailure::new(FailureKind::Contention, "cloud library head remained busy; upgrade not started or not confirmed").into())
+}
+
+fn transition(
+    connection: &S3Connection,
+    library: &str,
+    cancel: &AtomicBool,
+    next: impl Fn(&Head, &Control) -> std::result::Result<Control, Failure>,
+) -> std::result::Result<Head, Failure> {
+    transition_control(connection, library, cancel, |h, c| next(h, c).map(Some))
+}
+
+fn with_lease<T>(
+    connection: &S3Connection,
+    library: &str,
+    acquired: Control,
+    cancel: &AtomicBool,
+    body: impl FnOnce(&AtomicBool, &Mutex<Lease>) -> Result<T>,
+) -> Result<T> {
+    let ownership = Mutex::new(Lease::new(acquired)?);
+    lease::run(
+        cancel,
+        |io_cancel| {
+            if !ownership.lock().unwrap_or_else(std::sync::PoisonError::into_inner).due(now_ms()) {
+                return Ok(());
+            }
+            let head = transition_control(connection, library, io_cancel, |_, control| {
+                ownership.lock().unwrap_or_else(std::sync::PoisonError::into_inner).renewal(control, now_ms()).map_err(Failure::from)
+            })
+            .map_err(CloudFailure::from)?;
+            ownership.lock().unwrap_or_else(std::sync::PoisonError::into_inner).confirmed(&head.control().map_err(invalid)?);
+            Ok(())
+        },
+        |work_cancel| body(work_cancel, &ownership),
+    )
 }
 
 /// Acquire maintenance: begin a new migration, resume our own (same installation) or
@@ -132,71 +169,81 @@ fn owned<'a>(head: &'a Head, token: &str) -> Result<&'a crate::cloud_control::Mi
 fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &AtomicBool) -> Result<Outcome> {
     let library = &local.library;
     let (head, token) = acquire(connection, library, Plan::Rebase, owner, cancel)?;
-    let migration = owned(&head, &token)?.clone();
-    let spec = head.control().map_err(invalid)?.migration_spec()?;
-    match spec.converter() {
-        crate::cloud_control::Converter::Identity => crate::cloud_control::translate_mutation(spec.source_schema(), spec.target_schema())
-            .map_err(|why| CloudFailure::new(FailureKind::Unsupported, why))?,
-    }
-    // The maintenance head holds only marker batches after the frozen source, so
-    // its full verified history is exactly the source state.
-    let mut proofs = Default::default();
-    let mut source = crate::cloud_replication::read_with_witness(connection, library, &mut proofs, cancel)?;
-    let publishing = transition(connection, library, cancel, |head, control| {
-        owned(head, &token)?;
-        Ok(control.begin_output(&token, now_ms())?)
-    })?;
-    let epoch = migration.target_epoch;
-    let first = publication::encode(&Batch { version: 3, parent: None, imports: Vec::new(), mutations: Vec::new(), checkpoint_marker: true })?;
-    let first_ref = crate::cloud_replication::batch_ref(connection, epoch, &first)?;
-    crate::cloud_replication::write_immutable(connection, &first_ref.key, &first, cancel)?;
-    let base = publishing.generation.checked_add(1).ok_or_else(|| invalid("generation exhausted"))?;
-    let checkpoint: CheckpointRef = crate::cloud_replication::checkpoint(connection, &mut source.state, first_ref.clone(), base, epoch, cancel)?;
-    // Verify the replacement before activation: exact bytes, structure and state.
-    let written = crate::cloud_replication::read_checkpoint(connection, &checkpoint, cancel)?;
-    if written.state != source.state.portable() {
-        return Err(CloudFailure::integrity("upgraded checkpoint does not reproduce the frozen source state; old epoch remains active"));
-    }
-    // A long build renews the lease before activation, so it is not taken over at the end.
-    if now_ms() >= migration.lease_until_ms.saturating_sub(crate::cloud_control::LEASE_MS / 2) {
-        transition(connection, library, cancel, |head, control| {
+    with_lease(connection, library, head.control().map_err(invalid)?, cancel, |cancel, ownership| {
+        let migration = owned(&head, &token)?.clone();
+        let spec = head.control().map_err(invalid)?.migration_spec()?;
+        match spec.converter() {
+            crate::cloud_control::Converter::Identity => crate::cloud_control::translate_mutation(spec.source_schema(), spec.target_schema())
+                .map_err(|why| CloudFailure::new(FailureKind::Unsupported, why))?,
+        }
+        // The maintenance head holds only marker batches after the frozen source, so
+        // its full verified history is exactly the source state.
+        let mut proofs = Default::default();
+        let mut source = crate::cloud_replication::read_with_witness(connection, library, &mut proofs, cancel)?;
+        let publishing = transition(connection, library, cancel, |head, control| {
             owned(head, &token)?;
-            Ok(control.renew(&token, now_ms())?)
+            Ok(control.begin_output(&token, now_ms())?)
         })?;
-    }
-    let mut activated = None;
-    for _ in 0..ATTEMPTS {
-        let (current, etag, control) = read(connection, library, cancel)?;
-        // A lost activation response: the reread shows our epoch with our checkpoint.
-        if control.state == State::Active && control.epoch == epoch && current.checkpoint.as_ref().map(|c| &c.object) == Some(&checkpoint.object) {
-            activated = Some(current);
-            break;
+        let epoch = migration.target_epoch;
+        let first = publication::encode(&Batch { version: 3, parent: None, imports: Vec::new(), mutations: Vec::new(), checkpoint_marker: true })?;
+        let first_ref = crate::cloud_replication::batch_ref(connection, epoch, &first)?;
+        crate::cloud_replication::write_immutable(connection, &first_ref.key, &first, cancel)?;
+        let base = publishing.generation.checked_add(1).ok_or_else(|| invalid("generation exhausted"))?;
+        let checkpoint: CheckpointRef = crate::cloud_replication::checkpoint(connection, &mut source.state, first_ref.clone(), base, epoch, cancel)?;
+        // Verify the replacement before activation: exact bytes, structure and state.
+        let written = crate::cloud_replication::read_checkpoint(connection, &checkpoint, cancel)?;
+        if written.state != source.state.portable() {
+            return Err(CloudFailure::integrity("upgraded checkpoint does not reproduce the frozen source state; old epoch remains active"));
         }
-        owned(&current, &token)?;
-        let wanted = control.activate(&token)?;
-        // The checkpoint records generation `base`; the activation head must follow both
-        // it and any renewal/takeover heads written meanwhile.
-        let generation = current.generation.max(base).checked_add(1).ok_or_else(|| invalid("generation exhausted"))?;
-        match crate::cloud_replication::commit(
-            connection,
-            Some((&current, &etag)),
-            Some(first_ref.clone()),
-            Vec::new(),
-            Some(checkpoint.clone()),
-            Some(generation),
-            wanted,
-            library,
-            cancel,
-        ) {
-            Ok(_) => {}
-            Err(error) if error.uncertain_write() => {}
-            Err(error) => return Err(error.into()),
+        ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect_completion(publishing.control().map_err(invalid)?.activate(&token)?)?;
+        let mut activated = None;
+        for _ in 0..ATTEMPTS {
+            let (current, etag, control) = read(connection, library, cancel)?;
+            // A lost activation response: the reread shows our epoch with our checkpoint.
+            if control.state == State::Active && control.epoch == epoch && current.checkpoint.as_ref().map(|c| &c.object) == Some(&checkpoint.object)
+            {
+                activated = Some(current);
+                break;
+            }
+            owned(&current, &token)?;
+            let wanted = control.activate(&token)?;
+            // The checkpoint records generation `base`; the activation head must follow both
+            // it and any renewal/takeover heads written meanwhile.
+            let generation = current.generation.max(base).checked_add(1).ok_or_else(|| invalid("generation exhausted"))?;
+            match crate::cloud_replication::commit(
+                connection,
+                Some((&current, &etag)),
+                Some(first_ref.clone()),
+                Vec::new(),
+                Some(checkpoint.clone()),
+                Some(generation),
+                wanted,
+                library,
+                cancel,
+            ) {
+                Ok(_) => {}
+                Err(error) if error.uncertain_write() => {}
+                Err(error) => return Err(error.into()),
+            }
         }
-    }
-    let activated = activated.ok_or_else(|| CloudFailure::connectivity("activation not confirmed; reread before retrying"))?;
-    let state = crate::cloud_history::native::certify(connection, local, &source.state.portable(), &mut proofs, cancel)?;
-    let acknowledged = local.pending.keys().filter(|id| source.state.received.contains_key(*id)).cloned().collect();
-    Ok(Outcome::head(state, HeadPosition::new(activated.tip.hash.0, activated.generation).map_err(invalid)?, acknowledged))
+        activated.ok_or_else(|| CloudFailure::connectivity("activation not confirmed; reread before retrying"))?;
+        // Another device may publish after activation, even before its response or
+        // confirmation GET reaches us. Never pair the frozen source with that newer
+        // cursor: replay one head snapshot and save only its matching state/position.
+        let confirmed = crate::cloud_replication::read_with_witness(connection, library, &mut proofs, cancel)?;
+        let (head, _) = confirmed.head.ok_or_else(|| invalid("activated cloud library head disappeared"))?;
+        let control = head.control().map_err(invalid)?;
+        control.may_read()?;
+        if control.state != State::Active || control.epoch != epoch || head.checkpoint.as_ref().map(|c| &c.object) != Some(&checkpoint.object) {
+            return Err(taken_over());
+        }
+        let state = crate::cloud_history::native::certify(connection, local, &confirmed.state.portable(), &mut proofs, cancel)?;
+        let acknowledged = local.pending.keys().filter(|id| confirmed.state.received.contains_key(*id)).cloned().collect();
+        Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged))
+    })
 }
 
 /// Seed the append protocol from the frozen head and retire the head, so conforming
@@ -215,8 +262,8 @@ fn append_log(connection: &S3Connection, local: &SyncState, owner: &str, writers
     }
     let (_, _, control) = read(connection, library, cancel)?;
     if control.state != State::Retired {
-        let token = match acquire(connection, library, Plan::AppendLog, owner, cancel) {
-            Ok((_, token)) => token,
+        let (acquired, token) = match acquire(connection, library, Plan::AppendLog, owner, cancel) {
+            Ok(value) => value,
             // Without conditional writes no conforming device can commit to this head, so
             // it is already frozen; the operator's confirmation covers older binaries.
             Err(Failure::Unsupported(_)) if writers_stopped => {
@@ -230,15 +277,22 @@ fn append_log(connection: &S3Connection, local: &SyncState, owner: &str, writers
             }
             Err(Failure::Other(error)) => return Err(error),
         };
-        transition(connection, library, cancel, |head, control| {
-            owned(head, &token)?;
-            Ok(control.begin_output(&token, now_ms())?)
-        })?;
-        crate::cloud_append::migration::seed(connection, local, cancel).map_err(CloudFailure::from)?;
-        let successor = Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: manifest.clone() };
-        transition(connection, library, cancel, |head, control| {
-            owned(head, &token)?;
-            Ok(control.retire(&token, successor.clone())?)
+        with_lease(connection, library, acquired.control().map_err(invalid)?, cancel, |cancel, ownership| {
+            let publishing = transition(connection, library, cancel, |head, control| {
+                owned(head, &token)?;
+                Ok(control.begin_output(&token, now_ms())?)
+            })?;
+            crate::cloud_append::migration::seed(connection, local, cancel).map_err(CloudFailure::from)?;
+            let successor = Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: manifest.clone() };
+            ownership
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .expect_completion(publishing.control().map_err(invalid)?.retire(&token, successor.clone())?)?;
+            transition(connection, library, cancel, |head, control| {
+                owned(head, &token)?;
+                Ok(control.retire(&token, successor.clone())?)
+            })?;
+            Ok(())
         })?;
     }
     rejoin(connection, local, &manifest, cancel)

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod capability;
+pub mod lease;
 pub use capability::{Converter, MigrationSpec};
 
 /// Envelope format this build understands. A newer envelope is refused before any

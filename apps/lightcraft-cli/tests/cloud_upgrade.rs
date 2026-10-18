@@ -140,6 +140,35 @@ fn commit_racing_maintenance_stays_pending_then_takeover_rebases_and_offline_wor
 }
 
 #[test]
+fn concurrent_edit_after_activation_never_advances_cursor_without_its_state() {
+    for lost_response in [false, true] {
+        let f = Fixture::new();
+        let (a, b) = initialize(&f);
+        ok(&f, &b, &[("photo.rate", json!({"ids":[1],"rating":3}))]);
+        let offline = pending(&b);
+        {
+            let mut state = f.state.lock().unwrap();
+            state.after_activation_mutation = Some(offline.as_object().unwrap().values().next().unwrap().clone());
+            if lost_response {
+                state.lost_head_matching = Some("\"activeMetadataRoot\":\"catalog/epochs/2\"".into());
+            }
+        }
+        ok(&f, &a, &[("cloud.upgradeLibrary", json!({"plan":"rebase"}))]);
+        assert!(f.state.lock().unwrap().after_activation_mutation.is_none(), "the concurrent edit was accepted");
+        let current = catalog(&a);
+        let remote = head(&f);
+        if current.sync_state().unwrap().cursor.as_deref() == remote["tip"]["hash"].as_str() {
+            assert_eq!(current.photo(PhotoId(1)).unwrap().rating, 3, "an advanced cursor must include the concurrent edit; lost={lost_response}");
+        }
+        ok(&f, &a, &[("cloud.sync", json!({})), ("cloud.sync", json!({}))]);
+        assert_eq!(catalog(&a).photo(PhotoId(1)).unwrap().rating, 3, "a clean poll must not permanently skip the edit");
+        assert_eq!(pending(&b), offline, "the other device's exact pending mutation is preserved");
+        assert!(f.state.lock().unwrap().lost_head_matching.is_none());
+        assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+    }
+}
+
+#[test]
 fn held_lease_refuses_other_upgraders_and_cancellation_restores_the_same_epoch() {
     let f = Fixture::new();
     let (a, b) = initialize(&f);

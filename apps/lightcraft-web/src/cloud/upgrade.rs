@@ -10,6 +10,9 @@ use lightcraft_engine::cloud_records::{Batch, Head, RecordRef, object_key};
 use lightcraft_engine::cloud_status::{CloudFailure, FailureKind};
 
 const ATTEMPTS: usize = 16;
+mod lease;
+use lightcraft_engine::cloud_control::lease::Lease;
+use std::cell::RefCell;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -52,10 +55,14 @@ impl Failure {
     }
 }
 /// A marker batch plus a conditional head carrying `next`'s control.
-async fn transition(provider: &Provider, library: &str, next: impl Fn(&Head, &Control) -> Result<Control, CloudFailure>) -> Result<Head, Failure> {
+async fn transition_control(
+    provider: &Provider,
+    library: &str,
+    next: impl Fn(&Head, &Control) -> Result<Option<Control>, CloudFailure>,
+) -> Result<Head, Failure> {
     for _ in 0..ATTEMPTS {
         let (head, etag, observed) = current(provider, library).await?;
-        let wanted = next(&head, &observed)?;
+        let Some(wanted) = next(&head, &observed)? else { return Ok(head) };
         let batch = Batch { version: 3, parent: Some(head.tip.clone()), imports: Vec::new(), mutations: Vec::new(), checkpoint_marker: true };
         let bytes = serde_json::to_vec(&batch).map_err(CloudFailure::from)?;
         let hash = sha256(&bytes);
@@ -84,6 +91,10 @@ async fn transition(provider: &Provider, library: &str, next: impl Fn(&Head, &Co
     }
     Err(CloudFailure::new(FailureKind::Contention, "cloud library head remained busy; upgrade not started or not confirmed").into())
 }
+async fn transition(provider: &Provider, library: &str, next: impl Fn(&Head, &Control) -> Result<Control, CloudFailure>) -> Result<Head, Failure> {
+    transition_control(provider, library, |h, c| next(h, c).map(Some)).await
+}
+
 fn taken_over() -> CloudFailure {
     CloudFailure::new(FailureKind::Contention, "upgrade ownership was taken over by another device; this result was not activated")
 }
@@ -119,33 +130,38 @@ async fn append(provider: &Provider, local: &SyncState, owner: &str, writers_sto
             }?)
         })
         .await;
-        match acquired {
-            Ok(_) => {}
+        let acquired = match acquired {
+            Ok(head) => head,
             Err(Failure::Unsupported) => {
                 legacy(Failure::Unsupported.message())?;
                 return super::append::migrate(provider, local).await;
             }
             Err(failure) => return Err(failure.message()),
-        }
-        transition(provider, library, |head, c| {
-            if head.control.as_ref().and_then(|c| c.migration.as_ref()).is_none_or(|m| m.token != token) {
-                return Err(taken_over());
-            }
-            Ok(c.begin_output(&token, now_ms())?)
+        };
+        let ownership = RefCell::new(Lease::new(acquired.control()?)?);
+        return lease::run(provider, library, &ownership, async {
+            let publishing = transition(provider, library, |head, c| {
+                if head.control.as_ref().and_then(|c| c.migration.as_ref()).is_none_or(|m| m.token != token) {
+                    return Err(taken_over());
+                }
+                Ok(c.begin_output(&token, now_ms())?)
+            })
+            .await
+            .map_err(Failure::message)?;
+            let seeded = super::append::migrate(provider, local).await?;
+            let successor = Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: manifest.clone() };
+            ownership.borrow_mut().expect_completion(publishing.control()?.retire(&token, successor.clone())?)?;
+            transition(provider, library, |head, c| {
+                if head.control.as_ref().and_then(|c| c.migration.as_ref()).is_none_or(|m| m.token != token) {
+                    return Err(taken_over());
+                }
+                Ok(c.retire(&token, successor.clone())?)
+            })
+            .await
+            .map_err(Failure::message)?;
+            Ok(seeded)
         })
-        .await
-        .map_err(Failure::message)?;
-        let seeded = super::append::migrate(provider, local).await?;
-        let successor = Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: manifest.clone() };
-        transition(provider, library, |head, c| {
-            if head.control.as_ref().and_then(|c| c.migration.as_ref()).is_none_or(|m| m.token != token) {
-                return Err(taken_over());
-            }
-            Ok(c.retire(&token, successor.clone())?)
-        })
-        .await
-        .map_err(Failure::message)?;
-        return Ok(seeded);
+        .await;
     }
     match &observed.successor {
         Some(s) if s.protocol == "append-log-v1" && s.manifest == manifest => {}
