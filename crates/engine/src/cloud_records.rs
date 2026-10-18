@@ -118,40 +118,45 @@ impl Head {
             None => Ok(Control::initial(library)),
         }
     }
+    /// Compatibility adapter for callers whose public contract is a textual audit error.
     pub fn validate_scope(&self, prefix: &str, library: &str) -> Result<(), String> {
+        self.validate_scope_typed(prefix, library).map_err(|blocked| blocked.to_string())
+    }
+    /// Keep compatibility/control provenance through publication and receive paths.
+    pub fn validate_scope_typed(&self, prefix: &str, library: &str) -> Result<(), Blocked> {
         if self.generation == 0
             || !matches!(self.version, 1..=HEAD_VERSION)
             || (self.version == 1 && (self.library.is_some() || self.checkpoint.is_some()))
             || (self.version >= 2 && self.library.as_deref() != Some(library))
             || ((self.version == HEAD_VERSION) != self.control.is_some())
         {
-            return Err("invalid catalog head or library identity".into());
+            return Err(Blocked::Invalid("invalid catalog head or library identity".into()));
         }
         if self.version < 2 {
-            return Err("obsolete pre-release catalog head; use a fresh catalog and storage prefix; local data retained".into());
+            return Err(Blocked::Invalid("obsolete pre-release catalog head; use a fresh catalog and storage prefix; local data retained".into()));
         }
-        let control = self.control()?;
-        control.may_read().map_err(|blocked| blocked.to_string())?;
+        let control = self.control().map_err(Blocked::Invalid)?;
+        control.may_read()?;
         if control.library != library || control.active_metadata_root != crate::cloud_control::epoch_root(control.epoch) {
-            return Err("catalog head control names another library or namespace".into());
+            return Err(Blocked::Invalid("catalog head control names another library or namespace".into()));
         }
-        if self.tip.validate_scope(prefix, "changes", 2 << 20)? != control.epoch {
-            return Err("catalog head tip is outside its active epoch".into());
+        if self.tip.validate_scope(prefix, "changes", 2 << 20).map_err(Blocked::Invalid)? != control.epoch {
+            return Err(Blocked::Invalid("catalog head tip is outside its active epoch".into()));
         }
         if let Some(checkpoint) = &self.checkpoint {
             if checkpoint.generation == 0 || checkpoint.generation >= self.generation {
-                return Err("invalid checkpoint generation".into());
+                return Err(Blocked::Invalid("invalid checkpoint generation".into()));
             }
-            if checkpoint.object.validate_scope(prefix, "checkpoints", 64 << 20)? != control.epoch
-                || checkpoint.covers.validate_scope(prefix, "changes", 2 << 20)? != control.epoch
+            if checkpoint.object.validate_scope(prefix, "checkpoints", 64 << 20).map_err(Blocked::Invalid)? != control.epoch
+                || checkpoint.covers.validate_scope(prefix, "changes", 2 << 20).map_err(Blocked::Invalid)? != control.epoch
             {
-                return Err("catalog checkpoint is outside its active epoch".into());
+                return Err(Blocked::Invalid("catalog checkpoint is outside its active epoch".into()));
             }
         }
         if let Some(migration) = &control.migration
             && migration.source.generation >= self.generation
         {
-            return Err("migration source is not before the maintenance head".into());
+            return Err(Blocked::Invalid("migration source is not before the maintenance head".into()));
         }
         Ok(())
     }
@@ -231,3 +236,25 @@ impl Batch {
 
 /// Shared bounded traversal primitives; they do not alter wire records.
 pub mod replay;
+
+#[cfg(test)]
+mod typed_failure_tests {
+    use super::*;
+    #[test]
+    fn constructed_head_scope_keeps_reader_compatibility_provenance() {
+        let mut control = Control::initial("library");
+        control.minimum_reader = crate::cloud_control::READER + 1;
+        control.minimum_writer = control.minimum_reader;
+        control.schema = control.minimum_reader;
+        control.validate().unwrap();
+        let head = Head {
+            version: HEAD_VERSION,
+            generation: 1,
+            tip: RecordRef { key: "unused".into(), hash: BlobId("a".repeat(64)), size: 1 },
+            library: Some("library".into()),
+            checkpoint: None,
+            control: Some(control),
+        };
+        assert!(matches!(head.validate_scope_typed("prefix", "library"), Err(Blocked::UpdateToRead(_))));
+    }
+}

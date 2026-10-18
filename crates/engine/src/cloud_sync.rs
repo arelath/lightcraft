@@ -358,7 +358,7 @@ pub fn publication_order(
     observed: &lightcraft_catalog::replication::Clock,
 ) -> Result<Vec<lightcraft_catalog::replication::Mutation>> {
     if pending.len() > lightcraft_catalog::replication::MAX_PENDING {
-        return Err(error("pending publication exceeds the bounded outbox"));
+        return Err(lightcraft_catalog::CatalogError::Capacity("pending publication exceeds the bounded outbox".into()).into());
     }
     if observed.len() > lightcraft_catalog::replication::MAX_DEVICES
         || observed.iter().any(|(author, sequence)| !lightcraft_catalog::assets::identifier(author) || author.len() > 96 || *sequence == 0)
@@ -628,10 +628,10 @@ fn enqueue_changes(state: &mut SyncState, changes: Vec<Change>) -> Result<bool> 
             } else {
                 "shorten large metadata values or split the entity's bulk edit into smaller commands before retrying"
             };
-            return Err(error(format!(
+            return Err(lightcraft_catalog::CatalogError::Capacity(format!(
                 "cloud entity exceeds the bounded mutation size: {entity}{label}; {} changes (limit {MAX_ENTITY_CHANGES}), {size} bytes (limit {MAX_ENTITY_BYTES} / 1 MiB); {recovery}; current library and outbox retained",
                 group.len()
-            )));
+            )).into());
         }
         if bytes.saturating_add(size) > MAX_ENTITY_BYTES || chunk.len().saturating_add(group.len()) > MAX_ENTITY_CHANGES {
             state.enqueue(std::mem::take(&mut chunk))?;

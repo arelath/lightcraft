@@ -422,3 +422,36 @@ fn simultaneous_upgraders_elect_one_owner_and_the_loser_changes_nothing() {
     assert_eq!(f.state.lock().unwrap().objects[HEAD], winner, "only the winner's migration is authoritative");
     assert!(!f.state.lock().unwrap().objects.keys().any(|k| k.contains("/catalog/epochs/")), "the loser built no epoch");
 }
+
+#[test]
+fn signed_transport_failures_preserve_http_and_update_remedies_in_health() {
+    let f = Fixture::new();
+    let (a, _) = initialize(&f);
+    ok(&f, &a, &[("photo.rate", json!({"ids":[1],"rating":5}))]);
+    let offline = pending(&a);
+    for code in [401_u16, 403] {
+        f.state.lock().unwrap().reject_status = Some(code);
+        let (out, rows) = f.run(&a, &[("cloud.sync", json!({})), ("cloud.syncStatus", json!({}))]);
+        assert!(!out.status.success());
+        let health = &rows[1]["result"]["health"];
+        assert_eq!(health["lastError"]["kind"], "authentication", "{rows:?}");
+        assert_eq!(health["lastError"]["httpStatus"], code);
+        assert_eq!(health["lastError"]["recovery"], "editConnection");
+        assert_eq!(health["retry"]["scheduled"], false);
+        assert_eq!(pending(&a), offline);
+    }
+    f.state.lock().unwrap().reject_status = None;
+    let mut future = head(&f);
+    future["control"]["minimumReader"] = json!(lightcraft_engine::cloud_control::READER + 1);
+    f.state.lock().unwrap().objects.insert(HEAD.into(), serde_json::to_vec(&future).unwrap());
+    let before = catalog(&a).to_snapshot();
+    let (out, rows) = f.run(&a, &[("cloud.sync", json!({})), ("cloud.syncStatus", json!({}))]);
+    assert!(!out.status.success());
+    let health = &rows[1]["result"]["health"];
+    assert_eq!(health["lastError"]["kind"], "unsupported", "{rows:?}");
+    assert_eq!(health["lastError"]["recovery"], "update");
+    assert_eq!(health["retry"]["scheduled"], false);
+    assert_eq!(catalog(&a).to_snapshot(), before);
+    assert_eq!(pending(&a), offline);
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+}

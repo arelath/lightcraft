@@ -73,7 +73,7 @@ fn condition_headers(condition: PutCondition<'_>) -> Result<Vec<(&'static str, S
 fn status(response: &Response) -> Result<()> {
     match response.status {
         200..=299 => Ok(()),
-        401 | 403 => Err(AssetError::Unauthorized),
+        code @ (401 | 403) => Err(AssetError::Http(code)),
         301 | 307 | 308 => Err(AssetError::Unsupported("the bucket answers from another region or endpoint; check the region and endpoint".into())),
         404 => Err(AssetError::Missing),
         409 | 412 => Err(AssetError::Conflict),

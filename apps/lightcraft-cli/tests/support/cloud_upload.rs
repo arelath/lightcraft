@@ -130,6 +130,7 @@ pub struct State {
     pub stop_after_recovery_prefix: bool,
     pub embedded_error: bool,
     pub unauthorized: bool,
+    pub reject_status: Option<u16>,
     pub signature_errors: usize,
     pub hold_part: bool,
     pub hold_head: bool,
@@ -210,6 +211,8 @@ impl Fixture {
                         state.signature_errors += 1;
                     }
                     (403, Vec::new(), None, false)
+                } else if let Some(status) = state.reject_status {
+                    (status, Vec::new(), None, false)
                 } else {
                     serve(&mut state, &method, &target, &headers, body)
                 };

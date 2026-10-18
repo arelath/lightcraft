@@ -49,6 +49,21 @@ impl Drop for Job {
         }
     }
 }
+/// Scheduling guards are user/API preconditions, not synchronization failures.
+enum StartError {
+    Report(CloudFailure),
+    Guard(String),
+}
+impl StartError {
+    fn guard(message: impl Into<String>) -> Self {
+        Self::Guard(message.into())
+    }
+}
+impl From<CloudFailure> for StartError {
+    fn from(error: CloudFailure) -> Self {
+        Self::Report(error)
+    }
+}
 #[derive(Default)]
 struct Data {
     preparing_migration: bool,
@@ -138,24 +153,29 @@ impl Host {
                 crate::safety::notice(error);
             }
         }
-        if let Err(error) = self.claim_owner(session) {
-            self.data.borrow_mut().paused = true;
-            crate::safety::notice(error);
+        if let Err(error) = self.claim_owner_typed(session) {
+            let mut data = self.data.borrow_mut();
+            data.paused = true;
+            data.health.fail_typed(&error, timestamp_ms(), None);
+            crate::safety::notice(error.to_string());
         }
     }
-    fn claim_owner(&self, session: &mut Session) -> Result<(), String> {
+    fn claim_owner_typed(&self, session: &mut Session) -> Result<(), CloudFailure> {
         let result = self.claim_owner_inner(session);
-        session.cloud_writer_error = result.as_ref().err().cloned();
+        session.cloud_writer_error = result.as_ref().err().map(|error| error.message.clone());
         result
     }
-    fn claim_owner_inner(&self, session: &mut Session) -> Result<(), String> {
+    fn claim_owner_inner(&self, session: &mut Session) -> Result<(), CloudFailure> {
         let Some(mut state) = session.catalog.sync_state().cloned() else { return Ok(()) };
         if state
-            .claim_owner(self.owner.clone().ok_or("persistent browser installation identity unavailable")?, random_identity()?)
-            .map_err(|e| e.to_string())?
+            .claim_owner(
+                self.owner.clone().ok_or_else(|| CloudFailure::local("persistent browser installation identity unavailable"))?,
+                random_identity().map_err(CloudFailure::local)?,
+            )
+            .map_err(CloudFailure::from)?
         {
-            session.apply_received(Op::SetSyncState { state: Some(Box::new(state)) }).map_err(|e| e.to_string())?;
-            session.persist().map_err(|e| e.to_string())?;
+            session.apply_received(Op::SetSyncState { state: Some(Box::new(state)) }).map_err(CloudFailure::from)?;
+            session.persist().map_err(CloudFailure::from)?;
         }
         Ok(())
     }
@@ -358,39 +378,57 @@ impl Host {
         Ok(out)
     }
     fn start(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
-        self.data.borrow_mut().health.reset_retries();
-        self.start_job(s, p, None)
+        let result = self.start_job(s, p, None);
+        if result.is_ok() {
+            self.data.borrow_mut().health.reset_retries();
+        }
+        result.map_err(|error| self.start_failure(error))
     }
-    fn start_job(&self, s: &mut Session, p: &Value, upgrade: Option<super::upgrade::Request>) -> Result<Value, String> {
-        self.claim_owner(s)?;
+    /// Convert to the public textual API only after preserving genuine failure provenance.
+    fn start_failure(&self, error: StartError) -> String {
+        match error {
+            StartError::Guard(message) => message,
+            StartError::Report(error) => {
+                let mut data = self.data.borrow_mut();
+                data.paused = true;
+                data.health.fail_typed(&error, timestamp_ms(), None);
+                error.to_string()
+            }
+        }
+    }
+    fn start_job(&self, s: &mut Session, p: &Value, upgrade: Option<super::upgrade::Request>) -> Result<Value, StartError> {
         let migrating = matches!(upgrade, Some(super::upgrade::Request::Append { .. }));
         if s.cloud_paused && upgrade.is_none() {
-            return Err("cloud syncing is paused on this device; choose Resume Syncing (cloud.resume) first".into());
+            return Err(StartError::guard("cloud syncing is paused on this device; choose Resume Syncing (cloud.resume) first"));
+        }
+        {
+            let data = self.data.borrow();
+            if data.sync_running {
+                return Err(StartError::guard("cloud synchronization is already running"));
+            }
+            if data.jobs.len() >= 8 {
+                return Err(StartError::guard("browser cloud task queue is full"));
+            }
         }
         if self.backend.is_none() || self.frozen.get() {
-            return Err("persistent browser storage is unavailable".into());
+            return Err(CloudFailure::local("persistent browser storage is unavailable").into());
         }
-        let state = s.catalog.sync_state().ok_or("enable synchronization first")?;
+        let state = s.catalog.sync_state().ok_or_else(|| StartError::guard("enable synchronization first"))?;
         if !self.data.borrow().providers.contains_key(&state.connection) {
-            return Err("configure the saved browser connection and reauthorize".into());
+            return Err(CloudFailure::new(FailureKind::Authentication, "configure the saved browser connection and reauthorize").into());
         }
         let checkpoint = match p.get("checkpoint") {
-            Some(value) => value.as_bool().ok_or("checkpoint must be true or false")?,
+            Some(value) => value.as_bool().ok_or_else(|| StartError::guard("checkpoint must be true or false"))?,
             None => false,
         };
+        let audit = p.get("audit").map(|v| v.as_bool().ok_or_else(|| StartError::guard("audit must be true or false"))).transpose()?.unwrap_or(true);
+        // Rejected scheduling requests must not claim/rotate a writer or mutate the catalog.
+        self.claim_owner_typed(s)?;
+        s.persist().map_err(CloudFailure::from)?;
         let mut data = self.data.borrow_mut();
-        if data.sync_running {
-            return Err("cloud synchronization is already running".into());
-        }
-        if data.jobs.len() >= 8 {
-            return Err("browser cloud task queue is full".into());
-        }
-        s.persist().map_err(|e| e.to_string())?;
         let guard = s.activity.start("cloudSync", if upgrade.is_some() { "Upgrade cloud library" } else { "Synchronize cloud library" }, Cancel::Yes);
         let task = guard.id();
-        let audit = p.get("audit").map(|v| v.as_bool().ok_or("audit must be true or false")).transpose()?.unwrap_or(true)
-            || data.last_audit == 0.
-            || js_sys::Date::now() - data.last_audit >= 300_000.;
+        let audit = audit || data.last_audit == 0. || js_sys::Date::now() - data.last_audit >= 300_000.;
         if audit {
             data.last_audit = js_sys::Date::now();
         }
@@ -418,7 +456,7 @@ impl Host {
             (_, Some("rebase")) => return Err("rebase upgrades run in the desktop app or CLI; browsing continues here".into()),
             _ => return Err("upgrade expects {plan?: \"appendLog\", cancel?: bool}".into()),
         };
-        self.start_job(s, p, Some(request))
+        self.start_job(s, p, Some(request)).map_err(|error| self.start_failure(error))
     }
     fn prepare_migration(&self, s: &Session) -> Result<Value, String> {
         if s.catalog.sync_state().is_none_or(|state| !state.protocol.is_head()) {
@@ -602,10 +640,7 @@ impl Host {
                 data.cadence.scanned(web_time::Instant::now());
                 data.next_poll = None;
             } else if let Err(error) = self.start_job(&mut app.session, &json!({"wait":false,"audit":false}), None) {
-                let mut data = self.data.borrow_mut();
-                data.paused = true;
-                data.health.fail(&error, None);
-                crate::safety::notice(error);
+                crate::safety::notice(self.start_failure(error));
             }
         }
         if self.data.borrow().sync_running {

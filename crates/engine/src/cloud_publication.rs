@@ -50,7 +50,7 @@ impl RecordRef {
 pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     let bytes = serde_json::to_vec(value).map_err(|_| invalid("could not encode remote catalog metadata"))?;
     if bytes.len() > MAX_BYTES {
-        return Err(invalid("remote catalog record exceeds 2 MiB; reduce metadata before publishing"));
+        return Err(AssetError::Capacity("remote catalog record exceeds 2 MiB; reduce metadata before publishing".into()));
     }
     Ok(bytes)
 }
@@ -64,7 +64,7 @@ pub fn read_head(connection: &S3Connection, cancel: &AtomicBool) -> Result<Optio
     }
     let library = head.library.clone().filter(|id| identifier(id)).ok_or_else(|| invalid("unsupported remote catalog head; preserved"))?;
     keys::in_library("", &head.tip.key)?;
-    head.validate_scope(&connection.prefix, &library).map_err(AssetError::Invalid)?;
+    head.validate_scope_typed(&connection.prefix, &library).map_err(AssetError::Blocked)?;
     let etag = reply.etag.ok_or_else(|| invalid("remote head has no ETag; conditional synchronization is unavailable"))?;
     Ok(Some((head, etag)))
 }

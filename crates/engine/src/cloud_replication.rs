@@ -459,7 +459,7 @@ pub(crate) fn commit(
         }
         head.generation = generation;
     }
-    head.validate_scope(&connection.prefix, library).map_err(invalid)?;
+    head.validate_scope_typed(&connection.prefix, library).map_err(AssetError::Blocked)?;
     let condition = previous.map_or(PutCondition::Absent, |(_, etag)| PutCondition::Matches(etag));
     connection.put_small(&keys::in_library(&connection.prefix, "catalog/head.json")?, &publication::encode(&head)?, condition, cancel)?;
     Ok(head)

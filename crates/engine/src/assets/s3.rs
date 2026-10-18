@@ -187,11 +187,11 @@ impl Credentials {
         }
         let path = credentials_path()?;
         let file = std::fs::File::open(path).map_err(|_| AssetError::Unconfigured("AWS shared credentials file could not be read".into()))?;
-        if file.metadata().map_err(|_| AssetError::Unauthorized)?.len() > 1 << 20 {
+        if file.metadata().map_err(|error| AssetError::Disk(error.to_string()))?.len() > 1 << 20 {
             return Err(AssetError::Invalid("AWS credentials file exceeds 1 MiB".into()));
         }
         let mut text = String::new();
-        file.take((1 << 20) + 1).read_to_string(&mut text).map_err(|_| AssetError::Unauthorized)?;
+        file.take((1 << 20) + 1).read_to_string(&mut text).map_err(|error| AssetError::Disk(error.to_string()))?;
         let default_profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".into());
         Self::parse_profile(&text, profile.unwrap_or(&default_profile))
     }
@@ -402,7 +402,7 @@ impl BlobStore for S3Connection {
         let mut response = http::get(&url, &headers, &limits).map_err(http_error)?;
         match response.status {
             200 => {}
-            401 | 403 => return Err(AssetError::Unauthorized),
+            status @ (401 | 403) => return Err(AssetError::Http(status)),
             404 => return Err(AssetError::Missing),
             status => return Err(AssetError::Http(status)),
         }

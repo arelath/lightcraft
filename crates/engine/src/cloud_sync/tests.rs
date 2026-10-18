@@ -1052,7 +1052,9 @@ fn entity_group_limits_accept_exact_boundaries_and_reject_one_more_without_chang
     fields.push(Change { entity: "album:large".into(), field: "name".into(), base: None, value: json!("Large album") });
     let mut rejected = state();
     let before = rejected.clone();
-    let error = enqueue_changes(&mut rejected, fields).unwrap_err().to_string();
+    let failure = enqueue_changes(&mut rejected, fields).unwrap_err();
+    assert_eq!(crate::cloud_status::CloudFailure::from(&failure).kind, crate::cloud_status::FailureKind::Capacity);
+    let error = failure.to_string();
     assert!(error.contains("Large album") && error.contains("4001 changes (limit 4000)") && error.contains("split large albums"), "{error}");
     assert_eq!(rejected, before);
 
@@ -1063,7 +1065,9 @@ fn entity_group_limits_accept_exact_boundaries_and_reject_one_more_without_chang
     enqueue_changes(&mut fit, changes.clone()).unwrap();
     changes[0].value = json!("x".repeat(MAX_ENTITY_BYTES - overhead + 1));
     let before = fit.clone();
-    let error = enqueue_changes(&mut fit, changes).unwrap_err().to_string();
+    let failure = enqueue_changes(&mut fit, changes).unwrap_err();
+    assert_eq!(crate::cloud_status::CloudFailure::from(&failure).kind, crate::cloud_status::FailureKind::Capacity);
+    let error = failure.to_string();
     assert!(error.contains("1048577 bytes (limit 1048576") && error.contains("shorten large metadata"), "{error}");
     assert_eq!(fit, before);
 }
@@ -1436,4 +1440,15 @@ fn recovery_pages_reject_hostile_requests_before_allocating_rows() {
     ] {
         assert!(s.execute("cloud.syncStatus", &request).is_err(), "{request}");
     }
+}
+
+#[test]
+fn bounded_publication_order_is_a_capacity_failure() {
+    let mut state = SyncState::new("library".into(), "writer".into(), "personal".into()).unwrap();
+    let mutation = state.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(1) }]).unwrap().unwrap();
+    let error = publication_order(vec![mutation; lightcraft_catalog::replication::MAX_PENDING + 1], &Default::default()).unwrap_err();
+    let failure = crate::cloud_status::CloudFailure::from(error);
+    assert_eq!(failure.kind, crate::cloud_status::FailureKind::Capacity);
+    assert_eq!(failure.remedy, None);
+    assert!(!failure.retryable());
 }

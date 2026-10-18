@@ -426,6 +426,7 @@ fn empty_cloud_library_error_details_preserve_diagnostic_and_repair_connection()
         assert!(Instant::now() < until, "authentication failure not visible: {data}");
         std::thread::sleep(Duration::from_millis(50));
     };
+    assert_eq!(error["httpStatus"], 403, "native transport preserves the actual rejection code");
     app.click_when_ready("icon:cloud");
     app.click_when_ready("button:cloudErrorDetails");
     let until = Instant::now() + Duration::from_secs(10);

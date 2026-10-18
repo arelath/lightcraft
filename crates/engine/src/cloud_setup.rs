@@ -124,7 +124,7 @@ pub fn probe(connection: &S3Connection, cancel: &AtomicBool) -> Result<Probe, St
 #[cfg(not(target_arch = "wasm32"))]
 fn explain(connection: &S3Connection, error: AssetError) -> String {
     match error {
-        AssetError::Unauthorized => format!(
+        AssetError::Unauthorized | AssetError::Http(401 | 403) => format!(
             "The storage refused these keys. Check the key ID and secret, and that the key may read, write and list the bucket “{}”.",
             connection.bucket
         ),

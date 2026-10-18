@@ -23,7 +23,10 @@ struct Remote {
 fn encode(value: &impl serde::Serialize, max: usize) -> Result<Vec<u8>, CloudFailure> {
     let bytes = serde_json::to_vec(value).map_err(CloudFailure::from)?;
     if bytes.len() > max {
-        return Err("catalog object exceeds its bounded size; pending work retained".into());
+        return Err(CloudFailure::new(
+            lightcraft_engine::cloud_status::FailureKind::Capacity,
+            "catalog object exceeds its bounded size; pending work retained",
+        ));
     }
     Ok(bytes)
 }
@@ -141,7 +144,7 @@ pub(super) async fn read_head(provider: &Provider, library: &str) -> Result<Opti
     }
     let etag = reply.etag.ok_or("catalog head has no exposed ETag; check bucket CORS")?;
     let head = Head::decode(&reply.bytes)?;
-    head.validate_scope(&provider.connection.prefix, library)?;
+    head.validate_scope_typed(&provider.connection.prefix, library)?;
     Ok(Some((head, etag)))
 }
 pub(super) async fn immutable(provider: &Provider, key: &str, bytes: &[u8]) -> Result<(), CloudFailure> {
@@ -339,7 +342,7 @@ async fn publish(
     checkpoint: Option<CheckpointRef>,
     library: &str,
 ) -> Result<(), CloudFailure> {
-    let control = lightcraft_engine::cloud_records::publishable(previous.map(|(head, _)| head), library).map_err(|blocked| blocked.to_string())?;
+    let control = lightcraft_engine::cloud_records::publishable(previous.map(|(head, _)| head), library)?;
     let batch = Batch {
         version: 3,
         parent: previous.map(|(head, _)| head.tip.clone()),

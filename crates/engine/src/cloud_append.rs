@@ -12,12 +12,12 @@ fn invalid(message: impl Into<String>) -> AssetError {
     AssetError::Invalid(message.into())
 }
 fn ce(error: lightcraft_catalog::CatalogError) -> AssetError {
-    invalid(error.to_string())
+    error.into()
 }
 pub fn encode(value: &impl Serialize) -> Result<Vec<u8>> {
     let bytes = serde_json::to_vec(value).map_err(|_| invalid("cannot encode append record"))?;
     if bytes.len() > MAX_OBJECT {
-        return Err(invalid("append object exceeds 64 MiB"));
+        return Err(AssetError::Capacity("append object exceeds 64 MiB".into()));
     }
     Ok(bytes)
 }
@@ -179,13 +179,13 @@ impl Planner {
         if !self.remote.received.contains_key(&id) && !self.staged.contains_key(&id) {
             let size = encode(&m)?.len();
             if self.staged_bytes.saturating_add(size) > MAX_OBJECT {
-                return Err(invalid("staged causal dependencies exceed 64 MiB; local work retained"));
+                return Err(AssetError::Capacity("staged causal dependencies exceed 64 MiB; local work retained".into()));
             }
             self.staged_bytes = self.staged_bytes.saturating_add(size);
             self.staged.insert(id, m);
         }
         if self.staged.len().saturating_add(self.remote.received.len()) > MAX_RECORDS {
-            return Err(invalid("append record limit exceeded; local work retained"));
+            return Err(AssetError::Capacity("append record limit exceeded; local work retained".into()));
         }
         Ok(())
     }
@@ -260,6 +260,41 @@ mod tests {
     }
     fn edit(s: &mut SyncState, n: u32) -> Mutation {
         s.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(n) }]).unwrap().unwrap()
+    }
+    #[test]
+    fn unresolved_planner_capacity_reaches_health_with_maintenance_recovery() {
+        use crate::cloud_status::{CloudFailure, PollHealth};
+        let mut writer = state("writer");
+        edit(&mut writer, 1); // The reader never receives this required predecessor.
+        let template = writer
+            .enqueue(vec![Change { entity: "photo:one".into(), field: "meta.caption".into(), base: None, value: json!("x".repeat(512 << 10)) }])
+            .unwrap()
+            .unwrap();
+        let mut planner = Planner::new(&state("reader")).unwrap();
+        let failure = loop {
+            let mut mutation = template.clone();
+            let sequence = planner.staged.len() as u64 + 2;
+            mutation.revision.sequence = sequence;
+            mutation.context.insert("writer".into(), sequence - 1);
+            match planner.stage_and_drain(mutation) {
+                Ok(()) => assert!(planner.staged_bytes <= MAX_OBJECT),
+                Err(error) => break CloudFailure::from(error),
+            }
+        };
+        assert!(planner.remote.clock.is_empty());
+        assert!(planner.remote.documents.is_empty());
+        assert!(planner.staged_bytes <= MAX_OBJECT);
+        let mut health = PollHealth::default();
+        assert_eq!(health.fail_typed(&failure, Some(1000), None), None);
+        let health = health.view_at(true, false, false, false, true, Some(1000));
+        assert_eq!(health["lastError"]["kind"], "capacity");
+        assert_eq!(health["lastError"]["recovery"], "reviewCapacity");
+        assert_eq!(health["retry"]["scheduled"], false);
+        assert!(health["lastError"]["message"].as_str().unwrap().contains("staged causal dependencies"));
+    }
+    #[test]
+    fn catalog_capacity_in_append_helpers_keeps_its_kind() {
+        assert!(matches!(ce(lightcraft_catalog::CatalogError::Capacity("retained receipts".into())), AssetError::Capacity(_)));
     }
     #[test]
     fn discovery_releases_three_hundred_large_replacements_and_unblocks_other_authors() {
