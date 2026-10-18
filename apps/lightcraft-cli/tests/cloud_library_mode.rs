@@ -1487,3 +1487,111 @@ fn independent_wizard_keys_and_rotation_do_not_overwrite_other_libraries_or_reje
     assert_eq!(state.signature_errors, 0);
     assert!(!state.requests.iter().any(|(m, _)| m == "DELETE"));
 }
+
+#[test]
+#[ignore = "explicit native authoritative-discovery acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn guided_discovery_lists_all_validated_pages_and_retires_only_the_old_protocol_choice() {
+    use lightcraft_engine::{
+        catalog::assets::BlobId,
+        cloud_append as append,
+        cloud_control::{Control, State, Successor},
+        cloud_publication::{Head, RecordRef},
+    };
+    let root = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("discovery");
+    for mode in ["paginated", "retired", "invalid"] {
+        let f = support::Fixture::new();
+        let local = f.dir.join(mode);
+        let ids = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+        let (out, rows) = f.run(
+            &local,
+            &[(
+                "cloud.configure",
+                json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"}),
+            )],
+        );
+        assert!(out.status.success(), "{rows:?}");
+        {
+            let mut state = f.state.lock().unwrap();
+            state.list_page_size = 1;
+            for id in &ids {
+                state.objects.insert(format!("/photos/{}", append::manifest_key("library", id).unwrap()), append::manifest(id).unwrap());
+            }
+            if mode == "invalid" {
+                state.objects.insert(format!("/photos/{}", append::manifest_key("library", &ids[1]).unwrap()), b"{}".to_vec());
+            }
+            if mode == "retired" {
+                let mut c = Control::initial(&ids[0]);
+                c.state = State::Retired;
+                c.successor =
+                    Some(Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: support::hash(&append::manifest(&ids[0]).unwrap()) });
+                let hash = "d".repeat(64);
+                let head = Head::next(
+                    None,
+                    RecordRef { key: format!("library/catalog/changes/{hash}.json"), hash: BlobId(hash), size: 2 },
+                    &ids[0],
+                    None,
+                    c,
+                )
+                .unwrap();
+                state.objects.insert("/photos/library/catalog/head.json".into(), serde_json::to_vec(&head).unwrap());
+            }
+        }
+        let original = f.state.lock().unwrap().objects.clone();
+        let artifacts = root.join(mode);
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let mut app = Desktop::start(&f, &local, &artifacts);
+        app.execute("dialog.cloudSync", json!({}));
+        app.ask("ui.screenshot", json!({"path":artifacts.join("before-check.png"),"headless":true}));
+        app.click_when_ready("button:cloudSetupTest");
+        if mode == "invalid" {
+            let until = Instant::now() + Duration::from_secs(15);
+            let manifest = append::manifest_key("library", &ids[1]).unwrap();
+            while !f.state.lock().unwrap().requests.iter().any(|(method, key)| method == "GET" && key.ends_with(&manifest)) {
+                assert!(Instant::now() < until, "invalid manifest was not read");
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            app.ask("ui.screenshot", json!({"path":artifacts.join("check-barrier.png"),"headless":true}));
+            app.wait_widget("cloudSetupEndpoint");
+            app.ask("ui.screenshot", json!({"path":artifacts.join("refused.png"),"headless":true}));
+            assert!(!app.ask("ui.widgets", json!({"filter":"radio:cloudSetupJoin"})).to_string().contains("radio:cloudSetupJoin"));
+        } else {
+            let until = Instant::now() + Duration::from_secs(15);
+            loop {
+                if app.ask("ui.widgets", json!({"filter":"status:cloudSetupConnected"})).to_string().contains("status:cloudSetupConnected") {
+                    break;
+                }
+                if Instant::now() >= until {
+                    app.ask("ui.screenshot", json!({"path":artifacts.join("failed.png"),"headless":true}));
+                    let inspect = app.ask("ui.inspect", json!({}));
+                    std::fs::write(artifacts.join("failed-inspect.json"), serde_json::to_vec_pretty(&inspect).unwrap()).unwrap();
+                    panic!("{mode}: native connection check did not succeed; inspect its captured form");
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            app.ask("ui.dialog.confirm", json!({}));
+            for id in &ids {
+                app.wait_widget(&format!("radio:cloudSetupJoin:{id}"));
+            }
+            let widgets = app.ask("ui.widgets", json!({"filter":"radio:cloudSetupJoin"}));
+            assert_eq!(widgets.as_array().unwrap().len(), 3, "{mode}: {widgets}");
+            app.ask("ui.screenshot", json!({"path":artifacts.join("libraries.png"),"headless":true}));
+        }
+        let inspect = app.ask("ui.inspect", json!({}));
+        std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&inspect).unwrap()).unwrap();
+        app.ask("ui.dialog.cancel", json!({}));
+        app.ask("app.quit", json!({}));
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = app.child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.objects, original);
+        assert!(state.requests.iter().all(|(method, _)| method == "GET"));
+        assert_eq!(state.signature_errors, 0);
+    }
+}

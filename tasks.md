@@ -293,7 +293,7 @@ checks pass; provider access and an actual schema change are separate prerequisi
 - [x] **CR.50** Preserve publication capability on every readable head outcome, including unchanged clean polls.
 - [x] **CR.54** Isolate saved credential profiles for independent libraries with the same connection name.
 - [x] **CR.52** Recover browser blob/index publication durably after interruption or policy-save failure, preserving all libraries' protections.
-- [ ] **CR.55** Paginate and validate guided library discovery, including retired heads, successors and duplicate identities.
+- [x] **CR.55** Paginate and validate guided library discovery, including retired heads, successors and duplicate identities.
 - [ ] **CR.43** Add the exclusive append-maintenance adapter, upgrade runner and late old-epoch operation recovery, with simultaneous-upgrader tests.
 - [ ] **CR.44** Add real mutation translation/provenance when a concrete schema change requires it; preserve the existing fail-closed boundary meanwhile.
 - [ ] **CR.45** Verify current desktop/browser upgrade workflows and request costs against live AWS S3 and, after the exclusive barrier, B2.

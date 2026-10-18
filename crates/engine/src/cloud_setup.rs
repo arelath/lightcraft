@@ -110,30 +110,11 @@ pub fn probe(connection: &S3Connection, cancel: &AtomicBool) -> Result<Probe, St
     connection.validate().map_err(|e| e.to_string())?;
     let normalized = connection.clone().canonicalized();
     let connection = &normalized;
-    let prefix = connection.prefix.trim_end_matches('/');
-    let root = if prefix.is_empty() { "sync-v2/".to_owned() } else { format!("{prefix}/sync-v2/") };
-    let request = crate::cloud_append::listing::ListRequest { prefix: root.clone(), delimiter: true, continuation: None, start_after: None };
-    let page = connection.list_objects_v2(&request, cancel).map_err(|e| explain(connection, e))?;
-    let libraries = page
-        .prefixes
-        .iter()
-        .filter_map(|p| p.strip_prefix(&root)?.strip_suffix('/'))
-        .filter(|id| lightcraft_catalog::assets::identifier(id))
-        .map(|id| FoundLibrary { id: id.to_owned(), protocol: SyncProtocol::AppendLog })
-        .collect();
-    let mut probe = Probe { libraries, head_taken: false };
-    match crate::cloud_publication::read_head(connection, cancel) {
-        Ok(Some((head, _))) => {
-            probe.head_taken = true;
-            if let Some(id) = head.library {
-                probe.libraries.insert(0, FoundLibrary { id, protocol: SyncProtocol::ConditionalHead });
-            }
-        }
-        Ok(None) => {}
-        Err(e) => return Err(explain(connection, e)),
-    }
-    Ok(probe)
+    discovery::probe(connection, cancel)
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod discovery;
 
 /// What to fix when the check fails.
 #[cfg(not(target_arch = "wasm32"))]

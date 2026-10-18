@@ -14,7 +14,7 @@ use std::time::Duration;
 const T: Duration = Duration::from_secs(20);
 const LIBRARY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/// Answers `requests` S3 requests: a listing with one append library, 404 for anything else.
+/// Answers read-only discovery with a supported manifest, no controls and no conditional head.
 /// The first reply waits for `release`, so the test sees the check running. Records each
 /// request line and Authorization header.
 fn s3(requests: usize, release: mpsc::Receiver<()>) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
@@ -50,12 +50,23 @@ fn s3_response(requests: usize, release: mpsc::Receiver<()>, forbidden: bool) ->
             let (status, body) = if forbidden {
                 (403, String::new())
             } else if line.contains("list-type=2") {
-                (
-                    200,
-                    format!(
-                        "<ListBucketResult><Prefix>lightcraft/sync-v2/</Prefix><IsTruncated>false</IsTruncated><CommonPrefixes><Prefix>lightcraft/sync-v2/{LIBRARY}/</Prefix></CommonPrefixes></ListBucketResult>"
-                    ),
-                )
+                if line.contains("delimiter=") {
+                    (
+                        200,
+                        format!(
+                            "<ListBucketResult><Prefix>lightcraft/sync-v2/</Prefix><IsTruncated>false</IsTruncated><CommonPrefixes><Prefix>lightcraft/sync-v2/{LIBRARY}/</Prefix></CommonPrefixes></ListBucketResult>"
+                        ),
+                    )
+                } else {
+                    (
+                        200,
+                        format!(
+                            "<ListBucketResult><Prefix>lightcraft/sync-v2/{LIBRARY}/control/</Prefix><IsTruncated>false</IsTruncated></ListBucketResult>"
+                        ),
+                    )
+                }
+            } else if line.contains("/manifest/") {
+                (200, String::from_utf8(lightcraft_engine::cloud_append::manifest(LIBRARY).unwrap()).unwrap())
             } else {
                 (404, String::new())
             };
@@ -138,7 +149,7 @@ fn run_wizard(control: bool) {
     assert_eq!((setup(&h).step, setup(&h).name.as_str()), (Step::Connect, "storage"));
     let (endpoint, seen) = {
         let (release, wait) = mpsc::channel();
-        let server = s3(2, wait);
+        let server = s3(4, wait);
         if let Some(Dialog::CloudSetup { setup }) = &mut h.app.ui.dialog {
             setup.endpoint = server.0.clone();
             setup.bucket = "photos".into();
@@ -158,7 +169,7 @@ fn run_wizard(control: bool) {
     assert!(h.step_until(T, |h| setup(h).step == Step::Library), "{:?}", setup(&h).check);
     assert!(h.app.session.activity.list().iter().all(|task| task.kind != "cloudCheck"), "the row goes with the check");
     let requests = seen.lock().unwrap().clone();
-    assert_eq!(requests.len(), 2, "a listing and the head, nothing written: {requests:?}");
+    assert_eq!(requests.len(), 4, "library listing, manifest, controls and head; nothing written: {requests:?}");
     assert!(requests.iter().all(|(line, auth)| line.starts_with("GET ") && auth.contains("Credential=AKIDTEST/")), "{requests:?}");
     assert_eq!(setup(&h).choice, Choice::Found(LIBRARY.into()), "the one library found is chosen");
     for _ in 0..3 {
