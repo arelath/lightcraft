@@ -59,6 +59,12 @@ pub struct CloudFailure {
 }
 const UPDATE: &str = "Update LightCraft on this device, then use Retry Syncing. Local edits are kept and publish after the update.";
 const RETIRED: &str = "This cloud library moved to a new format. Use Migrate Cloud Library… to rejoin it; pending edits are kept and publish there.";
+const RETIRED_DESKTOP: &str = "This cloud library was upgraded on a desktop to a format browsers cannot sync. Continue in the LightCraft desktop app; pending edits stay in this browser.";
+/// Browsers cannot hold the native B2 authority a conditional-head successor of
+/// an append library needs, so Migrate would be a dead end there.
+fn retired_recovery(successor: &crate::cloud_control::Successor, browser: bool) -> &'static str {
+    if browser && successor.protocol == "conditional-head-v1" { RETIRED_DESKTOP } else { RETIRED }
+}
 const MAINTENANCE: &str =
     "Another device is upgrading this cloud library. Changes from other devices still arrive; yours publish when the upgrade finishes.";
 impl CloudFailure {
@@ -238,7 +244,7 @@ impl From<crate::cloud_control::Blocked> for CloudFailure {
             Blocked::Deleted => {
                 (FailureKind::Unsupported, Some("This cloud library was deleted. Use a new library and storage folder; local copies remain."))
             }
-            Blocked::Retired(_) => (FailureKind::Unsupported, Some(RETIRED)),
+            Blocked::Retired(successor) => (FailureKind::Unsupported, Some(retired_recovery(successor, cfg!(target_arch = "wasm32")))),
             Blocked::FinishUpgrade(_) => (
                 FailureKind::Unsupported,
                 Some(
@@ -396,6 +402,12 @@ mod tests {
             migration.fail_migration(error, Some(1));
             assert_eq!(migration.view_at(true, false, false, true, true, None)["lastError"]["action"], error.action());
         }
+        let upgraded = Successor { protocol: "conditional-head-v1".into(), epoch: 2, manifest: "x".into() };
+        assert!(retired_recovery(&upgraded, true).contains("desktop app"));
+        assert!(retired_recovery(&upgraded, false).contains("Migrate Cloud Library"));
+        assert!(
+            retired_recovery(&Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "x".into() }, true).contains("Migrate Cloud Library")
+        );
         let moved = CloudFailure::from(Blocked::Retired(Successor { protocol: "append-log-v1".into(), epoch: 1, manifest: "x".into() }));
         assert!(moved.action().contains("Migrate Cloud Library"), "{}", moved.action());
         let maintenance = CloudFailure::from(Blocked::Maintenance { migration: "m".into(), plan: Plan::Rebase, owner: "o".into() });

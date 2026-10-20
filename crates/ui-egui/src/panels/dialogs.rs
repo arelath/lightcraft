@@ -1051,6 +1051,9 @@ fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
                             1 => "1 pending change stays on this device.".to_owned(),
                             n => format!("{n} pending changes stay on this device."),
                         });
+                        if !state.protocol.is_head() {
+                            ui.label(crate::i18n::tr("Browsers cannot sync the upgraded library. Other devices continue in the desktop app."));
+                        }
                     }
                     let check = ui.checkbox(writers_stopped, crate::i18n::tr("All other devices are stopped"))
                         .on_hover_text(crate::i18n::tr("Only needed if storage cannot hold an upgrade barrier. Keep older LightCraft builds stopped."));

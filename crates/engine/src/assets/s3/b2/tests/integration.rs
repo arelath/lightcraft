@@ -438,8 +438,9 @@ fn native_upgrade(probe: &mut Probe, library: &str, source: &mut SyncState, firs
             Ok(outcome) => outcome,
             Err(failure) => {
                 require(
-                    !matches!(failure.kind, crate::cloud_status::FailureKind::Integrity | crate::cloud_status::FailureKind::InvalidHistory),
-                    &format!("competing upgrader failed unsafely: {}", failure.message),
+                    // Lease and initialization races map to Contention only.
+                    failure.kind == crate::cloud_status::FailureKind::Contention,
+                    &format!("competing upgrader refused with {:?}, not contention: {}", failure.kind, failure.message),
                 )?;
                 crate::cloud_upgrade::run(c, shared, owner, crate::cloud_upgrade::Request::Auto { writers_stopped: false }, cancel)
                     .map_err(|failure| invalid(&format!("competing upgrader retry: {}", failure.message)))?
