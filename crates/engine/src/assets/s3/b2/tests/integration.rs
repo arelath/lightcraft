@@ -12,6 +12,20 @@ struct Probe {
     heads: BTreeSet<String>,
 }
 impl Probe {
+    fn control(
+        &self,
+        action: crate::cloud_records::b2_control::Action,
+    ) -> std::result::Result<crate::cloud_records::b2_control::Reply, crate::cloud_status::CloudFailure> {
+        crate::cloud_signer::execute_b2_control(
+            &self.c,
+            &crate::cloud_records::b2_control::Request {
+                connection: self.c.id.clone(),
+                prefix: self.c.prefix.clone(),
+                bucket_root: format!("{}/{}/", self.c.endpoint.as_deref().unwrap_or_default().trim_end_matches('/'), self.c.bucket),
+                action,
+            },
+        )
+    }
     fn catalog(&mut self, epoch: u64, kind: &str, value: &impl Serialize) -> Result<RecordRef> {
         let bytes = serde_json::to_vec(value).map_err(|_| invalid("test encoding"))?;
         let hash = sha256(&bytes);
@@ -200,10 +214,13 @@ fn live_recovery(ordinary_sync: bool, upgrade: bool) {
         for version in probe.c.library_versions(&probe.cancel)?.into_iter().filter(|v| v.key == future_key) {
             probe.c.erase_version(&version, &probe.cancel)?;
         }
-        probe.c.b2_initialize_head(&head, &probe.cancel)?;
+        use crate::cloud_records::b2_control::{Action, Reply};
+        require(
+            matches!(probe.control(Action::Initialize { head: Box::new(head.clone()) }), Ok(Reply::Updated {})),
+            "personal signer did not initialize the fenced source",
+        )?;
         let (_, expected, _) = probe.c.b2_read_head(&probe.cancel)?;
         let fence = Control::initial_append(&library).retire_append_source(&intake.manifest).map_err(AssetError::Blocked)?;
-        probe.append(crate::cloud_append::control::key(&probe.c.prefix, &fence)?, &crate::cloud_append::control::encode(&fence)?)?;
         let first2 = probe.catalog(2, "changes", &marker(None))?;
         let cp2 = probe.catalog(
             2,
@@ -221,7 +238,23 @@ fn live_recovery(ordinary_sync: bool, upgrade: bool) {
         .map_err(AssetError::Invalid)?;
         active.generation = 4;
         probe.track_head(&active)?;
-        probe.c.b2_write_head(&expected, &active, &probe.cancel)?;
+        require(
+            probe
+                .control(Action::Write { expected: expected.clone(), head: Box::new(active.clone()) })
+                .is_err_and(|failure| failure.remedy == Some(crate::cloud_status::Recovery::FinishUpgrade)),
+            "personal signer activated an unfenced append source",
+        )?;
+        require(probe.c.b2_read_head(&probe.cancel)?.0.generation == head.generation, "refused activation changed authority")?;
+        probe.keys.insert(crate::cloud_append::control::key(&probe.c.prefix, &fence)?);
+        probe.control(Action::Fence { expected: expected.clone(), library: library.clone() }).map_err(|e| invalid(&e.to_string()))?;
+        probe.control(Action::Write { expected, head: Box::new(active.clone()) }).map_err(|e| invalid(&e.to_string()))?;
+        let read = probe.control(Action::Read {}).map_err(|e| invalid(&e.to_string()))?;
+        let encoded = serde_json::to_string(&read).map_err(|_| invalid("control response encoding"))?;
+        require(!encoded.contains(&observed.auth.token) && !encoded.contains("bucketInfo"), "personal signer exposed native authorization material")?;
+        require(
+            matches!(read, Reply::Read { current: Some(snapshot) } if snapshot.head.generation == active.generation),
+            "personal signer did not read the committed authority",
+        )?;
         let late = source
             .enqueue(vec![Change { entity: format!("library:{library}"), field: "label.Blue".into(), base: None, value: json!("After") }])?
             .ok_or_else(|| invalid("late test mutation"))?;

@@ -36,7 +36,7 @@ impl S3Connection {
     /// Check the immutable marker before requesting native bucket permissions.
     /// Its absence keeps existing append-only keys and ordinary S3 heads usable.
     pub fn b2_head_enabled(&self, cancel: &AtomicBool) -> Result<bool> {
-        if self.prefix.is_empty() || self.endpoint.as_deref().and_then(crate::cloud_setup::b2_endpoint).is_none() {
+        if self.prefix.is_empty() || self.endpoint.as_deref().and_then(crate::cloud_setup::b2_runtime_endpoint).is_none() {
             return Ok(false);
         }
         let scope = Scope::new(self)?;
@@ -185,7 +185,11 @@ impl S3Connection {
             }
         }
         if next.control.as_ref().is_none_or(|c| c.state != State::Deleted) {
-            self.b2_legacy_intake(next, cancel)?;
+            let intake = self.b2_legacy_intake(next, cancel)?;
+            if old_control.state == State::Upgrading && new_control.state == State::Active && new_control.epoch > old_control.epoch {
+                let source = crate::cloud_append::native::library_control(self, &intake.library, cancel)?;
+                require_source_fence(&source, &intake, old_control.migration.as_ref().map_or("upgrade", |m| m.id.as_str()))?;
+            }
         }
         let reference = self.b2_stage_head(next, cancel)?;
         self.b2_compare_exchange_authority(&observed, &reference, cancel)?;
@@ -193,32 +197,26 @@ impl S3Connection {
     }
 }
 
+fn require_source_fence(source: &crate::cloud_control::Control, intake: &LegacyIntake, migration: &str) -> Result<()> {
+    source.may_read().map_err(AssetError::Blocked)?;
+    if source.library != intake.library
+        || source.epoch != 1
+        || source.schema != SCHEMA
+        || source.active_metadata_root != crate::cloud_control::append_root(&intake.library, 1)
+    {
+        return Err(invalid("original append source identity or namespace changed"));
+    }
+    if source.state != State::Retired {
+        return Err(AssetError::Blocked(crate::cloud_control::Blocked::FinishUpgrade(migration.into())));
+    }
+    if source.successor.as_ref().is_none_or(|s| s.protocol != "conditional-head-v1" || s.epoch != 2 || s.manifest != intake.manifest) {
+        return Err(invalid("original append source is retired to a different successor"));
+    }
+    Ok(())
+}
+
 fn validate_catalog_record(connection: &S3Connection, key: &str, bytes: &[u8]) -> Result<()> {
-    let reference = RecordRef { key: key.into(), hash: sha256(bytes), size: bytes.len() as u64 };
-    let prefix = connection.prefix.trim_end_matches('/');
-    if reference.validate_scope(prefix, "changes", 2 << 20).is_ok() {
-        let batch: crate::cloud_records::Batch = serde_json::from_slice(bytes).map_err(|_| invalid("catalog batch"))?;
-        let library = batch.mutations.first().map_or("marker", |m| m.library.as_str());
-        return batch.validate_at(prefix, library, &reference).map_err(AssetError::Invalid);
-    }
-    if reference.validate_scope(prefix, "checkpoints", 64 << 20).is_ok() {
-        let checkpoint: crate::cloud_records::Checkpoint = serde_json::from_slice(bytes).map_err(|_| invalid("catalog checkpoint"))?;
-        checkpoint.state.validate()?;
-        let epoch = reference.validate_scope(prefix, "checkpoints", 64 << 20).map_err(AssetError::Invalid)?;
-        if checkpoint.version != 1
-            || checkpoint.generation == 0
-            || !checkpoint.imports.is_empty()
-            || checkpoint.covers.validate_scope(prefix, "changes", 2 << 20).map_err(AssetError::Invalid)? != epoch
-        {
-            return Err(invalid("catalog checkpoint scope"));
-        }
-        return Ok(());
-    }
-    if reference.validate_scope(prefix, "legacy", crate::cloud_records::MAX_INTAKE).is_ok_and(|epoch| epoch == 1) {
-        let intake: LegacyIntake = serde_json::from_slice(bytes).map_err(|_| invalid("legacy intake"))?;
-        return intake.validate(&intake.library).map_err(AssetError::Blocked);
-    }
-    Err(invalid("unconditional catalog record is not content addressed and scoped"))
+    crate::cloud_records::b2_catalog::validate(connection.prefix.trim_end_matches('/'), key, bytes).map_err(AssetError::Blocked)
 }
 
 fn validate_initial(connection: &S3Connection, head: &Head) -> Result<()> {

@@ -17,6 +17,21 @@ type Result<T> = std::result::Result<T, CloudFailure>;
 const ATTEMPTS: usize = 16;
 mod b2;
 mod lease;
+/// Personal browser signers may fence only the source named by the exact
+/// observed authority; no caller-supplied manifest or bucket metadata is used.
+pub(crate) fn fence_b2_authority(connection: &S3Connection, expected: &str, library: &str, cancel: &AtomicBool) -> Result<()> {
+    let (head, token, _) = connection.b2_read_head(cancel)?;
+    if token != expected {
+        return Err(CloudFailure::new(FailureKind::Contention, "B2 authority changed; reread before retiring its legacy source"));
+    }
+    head.validate_scope_typed(&connection.prefix, library)?;
+    let control = head.control().map_err(invalid)?;
+    control.may_read()?;
+    if !matches!(control.state, State::Active | State::Upgrading) {
+        return Err(invalid("B2 authority cannot retire a legacy source in this state"));
+    }
+    b2::fence(connection, &head, cancel)
+}
 use crate::cloud_control::lease::Lease;
 use std::sync::Mutex;
 fn invalid(message: impl Into<String>) -> CloudFailure {

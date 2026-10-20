@@ -18,6 +18,8 @@ pub const HEAD_VERSION: u32 = 5;
 const BASE_HEAD_VERSION: u32 = 4;
 mod legacy;
 pub use legacy::{LegacyIntake, MAX_INTAKE};
+pub mod b2_catalog;
+pub mod b2_control;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Head {

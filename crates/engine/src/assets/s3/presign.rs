@@ -35,15 +35,16 @@ fn identifier(s: &str) -> bool {
 fn epoch(s: &str) -> bool {
     s.parse::<u64>().is_ok_and(|epoch| epoch >= 2 && epoch.to_string() == s)
 }
-fn write_limit(key: &str, digest: &str, immutable: bool) -> Option<u64> {
+fn write_limit(key: &str, digest: &str, immutable: bool, b2: bool) -> Option<u64> {
     let parts: Vec<_> = key.split('/').collect();
     let named = format!("{digest}.json");
     match parts.as_slice() {
         ["catalog", "head.json"] if !immutable => Some(16 << 10),
-        ["catalog", "changes", file] if !immutable && *file == named => Some(2 << 20),
-        ["catalog", "checkpoints", file] if !immutable && *file == named => Some(64 << 20),
-        ["catalog", "epochs", n, "changes", file] if !immutable && epoch(n) && *file == named => Some(2 << 20),
-        ["catalog", "epochs", n, "checkpoints", file] if !immutable && epoch(n) && *file == named => Some(64 << 20),
+        ["catalog", "changes", file] if (!immutable || b2) && *file == named => Some(2 << 20),
+        ["catalog", "checkpoints", file] if (!immutable || b2) && *file == named => Some(64 << 20),
+        ["catalog", "epochs", n, "changes", file] if (!immutable || b2) && epoch(n) && *file == named => Some(2 << 20),
+        ["catalog", "epochs", n, "checkpoints", file] if (!immutable || b2) && epoch(n) && *file == named => Some(64 << 20),
+        ["catalog", "legacy", file] if immutable && b2 && *file == named => Some(crate::cloud_records::MAX_INTAKE),
         ["sync-v2", library, "receipts", file] if identifier(library) && *file == named => Some(1024),
         ["sync-v2", library, "manifest", file] if immutable && identifier(library) && *file == named => Some(64 << 10),
         ["sync-v2", library, "checkpoints", author, file] if immutable && identifier(library) && identifier(author) && *file == named => {
@@ -160,7 +161,9 @@ impl S3Connection {
                 "PUT" if r.version.is_none() => {
                     let digest = r.content_sha256.as_deref().filter(|s| hash(s)).ok_or_else(denied)?;
                     let relative = r.key.strip_prefix(&format!("{}/", self.prefix)).ok_or_else(denied)?;
-                    let limit = write_limit(relative, digest, immutable).ok_or_else(denied)?;
+                    let b2 =
+                        self.endpoint.as_deref().and_then(crate::cloud_setup::b2_runtime_endpoint).is_some_and(|(_, region)| region == self.region);
+                    let limit = write_limit(relative, digest, immutable, b2).ok_or_else(denied)?;
                     if r.size.is_none_or(|size| size == 0 || size > limit) {
                         return Err(denied());
                     }
@@ -329,5 +332,54 @@ mod tests {
             assert!(c.authorize_browser(&r, 300).is_err());
         }
         assert_eq!(checksum(&super::super::super::sha256(b"").0).unwrap(), "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=");
+    }
+
+    #[test]
+    fn b2_catalog_grants_are_bounded_and_never_grant_heads_descriptors_or_media() {
+        let mut c = connection();
+        c.endpoint = Some("https://s3.us-east-005.backblazeb2.com".into());
+        c.region = "us-east-005".into();
+        let digest = super::super::super::sha256(b"metadata").0;
+        for (key, max) in [
+            (format!("catalog/changes/{digest}.json"), 2 << 20),
+            (format!("catalog/checkpoints/{digest}.json"), 64 << 20),
+            (format!("catalog/epochs/2/changes/{digest}.json"), 2 << 20),
+            (format!("catalog/epochs/17/checkpoints/{digest}.json"), 64 << 20),
+            (format!("catalog/legacy/{digest}.json"), crate::cloud_records::MAX_INTAKE),
+        ] {
+            let mut r = request(
+                json!({"connection":"personal","method":"PUT","operation":"putImmutable","key":format!("library/{key}"),"size":max,"contentSha256":digest}),
+            );
+            let grant = c.authorize_browser(&r, 300).unwrap();
+            assert_eq!(grant.headers["x-amz-checksum-sha256"], checksum(&digest).unwrap());
+            assert!(!grant.headers.contains_key("if-match") && !grant.headers.contains_key("if-none-match"));
+            r.size = Some(max + 1);
+            assert!(c.authorize_browser(&r, 300).is_err());
+            r.size = Some(max);
+            r.condition = Some("*".into());
+            assert!(c.authorize_browser(&r, 300).is_err());
+            r.condition = None;
+            for (endpoint, region) in [(None, "us-east-1"), (Some("https://us1"), "us1"), (Some("https://minio.example.com"), "us-east-1")] {
+                let mut other = c.clone();
+                other.endpoint = endpoint.map(str::to_owned);
+                other.region = region.into();
+                assert!(other.authorize_browser(&r, 300).is_err(), "no unconditional catalog grant for {endpoint:?}");
+            }
+        }
+        for key in [
+            "catalog/head.json".into(),
+            "catalog/b2-authority.json".into(),
+            format!("catalog/authority/{digest}.json"),
+            format!("catalog/epochs/2/legacy/{digest}.json"),
+            format!("catalog/epochs/02/changes/{digest}.json"),
+            format!("catalog/changes/{}.json", "b".repeat(64)),
+            format!("originals/{digest}"),
+            format!("sync-v2/lib/control/00000000000000000001-{digest}.json"),
+        ] {
+            let r = request(
+                json!({"connection":"personal","method":"PUT","operation":"putImmutable","key":format!("library/{key}"),"size":1,"contentSha256":digest}),
+            );
+            assert!(c.authorize_browser(&r, 300).is_err(), "{key}");
+        }
     }
 }

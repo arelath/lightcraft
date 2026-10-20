@@ -1,6 +1,6 @@
 # Deploying the personal browser signer
 
-Last updated: 2026-10-17
+Last updated: 2026-10-20
 
 `lightcraft-cli cloud-signer` is the maintained personal deployment for the
 [browser adapter](browser-cloud.md). It serves one storage connection, one dedicated
@@ -67,7 +67,7 @@ lightcraft-cli cloud-signer --config /etc/lightcraft/signer.json \
 
 `--token-env NAME` chooses a different environment variable. The service refuses public
 bindings, empty prefixes, wildcard origins, invalid configuration and missing/short tokens.
-Requests have bounded headers (8 KiB), JSON bodies (16 KiB), a 10-second read deadline
+Requests have bounded headers (8 KiB), authorization JSON bodies (16 KiB), a 10-second read deadline
 and bounded concurrent connections. It closes connections after each response, emits
 no request/URL/token logs and returns generic errors without storage credentials.
 Keep proxy tracing and application response-body logging disabled too: signed URLs
@@ -130,7 +130,7 @@ For example, configure Caddy separately from the static browser site:
 
 ```caddyfile
 signer.example.com {
-    @authorize path /authorize
+    @authorize path /authorize /authorize/control
     reverse_proxy @authorize 127.0.0.1:8787
     respond 404
 }
@@ -170,6 +170,57 @@ and [checksum support](https://docs.aws.amazon.com/AmazonS3/latest/userguide/usi
 Temporary credentials can expire before the returned URL lifetime. Custom providers
 must support the signed checksum and the chosen synchronization protocol; URL issuance
 alone does not verify provider behavior.
+
+### Backblaze authority endpoint (server component)
+
+The signer now provides `POST /authorize/control` for the B2 authority adapter.
+The browser upgrade/sync runner does not use it yet; upgraded B2 libraries remain
+desktop-only until that integration and runtime acceptance are complete (CR.43).
+Deploying this endpoint alone does not enable browser upgrade or rejoin.
+
+It uses the same exact Origin, bearer session token, JSON content type and preflight
+rules as `/authorize`, with a separate 32 KiB request/response bound and a 16 KiB
+head bound. Forward both paths through the reverse proxy. A request binds the
+connection ID, exact configured prefix and public bucket root before any native
+control operation:
+
+```json
+{
+  "connection": "personal",
+  "prefix": "lightcraft/personal",
+  "bucketRoot": "https://s3.us-east-005.backblazeb2.com/my-bucket/",
+  "action": { "operation": "read" }
+}
+```
+
+Only canonical HTTPS B2 S3 hosts select this adapter. Bare regions are setup inputs,
+and saved custom hosts such as `https://us1` do not select B2 authority. Native B2
+application credentials remain on the signer host; account authorization tokens,
+bucket IDs and unrelated bucket-info entries never appear in responses. The native
+adapter requires `listBuckets`, and authority mutation requires `writeBuckets`, in
+addition to scoped object access. Do not substitute AWS temporary session credentials.
+
+Actions are limited to `read`, `initialize` with a frozen append-upgrade `head`,
+`write` with the observed `expected` token and replacement `head`, and `fence` with
+the observed token and library ID. Fence retires only the exact legacy source named
+by the current committed B2 authority. Native initialization, transition, namespace
+and original-manifest validation still run; activation independently refuses an
+unretired or differently retired legacy source. The endpoint grants no whole-library
+erasure, arbitrary native API forwarding or client-supplied bucket metadata.
+
+Read returns `{ "result": "read", "current": null }` before an authority descriptor
+exists, or a verified head plus concurrency token. A missing pointer after descriptor
+publication is an interrupted upgrade error, not an empty library. Writes return
+`{ "result": "updated" }`; callers must reread the committed authority and replay it
+before acknowledging edits. Failures return `result: "failed"` plus a typed `failure`,
+preserving contention, update/finish-upgrade recovery, HTTP provenance and captured
+retry delay. They contain no native authorization response.
+
+B2 immutable presigning additionally permits exact-hash catalog changes (2 MiB),
+checkpoints (64 MiB), their canonical epoch namespaces, and original-root legacy
+intakes (64 MiB). Heads, authority objects and the fixed descriptor remain server
+written; source fencing uses the typed endpoint. Generic append grants remain
+unchanged. Media uploads, DELETE and arbitrary listing remain unavailable.
 
 ## Browser and bucket setup
 

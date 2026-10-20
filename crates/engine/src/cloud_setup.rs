@@ -34,7 +34,7 @@ impl Provider {
     pub fn of(connection: &S3Connection) -> Self {
         match connection.endpoint.as_deref() {
             None => Self::Aws,
-            Some(endpoint) if b2_endpoint(endpoint).is_some() => Self::Backblaze,
+            Some(endpoint) if b2_runtime_endpoint(endpoint).is_some() => Self::Backblaze,
             Some(_) => Self::Other,
         }
     }
@@ -53,6 +53,20 @@ pub fn b2_endpoint(typed: &str) -> Option<(String, String)> {
         && region.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && region.bytes().any(|b| b.is_ascii_digit());
     valid.then(|| (format!("https://s3.{region}.backblazeb2.com"), region))
+}
+
+/// Classify a saved endpoint, not a setup preset or bare region. This finite URL
+/// grammar is shared with the browser: HTTPS, an exact B2 S3 host, the default
+/// port and at most the root slash. No credentials, escaped host, query or path.
+pub fn b2_runtime_endpoint(raw: &str) -> Option<(String, String)> {
+    if raw.len() > 512 || raw != raw.trim() || !raw.get(..8)?.eq_ignore_ascii_case("https://") {
+        return None;
+    }
+    let authority = raw.get(8..)?.strip_suffix('/').unwrap_or(raw.get(8..)?);
+    let host = authority.strip_suffix(":443").unwrap_or(authority).to_ascii_lowercase();
+    let region = host.strip_prefix("s3.")?.strip_suffix(".backblazeb2.com")?;
+    let (endpoint, parsed) = b2_endpoint(region)?;
+    (host == format!("s3.{parsed}.backblazeb2.com")).then_some((endpoint, parsed))
 }
 
 /// The legacy name-derived binding, retained only for existing saved connections.
@@ -150,6 +164,37 @@ mod tests {
     }
 
     #[test]
+    fn saved_b2_endpoints_require_an_exact_https_storage_host() {
+        let want = Some(("https://s3.us-west-004.backblazeb2.com".to_owned(), "us-west-004".to_owned()));
+        for good in
+            ["https://s3.us-west-004.backblazeb2.com", "https://S3.US-WEST-004.backblazeb2.com/", "https://s3.us-west-004.backblazeb2.com:443/"]
+        {
+            assert_eq!(b2_runtime_endpoint(good), want, "{good}");
+        }
+        for bad in [
+            "us-west-004",
+            "s3.us-west-004.backblazeb2.com",
+            "https://us1",
+            "https://s3.us1",
+            "https://minio.example.com",
+            "http://s3.us-west-004.backblazeb2.com",
+            "https://s3.us-west-004.backblazeb2.com:444",
+            "https://s3.us-west-004.backblazeb2.com//",
+            "https://s3.us-west-004.backblazeb2.com/path",
+            "https://s3.us-west-004.backblazeb2.com/?x=1",
+            "https://s3.us-west-004.backblazeb2.com/#x",
+            "https://name@s3.us-west-004.backblazeb2.com",
+            "https://s3.us-west-004.backblazeb2.com.evil.test",
+            "https://s3.us-west-004.backblazeb2.com./",
+            " https://s3.us-west-004.backblazeb2.com",
+            "https://s3.us-west-004.backblazeb2.com\\",
+            "https://s3.us-west-004.backblazeb2.com/\n",
+        ] {
+            assert_eq!(b2_runtime_endpoint(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn providers_pick_the_protocol_and_are_recognised_again() {
         assert_eq!(Provider::Aws.new_library_protocol(), SyncProtocol::ConditionalHead);
@@ -160,6 +205,9 @@ mod tests {
         connection.endpoint = Some("https://s3.eu-central-003.backblazeb2.com".into());
         assert_eq!(Provider::of(&connection), Provider::Backblaze);
         connection.endpoint = Some("https://minio.example.com".into());
+        assert_eq!(Provider::of(&connection), Provider::Other);
+        connection.endpoint = Some("https://us1".into());
+        connection.region = "us1".into();
         assert_eq!(Provider::of(&connection), Provider::Other);
     }
 }

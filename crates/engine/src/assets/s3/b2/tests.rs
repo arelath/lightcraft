@@ -53,6 +53,17 @@ fn authority_pointers_bind_storage_prefix_and_are_small_and_canonical() {
 }
 
 #[test]
+fn custom_region_like_hosts_never_select_native_b2_authority() {
+    let mut c = connection();
+    c.endpoint = Some("https://us1".into());
+    c.region = "us1".into();
+    c.validate().unwrap();
+    assert!(Scope::new(&c).is_err());
+    assert!(!c.b2_head_enabled(&AtomicBool::new(false)).unwrap(), "no request to a custom endpoint or the B2 account API");
+    assert!(matches!(c.b2_read_authority(&AtomicBool::new(false)), Err(AssetError::Unconfigured(_))));
+}
+
+#[test]
 fn arbitrary_bucket_info_values_are_preserved_and_capacity_is_bounded() {
     let mut info = Map::new();
     info.insert("unrelated".into(), json!({"nested":[1,true,"text"]}));

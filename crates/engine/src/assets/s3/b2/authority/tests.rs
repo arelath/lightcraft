@@ -45,6 +45,22 @@ fn initial() -> Head {
     head
 }
 #[test]
+fn activation_requires_the_exact_permanent_legacy_fence() {
+    let intake = LegacyIntake::new("library", Default::default()).unwrap();
+    let source = Control::initial_append("library");
+    assert!(matches!(require_source_fence(&source, &intake, "upgrade"), Err(AssetError::Blocked(crate::cloud_control::Blocked::FinishUpgrade(_)))));
+    let retired = source.retire_append_source(&intake.manifest).unwrap();
+    require_source_fence(&retired, &intake, "upgrade").unwrap();
+    let mut other = retired.clone();
+    other.successor.as_mut().unwrap().manifest = "d".repeat(64);
+    assert!(require_source_fence(&other, &intake, "upgrade").is_err());
+    let mut other = retired.clone();
+    other.library = "another".into();
+    assert!(require_source_fence(&other, &intake, "upgrade").is_err());
+    let deleted = retired.delete().unwrap();
+    assert!(matches!(require_source_fence(&deleted, &intake, "upgrade"), Err(AssetError::Blocked(crate::cloud_control::Blocked::Deleted))));
+}
+#[test]
 fn initialization_requires_exact_exposed_append_upgrade_shape() {
     let c = connection();
     let valid = initial();

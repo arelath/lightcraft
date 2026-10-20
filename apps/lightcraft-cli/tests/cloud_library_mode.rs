@@ -52,6 +52,42 @@ fn b2_append_upgrade_is_available_and_confirmation_uses_provider_neutral_copy() 
     assert!(status["reports"].as_array().unwrap().is_empty());
     assert!(f.state.lock().unwrap().requests.is_empty());
 }
+#[test]
+#[ignore = "explicit native presented-window acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn custom_region_like_endpoints_do_not_offer_b2_only_upgrades() {
+    let f = support::Fixture::new();
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("custom-endpoint");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let local = f.dir.join("custom-endpoint-presentation");
+    let (out, rows) = f.run(
+        &local,
+        &[
+            (
+                "cloud.configure",
+                json!({"id":"personal","bucket":"photos","region":"us1","prefix":"library","endpoint":"https://us1","profile":"acceptance"}),
+            ),
+            ("cloud.pause", json!({})),
+            ("cloud.syncEnable", json!({"connection":"personal","protocol":"append-log-v1"})),
+        ],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    let status = app.execute("cloud.syncStatus", json!({}));
+    assert_eq!(status["canUpgrade"], false);
+    assert_eq!(status["userPaused"], true);
+    assert_eq!(status["running"], false);
+    assert_eq!(app.execute("cloud.overview", json!({}))["canUpgrade"], false);
+    app.click_when_ready("icon:cloud");
+    app.click_when_ready("button:cloudMore");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("cloud-actions.png")}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    std::fs::write(artifacts.join("widgets.json"), serde_json::to_vec_pretty(&app.ask("ui.widgets", json!({"filter":"cloudSyncMigrate"}))).unwrap())
+        .unwrap();
+    let status = app.execute("cloud.syncStatus", json!({}));
+    assert!(status["reports"].as_array().unwrap().is_empty());
+    assert_eq!(status["running"], false);
+    assert!(f.state.lock().unwrap().requests.is_empty());
+}
 impl Desktop {
     fn start(f: &support::Fixture, library: &Path, artifacts: &Path) -> Self {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();

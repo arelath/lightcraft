@@ -51,7 +51,12 @@ impl Config {
         Ok(())
     }
 }
+mod control;
+#[cfg(test)]
+pub(crate) use control::execute as execute_b2_control;
+
 struct Request {
+    control: bool,
     method: String,
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
@@ -85,7 +90,12 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, u16> {
     let text = std::str::from_utf8(&header).map_err(|_| 400u16)?;
     let mut lines = text.split("\r\n");
     let parts: Vec<_> = lines.next().ok_or(400u16)?.split(' ').collect();
-    let [method, "/authorize", "HTTP/1.1"] = parts.as_slice() else { return Err(404) };
+    let [method, path, "HTTP/1.1"] = parts.as_slice() else { return Err(404) };
+    let control = match *path {
+        "/authorize" => false,
+        "/authorize/control" => true,
+        _ => return Err(404),
+    };
     if !matches!(*method, "POST" | "OPTIONS") {
         return Err(405);
     }
@@ -108,12 +118,12 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, u16> {
         None if *method == "OPTIONS" => 0,
         None => return Err(411),
     };
-    if size > 16 << 10 {
+    if size > if control { crate::cloud_records::b2_control::REQUEST_LIMIT } else { 16 << 10 } {
         return Err(413);
     }
     let mut body = vec![0u8; size];
     read_deadline(stream, &mut body, deadline)?;
-    Ok(Request { method: (*method).into(), headers, body })
+    Ok(Request { control, method: (*method).into(), headers, body })
 }
 fn same_token(expected: &str, actual: &str) -> bool {
     let Ok(mut left) = Hmac::<Sha256>::new_from_slice(b"LightCraft signer session token") else { return false };
@@ -132,6 +142,8 @@ fn response(stream: &mut TcpStream, status: u16, origin: Option<&str>, body: &[u
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
+        409 => "Conflict",
+        422 => "Unprocessable Content",
         411 => "Length Required",
         413 => "Content Too Large",
         431 => "Request Header Fields Too Large",
@@ -145,7 +157,15 @@ fn response(stream: &mut TcpStream, status: u16, origin: Option<&str>, body: &[u
     );
     let _ = stream.write_all(header.as_bytes()).and_then(|()| stream.write_all(body));
 }
-fn handle(mut stream: TcpStream, config: &Config, token: &str) {
+fn handle(stream: TcpStream, config: &Config, token: &str) {
+    handle_using(stream, config, token, |request| control::execute(&config.connection, request));
+}
+fn handle_using(
+    mut stream: TcpStream,
+    config: &Config,
+    token: &str,
+    execute: impl FnOnce(&crate::cloud_records::b2_control::Request) -> Result<crate::cloud_records::b2_control::Reply, crate::cloud_status::CloudFailure>,
+) {
     let r = match read_request(&mut stream) {
         Ok(r) => r,
         Err(status) => {
@@ -177,6 +197,23 @@ fn handle(mut stream: TcpStream, config: &Config, token: &str) {
     }
     if r.headers.get("content-type").and_then(|v| v.split(';').next()).map(str::trim) != Some("application/json") {
         response(&mut stream, 400, origin, b"{\"error\":\"expected application/json\"}");
+        return;
+    }
+    if r.control {
+        use crate::cloud_records::b2_control::{RESPONSE_LIMIT, Reply, Request};
+        let Ok(request) = serde_json::from_slice::<Request>(&r.body) else {
+            response(&mut stream, 400, origin, b"{\"error\":\"invalid control request\"}");
+            return;
+        };
+        let result = control::validate(&config.connection, &request).and_then(|()| execute(&request));
+        let (status, reply) = match result {
+            Ok(reply) => (200, reply),
+            Err(failure) => (control::status(&failure), Reply::Failed { failure }),
+        };
+        match serde_json::to_vec(&reply) {
+            Ok(bytes) if bytes.len() <= RESPONSE_LIMIT => response(&mut stream, status, origin, &bytes),
+            _ => response(&mut stream, 500, origin, b"{\"error\":\"could not encode control response\"}"),
+        }
         return;
     }
     let Ok(request) = serde_json::from_slice::<BrowserRequest>(&r.body) else {

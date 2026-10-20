@@ -54,10 +54,13 @@ impl Signer {
         s
     }
     fn request(&self, token: &str, body: Value) -> (u16, String, Value) {
+        self.request_at("/authorize", token, body)
+    }
+    fn request_at(&self, route: &str, token: &str, body: Value) -> (u16, String, Value) {
         let body = body.to_string();
         let mut stream = TcpStream::connect(&self.address).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        write!(stream,"POST /authorize HTTP/1.1\r\nHost: localhost\r\nOrigin: http://127.0.0.1:8080\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
+        write!(stream,"POST {route} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://127.0.0.1:8080\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
         stream.shutdown(Shutdown::Write).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
@@ -82,4 +85,16 @@ fn maintained_signer_cli_launches_from_configuration_and_enforces_auth_and_scope
     assert_eq!(signer.request("wrong", read).0, 401);
     assert_eq!(signer.request(token, json!({"connection":"personal","method":"DELETE","key":"library/originals/example"})).0, 403);
     assert_eq!(signer.request(token, json!({"connection":"personal","method":"GET","key":"other/originals/example"})).0, 403);
+    let control = json!({"connection":"personal","prefix":"library","bucketRoot":"http://127.0.0.1:9000/photos/","action":{"operation":"read"}});
+    assert_eq!(signer.request_at("/authorize/control", "wrong", control.clone()).0, 401);
+    let (status, headers, body) = signer.request_at("/authorize/control", token, control.clone());
+    assert_eq!(status, 422, "a non-B2 destination must not invoke any native account API");
+    assert!(headers.contains("Access-Control-Allow-Origin: http://127.0.0.1:8080"));
+    assert_eq!(body["result"], "failed");
+    assert_eq!(body["failure"]["kind"], "unsupported");
+    assert_eq!(body["failure"]["remedy"], "editConnection");
+    assert!(!body.to_string().contains("test-secret-example") && !body.to_string().contains(token));
+    let mut outside = control;
+    outside["bucketRoot"] = json!("http://127.0.0.1:9000/another/");
+    assert_eq!(signer.request_at("/authorize/control", token, outside).0, 403);
 }

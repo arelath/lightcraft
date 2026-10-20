@@ -75,7 +75,7 @@ impl Scope {
         let (endpoint, region) = c
             .endpoint
             .as_deref()
-            .and_then(crate::cloud_setup::b2_endpoint)
+            .and_then(crate::cloud_setup::b2_runtime_endpoint)
             .ok_or_else(|| configuration("requires a canonical Backblaze endpoint"))?;
         if region != c.region {
             return Err(configuration("configured region differs from its endpoint"));
@@ -234,7 +234,7 @@ fn authorize(c: &S3Connection, cancel: &AtomicBool, refresh: bool) -> Result<Arc
     let storage = value.get("apiInfo").and_then(|v| v.get("storageApi")).ok_or_else(|| invalid("account API"))?;
     let api = endpoint(&text(storage, "apiUrl", 512)?)?;
     let s3 = text(storage, "s3ApiUrl", 512)?;
-    if crate::cloud_setup::b2_endpoint(&s3) != c.endpoint.as_deref().and_then(crate::cloud_setup::b2_endpoint) {
+    if crate::cloud_setup::b2_runtime_endpoint(&s3) != c.endpoint.as_deref().and_then(crate::cloud_setup::b2_runtime_endpoint) {
         return Err(configuration("account and configured S3 region differ"));
     }
     let capabilities = storage
