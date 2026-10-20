@@ -98,7 +98,7 @@ fn read_window(
             remote.tail_records = tail.count();
             first = false;
         }
-        let budget = tail.count().min(segment.unwrap_or(RECOVERY_SEGMENT_BATCHES));
+        let budget = tail.retained().min(segment.unwrap_or(RECOVERY_SEGMENT_BATCHES));
         for _ in 0..budget {
             let (_, batch) = tail.next(connection, cancel)?.ok_or_else(|| invalid("history replay ended before its verified prefix"))?;
             for mutation in batch.mutations {
@@ -145,16 +145,26 @@ fn read_incremental(
     while let Some(reference) = next.take() {
         canceled(cancel)?;
         if local.cursor.as_deref() == Some(reference.hash.0.as_str()) {
-            if index.count > RECOVERY_SEGMENT_BATCHES {
-                return read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), archive_proofs, cancel);
-            }
+            // An acknowledged baseline is already certified. If scratch capacity
+            // retained only its oldest new prefix, checkpoint that prefix through
+            // the existing recovery path instead of downloading the scan again.
+            let prefix_generation = if index.retained() < index.count {
+                Some(
+                    current
+                        .generation
+                        .checked_sub(index.count - index.retained())
+                        .filter(|generation| *generation > local.generation)
+                        .ok_or_else(|| invalid("history generation does not cover the acknowledged recovery prefix"))?,
+                )
+            } else {
+                None
+            };
             let state = SyncState::restore_durable(&local.portable(), "remote".into(), connection.id.clone()).map_err(catalog_error)?;
             let tail_records = tail_length(current);
             let mut remote = Remote { head, state, tail_records, recovery: None };
             let mut parent = Some(reference);
-            while let Some(reference) = index.pop()? {
+            while let Some((reference, batch)) = index.pop(connection, cancel)? {
                 canceled(cancel)?;
-                let batch = publication::read_batch(connection, &reference, cancel)?;
                 if batch.parent != parent {
                     return Err(AssetError::Integrity);
                 }
@@ -163,16 +173,20 @@ fn read_incremental(
                     crate::cloud_history::native::receive(connection, &mut remote.state, &mutation, archive_proofs, cancel)?;
                 }
             }
+            if let Some(generation) = prefix_generation {
+                remote.recovery = Some((parent.ok_or_else(|| invalid("recovery prefix has no boundary"))?, generation));
+            }
             return Ok(remote);
         }
         if boundary == Some(&reference.hash) {
             break;
         }
-        index.push(&reference)?;
         seen.visit(&reference.hash).map_err(invalid)?;
-        let batch = publication::read_batch(connection, &reference, cancel)?;
+        let (bytes, batch) = publication::read_batch_bytes(connection, &reference, cancel)?;
+        index.push(&reference, &bytes, cancel)?;
         next = batch.parent;
     }
+    drop(index);
     read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), archive_proofs, cancel)
 }
 fn immutable(connection: &S3Connection, key: &str, bytes: &[u8], cancel: &AtomicBool, max: usize) -> Result<()> {

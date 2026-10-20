@@ -61,14 +61,14 @@ Destination detail is bounded to 32 identities plus an overflow bucket. The curr
 connection-name lookup is limited to 32 bindings, with an explicit truncation flag. No cache,
 publication proof, upload verification or polling policy changes are implied by these
 diagnostics. Native immutable-body reuse is described below; further traffic reductions
-remain tracked by CR.79–CR.86.
+remain tracked by CR.80–CR.86.
 
 ## Native immutable history cache
 
 Native filesystem libraries reuse verified append operation/checkpoint and receipt-archive
 bodies in `<library>/sync-record-cache-v1/`. The disposable cache is independent of the
 movable original-media cache; moving media storage does not move history bodies. No cache
-binding is serialized into a connection, upload receipt or cloud record. In-memory catalogs retain their existing adapters. Browser append-body reuse is described below. Conditional-head batch replay is still CR.79.
+binding is serialized into a connection, upload receipt or cloud record. In-memory catalogs retain their existing adapters. Browser append-body reuse is described below. Native conditional-head batch replay uses the operation-local spool described below; browser replay remains CR.86.
 
 Entries bind the canonical destination (connection ID, bucket, region, prefix and endpoint),
 exact immutable key including its content identity, verified actual byte length and body
@@ -96,6 +96,32 @@ index: historical discovery can skip reconstructing those accepted effects entir
 if the disposable body cache was evicted. These identity checks are not fresh remote-byte
 proof. Unknown/gapped records still need their verified bodies. Explicit maintenance and
 receive-only audits bypass cached bodies, including nested receipt reads.
+
+## Native conditional-history replay spool
+
+Within one native conditional-head read, backward traversal saves the exact verified
+batch bytes and forward replay reuses them without another object GET. Replay rechecks
+scope, size, SHA-256, schema and parent continuity. This ephemeral proof belongs to the
+observed history; it does not grant current authority, establish later remote existence,
+or bypass fresh authority/CAS confirmation. Another read or explicit verification fetches
+remote bytes again. The pending-local-edit safety guard remains unchanged.
+
+Two private temporary files retain at most 512 MiB of bodies and 16,826,368 bytes of
+references (4,096 slots). A bounded offset deque tracks complete retained batches. The
+circular body arena keeps the oldest complete replay prefix even when the byte limit is
+reached before the record limit. Only one raw and one decoded batch are resident; bodies
+remain limited to 2 MiB. Cancellation is checked during chunked I/O. Scratch damage or
+storage failure reports temporary-disk recovery and preserves catalog/pending work.
+Windows deletes exclusive scratch files when their handles close, including process exit;
+Unix unlinks them on creation. Other hosts remove owned paths on normal drop.
+
+Longer histories still traverse the chain to certify its boundary. Recovery installs
+verified oldest-prefix checkpoints through the existing conditional authority before
+continuing; read-only callers walk successive windows. An acknowledged cursor with no
+pending edits can seed a byte/record-limited prefix without repeating its initial scan.
+Separate recovery walks, CAS retries and publication confirmation can reread records.
+The spool is neither a durable cache nor progress across verification budget slices.
+Browser conditional-head replay still downloads traversal/replay bodies separately (CR.86).
 
 ## Incremental sync and remote verification
 
@@ -149,11 +175,13 @@ hide missing consumed checkpoints, acknowledged full-receipt operation keys, or 
 archive roots. Newly introduced old keys still undergo causal/fork checks. A detected remote
 history failure stays latched across ordinary cached sync; restore the remote objects and
 complete fresh verification to clear it. Successful cached reads cannot clear that diagnosis.
-Conditional-head verification uses the existing bounded read-only checkpoint/tail reader;
-it restarts that replay when a slice is exhausted. A head history too large for one slice
-cannot complete verification until checkpoint maintenance reduces its tail. Resumable head
-replay spooling and incremental acknowledged baselines remain CR.79/CR.80/CR.86; append
-verification already resumes at its saved key.
+Conditional-head verification uses the bounded read-only checkpoint/tail reader. Native
+traversal/replay reuses each verified batch within that read, halving its history GETs;
+the spool does not survive a request/byte-budget slice or restart. A head history too large
+for one slice still cannot complete verification until checkpoint maintenance reduces its
+tail. Cross-slice head progress and incremental acknowledged baselines remain future work;
+CR.80 covers native baseline separation and CR.86 browser replay. Append verification
+already resumes at its saved key.
 
 Cached/known-key discovery intentionally delays detection of corruption or disappearance
 at an already accepted remote key until a fresh check. Weekly verification is not an atomic

@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~14 points and ~340–600 h away
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (CR.78: separate incremental sync and durable budgeted verification; CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified; RAW decoding 77%) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (CR.79: bounded native conditional-history byte reuse; CR.78: separate incremental sync and durable budgeted verification; CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified; RAW decoding 77%) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 One-page summary of how close LightCraft is to Adobe Lightroom. Agents: read this, then pick work
 from [docs/gaps.md](docs/gaps.md). The full assessment, method and evidence are in
@@ -161,6 +161,7 @@ Ranked toward beta; detail in [docs/roadmap.md](docs/roadmap.md), gaps in [docs/
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | minor | CR.79: Native conditional-history traversal/replay shares a bounded verified byte spool, preserving recovery and pending-edit guards. Browser replay and baseline separation remain open; cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.78: Incremental known-key/cached discovery is separate from read-only fresh verification, with persistent deadlines, cursor and request/byte reservations. Native and browser append paths retain late-key fork checks; cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.77: Bounded durable native append/receipt-body reuse rechecks destination, content and schema, preserves causal/fork checks and bypasses cache for fresh audits. Audit scheduling remains CR.78; cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.76: Native cloud request/body-byte accounting includes media verification, B2 control, partial failures, bounded operation/hourly diagnostics and safe identity fields. CR.77-CR.86 track traffic reduction; cloud remains OOS and parity counts unchanged |

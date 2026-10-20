@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 
-const MAX_BYTES: usize = 2 << 20;
+pub(crate) const MAX_BYTES: usize = 2 << 20;
 
 pub use crate::cloud_records::{Batch, CheckpointRef, Head, Imported, RecordRef};
 
@@ -112,12 +112,22 @@ pub(crate) fn ensure_head_protocol(connection: &S3Connection, library: &str, can
 }
 
 pub fn read_batch(connection: &S3Connection, reference: &RecordRef, cancel: &AtomicBool) -> Result<Batch> {
-    let epoch = reference.validate(connection)?;
+    read_batch_bytes(connection, reference, cancel).map(|(_, batch)| batch)
+}
+/// Keep verified wire bytes for a bounded, operation-local replay spool.
+pub(crate) fn read_batch_bytes(connection: &S3Connection, reference: &RecordRef, cancel: &AtomicBool) -> Result<(Vec<u8>, Batch)> {
+    reference.validate(connection)?;
     let reply = connection.get_small(&reference.key, MAX_BYTES, cancel)?.ok_or(AssetError::Missing)?;
-    if reply.bytes.len() as u64 != reference.size || sha256(&reply.bytes) != reference.hash {
+    let batch = decode_batch(connection, reference, &reply.bytes)?;
+    Ok((reply.bytes, batch))
+}
+/// Network reads and local replay must enforce identical scope/content/schema checks.
+pub(crate) fn decode_batch(connection: &S3Connection, reference: &RecordRef, bytes: &[u8]) -> Result<Batch> {
+    let epoch = reference.validate(connection)?;
+    if bytes.len() as u64 != reference.size || sha256(bytes) != reference.hash {
         return Err(AssetError::Integrity);
     }
-    let batch: Batch = serde_json::from_slice(&reply.bytes).map_err(|_| invalid("remote catalog batch is malformed; preserved"))?;
+    let batch: Batch = serde_json::from_slice(bytes).map_err(|_| invalid("remote catalog batch is malformed; preserved"))?;
     if !matches!(batch.version, 1..=3)
         || (batch.imports.is_empty() && batch.mutations.is_empty() && !batch.checkpoint_marker)
         || batch.imports.len() > 1000

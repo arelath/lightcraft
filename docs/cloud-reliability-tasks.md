@@ -5,9 +5,9 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
-Current status (2026-10-20): CR.1–CR.42, CR.46–CR.78 are complete.
+Current status (2026-10-20): CR.1–CR.42, CR.46–CR.79 are complete.
 CR.43–CR.45 remain open.
-CR.79–CR.86 are open: reduce provider traffic without weakening synchronization or media integrity.
+CR.80–CR.86 are open: reduce provider traffic without weakening synchronization or media integrity.
 Dated verification notes below
 describe their original snapshots; current operational limits remain in
 [cloud-storage-implementation.md](cloud-storage-implementation.md).
@@ -19,7 +19,7 @@ Source: supplied review of `9aae8b53`. Its request/day and download-byte example
 - [x] CR.76 — Complete request and byte accounting. Cover native S3 metadata, full media transfers and native B2 control calls, with logical purpose, destination/library scope, status, recognized provider refusal, transferred bytes, elapsed time and attempt. Record cache/shared-proof reuse at its owning layer. Expose per-sync/per-import and background usage without logging secrets or signed URLs. Prove totals against the counting backend, including failed and partial transfers.
 - [x] CR.77 — Reuse durably verified immutable synchronization records. Cache bodies by complete destination/content identity with bounded disk/memory use and crash-safe publication; verify bytes before cache admission and reuse. Continue discovering new keys behind author frontiers and rejecting forks. Fresh remote verification bypasses cached bodies. Cover restart, corrupt cache entries, changed destinations, old-sequence conflicts and capacity/eviction.
 - [x] CR.78 — Separate incremental synchronization from remote integrity verification. Make ordinary Sync now incremental. Give fresh remote history verification its own command, persistent schedule and request/byte budgets, independent of activity-aware polling. Preserve interrupted audit progress and historical-key discovery. Simulate 24 idle hours with 50 known operations; bound total traffic and show known history is not repeatedly downloaded. Document delayed detection of remote corruption/disappearance when cached proof is used.
-- [ ] CR.79 — Reuse conditional-history bytes during traversal/replay. Use a bounded verified spool/cache instead of fetching each batch twice. Preserve hostile-input limits, history certification, cancellation and cleanup. Assert exact GET/byte savings and unchanged outcomes for long tails, missing/corrupt history and recovery.
+- [x] CR.79 — Reuse conditional-history bytes during traversal/replay. Use a bounded verified spool/cache instead of fetching each batch twice. Preserve hostile-input limits, history certification, cancellation and cleanup. Assert exact GET/byte savings and unchanged outcomes for long tails, missing/corrupt history and recovery.
 - [ ] CR.80 — Separate the acknowledged remote baseline from pending local edits. Incrementally advance certified remote state and apply the pending overlay; after publication, confirm current authority and fetch only additional work before durable acknowledgement. Do not remove the pending-state safety guard without a replacement proof. Test warm edit costs at 10/100/1,000 batches, concurrent writers, uncertain writes, restart and exact pending preservation.
 - [ ] CR.81 — Share a verified B2 authority snapshot within each operation. Reuse verified immutable descriptor/head/intake/manifest bodies and the observed bucket revision through one synchronization call. Refresh mutable observations after conflict or uncertain writes, and confirm successful writes independently. Give legacy recovery a separate bounded schedule so unchanged upgraded libraries return promptly without missing late append input. Assert request counts and fencing/upgrade/late-writer safety.
 - [ ] CR.82 — Persist strong media verification receipts. Retain destination, object key, actual remote version ID, expected hash/size and verification method/result. Capture upload response version information. On restart, reuse proof only when the exact verified version is still applicable; otherwise perform full verification. Test restart before metadata acknowledgement, replacement/deletion, missing receipts, versionless providers, multipart and uncertain completion. HEAD alone and uploader-authored metadata are not content proof.
@@ -28,7 +28,7 @@ Source: supplied review of `9aae8b53`. Its request/day and download-byte example
 - [ ] CR.85 — Batch ready uploads through one per-library publisher. Let media workers complete independently, gather bounded ready imports, and synchronize/publicize using a fresh catalog snapshot. Preserve per-import durable acknowledgement, dependency waiting, cancellation and restart. Share immutable control-body proof while retaining fresh deletion/maintenance admission during long batches. Assert per-photo/per-batch request counts and unchanged queue/progress behavior.
 - [ ] CR.86 — Make browser conditional-head polling incremental. Check verified authority/cursor before downloading unchanged checkpoint/tail data; use the shared verified immutable cache and an acknowledged baseline separate from pending local changes. Avoid duplicate traversal/replay reads and retain OPFS/IndexedDB durability, quota recovery and causal proofs. Assert unchanged polls fetch no checkpoint/tail once verified state is available, and cover concurrent edits, reload, lost responses and rejoin.
 
-Remaining priority: CR.82/CR.83 for bandwidth, CR.84 for refusal containment, then CR.79/CR.81/CR.80 and CR.85/CR.86. CR.76–CR.78 are complete. Integrity, deletion barriers, maintenance fencing and exact durable acknowledgement remain acceptance requirements throughout. A successful cached read does not prove the remote object still exists; only a fresh remote verification establishes that at the time checked.
+Remaining priority: CR.82/CR.83 for bandwidth, CR.84 for refusal containment, then CR.81/CR.80 and CR.85/CR.86. CR.76–CR.79 are complete. Integrity, deletion barriers, maintenance fencing and exact durable acknowledgement remain acceptance requirements throughout. A successful cached read does not prove the remote object still exists; only a fresh remote verification establishes that at the time checked.
 
 ## Original reliability checklist
 
@@ -1981,3 +1981,47 @@ Final validation: all eight cargo +1.95.0 xtask ci gates pass (target/cloud-cr78
 Actual native control-channel acceptance passes (target/cloud-cr78-native-acceptance.log): two waiting operations require 2 GETs initially, 0 on an ordinary retry and 2 through the new Verify action, with zero signature errors. Fresh browser runtime acceptance passes in both OPFS and IndexedDB (target/cloud-cr78-browser.log; target/cloud-cr78/browser-results.json): 50 added history operations plus seeded library history, 96 simulated idle checks, 1,728 signer/storage requests and zero known-history body GETs per backend. It proves durable gap reuse after reload, exact catalog/outbox and remote-object preservation, failed reservation saves before network I/O, saved daily allowance after reload, and latched corrupt/missing-object failures. A larger verification finishes in slices of 128, 128 and 14 requests on each backend.
 
 Native More/popup and both browser More screenshots were inspected; completion feedback is visible. ui.inspect/perf samples are saved with the artifacts. The empty native sample records frame 1.70 ms, update 31.29 ms and max update 35.30 ms; browser samples include session maxima of 7,509/8,182 ms. These are not rendering-performance acceptance or scale claims. Desktop and web builds pass. Existing unrelated WASM warnings remain. All provider requests used local fixtures, consuming no live B2 allowance; live AWS/B2 acceptance remains CR.43/CR.45.
+
+
+2026-10-20 — CR.79 implementation: native conditional-head traversal retains exact verified
+wire bytes in a private operation-local circular spool. Forward replay checks scope,
+length, SHA-256, schema and parent continuity without another GET. The spool is limited
+to 512 MiB of bodies and 4,096 fixed reference slots (16,826,368 bytes), with one raw and
+one decoded batch resident. Byte-limited windows retain complete oldest prefixes and
+use existing checkpoint/CAS recovery before applying or acknowledging pending edits.
+An acknowledged cursor can seed that prefix only after ancestry certification and only
+without pending local effects; the pending-state guard is unchanged. Scratch corruption,
+cancellation and disk failure preserve catalog/pending work. Windows delete-on-close and
+Unix unlink-on-open reclaim private files even after abrupt process exit.
+
+Focused final tests pass (`target/cloud-cr79-unit-final.log`,
+`target/cloud-cr79-replay-final.log`): eight unit regressions cover ring/byte bounds,
+100,000 records, wrapped bodies, hostile/truncated/corrupt frames, schema/scope rechecks,
+cancellation, disk errors and abrupt process exit. Five signed real-CLI counting tests
+cover 10/100/1,000-batch incremental reads and pending edits, empty unchanged polls,
+4,097-batch recovery, missing/corrupt records with exact pending/catalog preservation,
+retry cleanup and remote replacement detected by a later fresh verification. All 20
+ordinary cloud-sync integration tests pass, including competing writers, lost responses,
+expired cursors and interrupted overlong recovery. The separate explicit scale test is
+still ignored. The 100/1,500 superseding-caption child-process regression compares the
+pre-change `79f88ae7` baseline (`target/cloud-cr79-baseline-memory.log`) with the final
+implementation: 1,500 batches now require 1,500
+GETs / 394,219,202 body bytes instead of 3,000 / 788,438,404. Final reader peak working
+set is 22,945,792 bytes and commit 10,526,720 bytes, with small final state. These are
+local-fixture memory/request observations, not live-provider or responsiveness acceptance.
+
+This is per-read proof: separate recovery walks, CAS retries and publication confirmation
+can reread records. A later fresh check still obtains remote bytes and can detect objects
+changed after the first read. The spool is disposable and does not persist verification
+progress across request/byte-budget slices or restart; very long head verification still
+needs checkpoint maintenance. Native pending-baseline separation remains CR.80, browser
+conditional-head replay remains CR.86, and cross-slice head progress remains future work.
+Actual desktop acceptance passes (`target/cloud-cr79-native-acceptance.log`): More →
+Verify remote history completes a 100-batch fresh read with one GET per batch, preserves
+the exact catalog/pending snapshot and persisted pause, and writes no remote objects.
+The popup and verification toast were inspected (`target/cloud-cr79-native/head-spool/`).
+The one-photo debug sample is frame 1.23 ms / update 1.32 ms / maximum update 49.88 ms;
+this is not scale or responsiveness acceptance. All requests used signed local fixtures,
+consuming no live B2 allowance. All eight `cargo +1.95.0 xtask ci` gates pass
+(`target/cloud-cr79-ci.log`): formatting, strict workspace Clippy, HEIF, workspace tests,
+parity, layers, assets and WebAssembly. CR.79 is complete; CR.80–CR.86 remain open.

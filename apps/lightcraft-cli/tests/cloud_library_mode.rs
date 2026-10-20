@@ -1,3 +1,5 @@
+#[path = "support/cloud_history.rs"]
+mod history;
 #[path = "support/cloud_upload.rs"]
 mod support;
 use serde_json::{Value, json};
@@ -9,6 +11,60 @@ use std::time::{Duration, Instant};
 struct Desktop {
     child: std::process::Child,
     socket: BufReader<TcpStream>,
+}
+
+#[test]
+#[ignore = "explicit native conditional-history spool acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn native_verification_replays_a_hundred_batches_once_without_acknowledging_pending_edits() {
+    let f = support::Fixture::new();
+    let local = f.dir.join("head-spool");
+    f.import(&local, false);
+    let (out, rows) = f.run(
+        &local,
+        &[("cloud.upload", json!({})), ("cloud.sync", json!({})), ("cloud.pause", json!({})), ("photo.rate", json!({"ids":[1],"rating":4}))],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    let sizes = history::extend_markers(&f, 100);
+    let before_catalog =
+        lightcraft_engine::catalog::Journal::open(Box::new(lightcraft_engine::catalog::FsStore::open(&local).unwrap())).unwrap().1.to_snapshot();
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("head-spool");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    let before = app.execute("cloud.syncStatus", json!({}));
+    assert_eq!(before["userPaused"], true);
+    assert_eq!(before["pending"], 1);
+    let remote = f.state.lock().unwrap().objects.clone();
+    f.state.lock().unwrap().traffic.clear();
+    app.click_when_ready("icon:cloud");
+    app.click_when_ready("button:cloudMore");
+    app.click_when_ready("button:cloudVerifyHistory");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = app.execute("cloud.syncStatus", json!({}));
+        if let Some(report) = status["reports"].as_array().unwrap().iter().find(|report| report["result"]["verification"] == true) {
+            assert_eq!(report["ok"], true, "{report}");
+            assert_eq!(report["result"]["complete"], true, "{report}");
+            assert_eq!(status["pending"], before["pending"]);
+            assert_eq!(status["cursor"], before["cursor"]);
+            assert_eq!(status["userPaused"], true);
+            break;
+        }
+        assert!(Instant::now() < deadline, "verification did not finish: {status}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    history::assert_cost(&f, &sizes, 1);
+    assert_eq!(f.state.lock().unwrap().objects, remote);
+    if !app.ask("ui.widgets", json!({"filter":"button:cloudMore"})).to_string().contains("button:cloudMore") {
+        app.click_when_ready("icon:cloud");
+    }
+    app.wait_widget("button:cloudMore");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("popup.png")}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.ask("app.quit", json!({}));
+    drop(app);
+    let after_catalog =
+        lightcraft_engine::catalog::Journal::open(Box::new(lightcraft_engine::catalog::FsStore::open(&local).unwrap())).unwrap().1.to_snapshot();
+    assert_eq!(after_catalog, before_catalog);
 }
 
 #[test]

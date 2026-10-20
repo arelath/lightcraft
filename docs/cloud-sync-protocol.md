@@ -903,27 +903,31 @@ No wire-format change or large-library performance claim accompanies extraction.
 
 ### Native conditional-head history recovery
 
-Native readers stream backwards through immutable batches into a fixed 4,096-slot
-reference ring on temporary disk, then refetch and verify one batch at a time for
-oldest-first replay. The ring uses at most 16,793,600 bytes; decoded history batches
-never accumulate. Constant-space cycle detection and exact parent/hash/size checks
-remain enforced. Scratch failures report temporary-disk recovery and preserve data;
-normal completion/error/cancellation removes the current scratch file.
+Native readers stream backwards through immutable batches into an operation-local
+verified byte spool, then revalidate one batch at a time for oldest-first replay without
+a second GET. A fixed 4,096-slot reference ring uses at most 16,826,368 bytes and a
+circular body arena uses at most 512 MiB. Decoded history batches never accumulate.
+Constant-space cycle detection and exact parent/hash/size/schema/scope checks remain
+enforced. Scratch failures report temporary-disk recovery and preserve data. Normal
+completion/error/cancellation releases both files; Windows delete-on-close and Unix
+unlink-on-open also reclaim files after abrupt process exit.
 
 Ordinary writers and caught-up idle polls automatically checkpoint at 1,024 tail
-batches. Histories already beyond 4,096 replay records recover through verified
+batches. Histories beyond the retained record or byte window recover through verified
 oldest-prefix checkpoints. Each prefix is installed through conditional head CAS
 before any local pending edit is applied or acknowledged. Completed prefixes survive
 restart and cancellation; retry reads the new boundary. Further windows rescan the
 remaining chain instead of requiring it all to fit in memory or scratch storage.
-Migration's read-only path uses successive windows without changing the head.
+An acknowledged baseline is reused only without pending local effects and after its
+cursor is found in the certified ancestry. Migration's read-only path uses successive
+windows without changing the head.
 
-This favors a bounded working set over request minimization: fresh traversal and
-replay fetch a batch twice, and very long recovery/read-only histories can require
-additional passes. Unchanged small head polls retain their existing no-write path.
-Browser replay shares these windows, as specified below. CR.35 records measured
-native memory/cost evidence; append checkpoint consumption and audit bounds follow below.
-
+Spool proof lasts for one read, never grants authority and does not survive a verification
+budget slice. Separate recovery/CAS/publication-confirmation reads may fetch records
+again; fresh remote verification always obtains current bytes. Unchanged small head polls
+retain their existing no-write path. Browser replay still has separate traversal/replay
+GETs below. CR.79 records exact native request/byte savings and memory evidence; append
+checkpoint consumption and audit bounds follow below.
 
 ### Browser bounded history replay
 
@@ -943,7 +947,7 @@ The checked-in Windows regression `apps/lightcraft-cli/tests/cloud_replay_memory
 uses `scripts/cloud-replay-memory.ps1` (PowerShell 7) to measure only the reader
 child, excluding the provider fixture's retained source objects. It compares 100
 and 1,500 superseding 256 KiB caption batches, checks small final state, resident
-and commit growth, and exactly two payload GETs per historical batch. The measurement is Windows-only; Windows without PowerShell 7 reports a skip.
+and commit growth, and exactly one payload GET per historical batch in a read. The measurement is Windows-only; Windows without PowerShell 7 reports a skip.
 Shared/native bounded-window tests remain portable. These are catch-up working-set checks, not
 owner-thread or slider-latency benchmarks.
 

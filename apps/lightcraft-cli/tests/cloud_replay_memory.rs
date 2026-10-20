@@ -115,7 +115,7 @@ fn superseded_head_payloads_do_not_accumulate_in_the_reader_process() {
             }
         }
         for (key, size) in &sizes {
-            assert_eq!(gets.get(key.as_str()), Some(&(2, 2 * size)), "{key}");
+            assert_eq!(gets.get(key.as_str()), Some(&(1, *size)), "{key}");
         }
         assert_eq!(storage.signature_errors, 0);
         eprintln!("replay memory: records={count}, history_bytes={}, state_bytes={state_bytes}, peak={report}", sizes.values().sum::<u64>());
