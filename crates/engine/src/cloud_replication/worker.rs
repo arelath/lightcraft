@@ -127,7 +127,7 @@ pub(crate) fn request_poll(s: &mut Session) {
 }
 pub fn start(s: &mut Session, p: &Value) -> crate::Result<Value> {
     s.cloud_replication_jobs.health.reset_retries();
-    start_impl(s, p, None)
+    start_impl(s, p, None, false)
 }
 pub fn prepare_migration(s: &mut Session, _: &Value) -> crate::Result<Value> {
     if s.cloud_replication_jobs.migrating() {
@@ -169,9 +169,9 @@ pub fn start_migration(s: &mut Session, p: &Value) -> crate::Result<Value> {
     if s.cloud_uploads.running() > 0 {
         return Err(error("finish or cancel uploads before upgrading the cloud library"));
     }
-    start_impl(s, p, Some(request))
+    start_impl(s, p, Some(request), false)
 }
-fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::Request>) -> crate::Result<Value> {
+fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::Request>, background_poll: bool) -> crate::Result<Value> {
     crate::cloud_transition::ensure_command(s, "cloud.sync")?;
     let migrating = upgrade.is_some();
     if s.cloud_paused && !migrating {
@@ -227,6 +227,13 @@ fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::
     std::thread::Builder::new()
         .name("cloud-catalog-sync".into())
         .spawn(move || {
+            let _background = crate::cloud_traffic::Scope::background_poll(background_poll);
+            let _traffic = crate::cloud_traffic::Scope::operation(
+                if migrating { crate::cloud_traffic::Purpose::Upgrade } else { crate::cloud_traffic::Purpose::Sync },
+                Some(&state.library),
+                None,
+                Some(id),
+            );
             let _permit = match coordinator.acquire(&worker_cancel) {
                 Ok(permit) => permit,
                 Err(error) => {
@@ -351,7 +358,7 @@ impl Session {
         }
         self.cloud_replication_jobs.next_poll = None;
         self.cloud_replication_jobs.cadence.scanned(now);
-        if let Err(error) = start_impl(self, &json!({"wait":false,"audit":false}), None) {
+        if let Err(error) = start_impl(self, &json!({"wait":false,"audit":false}), None, true) {
             let failure = crate::cloud_status::CloudFailure::from(&error);
             if matches!(error, EngineError::NotSaved(_)) {
                 // The library save is already retried; polling waits for it rather than halting.

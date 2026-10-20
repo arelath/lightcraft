@@ -514,6 +514,13 @@ fn empty_cloud_library_error(cap: bool) {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(error["httpStatus"], 403, "native transport preserves the actual rejection code");
+    let traffic = app.execute("cloud.traffic", json!({"limit":256}));
+    assert_eq!(traffic["scope"], "thisProcess");
+    assert!(traffic["recentRequests"].as_array().unwrap().iter().any(|request| request["purpose"] == "sync" && request["status"] == 403));
+    if cap {
+        assert!(traffic["totals"]["providerCaps"].as_u64().unwrap() > 0);
+    }
+    std::fs::write(artifacts.join("traffic.json"), serde_json::to_vec_pretty(&traffic).unwrap()).unwrap();
     app.click_when_ready("icon:cloud");
     if cap {
         app.wait_widget("button:cloudErrorDetails");

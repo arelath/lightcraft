@@ -313,6 +313,7 @@ pub(super) fn publish_ready(
     task: &UploadProgress,
     media: &mut VerifiedMedia,
 ) -> Result<Vec<Result<Value>>> {
+    let _traffic = crate::cloud_traffic::Scope::purpose(crate::cloud_traffic::Purpose::Publication);
     let first = ready.first().map(|(item, _)| *item).ok_or_else(|| error("no verified media ready for publication"))?;
     let local = transitions::publication_binding(
         ready.iter().map(|(item, _)| transitions::PublicationBinding { connection: &item.connection, state: item.sync.as_deref() }),

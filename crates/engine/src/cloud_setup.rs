@@ -121,6 +121,7 @@ pub struct Probe {
 /// error is a sentence saying what to fix.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn probe(connection: &S3Connection, cancel: &AtomicBool) -> Result<Probe, String> {
+    let _traffic = crate::cloud_traffic::Scope::operation(crate::cloud_traffic::Purpose::Setup, None, None, None);
     connection.validate().map_err(|e| e.to_string())?;
     let normalized = connection.clone().canonicalized();
     let connection = &normalized;

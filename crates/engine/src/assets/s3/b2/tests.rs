@@ -104,12 +104,38 @@ fn basic_uses_rfc4648_padding_without_serializing_keys() {
 
 #[derive(Default)]
 struct ServerState {
+    requests: u64,
+    request_bytes: u64,
+    response_bytes: u64,
     info: Map<String, Value>,
     revision: u64,
     writes: usize,
     fault: Option<u16>,
     lose_reply: bool,
     malformed_reply: bool,
+}
+
+#[test]
+fn native_b2_control_traffic_matches_the_backend_without_exposing_control_secrets() {
+    let scope = crate::cloud_traffic::Scope::operation(crate::cloud_traffic::Purpose::Signer, Some("library"), None, Some(17));
+    let server = Server::new();
+    let observed = server.observed();
+    let cancel = AtomicBool::new(false);
+    let value = bucket(&connection(), &observed.auth, &cancel).unwrap();
+    assert!(value["bucketInfo"].is_object());
+    update(&observed, &observed.info, &observed.auth, &cancel).unwrap();
+    let traffic = crate::cloud_traffic::observed_operation(&scope).unwrap();
+    let state = server.state.lock().unwrap();
+    assert_eq!(traffic["totals"]["attempts"], state.requests);
+    assert_eq!(traffic["totals"]["bodyBytesSent"], state.request_bytes);
+    assert_eq!(traffic["totals"]["bodyBytesRead"], state.response_bytes);
+    assert_eq!(traffic["totals"]["completeBodies"], 2);
+    let requests = traffic["requests"].as_array().unwrap();
+    assert!(requests.iter().all(|request| request["transport"] == "b2Control" && request["purpose"] == "signer" && request["status"] == 200));
+    let text = traffic.to_string();
+    assert!(!text.contains("fake-token"));
+    assert!(!text.contains("bucket-id"));
+    assert!(!text.contains(&server.api));
 }
 struct Server {
     api: String,
@@ -162,6 +188,8 @@ impl Server {
         stream.read_exact(&mut body).unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
         let mut state = state.lock().unwrap();
+        state.requests += 1;
+        state.request_bytes += size as u64;
         let mut status = 200;
         let value = if let Some(code) = state.fault.take() {
             status = code;
@@ -193,6 +221,7 @@ impl Server {
             }
         };
         let bytes = serde_json::to_vec(&value).unwrap();
+        state.response_bytes += bytes.len() as u64;
         write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
         let _ = stream.write_all(&bytes);
     }
@@ -200,6 +229,7 @@ impl Server {
         let scope = Scope::new(&connection()).unwrap();
         let state = self.state.lock().unwrap();
         Observed {
+            destination: crate::cloud_traffic::destination(&connection()),
             revision: state.revision,
             head: None,
             scope: scope.binding,
@@ -314,7 +344,7 @@ fn malformed_and_oversized_success_bodies_are_uncertain() {
             let length = if oversized { MAX_JSON + 1 } else { 5 };
             write!(stream, "HTTP/1.1 200 Test\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{{bad!").unwrap();
         });
-        let error = request(&url, "fake-token", None, &AtomicBool::new(false)).unwrap_err();
+        let error = request(&crate::cloud_traffic::destination(&connection()), &url, "fake-token", None, &AtomicBool::new(false)).unwrap_err();
         assert!(error.uncertain_write(), "{error}");
         worker.join().unwrap();
     }

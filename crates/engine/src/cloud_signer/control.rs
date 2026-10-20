@@ -76,6 +76,12 @@ pub(super) fn validate(connection: &S3Connection, request: &Request) -> Result<(
     Ok(())
 }
 pub(crate) fn execute(connection: &S3Connection, request: &Request) -> Result<Reply, CloudFailure> {
+    let library = match &request.action {
+        Action::Initialize { head } | Action::Write { head, .. } => head.library.as_deref(),
+        Action::Fence { library, .. } => Some(library.as_str()),
+        Action::Read { .. } => None,
+    };
+    let _traffic = crate::cloud_traffic::Scope::operation(crate::cloud_traffic::Purpose::Signer, library, None, None);
     // Also validate here so no future non-HTTP caller can bypass destination binding.
     validate(connection, request)?;
     let cancel = AtomicBool::new(false);

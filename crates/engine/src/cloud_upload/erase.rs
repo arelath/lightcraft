@@ -174,6 +174,7 @@ fn preview(
     protocol: lightcraft_catalog::replication::SyncProtocol,
     cancel: &AtomicBool,
 ) -> Result<DeletionReview> {
+    let _traffic = crate::cloud_traffic::Scope::operation(crate::cloud_traffic::Purpose::Maintenance, Some(library), None, None);
     let versions = inventory(connection, library, cancel)?;
     let current_head = head(connection, library, cancel)?;
     if protocol.is_head() && current_head.is_none() {
@@ -211,6 +212,7 @@ fn erase(
     revision: u64,
 ) -> Result<Value> {
     let Target { connection, library } = target;
+    let _traffic = crate::cloud_traffic::Scope::operation(crate::cloud_traffic::Purpose::Maintenance, Some(library), None, None);
     let root = resolver.durable_root().ok_or_else(|| error("no durable library storage for deletion intent"))?;
     resolver.validate_storage().map_err(asset_error)?;
     // Joining an empty library configures Managed before any staging creates it.

@@ -3,8 +3,9 @@
 
 use super::{S3Connection, Signing, encode, http_error, sign_request};
 use crate::assets::{AssetError, Result, sha256};
+use crate::cloud_traffic::{self, Response, Target};
 use lightcraft_catalog::assets::{Blob, RemoteLocation};
-use lightcraft_fetch::http::{self, Limits, Method, RequestBody, Response, Url};
+use lightcraft_fetch::http::{Limits, Method, RequestBody, Url};
 use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
 use std::collections::BTreeMap;
@@ -175,7 +176,6 @@ impl S3Connection {
     }
 
     fn request(&self, request: Request<'_>, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<Response> {
-        log::debug!(target:"lightcraft_cloud_requests","S3 {:?} key={} query={} if_match={} if_none_match={}",request.method,request.key,request.query.iter().map(|(k,_)|*k).collect::<Vec<_>>().join(","),request.headers.iter().any(|(k,_)|*k=="if-match"),request.headers.iter().any(|(k,_)|*k=="if-none-match"));
         let url = self.request_url(request.key, request.query)?;
         let credentials = self.credentials()?;
         let now = time::OffsetDateTime::now_utc();
@@ -189,15 +189,26 @@ impl S3Connection {
             Signing { method: request.method, payload: request.payload, extra: request.headers },
         )?;
         let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
-        let length = request.body.as_ref().map_or(0, |b| b.length);
-        let mut previous = 0;
-        http::request(request.method, &url, &headers, request.body, &limits, &mut |done| {
-            progress(done);
-            if length >= 1 << 20 && (done >= previous + 1_048_576 || done == length) {
-                previous = done;
-                log::debug!(target:"lightcraft_cloud_requests","S3 sent bytes={done}/{length}");
-            }
-        })
+        cloud_traffic::request(
+            Target {
+                destination: &cloud_traffic::destination(self),
+                resource: &url.path,
+                transport: "s3",
+                kind: if request.method == Method::Get
+                    && request.query.iter().any(|(k, _)| matches!(*k, "list-type" | "versions" | "uploads" | "uploadId"))
+                {
+                    "listing"
+                } else {
+                    "object"
+                },
+                method: request.method,
+            },
+            &url,
+            &headers,
+            request.body,
+            &limits,
+            progress,
+        )
         .map_err(http_error)
     }
 

@@ -5,7 +5,7 @@
 use super::{Credentials, S3Connection, http_error};
 use crate::assets::{AssetError, Result, sha256};
 use crate::cloud_publication::RecordRef;
-use lightcraft_fetch::http::{self, Limits, Method, RequestBody, Url};
+use lightcraft_fetch::http::{Limits, Method, RequestBody, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
@@ -55,6 +55,7 @@ struct Pointer {
 /// The full map stays native so compare_exchange preserves unrelated bucket information.
 #[derive(Clone)]
 pub struct Observed {
+    destination: String,
     revision: u64,
     head: Option<RecordRef>,
     scope: String,
@@ -156,7 +157,7 @@ fn endpoint(raw: &str) -> Result<String> {
     }
     Ok(format!("https://{}", url.host))
 }
-fn request(url: &str, authorization: &str, body: Option<&Value>, cancel: &AtomicBool) -> Result<Value> {
+fn request(destination: &str, url: &str, authorization: &str, body: Option<&Value>, cancel: &AtomicBool) -> Result<Value> {
     let url = Url::parse(url).map_err(http_error)?;
     throttle::check(&url, cancel)?;
     let encoded = body.map(serde_json::to_vec).transpose().map_err(|_| invalid("request"))?.unwrap_or_default();
@@ -166,9 +167,22 @@ fn request(url: &str, authorization: &str, body: Option<&Value>, cancel: &Atomic
     let mut bytes = Cursor::new(&encoded);
     let headers = vec![("authorization", authorization.into()), ("content-type", "application/json".into())];
     let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
-    log::debug!(target:"lightcraft_cloud_requests", "B2 {} {}", if body.is_some() { "POST" } else { "GET" }, url.path);
-    let mut response = http::request(
-        if body.is_some() { Method::Post } else { Method::Get },
+    let mut response = crate::cloud_traffic::request(
+        crate::cloud_traffic::Target {
+            destination,
+            resource: &url.path,
+            transport: "b2Control",
+            kind: if url.path.ends_with("b2_authorize_account") {
+                "authorizeAccount"
+            } else if url.path.ends_with("b2_list_buckets") {
+                "observeBucket"
+            } else if url.path.ends_with("b2_update_bucket") {
+                "updateBucket"
+            } else {
+                "otherControl"
+            },
+            method: if body.is_some() { Method::Post } else { Method::Get },
+        },
         &url,
         &headers,
         body.map(|_| RequestBody { reader: &mut bytes, length: encoded.len() as u64 }),
@@ -229,9 +243,10 @@ fn authorize(c: &S3Connection, cancel: &AtomicBool, refresh: bool) -> Result<Arc
             .filter(|cached| Instant::now() < cached.expires)
             .map(|cached| cached.auth.clone())
     {
+        crate::cloud_traffic::reuse(false);
         return Ok(auth);
     }
-    let value = request(AUTH_URL, &basic(&credentials)?, None, cancel)?;
+    let value = request(&crate::cloud_traffic::destination(c), AUTH_URL, &basic(&credentials)?, None, cancel)?;
     let storage = value.get("apiInfo").and_then(|v| v.get("storageApi")).ok_or_else(|| invalid("account API"))?;
     let api = endpoint(&text(storage, "apiUrl", 512)?)?;
     let s3 = text(storage, "s3ApiUrl", 512)?;
@@ -264,6 +279,7 @@ fn authorize(c: &S3Connection, cancel: &AtomicBool, refresh: bool) -> Result<Arc
 }
 fn bucket(c: &S3Connection, auth: &Auth, cancel: &AtomicBool) -> Result<Value> {
     let reply = request(
+        &crate::cloud_traffic::destination(c),
         &format!("{}/b2api/v4/b2_list_buckets", auth.api),
         &auth.token,
         Some(&json!({"accountId":auth.account,"bucketName":c.bucket,"bucketTypes":["allPrivate","allPublic"]})),
@@ -332,6 +348,7 @@ impl S3Connection {
         let info = info(&value)?;
         let head = scope.decode(info.get(&scope.entry))?;
         Ok(Observed {
+            destination: crate::cloud_traffic::destination(self),
             revision: value.get("revision").and_then(Value::as_u64).ok_or_else(|| invalid("bucket revision"))?,
             head,
             scope: scope.binding,
@@ -384,7 +401,7 @@ fn validate_head(connection: &S3Connection, head: &crate::cloud_records::Head) -
 
 fn update(observed: &Observed, next: &Map<String, Value>, auth: &Auth, cancel: &AtomicBool) -> Result<()> {
     let body = json!({"accountId":auth.account,"bucketId":observed.bucket_id,"ifRevisionIs":observed.revision,"bucketInfo":next});
-    let reply = request(&format!("{}/b2api/v4/b2_update_bucket", auth.api), &auth.token, Some(&body), cancel)?;
+    let reply = request(&observed.destination, &format!("{}/b2api/v4/b2_update_bucket", auth.api), &auth.token, Some(&body), cancel)?;
     if reply.get("bucketId").and_then(Value::as_str) != Some(observed.bucket_id.as_str())
         || reply.get("accountId").and_then(Value::as_str) != Some(auth.account.as_str())
         || reply.get("revision").and_then(Value::as_u64).is_none_or(|revision| revision <= observed.revision)

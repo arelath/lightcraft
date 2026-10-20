@@ -428,7 +428,22 @@ impl BlobStore for S3Connection {
             format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", now.year(), u8::from(now.month()), now.day(), now.hour(), now.minute(), now.second());
         let headers = signing_headers(&url, &self.region, &credentials, &timestamp)?;
         let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
-        let mut response = http::get(&url, &headers, &limits).map_err(http_error)?;
+        let _purpose = crate::cloud_traffic::Scope::default_purpose(crate::cloud_traffic::Purpose::MediaRead);
+        let mut response = crate::cloud_traffic::request(
+            crate::cloud_traffic::Target {
+                destination: &crate::cloud_traffic::destination(self),
+                resource: &url.path,
+                transport: "s3Media",
+                kind: "media",
+                method: http::Method::Get,
+            },
+            &url,
+            &headers,
+            None,
+            &limits,
+            &mut |_| {},
+        )
+        .map_err(http_error)?;
         error::provider_limit(&mut response, cancel)?;
         match response.status {
             200 => {}

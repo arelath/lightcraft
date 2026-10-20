@@ -54,6 +54,10 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
     out["inputLimits"] = crate::input_limits::view();
     #[cfg(not(target_arch = "wasm32"))]
     {
+        out["traffic"] = crate::cloud_traffic::summary();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
         out["syncEnabled"] = json!(s.catalog.sync_state().is_some() && !s.cloud_transition.local_only());
         out["localOnly"] = json!(s.cloud_transition.local_only());
         if s.cloud_transition.local_only() {

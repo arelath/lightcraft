@@ -43,7 +43,14 @@ command ID (for example `edit.undo`, `edit.redo`, `view.filmstrip` or `view.left
 their command behavior. That API invokes the app command dispatcher directly; it does not traverse
 Cocoa menu dispatch. Native menu activation and keyboard accelerator delivery require a separate test.
 
-`cloud.syncStatus` accepts optional read-only recovery queries:
+Native `cloud.traffic {"limit":64}` reports the running process's observed cloud
+request/body-byte totals, recent request records, operation costs and hourly buckets.
+Use `{"operation":id}` for a retained operation's totals. `cloud.overview.traffic`
+includes the compact process totals. These queries perform no remote requests; see
+[traffic diagnostics](cloud-storage-implementation.md#native-traffic-diagnostics) for
+byte-counting limits, observation periods and scope/retention semantics.
+
+`cloud.syncStatus` recovery parameters:
 `{"section":"conflicts|choices|deleted|structural","search":"…","cursor":"…","limit":16}`.
 For one complete retained value, use `{"section":"choice","entity":"photo:…","field":"develop","revision":"writer-1"}`; optional `library` and `libraryGeneration` reject a stale library context. This read-only query includes the full value, writer identity, sequence, current-choice flag and local photo identity, and never resolves a conflict.
 Use one section name, omit `cursor` on the first request, and include `entity` and `field`

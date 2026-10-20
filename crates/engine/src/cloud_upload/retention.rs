@@ -155,6 +155,7 @@ fn local_references(root: &Path, audit: &mut audit::Audit, cancel: &AtomicBool) 
 }
 
 fn plan(connection: &S3Connection, root: &Path, local: &Value, days: u64, cancel: &AtomicBool, task: &TaskHandle) -> Result<Value> {
+    let _traffic = crate::cloud_traffic::Scope::purpose(crate::cloud_traffic::Purpose::Maintenance);
     let authority = connection.b2_try_read_head(cancel).map_err(|e| error(e.to_string()))?;
     let keys = list(connection, cancel)?;
     let mut audit = audit::Audit::default();
@@ -318,6 +319,7 @@ fn start_impl(s: &mut Session, p: &Value, observer: Option<&mut dyn FnMut(u64, u
     let connection_id = id.to_owned();
     let (sender, receiver) = mpsc::sync_channel(2);
     std::thread::Builder::new().name("cloud-retention".into()).spawn(move||{
+        let _traffic=crate::cloud_traffic::Scope::operation(crate::cloud_traffic::Purpose::Maintenance,local["state"]["library"].as_str(),None,Some(task_id));
         let result=crate::guard::catch("cloud retention",||{
             let _permit=coordinator.acquire(&worker_cancel)?;
             let _storage=worker_resolver.durable_guard(&worker_cancel).map_err(|e|error(e.to_string()))?;

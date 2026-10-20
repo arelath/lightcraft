@@ -1140,6 +1140,8 @@ pub struct ManagedThumbnail {
 
 impl ManagedThumbnail {
     fn load(&self) -> Result<Rgba8, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _traffic = crate::cloud_traffic::Scope::operation(crate::cloud_traffic::Purpose::Thumbnail, None, None, None);
         use crate::assets::TransferManager;
         if self.blob.size > 16 << 20 {
             return Err("cloud thumbnail exceeds the 16 MiB limit".into());

@@ -1014,6 +1014,12 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
     std::thread::Builder::new()
         .name("cloud-upload".into())
         .spawn(move || {
+            let _traffic = crate::cloud_traffic::Scope::operation(
+                crate::cloud_traffic::Purpose::Upload,
+                items.first().and_then(|item| item.sync.as_deref()).map(|state| state.library.as_str()),
+                None,
+                Some(id),
+            );
             let _producers = producers;
             let progress = UploadProgress { handle, bytes: worker_bytes };
             let result = crate::guard::catch("cloud upload worker", || {
@@ -1027,6 +1033,12 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
                 );
                 let mut ready = Vec::new();
                 for item in &items {
+                    let _traffic = crate::cloud_traffic::Scope::operation(
+                        crate::cloud_traffic::Purpose::Upload,
+                        item.sync.as_deref().map(|state| state.library.as_str()),
+                        Some(&item.id),
+                        Some(id),
+                    );
                     if worker_cancel.load(Ordering::Relaxed) {
                         return Err(error("upload cancelled; originals and multipart receipts retained"));
                     }

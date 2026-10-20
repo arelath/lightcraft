@@ -60,6 +60,8 @@ pub mod native {
             for hash in missing {
                 if !witness.contains_key(&hash) {
                     fetch(connection, &local.library, &hash, witness, cancel)?;
+                } else {
+                    crate::cloud_traffic::reuse(false);
                 }
                 let node = witness.get(&hash).ok_or(AssetError::Integrity)?;
                 session.provide(&hash, node.clone()).map_err(ce)?;

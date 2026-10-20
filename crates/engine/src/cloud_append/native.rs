@@ -300,6 +300,7 @@ fn audit_history(
     cancel: &AtomicBool,
 ) -> Result<()> {
     let mut audit = discovery::Audit::new(&planner.scan, requested)?;
+    let _traffic = crate::cloud_traffic::Scope::purpose(crate::cloud_traffic::Purpose::Audit);
     for namespace in ["checkpoints", "ops"] {
         let Some(mut request) = audit.request(root, namespace) else { continue };
         let mut tokens = BTreeSet::new();

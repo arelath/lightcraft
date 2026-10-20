@@ -414,6 +414,8 @@ impl AssetResolver {
     /// Source loaders without a command-owned task get cancellable shared activity.
     /// Callers that already have a cancellation flag continue to use `acquire` directly.
     pub fn source_transfer<T>(&self, run: impl FnOnce(&AtomicBool) -> Result<T>) -> Result<T> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _traffic = crate::cloud_traffic::Scope::default_purpose(crate::cloud_traffic::Purpose::MediaRead);
         if let Some(cancel) = transfers::cancel_flag() {
             return run(&cancel);
         }
@@ -472,6 +474,8 @@ impl AssetResolver {
         if requirement == SourceRequirement::PreviewAllowed
             && let Some(preview) = &asset.smart_preview
         {
+            #[cfg(not(target_arch = "wasm32"))]
+            let _traffic = crate::cloud_traffic::Scope::purpose(crate::cloud_traffic::Purpose::Preview);
             if let Ok(lease) = self.acquire(preview, cancel) {
                 return Ok((lease, true));
             }
@@ -506,6 +510,8 @@ impl AssetResolver {
         if !verify_file(&path, blob, cancel)? {
             return Ok(None);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::cloud_traffic::reuse(false);
         let mut state = entry.state.lock().unwrap_or_else(PoisonError::into_inner);
         let changed = *state != AssetAvailability::Cached;
         *state = AssetAvailability::Cached;
@@ -683,6 +689,9 @@ impl TransferManager for AssetResolver {
                     return Err(e);
                 }
                 result.map_err(disk)?;
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::cloud_traffic::reuse(false);
             }
             let mut state = entry.state.lock().unwrap_or_else(PoisonError::into_inner);
             availability_changed = *state != AssetAvailability::Cached;
@@ -837,6 +846,7 @@ impl AssetResolver {
             let cancel = task.as_ref().and_then(|t| t.cancel_flag()).unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
             let weak = Arc::downgrade(self);
             let spawned = std::thread::Builder::new().name("cloud-keep-all".into()).spawn(move || {
+                let _traffic = crate::cloud_traffic::Scope::operation(crate::cloud_traffic::Purpose::OfflineCopy, None, None, task_id);
                 let mut tried = std::collections::BTreeSet::new();
                 let mut observed_epoch = 0;
                 let run = |tried: &mut std::collections::BTreeSet<BlobId>, observed_epoch: &mut u64| -> std::result::Result<(), String> {

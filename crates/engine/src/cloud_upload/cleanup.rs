@@ -202,6 +202,7 @@ fn start_impl(s: &mut Session, p: &Value, observer: Option<&mut dyn FnMut(u64, u
     std::thread::Builder::new()
         .name("cloud-upload-cleanup".into())
         .spawn(move || {
+            let _traffic = crate::cloud_traffic::Scope::operation(crate::cloud_traffic::Purpose::Maintenance, None, None, Some(id));
             let result = crate::guard::catch("cloud upload cleanup", || {
                 run(&root, &connection, &worker_resolver, Duration::from_secs(retention * 86400), apply, &worker_cancel, &handle)
             })

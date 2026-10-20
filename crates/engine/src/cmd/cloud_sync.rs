@@ -215,6 +215,7 @@ pub fn specs() -> Vec<CommandSpec> {
     ];
     #[cfg(not(target_arch = "wasm32"))]
     specs.extend([
+        cmd!(query "cloud.traffic", "Cloud traffic diagnostics", [], None, "{limit?:0..256,operation?:id}; process-local request/body-byte totals, recent requests, operation costs and hourly buckets; no network I/O", always, crate::cloud_traffic::status),
         cmd!(query "cloud.syncDisablePreview", "Review turning off cloud sync", [], None, "{}; estimate permanent local copies before final remote discovery", always, crate::cloud_transition::preview),
         cmd!(query "cloud.syncDisable", "Turn off cloud sync", [], None, "{confirm?:true,cancel?:true,wait?:false}; download and verify live library files before committing local-only mode; never delete cloud files", always, crate::cloud_transition::disable),
         cmd!(query "cloud.transitionStatus", "Cloud mode conversion status", [], None, "{}; durable conversion stage, bytes, files, destination and recovery actions", always, crate::cloud_transition::status),

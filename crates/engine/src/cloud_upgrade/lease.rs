@@ -34,6 +34,7 @@ pub(super) fn run<T>(
     let work_cancel = AtomicBool::new(user_cancel.load(Ordering::Relaxed));
     let io_cancel = AtomicBool::new(false);
     let failure = Mutex::new(None);
+    let traffic = crate::cloud_traffic::Attribution::capture();
     std::thread::scope(|scope| {
         let watcher = std::thread::Builder::new()
             .name("cloud-upgrade-cancel".into())
@@ -49,6 +50,7 @@ pub(super) fn run<T>(
             })
             .map_err(|e| CloudFailure::local(format!("could not monitor upgrade cancellation: {e}")))?;
         let heartbeat = std::thread::Builder::new().name("cloud-upgrade-lease".into()).spawn_scoped(scope, || {
+            let _traffic = traffic.enter();
             while !stop.load(Ordering::Acquire) && !work_cancel.load(Ordering::Relaxed) {
                 if let Err(error) = tick(&io_cancel) {
                     if !stop.load(Ordering::Acquire) {

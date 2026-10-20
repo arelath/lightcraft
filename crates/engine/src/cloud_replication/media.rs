@@ -131,11 +131,13 @@ impl VerifiedMedia {
         }
         connection.validate_blob(blob)?;
         if self.contains(connection, blob) {
+            crate::cloud_traffic::reuse(false);
             return Ok(true);
         }
         if let Some((shared, revision)) = &self.shared {
             let (ready, active) = shared.status(*revision, connection, &Self::key(blob));
             if ready && !self.fresh {
+                crate::cloud_traffic::reuse(true);
                 self.record(connection, blob);
                 return Ok(true);
             }
@@ -146,6 +148,7 @@ impl VerifiedMedia {
         }
         let mut check = Check { hash: Sha256::new(), count: 0, expected: blob.size, exceeded: false };
         let mut previous = 0;
+        let _traffic = crate::cloud_traffic::Scope::purpose(crate::cloud_traffic::Purpose::UploadVerification);
         let result = connection.download(blob, &mut check, cancel, &mut |done| {
             if let Some(bytes) = &self.bytes {
                 let delta = done.saturating_sub(previous);

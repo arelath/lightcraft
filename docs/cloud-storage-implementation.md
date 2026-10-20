@@ -17,6 +17,51 @@ The same recognition runs before the browser refreshes an authorized URL. Other 
 responses retain their authentication classification. Provider caps are separate from
 library receipt/history limits and never route to LightCraft's Storage tools.
 
+## Native traffic diagnostics
+
+`cloud.traffic {limit?: 0..256, operation?: id}` is a read-only native query for the
+**current process's observation period**, starting at `startedUnixMs`. Query the running
+app through the control channel, or put it after sync/upload commands in the same CLI
+invocation. A new CLI process starts a new observation period. `cloud.overview.traffic`
+provides the compact process totals; these are not account-wide usage or billing totals.
+
+Accounting covers S3 metadata/listing/upload requests, full media downloads (including
+upload verification), and native B2 authorization/bucket-control calls. Each completed
+transport attempt emits one structured `lightcraft_cloud_requests` debug record with
+method, operation kind, status, recognized B2 cap refusal, elapsed time, body bytes,
+logical purpose and operation ancestry. Connect/cancel/source/read failures are included;
+HTTP failures retain their status. Attempts can fail before reaching the provider.
+`attemptInOperation` is the HTTP-call ordinal, not an inferred retry number.
+
+The diagnostic reports per-operation and destination totals, per-import scopes within
+upload batches, local cache/evidence and shared-proof hits, and up to 24 recent hourly
+buckets. `backgroundPollAttempts` and `backgroundPollBodyBytesRead` isolate automatically
+scheduled synchronization, including its audit traffic. Hour bins are relative to process
+start; `observedMs` identifies partial bins. Parent operation totals include child work;
+do not sum parent and child totals together. Global totals count each attempt once.
+Snapshots expose active attempts separately; body-byte totals finalize when responses
+are released. They do not replace live transfer progress in Activity.
+Elapsed-time totals sum request lifetimes, including streamed body consumption; parallel
+request durations do not represent job wall time.
+
+Byte counts describe body bytes read by the application and outbound chunks confirmed
+by the transport. Headers, TLS, framing and unread/prefetched response bytes are excluded.
+Partial failures can therefore give a **lower bound**, never a provider invoice estimate.
+Successful fully consumed fixture transfers are checked against backend payload counts.
+The combined B2 download/Class B cap message still does not identify which cap was hit.
+
+Request records contain hashed destination, resource, library and import identities,
+not credentials, headers, signed URLs or raw object paths. Current connection names and
+the public cloud-library ID have a separate identity lookup in the response. Callers
+without a known library/operation remain explicitly unscoped; they still contribute to
+process/destination totals. Recent detail is bounded to 256 requests and 64 operations;
+active operations are protected from detail eviction. If all operation slots are active,
+`untrackedOperations` records omitted new detail while global traffic totals remain.
+Destination detail is bounded to 32 identities plus an overflow bucket. The current
+connection-name lookup is limited to 32 bindings, with an explicit truncation flag. No cache,
+publication proof, upload verification or polling policy changes are implied by these
+diagnostics; reducing that traffic is tracked by CR.77–CR.86.
+
 Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and published remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
 
 `cloud.syncStatus` / `cloud.overview` expose exact metadata bytes and count utilization,

@@ -47,6 +47,8 @@ pub mod cloud_signer;
 pub mod cloud_status;
 pub mod cloud_sync;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod cloud_traffic;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_transition;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_upgrade;
