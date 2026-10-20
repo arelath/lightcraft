@@ -208,6 +208,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:9".into()),
             profile: None,
             keys: Default::default(),
+            metadata: Default::default(),
         };
         let blob = Blob {
             id: BlobId("a".repeat(64)),
@@ -253,6 +254,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:9".into()),
             profile: None,
             keys: Default::default(),
+            metadata: Default::default(),
         };
         let blob = Blob {
             id: BlobId("a".repeat(64)),

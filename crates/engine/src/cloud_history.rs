@@ -45,10 +45,19 @@ pub mod native {
     use crate::assets::s3::S3Connection;
     use std::sync::atomic::AtomicBool;
     pub fn fetch(connection: &S3Connection, library: &str, hash: &str, witness: &mut Witness, cancel: &AtomicBool) -> Result<()> {
+        if witness.len() >= archive::MAX_WITNESS_NODES {
+            return Err(AssetError::Invalid("receipt proof budget exceeded; local work retained".into()));
+        }
         let object = connection
-            .get_small(&key(&connection.prefix, library, hash)?, archive::MAX_NODE_BYTES, cancel)?
-            .ok_or_else(|| AssetError::Invalid("receipt archive is missing; restore retained archive objects, local work retained".into()))?;
-        insert(witness, hash, &object.bytes)
+            .history_record(&key(&connection.prefix, library, hash)?, archive::MAX_NODE_BYTES, cancel, |bytes| Node::decode(hash, bytes).map_err(ce))
+            .map_err(|error| match error {
+                AssetError::Missing => {
+                    AssetError::Invalid("receipt archive is missing; restore retained archive objects, local work retained".into())
+                }
+                other => other,
+            })?;
+        witness.insert(hash.into(), object.value);
+        Ok(())
     }
     pub fn certify(connection: &S3Connection, local: &SyncState, remote: &Portable, witness: &mut Witness, cancel: &AtomicBool) -> Result<Portable> {
         let mut session = merge_session(local, remote).map_err(ce)?;

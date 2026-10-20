@@ -208,6 +208,7 @@ fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::
         .into_iter()
         .find(|connection| connection.id == state.connection)
         .ok_or_else(|| error("synchronization storage connection is not configured"))?;
+    let connection = if audit { connection.fresh_metadata() } else { connection };
     let upgrade_owner = if migrating { Some(crate::cloud_append::owner::identity(&lib.dir)?) } else { None };
     let migration_owner = upgrade_owner.clone().filter(|_| !matches!(upgrade, Some(crate::cloud_upgrade::Request::Cancel)));
     let resolver = s.media.asset_resolver.clone().ok_or_else(|| error("native asset storage is unavailable"))?;

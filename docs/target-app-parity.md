@@ -1,6 +1,6 @@
 # Target-app parity: LightCraft vs Adobe Lightroom
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified: RAW decoding 76% → 77%; headline numbers unchanged) · **Target:** Adobe Lightroom Classic 15.5 (August 2026) and Lightroom 9.6 (desktop)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified: RAW decoding 76% → 77%; headline numbers unchanged) · **Target:** Adobe Lightroom Classic 15.5 (August 2026) and Lightroom 9.6 (desktop)
 
 The authoritative assessment of how close LightCraft is to Lightroom. The row-by-row checklist is
 [parity-checklist.md](parity-checklist.md); the ranked work list is [gaps.md](gaps.md); deep areas
@@ -297,6 +297,7 @@ P2 items 12–25 h; look tuning, performance, packaging, hardening 25–45 h.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | minor | CR.77: Bounded durable native append/receipt-body reuse rechecks destination, content and schema, preserves causal/fork checks and bypasses cache for fresh audits. Audit scheduling remains CR.78; cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.76: Native cloud request/body-byte accounting includes media verification, B2 control, partial failures, bounded operation/hourly diagnostics and safe identity fields. CR.77-CR.86 track traffic reduction; cloud remains OOS and parity counts unchanged |
 | 2026-10-20 | minor | CR.75: Bounded B2 download-cap diagnostics preserve HTTP 403, direct recovery to provider Caps & Alerts and halt automatic retries; ordinary authentication failures stay distinct. Cloud remains OOS; counts unchanged |
 | 2026-10-11 | minor | EOS R5 Mark II CR3 verified (raw-parity.md): use-weighted share whose camera decodes 84% → 85%, RAW decoding 76% → 77%; full 60.6% → 60.7%, mainstream depth 71.8% → 72.1%, essentials depth 77.4% → 77.5%; the rounded numbers (~61%, ~49%, ~64%) are unchanged |

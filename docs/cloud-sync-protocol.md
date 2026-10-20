@@ -1,6 +1,6 @@
 # Direct bucket synchronization
 
-Last updated: 2026-10-18
+Last updated: 2026-10-20
 
 This is the current normative metadata protocol and owner-durability contract.
 [Current behavior and limits](cloud-storage-implementation.md), the
@@ -8,6 +8,14 @@ This is the current normative metadata protocol and owner-durability contract.
 [dated acceptance](cloud-acceptance-history.md) have separate roles. Exact receipt
 archive and capacity rules are maintained in [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
 The [reliability checklist](cloud-reliability-tasks.md) tracks implementation and verification.
+
+Native immutable append/receipt bodies may be reused from a bounded, destination/key-bound
+local cache after byte and schema verification. This is transport evidence only: causal
+validation, current authority, historical-key discovery and durable acknowledgement remain
+required. Fresh integrity verification bypasses durable bodies throughout that pass. Cached
+reuse cannot establish that a remote object still exists or has unchanged remote bytes;
+corruption/disappearance may be detected later at fresh verification. See the
+[cache policy and limits](cloud-storage-implementation.md#native-immutable-history-cache).
 
 Configure the same bucket and library prefix on each computer. In File → Cloud Synchronization,
 the first computer leaves Library ID blank; subsequent computers enter the first computer's

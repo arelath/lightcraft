@@ -10,6 +10,76 @@ struct Desktop {
     child: std::process::Child,
     socket: BufReader<TcpStream>,
 }
+
+#[test]
+#[ignore = "explicit native history-cache acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn native_history_cache_reuses_gap_bodies_and_explicit_audit_fetches_them_again() {
+    use lightcraft_engine::catalog::replication::{Change, SyncState};
+    let f = support::Fixture::new();
+    f.state.lock().unwrap().append_mode = true;
+    let local = f.dir.join("history-cache");
+    let (out, rows) = f.run(
+        &local,
+        &[
+            (
+                "cloud.configure",
+                json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"}),
+            ),
+            ("cloud.syncEnable", json!({"connection":"personal","protocol":"append-log-v1"})),
+            ("cloud.sync", json!({})),
+        ],
+    );
+    assert!(out.status.success(), "{rows:?}");
+    let library = rows[1]["result"]["library"].as_str().unwrap();
+    let mut remote = SyncState::new(library.into(), "cache-author".into(), "personal".into()).unwrap();
+    for n in 0..3 {
+        let m = remote
+            .enqueue(vec![Change { entity: format!("library:{library}"), field: "label.Red".into(), base: None, value: json!(format!("red-{n}")) }])
+            .unwrap()
+            .unwrap();
+        if n > 0 {
+            f.state.lock().unwrap().objects.insert(
+                format!("/photos/{}", lightcraft_engine::cloud_append::mutation_key("library", &m).unwrap()),
+                lightcraft_engine::cloud_append::encode(&m).unwrap(),
+            );
+        }
+    }
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("history-cache");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    for (phase, audit) in [false, false, true].into_iter().enumerate() {
+        f.state.lock().unwrap().requests.clear();
+        app.execute("cloud.sync", json!({"wait":false,"audit":audit}));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = app.execute("cloud.syncStatus", json!({}));
+            if status["running"] == false {
+                assert!(!status["gaps"].as_array().unwrap().is_empty(), "{status}");
+                assert!(status["health"]["lastError"].is_null(), "{status}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "sync did not finish");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let gets = f
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(method, key)| method == "GET" && !key.contains('?') && key.contains("/ops/cache-author/"))
+            .count();
+        assert_eq!(gets, if phase == 1 { 0 } else { 2 }, "phase {phase}: cached ordinary retry versus fresh integrity audit");
+    }
+    let traffic = app.execute("cloud.traffic", json!({"limit":256}));
+    assert!(traffic["totals"]["localCacheHits"].as_u64().unwrap() >= 2);
+    std::fs::write(artifacts.join("traffic.json"), serde_json::to_vec_pretty(&traffic).unwrap()).unwrap();
+    app.click_when_ready("icon:cloud");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("popup.png")}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+    app.ask("app.quit", json!({}));
+}
 impl Drop for Desktop {
     fn drop(&mut self) {
         let _ = self.child.kill();

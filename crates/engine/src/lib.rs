@@ -33,6 +33,8 @@ pub mod cloud_import;
 pub(crate) mod cloud_import;
 #[cfg(not(target_arch = "wasm32"))]
 mod cloud_local_transfer;
+#[cfg(not(target_arch = "wasm32"))]
+mod cloud_metadata;
 pub mod cloud_outcome;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_owner;

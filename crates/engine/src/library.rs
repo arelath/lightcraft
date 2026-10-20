@@ -101,6 +101,9 @@ pub struct Library {
     /// Cancel deferred cache deletion before releasing this library's process lock.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) cache_cleanup: Option<crate::assets::relocation::CleanupGuard>,
+    /// Disposable history bodies stay beside this catalog, independently of media relocation.
+    #[cfg(not(target_arch = "wasm32"))]
+    metadata_cache: Option<std::sync::Arc<crate::cloud_metadata::Cache>>,
     /// Keeps other processes out of this library while it's open (last: released after the
     /// journal's background snapshot has landed).
     lock: Option<LibraryLock>,
@@ -164,7 +167,7 @@ impl Library {
         for c in &connections {
             c.validate().map_err(|e| EngineError::Other(e.to_string()))?;
         }
-        Ok(connections.into_iter().map(crate::assets::s3::S3Connection::canonicalized).collect())
+        Ok(connections.into_iter().map(|c| c.canonicalized().with_metadata_cache(self.metadata_cache.clone())).collect())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -559,6 +562,8 @@ impl Session {
             self.media.attach_disk_cache(&cache_dir.join("thumbs"), self.cache_bytes());
         }
         let view_written = self.view_json();
+        #[cfg(not(target_arch = "wasm32"))]
+        let metadata_cache = on_disk.then(|| std::sync::Arc::new(crate::cloud_metadata::Cache::new(dir.join("sync-record-cache-v1"))));
         self.library = Some(Library {
             dir,
             on_disk,
@@ -577,6 +582,8 @@ impl Session {
             blocked: settings.blocked,
             #[cfg(not(target_arch = "wasm32"))]
             cache_cleanup: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            metadata_cache,
             lock: lock.take(),
         });
         self.library_identity = std::sync::Arc::new(());

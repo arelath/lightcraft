@@ -133,6 +133,12 @@ fn synchronize_mode(
     media: &mut crate::cloud_replication::VerifiedMedia,
 ) -> Result<crate::cloud_replication::Outcome> {
     let ScanOptions { checkpoint, audit, receive_only, legacy } = options;
+    // An active or resumed integrity audit must not mistake a durable cache hit
+    // from discovery for fresh remote evidence. The same mode covers nested receipt
+    // proof reads, and the per-pass fetched map can still share fresh downloads.
+    let fresh = audit || checkpoint || local.append.as_ref().is_none_or(|p| !p.scan.audit.complete);
+    let fresh_connection = fresh.then(|| connection.fresh_metadata());
+    let connection = fresh_connection.as_ref().unwrap_or(connection);
     if local.protocol != SyncProtocol::AppendLog {
         return Err(invalid("append synchronization requires explicit protocol selection"));
     }
@@ -267,21 +273,25 @@ fn synchronize_mode(
 }
 
 fn read_checkpoint(connection: &S3Connection, planner: &mut Planner, root: &str, key: &str, cancel: &AtomicBool) -> Result<usize> {
-    let reply = connection.get_small(key, MAX_OBJECT, cancel)?.ok_or(AssetError::Missing)?;
-    immutable_metadata(key, &reply.bytes)?;
-    let p: AppendProgress = serde_json::from_slice(&reply.bytes).map_err(|_| invalid("malformed append checkpoint"))?;
-    p.validate(&planner.remote.library).map_err(ce)?;
-    if p.manifest != sha256(&manifest(&planner.remote.library)?).0 || !p.gaps.is_empty() {
-        return Err(AssetError::Integrity);
-    }
+    let reply = connection.history_record(key, MAX_OBJECT, cancel, |bytes| {
+        let p: AppendProgress = serde_json::from_slice(bytes).map_err(|_| invalid("malformed append checkpoint"))?;
+        p.validate(&planner.remote.library).map_err(ce)?;
+        if p.manifest != sha256(&manifest(&planner.remote.library)?).0 || !p.gaps.is_empty() {
+            return Err(AssetError::Integrity);
+        }
+        Ok(p)
+    })?;
+    let p = reply.value;
     let remote = crate::cloud_history::native::certify(connection, &planner.remote, &p.remote, &mut planner.proofs, cancel)?;
     planner.remote.merge(&remote).map_err(ce)?;
     discovery::consume(planner, root, key)?;
-    Ok(reply.bytes.len())
+    Ok(reply.size)
 }
 fn read_operation(connection: &S3Connection, planner: &mut Planner, key: &str, cancel: &AtomicBool) -> Result<usize> {
-    let reply = connection.get_small(key, lightcraft_catalog::replication::MAX_MUTATION_BYTES, cancel)?.ok_or(AssetError::Missing)?;
-    let mutation = decode_mutation(&connection.prefix, &planner.remote.library, key, &reply.bytes)?;
+    let reply = connection.history_record(key, lightcraft_catalog::replication::MAX_MUTATION_BYTES, cancel, |bytes| {
+        decode_mutation(&connection.prefix, &planner.remote.library, key, bytes)
+    })?;
+    let mutation = reply.value;
     if lightcraft_catalog::replication::archive::covers(&planner.remote.archives, &mutation.revision.id()) {
         crate::cloud_history::native::prove(connection, &planner.remote, &mutation, &mut planner.proofs, cancel)?;
     }
@@ -289,7 +299,7 @@ fn read_operation(connection: &S3Connection, planner: &mut Planner, key: &str, c
     if planner.proofs.len() > 8192 {
         planner.proofs.clear();
     }
-    Ok(reply.bytes.len())
+    Ok(reply.size)
 }
 fn audit_history(
     connection: &S3Connection,

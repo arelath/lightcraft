@@ -30,6 +30,8 @@ pub struct S3Connection {
     /// Never serialized: connection settings stay free of secrets.
     #[serde(skip)]
     pub(crate) keys: TypedKeys,
+    #[serde(skip)]
+    pub(crate) metadata: crate::cloud_metadata::Binding,
 }
 
 /// Access keys typed by the person setting up storage. Like [`Credentials`], no Debug or
@@ -527,6 +529,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:9000".into()),
             profile: None,
             keys: TypedKeys::default(),
+            metadata: Default::default(),
         };
         let mut blob = Blob {
             id: super::super::sha256(b"x"),
@@ -677,6 +680,7 @@ aws_secret_access_key=y
             endpoint: None,
             profile: Some("absent-profile".into()),
             keys: TypedKeys::default(),
+            metadata: Default::default(),
         }
         .with_keys(AccessKeys::new(" AKID ", "SECRET").unwrap());
         assert_eq!(connection.credentials().unwrap().access, "AKID");

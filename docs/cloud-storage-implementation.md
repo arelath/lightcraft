@@ -60,7 +60,44 @@ active operations are protected from detail eviction. If all operation slots are
 Destination detail is bounded to 32 identities plus an overflow bucket. The current
 connection-name lookup is limited to 32 bindings, with an explicit truncation flag. No cache,
 publication proof, upload verification or polling policy changes are implied by these
-diagnostics; reducing that traffic is tracked by CR.77–CR.86.
+diagnostics. Native immutable-body reuse is described below; further traffic reductions
+remain tracked by CR.78–CR.86.
+
+## Native immutable history cache
+
+Native filesystem libraries reuse verified append operation/checkpoint and receipt-archive
+bodies in `<library>/sync-record-cache-v1/`. The disposable cache is independent of the
+movable original-media cache; moving media storage does not move history bodies. No cache
+binding is serialized into a connection, upload receipt or cloud record. In-memory/browser
+catalogs retain their existing adapters. Conditional-head batch replay is still CR.79.
+
+Entries bind the canonical destination (connection ID, bucket, region, prefix and endpoint),
+exact immutable key including its content identity, verified actual byte length and body
+SHA-256. Credentials and profile selection do not affect that binding. Reads check the
+binding/header/length/hash and the original content-addressed key and schema before reuse.
+Causal merge, receipt certification, fork detection and acknowledgement run again against
+the current planner. Cache bytes never establish current authority or remote existence.
+
+Published bodies are limited to 4,096 entries and 256 MiB per library, including envelope
+bytes; admission also reserves the temporary file's bytes. Each body retains its protocol
+limit (at most 64 MiB). Recent use guides eviction, with file modification order as the
+restart baseline. Initial directory discovery stops after 8,192 entries. Unknown files and
+interrupted temporary writes are never reused or deleted and consume admission capacity;
+an unusable or overfull cache falls back to remote reads. Cache loss or disk-write failure
+does not change synchronization state. Atomic durable publication prevents partial bodies
+from becoming valid entries. A cancellable OS file lock and durable pre-mutation generation
+serialize independent cache instances and invalidate stale indexes, including old workers
+winding down after a library switch. The fixed eight-byte lock record is outside the body
+budget. Cancellation is checked during reads/writes and both lock waits.
+
+Historical listings and resumable discovery remain active; a newly appearing old-sequence
+key is never hidden by the cache. Explicit or continued integrity audits bypass durable
+bodies throughout discovery and nested receipt reads. They can still share fresh downloads
+within that synchronization pass. A failed fresh verification leaves the earlier cached
+body intact but fails that verification; it never acknowledges corrupted remote history.
+Ordinary cached reuse can delay detection of remote corruption or disappearance until a
+fresh audit. Audit timing and the manual-sync default are unchanged in CR.77; separating
+routine discovery from persisted, budgeted verification is CR.78.
 
 Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and published remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
 

@@ -76,6 +76,44 @@ fn history_gets(f: &Fixture) -> Vec<String> {
         .collect()
 }
 #[test]
+fn durable_bodies_reduce_repeated_gap_reads_without_turning_a_fresh_audit_into_cached_proof() {
+    let f = Fixture::new();
+    let (a, b, _) = initialize(&f);
+    ok(&f, &a, &[("photo.rate", json!({"ids":[1],"rating":2})), ("photo.flag", json!({"ids":[1],"flag":"pick"})), ("cloud.sync", json!({}))]);
+    let author = catalog(&a).sync_state().unwrap().device.clone();
+    let mut remote = f.state.lock().unwrap();
+    let missing = remote.objects.keys().find(|key| key.contains(&format!("/ops/{author}/00000000000000000003-"))).unwrap().clone();
+    let missing_bytes = remote.objects.remove(&missing).unwrap();
+    let waiting = remote.objects.keys().find(|key| key.contains(&format!("/ops/{author}/00000000000000000004-"))).unwrap().clone();
+    remote.requests.clear();
+    drop(remote);
+    let rows = ok(
+        &f,
+        &b,
+        &[
+            ("cloud.sync", json!({"audit":false})),
+            ("cloud.traffic", json!({"limit":256})),
+            ("cloud.sync", json!({"audit":false})),
+            ("cloud.traffic", json!({"limit":256})),
+            ("cloud.sync", json!({"audit":true})),
+        ],
+    );
+    assert!(!rows[0]["result"]["gaps"].as_array().unwrap().is_empty());
+    assert_eq!(rows[0]["result"]["gaps"], rows[2]["result"]["gaps"], "cache never accepts an unresolved causal predecessor");
+    assert!(rows[3]["result"]["totals"]["localCacheHits"].as_u64().unwrap() > rows[1]["result"]["totals"]["localCacheHits"].as_u64().unwrap());
+    assert_eq!(
+        history_gets(&f).iter().filter(|key| **key == waiting).count(),
+        2,
+        "first scan and explicit fresh audit read remotely; intermediate gap retry uses cache"
+    );
+    assert!(std::fs::read_dir(b.join("sync-record-cache-v1")).unwrap().next().is_some());
+    f.state.lock().unwrap().objects.insert(missing, missing_bytes);
+    ok(&f, &b, &[("cloud.sync", json!({"audit":false}))]);
+    assert!(catalog(&b).sync_state().unwrap().append.as_ref().unwrap().gaps.is_empty());
+    assert_eq!(catalog(&b).photo(PhotoId(1)).unwrap().rating, 2);
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+}
+#[test]
 fn consumed_checkpoints_and_covered_history_are_not_downloaded_by_ordinary_polls() {
     for count in [16, 256] {
         let f = Fixture::new();
