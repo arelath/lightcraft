@@ -1,6 +1,6 @@
 # Cloud acceptance history
 
-Last updated: 2026-10-18
+Last updated: 2026-10-19
 
 These are historical reports from specific releases, not a current acceptance claim.
 Statements such as "not implemented", format versions, test counts and "remaining"
@@ -627,3 +627,8 @@ Nine pure/loopback regressions pass, covering scoped canonical pointers, capacit
 ### 2026-10-18 — CR.43 partial: native B2 head transitions and legacy intake
 
 Eighteen B2 pure/loopback tests plus three legacy model tests and the retired-source fence regression pass. Readable future-writer and unsupported-converter transitions refuse authority modification, and newer descriptor/pointer formats retain Update recovery. The explicit ignored Rust adapter test passes on the authorized disposable dykstrap-lightcraft bucket using saved lightcraft-b2: initial exposed maintenance, epoch-2 activation, late existing-author and previously unseen-author append operations with original IDs/digests, committed checkpoint/intake reread without duplicate effects, historical audit rejection of a conflicting operation behind its author cursor, permanent nonpersonal deletion and rejected revival. Its fresh random prefix and exact tracked object versions plus its own bucket-info entry are cleaned; unrelated bucket info/type/CORS/lifecycle/encryption/lock/replication settings are checked unchanged. Evidence: target/cloud-cr43-head-adapter-live-final.log. All eight CI gates pass at target/cloud-cr43-head-adapter-ci-final.log. An earlier opt-in test invocation omitted its bucket environment and refused before remote I/O; an earlier successful live run covered late-author recovery before the explicit historical-audit case. This does not certify the desktop/browser upgrade workflows or live AWS interoperability.
+
+
+### 2026-10-19 — CR.43 partial: native B2 workflow integration (fixture level)
+
+Focused engine tests (91, `target/cloud-cr43-resume-focused.log`) and UI dialog/transition tests (17, `target/cloud-cr43-resume-ui-tests.log`) pass, and the web app checks for wasm32. The ignored native acceptance `b2_append_upgrade_is_available_and_confirmation_uses_provider_neutral_copy` passes against a fake profile with no provider requests. Its screenshots and inspection are in `target/cloud-cr43-ui/` (`upgrade-action.png`, `upgrade-confirmation.png`, `inspect.json`). No live B2 or AWS workflow was run for this entry. All eight `cargo +1.95.0 xtask ci` gates pass (`target/cloud-cr43-resume-ci.log`); the first runs caught formatting and a recovery message that had lost its specific "moved to append-only synchronization" wording, which is restored. The earlier live failures were test-fixture defects, now corrected but not yet rerun.

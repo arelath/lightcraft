@@ -45,7 +45,7 @@ impl Scan<'_> {
             request.continuation = Some(next);
         }
     }
-    fn append(&mut self, library: &str) -> Result<(), String> {
+    fn append(&mut self, library: &str, head: Option<&(crate::cloud_records::Head, String)>) -> Result<bool, String> {
         self.admit()?;
         let key = append::manifest_key(&self.connection.prefix, library).map_err(|e| e.to_string())?;
         let bytes = self
@@ -87,11 +87,28 @@ impl Scan<'_> {
         // Readable maintenance/newer-writer controls are valid discoveries. Unknown
         // epochs, deleted libraries and ambiguous controls must not become new libraries.
         let effective = control::effective(&self.connection.prefix, library, &records).map_err(|e| e.to_string())?;
+        if let Some((head, token)) = head
+            && token.starts_with("b2:")
+            && head.library.as_deref() == Some(library)
+            && head.legacy_append.is_some()
+        {
+            let manifest = crate::assets::sha256(&append::manifest(library).map_err(|e| e.to_string())?).0;
+            if effective.state == State::Retired
+                && effective.successor.as_ref().is_some_and(|s| s.protocol == "conditional-head-v1" && s.epoch == 2 && s.manifest == manifest)
+            {
+                return Ok(false);
+            }
+            // Initialization may have committed before the compatibility fence.
+            // Its head is already authoritative; resuming the upgrade installs
+            // the fence before activating any admitted publication epoch.
+            effective.may_publish().map_err(|e| e.to_string())?;
+            return Ok(false);
+        }
         if effective.state == State::Retired {
             return Err(format!("Cloud library {library} moved to another format; update LightCraft before joining."));
         }
         control::publication(Ok(effective)).map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(true)
     }
 }
 pub(super) fn probe(connection: &S3Connection, cancel: &AtomicBool) -> Result<Probe, String> {
@@ -104,6 +121,8 @@ pub(super) fn probe(connection: &S3Connection, cancel: &AtomicBool) -> Result<Pr
     if candidates.len() > MAX_LIBRARIES {
         return Err("Too many cloud libraries in this storage folder; choose a narrower folder.".into());
     }
+    scan.admit()?;
+    let head = crate::cloud_publication::read_head(connection, cancel).map_err(|e| super::explain(connection, e))?;
     let mut found = BTreeMap::new();
     for candidate in candidates {
         let id = candidate
@@ -111,11 +130,10 @@ pub(super) fn probe(connection: &S3Connection, cancel: &AtomicBool) -> Result<Pr
             .and_then(|s| s.strip_suffix('/'))
             .filter(|id| lightcraft_catalog::assets::identifier(id))
             .ok_or("Storage returned an invalid cloud library folder; choose another folder or repair its contents.")?;
-        scan.append(id)?;
-        found.insert(id.to_owned(), FoundLibrary { id: id.to_owned(), protocol: SyncProtocol::AppendLog });
+        if scan.append(id, head.as_ref())? {
+            found.insert(id.to_owned(), FoundLibrary { id: id.to_owned(), protocol: SyncProtocol::AppendLog });
+        }
     }
-    scan.admit()?;
-    let head = crate::cloud_publication::read_head(connection, cancel).map_err(|e| super::explain(connection, e))?;
     let head_taken = head.is_some();
     let mut libraries = Vec::new();
     if let Some((head, _)) = head {

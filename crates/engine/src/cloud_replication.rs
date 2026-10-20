@@ -176,6 +176,9 @@ fn read_incremental(
     read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), archive_proofs, cancel)
 }
 fn immutable(connection: &S3Connection, key: &str, bytes: &[u8], cancel: &AtomicBool, max: usize) -> Result<()> {
+    if connection.b2_head_enabled(cancel)? {
+        return connection.b2_put_catalog_immutable(key, bytes, cancel);
+    }
     match connection.put_small(key, bytes, PutCondition::Absent, cancel) {
         Ok(_) => Ok(()),
         Err(error) if error.uncertain_write() => match connection.get_small(key, max, cancel) {
@@ -210,9 +213,7 @@ pub(crate) fn receive_only(connection: &S3Connection, local: &SyncState, cancel:
     if local.protocol == lightcraft_catalog::replication::SyncProtocol::AppendLog {
         return crate::cloud_append::native::receive_only(connection, local, cancel);
     }
-    if connection.get_small(&crate::cloud_append::manifest_key(&connection.prefix, &local.library)?, 16 << 10, cancel)?.is_some() {
-        return Err(AssetError::Moved("cloud library moved to append synchronization; rejoin before turning sync off".into()));
-    }
+    publication::ensure_head_protocol(connection, &local.library, cancel)?;
     let mut proofs = Default::default();
     let remote = read_with_witness(connection, &local.library, &mut proofs, cancel)?;
     let Some((head, _)) = remote.head else {
@@ -233,6 +234,15 @@ pub(crate) fn receive_only(connection: &S3Connection, local: &SyncState, cancel:
 pub fn synchronize(connection: &S3Connection, local: &SyncState, checkpoint_requested: bool, cancel: &AtomicBool) -> Result<Outcome> {
     synchronize_verified(connection, local, checkpoint_requested, cancel, &mut VerifiedMedia::default())
 }
+pub fn synchronize_with_audit(
+    connection: &S3Connection,
+    local: &SyncState,
+    checkpoint_requested: bool,
+    audit: bool,
+    cancel: &AtomicBool,
+) -> Result<Outcome> {
+    synchronize_verified_audit(connection, local, checkpoint_requested, audit, cancel, &mut VerifiedMedia::default())
+}
 pub(crate) fn synchronize_verified(
     connection: &S3Connection,
     local: &SyncState,
@@ -240,14 +250,20 @@ pub(crate) fn synchronize_verified(
     cancel: &AtomicBool,
     media: &mut VerifiedMedia,
 ) -> Result<Outcome> {
+    synchronize_verified_audit(connection, local, checkpoint_requested, false, cancel, media)
+}
+fn synchronize_verified_audit(
+    connection: &S3Connection,
+    local: &SyncState,
+    checkpoint_requested: bool,
+    audit: bool,
+    cancel: &AtomicBool,
+    media: &mut VerifiedMedia,
+) -> Result<Outcome> {
     if local.protocol == lightcraft_catalog::replication::SyncProtocol::AppendLog {
-        return crate::cloud_append::native::synchronize_verified(connection, local, checkpoint_requested, false, cancel, media);
+        return crate::cloud_append::native::synchronize_verified(connection, local, checkpoint_requested, audit, cancel, media);
     }
-    if connection.get_small(&crate::cloud_append::manifest_key(&connection.prefix, &local.library)?, 16 << 10, cancel)?.is_some() {
-        return Err(AssetError::Moved(
-            "this cloud library moved to append-only synchronization; use Migrate Cloud Library… (cloud.upgradeLibrary) on this device to rejoin it; pending work retained".into(),
-        ));
-    }
+    publication::ensure_head_protocol(connection, &local.library, cancel)?;
     local.validate().map_err(catalog_error)?;
     if local.pending.is_empty() && !checkpoint_requested {
         let current = publication::read_head(connection, cancel)?;
@@ -257,7 +273,7 @@ pub(crate) fn synchronize_verified(
             if head.library.as_deref() != Some(local.library.as_str()) || head.generation != local.generation {
                 return Err(invalid("remote library/cursor generation changed inconsistently"));
             }
-            if tail_length(&head) < AUTO_CHECKPOINT_BATCHES {
+            if head.legacy_append.is_none() && tail_length(&head) < AUTO_CHECKPOINT_BATCHES {
                 let capability = Publication::head(Some(&head), &local.library).map_err(AssetError::Blocked)?;
                 return Ok(Outcome::unchanged(local.portable(), HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?)
                     .with_publication(capability));
@@ -266,6 +282,7 @@ pub(crate) fn synchronize_verified(
     }
     let mut dependency_proof = BTreeSet::new();
     let mut archive_proofs = lightcraft_catalog::replication::archive::Witness::new();
+    let mut intake_checked = false;
     for _ in 0..64 {
         canceled(cancel)?;
         let mut remote = if checkpoint_requested {
@@ -294,6 +311,19 @@ pub(crate) fn synchronize_verified(
             // local pending IDs unchanged. A competitor simply causes a new scan.
             publish(connection, Some((head, etag)), Vec::new(), Some(checkpoint), &local.library, cancel)?;
             continue;
+        }
+        // Recovery input has no authority until its checkpoint and scan are
+        // committed together. Reread even after success or a lost CAS response.
+        // One attempt per poll prevents a completed requested audit restarting
+        // itself on every retry, and bounds work under competing publishers.
+        if !intake_checked && capability.is_allowed() {
+            intake_checked = true;
+            match legacy::admit(connection, &remote, audit, cancel) {
+                Ok(true) => continue,
+                Err(error) if error.uncertain_write() => continue,
+                Err(error) => return Err(error),
+                Ok(false) => {}
+            }
         }
         let checkpoint_needed = checkpoint_requested || remote.tail_records >= AUTO_CHECKPOINT_BATCHES;
         crate::cloud_history::native::hydrate(connection, &mut remote.state, local, &mut archive_proofs, cancel)?;
@@ -460,8 +490,7 @@ pub(crate) fn commit(
         head.generation = generation;
     }
     head.validate_scope_typed(&connection.prefix, library).map_err(AssetError::Blocked)?;
-    let condition = previous.map_or(PutCondition::Absent, |(_, etag)| PutCondition::Matches(etag));
-    connection.put_small(&keys::in_library(&connection.prefix, "catalog/head.json")?, &publication::encode(&head)?, condition, cancel)?;
+    publication::write_head(connection, previous.map(|(_, token)| token), &head, cancel)?;
     Ok(head)
 }
 pub(crate) fn batch_ref(connection: &S3Connection, epoch: u64, bytes: &[u8]) -> Result<RecordRef> {
@@ -474,6 +503,7 @@ pub(crate) fn write_immutable(connection: &S3Connection, key: &str, bytes: &[u8]
 }
 use crate::cloud_control::Control;
 
+mod legacy;
 mod worker;
 pub(crate) use worker::Coordinator;
 pub use worker::{Jobs, pause_publication, prepare_migration, resume_publication, start, start_migration};

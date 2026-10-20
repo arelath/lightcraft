@@ -2003,7 +2003,7 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
                 false
             }
         }
-        "dialog.cloudMigrate" => app.session.catalog.sync_state().is_some_and(|state| state.protocol.is_head()),
+        "dialog.cloudMigrate" => lightcraft_engine::cloud_status::can_upgrade(&app.session),
         "file.exportPresets" => app.session.presets.iter().any(|p| !p.builtin),
         "file.exportCurvePresets" => !app.session.curve_presets.is_empty(),
         "view.compare" => app.session.catalog.len() > 1,

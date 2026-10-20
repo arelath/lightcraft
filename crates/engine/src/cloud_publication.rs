@@ -56,9 +56,17 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 }
 
 pub fn read_head(connection: &S3Connection, cancel: &AtomicBool) -> Result<Option<(Head, String)>> {
+    if let Some((head, token, _)) = connection.b2_try_read_head(cancel)? {
+        let library = head.library.as_deref().ok_or_else(|| invalid("remote head has no library"))?;
+        head.validate_scope_typed(&connection.prefix, library).map_err(AssetError::Blocked)?;
+        return Ok(Some((head, token)));
+    }
     let key = keys::in_library(&connection.prefix, "catalog/head.json")?;
     let Some(reply) = connection.get_small(&key, 16 << 10, cancel)? else { return Ok(None) };
     let head = Head::decode(&reply.bytes).map_err(AssetError::Blocked)?;
+    if head.legacy_append.is_some() {
+        return Err(invalid("legacy recovery requires its destination-bound B2 authority descriptor; raw head preserved"));
+    }
     if head.version < 2 {
         return Err(invalid("obsolete pre-release catalog head; use a fresh catalog and storage prefix; local data retained"));
     }
@@ -67,6 +75,40 @@ pub fn read_head(connection: &S3Connection, cancel: &AtomicBool) -> Result<Optio
     head.validate_scope_typed(&connection.prefix, &library).map_err(AssetError::Blocked)?;
     let etag = reply.etag.ok_or_else(|| invalid("remote head has no ETag; conditional synchronization is unavailable"))?;
     Ok(Some((head, etag)))
+}
+
+/// All conditional publishers and maintenance transitions replace the same
+/// authority. A B2 descriptor permanently disables the old mutable S3 head.
+pub(crate) fn write_head(connection: &S3Connection, previous: Option<&str>, head: &Head, cancel: &AtomicBool) -> Result<()> {
+    if let Some(token) = previous.filter(|token| token.starts_with("b2:")) {
+        connection.b2_write_head(token, head, cancel)?;
+        return Ok(());
+    }
+    if connection.b2_head_enabled(cancel)? {
+        return Err(AssetError::Conflict);
+    }
+    let condition = previous.map_or(crate::assets::s3::PutCondition::Absent, crate::assets::s3::PutCondition::Matches);
+    connection.put_small(&keys::in_library(&connection.prefix, "catalog/head.json")?, &encode(head)?, condition, cancel)?;
+    Ok(())
+}
+
+/// An original append manifest remains a fence to obsolete head writers. Only
+/// its validated B2 successor may keep using the conditional publication model.
+pub(crate) fn ensure_head_protocol(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result<()> {
+    if connection.get_small(&crate::cloud_append::manifest_key(&connection.prefix, library)?, 16 << 10, cancel)?.is_none() {
+        return Ok(());
+    }
+    if let Some((head, _, _)) = connection.b2_try_read_head(cancel)?
+        && head.library.as_deref() == Some(library)
+        && head.legacy_append.is_some()
+    {
+        head.validate_scope_typed(&connection.prefix, library).map_err(AssetError::Blocked)?;
+        return Ok(());
+    }
+    Err(AssetError::Moved(
+        "this cloud library moved to append-only synchronization; use Migrate Cloud Library… (cloud.upgradeLibrary) on this device to rejoin it; pending work retained"
+            .into(),
+    ))
 }
 
 pub fn read_batch(connection: &S3Connection, reference: &RecordRef, cancel: &AtomicBool) -> Result<Batch> {

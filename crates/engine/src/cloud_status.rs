@@ -16,6 +16,22 @@ pub use health::{Failure, PollHealth, ResourceHealth};
 pub use polling::PollCadence;
 pub use presentation::{Presentation, SyncStatus};
 
+pub fn can_upgrade(s: &Session) -> bool {
+    let Some(state) = s.catalog.sync_state() else { return false };
+    if state.protocol.is_head() {
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        s.media.asset_resolver.as_ref().and_then(|resolver| resolver.cloud_provider(&state.connection))
+            == Some(crate::cloud_setup::Provider::Backblaze)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
 pub(crate) fn can_resume(s: &Session) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -59,6 +75,7 @@ pub fn overview(s: &mut Session, _: &Value) -> Result<Value> {
         }
     }
     let sync = crate::cmd::cloud_sync_status(s, &Value::Null)?;
+    out["canUpgrade"] = sync["canUpgrade"].clone();
     out["health"]["sync"] = sync["health"].clone();
     out["health"]["uploads"]["failedImports"] = json!(summary.failed_uploads);
     out["health"]["uploads"]["blockedImports"] = json!(summary.blocked_import_count);
@@ -135,6 +152,28 @@ mod tests {
     use super::*;
     use crate::library::LibraryStores;
     use lightcraft_catalog::{MemStore, Op, replication::SyncState};
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn append_upgrade_capability_uses_the_cached_destination_without_credentials_or_probe() {
+        use crate::assets::{AssetResolver, s3::S3Connection};
+        for (endpoint, supported) in [(Some("https://s3.us-east-005.backblazeb2.com"), true), (Some("https://example.invalid"), false), (None, false)]
+        {
+            let mut s = Session::new();
+            let mut state = SyncState::new("library".into(), "author".into(), "personal".into()).unwrap();
+            state.protocol = lightcraft_catalog::replication::SyncProtocol::AppendLog;
+            s.catalog.apply(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+            assert!(!can_upgrade(&s));
+            let resolver = std::sync::Arc::new(AssetResolver::new(std::env::temp_dir().join("lightcraft-cr43-status-unused")));
+            let connection: S3Connection =
+                serde_json::from_value(json!({"id":"personal","bucket":"photos","region":"us-east-005","prefix":"library","endpoint":endpoint}))
+                    .unwrap();
+            resolver.connect_s3(connection).unwrap();
+            s.media.asset_resolver = Some(resolver);
+            assert_eq!(can_upgrade(&s), supported);
+            assert_eq!(crate::cmd::cloud_sync_status(&mut s, &json!({})).unwrap()["canUpgrade"], supported);
+            assert_eq!(crate::cloud_replication::prepare_migration(&mut s, &json!({})).is_ok(), supported);
+        }
+    }
     fn stores(files: MemStore) -> LibraryStores {
         LibraryStores { dir: "cloud-pause-test".into(), catalog: Box::new(MemStore::new()), files: Box::new(files), on_disk: false }
     }

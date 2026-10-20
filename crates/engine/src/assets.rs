@@ -343,6 +343,13 @@ impl AssetResolver {
         self.cache.durable_epoch.fetch_add(1, Ordering::Release);
         self.connect(connection.id.clone(), Arc::new(connection))
     }
+    /// Credential-free cached destination classification; safe for status/UI
+    /// snapshots without reading settings or waiting for staging I/O.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn cloud_provider(&self, id: &str) -> Option<crate::cloud_setup::Provider> {
+        let policy = self.cache.staging.try_lock().ok()?;
+        policy.connections.get(id).map(crate::cloud_setup::Provider::of)
+    }
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn note_staging_intent(&self, id: &str, value: Option<(&lightcraft_catalog::uploads::UploadIntent, &Asset)>, durable: bool) {
         let mut policy = self.cache.staging.lock().unwrap_or_else(PoisonError::into_inner);

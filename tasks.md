@@ -4,7 +4,7 @@ Based on [docs/cloud-storage.md](docs/cloud-storage.md). Checkboxes reflect veri
 
 The supplied reliability review is tracked separately in
 [docs/cloud-reliability-tasks.md](docs/cloud-reliability-tasks.md), in execution order.
-Its unchecked items remain open even when earlier milestone acceptance passed. CR.43 has verified native B2 revision-CAS and head-transition adapters with isolated late-append recovery; ordinary desktop/browser sync and upgrade integration remain open.
+Its unchecked items remain open even when earlier milestone acceptance passed. CR.43 has verified native B2 revision-CAS and head-transition adapters, and native desktop sync/upgrade/discovery/erasure now use them; live workflow acceptance and browser support remain open.
 
 The source document describes a particular source snapshot. Verify its implementation assumptions before changing code. Task IDs use the `CS` prefix to distinguish this backlog from the existing project plan.
 

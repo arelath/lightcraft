@@ -141,8 +141,13 @@ fn local_references(root: &Path, audit: &mut audit::Audit, cancel: &AtomicBool) 
 }
 
 fn plan(connection: &S3Connection, root: &Path, local: &Value, days: u64, cancel: &AtomicBool, task: &TaskHandle) -> Result<Value> {
+    let authority = connection.b2_try_read_head(cancel).map_err(|e| error(e.to_string()))?;
     let keys = list(connection, cancel)?;
     let mut audit = audit::Audit::default();
+    audit.b2 = authority.is_some();
+    if let Some((head, _, _)) = &authority {
+        head.validate_scope(&connection.prefix, local["state"]["library"].as_str().unwrap_or_default()).map_err(error)?;
+    }
     audit.references(local)?;
     audit.local_clocks(&connection.prefix, local)?;
     local_references(root, &mut audit, cancel)?;
@@ -212,6 +217,12 @@ fn plan(connection: &S3Connection, root: &Path, local: &Value, days: u64, cancel
             .ok_or_else(|| error("head disappeared during audit; retry preview"))?;
         if &sha256(&actual.bytes).0 != expected {
             return Err(error("head changed during retention audit; retry preview; nothing deleted"));
+        }
+    }
+    if let Some((_, token, object)) = &authority {
+        let (_, current, reference) = connection.b2_read_head(cancel).map_err(|e| error(e.to_string()))?;
+        if &current != token || &reference != object {
+            return Err(error("B2 authority changed during retention audit; retry preview; nothing deleted"));
         }
     }
     let binding = json!({"destination":connection.storage_snapshot(),"local":local,"metadata":evidence,"inventory":keys,"candidates":candidates,"olderThanDays":days});

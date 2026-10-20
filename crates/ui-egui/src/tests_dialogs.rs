@@ -373,10 +373,7 @@ fn cloud_migration_dialog_relies_on_library_maintenance_and_cancel_keeps_pause()
     let r = h.request("ui.clickWidget", json!({"id":"button:dialogOk"}), T);
     assert_eq!(r["ok"], true, "{r}");
     h.step();
-    assert_eq!(
-        calls.borrow().as_slice(),
-        &[json!({"plan":"appendLog","writersStopped":false,"wait":false}), json!({"plan":"appendLog","writersStopped":true,"wait":false})]
-    );
+    assert_eq!(calls.borrow().as_slice(), &[json!({"writersStopped":false,"wait":false}), json!({"writersStopped":true,"wait":false})]);
 }
 
 #[test]

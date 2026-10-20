@@ -805,8 +805,8 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                         }
                     }
                     if !off
-                        && status["protocol"].as_str() == Some("conditional-head-v1")
-                        && text_button(ui, "cloudSyncMigrate", crate::i18n::tr("Migrate to append-only…"), false).clicked()
+                        && status["canUpgrade"].as_bool().unwrap_or_else(|| lightcraft_engine::cloud_status::can_upgrade(&app.session))
+                        && text_button(ui, "cloudSyncMigrate", crate::i18n::tr("Migrate library…"), false).clicked()
                         && let Err(error) = app.run("dialog.cloudMigrate", json!({}))
                     {
                         app.toast(ui.ctx(), error);

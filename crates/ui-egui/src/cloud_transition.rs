@@ -518,7 +518,7 @@ mod tests {
         let text = headless.painted_text();
         assert!(text.iter().any(|s| s.contains("Cloud sync is off")), "{text:?}");
         assert!(text.iter().any(|s| s.contains("Turn on cloud sync")), "{text:?}");
-        for label in ["Sync now", "Reconnect and retry", "Remove local original copy", "Keep original offline", "Migrate to append-only"] {
+        for label in ["Sync now", "Reconnect and retry", "Remove local original copy", "Keep original offline", "Migrate library"] {
             assert!(!text.iter().any(|s| s.contains(label)), "{label}: {text:?}");
         }
         capture(&mut headless, "off-info");

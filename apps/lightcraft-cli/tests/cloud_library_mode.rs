@@ -16,6 +16,42 @@ impl Drop for Desktop {
         let _ = self.child.wait();
     }
 }
+
+#[test]
+#[ignore = "explicit native B2 upgrade presentation acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn b2_append_upgrade_is_available_and_confirmation_uses_provider_neutral_copy() {
+    let f = support::Fixture::new();
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("b2-upgrade");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let local = f.dir.join("b2-upgrade-presentation");
+    // Paused before enrollment. The fake profile is scoped to this process;
+    // presentation and cached capability must never contact the B2 endpoint.
+    let (out, rows) = f.run(&local, &[
+        ("cloud.configure", json!({"id":"personal","bucket":"photos","region":"us-east-005","prefix":"library","endpoint":"https://s3.us-east-005.backblazeb2.com","profile":"acceptance"})),
+        ("cloud.pause", json!({})),
+        ("cloud.syncEnable", json!({"connection":"personal","protocol":"append-log-v1"})),
+    ]);
+    assert!(out.status.success(), "{rows:?}");
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    let status = app.execute("cloud.syncStatus", json!({}));
+    assert_eq!(status["canUpgrade"], true);
+    assert_eq!(status["userPaused"], true);
+    assert_eq!(status["running"], false);
+    app.click_when_ready("icon:cloud");
+    app.click_when_ready("button:cloudMore");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("upgrade-action.png")}));
+    app.click_when_ready("button:cloudSyncMigrate");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("upgrade-confirmation.png")}));
+    app.wait_widget("button:dialogOk");
+    assert_eq!(app.execute("cloud.syncStatus", json!({}))["preparingMigration"], true);
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.click_when_ready("button:dialogCancel");
+    let status = app.execute("cloud.syncStatus", json!({}));
+    assert_eq!(status["userPaused"], true);
+    assert_eq!(status["running"], false);
+    assert!(status["reports"].as_array().unwrap().is_empty());
+    assert!(f.state.lock().unwrap().requests.is_empty());
+}
 impl Desktop {
     fn start(f: &support::Fixture, library: &Path, artifacts: &Path) -> Self {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();

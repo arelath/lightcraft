@@ -3,6 +3,7 @@ use lightcraft_catalog::replication::{AppendProgress, Portable, archive};
 
 #[derive(Default)]
 pub(super) struct Audit {
+    pub(super) b2: bool,
     strings: BTreeSet<String>,
     clocks: BTreeMap<(String, String), u64>,
     mutations: BTreeMap<(String, String, u64), String>,
@@ -142,12 +143,29 @@ impl Audit {
         let record = |namespace| crate::cloud_records::object_epoch(prefix, namespace, key, &digest).is_some();
         match parts.as_slice() {
             ["catalog", "head.json"] => {
-                // Version 4 carries the library control envelope; newer heads are refused by `decode`.
                 let head = crate::cloud_records::Head::decode(bytes).map_err(|_| bad())?;
                 head.validate_scope(prefix, head.library.as_deref().ok_or_else(bad)?).map_err(|_| bad())?;
                 if head.version < 3 {
                     return Err(bad());
                 }
+            }
+            ["catalog", "b2-authority.json"] if self.b2 => {
+                if value.get("version").and_then(Value::as_u64) != Some(1)
+                    || value.get("protocol").and_then(Value::as_str) != Some("b2-bucket-head-v1")
+                    || !value.get("binding").and_then(Value::as_str).is_some_and(super::digest)
+                    || value.as_object().is_none_or(|fields| fields.len() != 3)
+                {
+                    return Err(bad());
+                }
+            }
+            ["catalog", "authority", name] if self.b2 && *name == format!("{digest}.json") => {
+                let head = crate::cloud_records::Head::decode(bytes).map_err(|_| bad())?;
+                head.validate_scope(prefix, head.library.as_deref().ok_or_else(bad)?).map_err(|_| bad())?;
+            }
+            _ if self.b2 && crate::cloud_records::object_epoch(prefix, "legacy", key, &digest) == Some(1) => {
+                let library = value.get("library").and_then(Value::as_str).ok_or_else(bad)?;
+                crate::cloud_records::LegacyIntake::decode(bytes, library).map_err(|_| bad())?;
+                self.required.insert(crate::cloud_append::manifest_key(prefix, library).map_err(|_| bad())?);
             }
             _ if record("changes") => {
                 let batch: crate::cloud_records::Batch = serde_json::from_slice(bytes).map_err(|_| bad())?;
@@ -209,7 +227,9 @@ impl Audit {
         Ok(())
     }
     pub fn complete(&self, keys: &BTreeSet<String>) -> Result<()> {
-        if self.required.iter().any(|key| !keys.contains(key)) || self.sizes.iter().any(|(key, size)| self.scanned.get(key) != Some(size)) {
+        if self.required.iter().any(|key| !keys.contains(key))
+            || self.sizes.iter().any(|(key, size)| !keys.contains(key) || self.scanned.get(key) != Some(size))
+        {
             return Err(error("retained metadata reference is missing or has the wrong length; no reclamation applied"));
         }
         for (hash, (library, author, first, count)) in &self.scopes {

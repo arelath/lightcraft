@@ -123,6 +123,7 @@ pub mod native {
     }
     pub fn compact(connection: &S3Connection, remote: &mut SyncState, unconditional: bool, cancel: &AtomicBool) -> Result<()> {
         let plan = remote.archive_plan().map_err(ce)?;
+        let unconditional = unconditional || (!plan.objects.is_empty() && connection.b2_head_enabled(cancel)?);
         for (hash, node) in &plan.objects {
             let bytes = serde_json::to_vec(node).map_err(|e| AssetError::Invalid(e.to_string()))?;
             let key = key(&connection.prefix, &remote.library, hash)?;

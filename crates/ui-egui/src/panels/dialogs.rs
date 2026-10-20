@@ -1045,18 +1045,19 @@ fn show_inner(app: &mut LightcraftApp, ctx: &egui::Context) {
                     });
                 }
                 Dialog::CloudMigration { writers_stopped } => {
-                    ui.label(crate::i18n::tr("Switch this library to append-only synchronization for Backblaze B2 and compatible storage."));
-                    ui.label(crate::i18n::tr("This device's automatic synchronization is paused. Migration puts the shared library into maintenance, so other up-to-date devices stop publishing, keep their edits and rejoin afterwards with Migrate Cloud Library."));
+                    ui.label(crate::i18n::tr("Move this cloud library to the sync format this storage supports. Photos, edits and history are kept."));
                     if let Some(state) = app.session.catalog.sync_state() {
-                        ui.label(format!("Library ID: {}", state.library));
-                        ui.label(format!("{} pending changes stay on this device.", state.pending.len()));
+                        ui.label(match state.pending.len() {
+                            1 => "1 pending change stays on this device.".to_owned(),
+                            n => format!("{n} pending changes stay on this device."),
+                        });
                     }
-                    ui.label(crate::i18n::tr("Saved edits, staged originals and cloud history are preserved. Builds released before library maintenance cannot see it: keep them stopped."));
-                    let check = ui.checkbox(writers_stopped, crate::i18n::tr("Storage rejects conditional writes or nothing was published yet: every other device is stopped."));
+                    let check = ui.checkbox(writers_stopped, crate::i18n::tr("All other devices are stopped"))
+                        .on_hover_text(crate::i18n::tr("Only needed if storage cannot hold an upgrade barrier. Keep older LightCraft builds stopped."));
                     crate::widgets::register(ui.ctx(), "checkbox:cloudMigrationStopped", check.rect);
                     let status = app.run("cloud.syncStatus", json!({})).unwrap_or_default();
                     if status["running"].as_bool() == Some(true) { ui.label(crate::i18n::tr("Waiting for the current synchronization to stop…")); }
-                    ui.label(crate::i18n::tr("Cancel leaves this device paused. Use Sync now to resume without migrating."));
+                    ui.label(crate::i18n::tr("Cancel keeps sync paused on this device."));
                 }
                 Dialog::CloudConnect { connection, library, protocol } => {
                     let local_only = app.run("cloud.overview", json!({})).ok().is_some_and(|status| status["localOnly"] == true);
@@ -1839,9 +1840,7 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
                 app.run("cloud.adopt", json!({"connection":connection,"ids":adopt_ids,"wait":false}))
             }
         }
-        Dialog::CloudMigration { writers_stopped } => {
-            app.run("cloud.upgradeLibrary", json!({"plan":"appendLog","writersStopped":writers_stopped,"wait":false}))
-        }
+        Dialog::CloudMigration { writers_stopped } => app.run("cloud.upgradeLibrary", json!({"writersStopped":writers_stopped,"wait":false})),
         Dialog::CloudConnect { connection, library, protocol } => {
             if app.run("cloud.overview", json!({})).ok().is_some_and(|v| v["syncEnabled"] == true) {
                 return Ok(Value::Null);

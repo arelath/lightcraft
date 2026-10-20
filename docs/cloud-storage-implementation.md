@@ -1,6 +1,6 @@
 # Cloud storage implementation
 
-Last updated: 2026-10-18. This document describes current behavior and operational limits. The normative wire and
+Last updated: 2026-10-19. This document describes current behavior and operational limits. The normative wire and
 durability contract is [cloud-sync-protocol.md](cloud-sync-protocol.md); its receipt-history
 contract is [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
 [browser-cloud.md](browser-cloud.md) defines the browser adapter contract.
@@ -500,6 +500,8 @@ The native cloud popup offers explicit on/off actions. Turning on merges local a
 
 ## Revision history
 
+CR.43 partial (2026-10-19): route native desktop sync, upgrade/rejoin, discovery, retention and erasure through the B2 head adapter; browsers remain unsupported for upgraded B2 libraries. Live workflow acceptance pending.
+
 CUX.11 (2026-10-17): implement resumable native cloud on/off transitions and blocking conversion UX; protect permanent originals from cache maintenance and output writes, preserve identities and reprojection of albums/stacks during adoption. See [dated validation and screenshots](cloud-acceptance-history.md#2026-10-17-device-local-cloud-onoff-cux11).
 
 
@@ -799,3 +801,16 @@ A native pure-Rust Backblaze control primitive reads one destination/prefix-boun
 ### 2026-10-18 — CR.43 partial: native B2 head transitions and legacy intake
 
 The native B2 head adapter uses a fixed immutable destination-bound descriptor and bucket-revision concurrency token. A descriptor without a committed pointer refuses normal reads rather than creating a new library. Initialization accepts only an explicit schema-1 append upgrade already in exposed maintenance, verifies the original manifest and supported source control, frozen checkpoint and marker chain, and refuses an active or unrelated raw S3 head. Subsequent writes validate generation, control transition, retained source binding and terminal deletion before staging a candidate. A same-generation CAS can change only legacy scan metadata. Exact content-addressed B2 catalog records use a narrow verified PUT adapter; the append-only write validator stays unchanged. Head format 5 adds an optional bounded legacyAppend intake reference, inherited across publication and epochs; ordinary heads and nonpersonal deletion barriers still emit format 4. Control format 3 is restricted to the retired original append source and its deletion barrier, while ordinary maintenance stays format 2 and mutation schema stays 1. The native legacy reader bypasses retired cooperative controls only for an active upgraded B2 head, verifies the original immutable records and causal proofs, and returns uncommitted input rather than a sync outcome or ACK. Callers explicitly restart budgeted historical audits. HTTP 429/503 control responses unwind immediate CAS retries; a bounded host cooldown and typed Retry-After delay reach the existing retry scheduler. Ordinary native/browser synchronization, maintenance election, upgrade/rejoin, discovery and erasure do not yet select this adapter. CR.43 stays open; these are tested components, not a shipped upgrade workflow.
+
+
+### 2026-10-19 — CR.43 partial: native B2 authority in desktop workflows
+
+Native desktop synchronization now selects the B2 head adapter whenever the destination's immutable descriptor exists. `read_head` prefers the verified B2 authority, and every head writer (ordinary publication, maintenance transitions, legacy admission and erasure) goes through one `write_head`: a `b2:` revision token uses bucket-revision CAS, and a raw S3 `catalog/head.json` write is refused once the descriptor exists. Content-addressed catalog records on such a destination use the verified B2 PUT adapter. The original append manifest remains a fence: head-mode readers continue only when the B2 successor names the same library and carries a legacy intake, otherwise they keep the "rejoin with Migrate Cloud Library…" recovery and retain pending work.
+
+Each native poll offers verified late append input to the conditional authority once, before computing any ACK. Admission writes the new intake and, when state changed, a checkpoint plus marker batch, then CASes the head and rereads, including after a lost response. A requested historical audit is passed through, so a conflicting old-author identity behind a cursor fails the poll instead of being skipped.
+
+`cloud.upgradeLibrary` without a plan resolves the successor in the worker, never with UI-thread I/O. A conditional-head library already on a B2 descriptor rebases; other head libraries keep the append-log plan; an append-log library on Backblaze B2 with a dedicated folder elects a frozen source through B2 initialization (one winner, others reread), retires the original append control to the B2 successor, then activates epoch 2 under the existing rebase lease, or rejoins without writing when that successor is already active. The owner thread switches the local binding protocol together with the outcome's ACKs, preserving device, owner, previous authors and pending mutations and requiring an existing remote; a failed save keeps the old binding. Pending local work is never seeded into the frozen checkpoint. `canUpgrade` (status, overview, File → Migrate Cloud Library…, cloud popup More → Migrate library…, Info) uses the cached destination class without credentials or network I/O. The confirmation copy is provider-neutral.
+
+Discovery lists an upgraded library once, as its conditional head, and keeps unrelated append libraries in the same folder. The retention audit recognizes the B2 descriptor, authority heads and legacy intakes only when a B2 authority was read, requires the original manifest and every referenced record, and refuses a preview if the authority changed during the audit. Whole-library erasure writes the deletion barrier by B2 CAS, confirms it, keeps the descriptor and manifest as nonpersonal barriers, and rechecks the authority before and after deleting versions.
+
+Browsers do not use native B2 authentication. A browser device on an upgraded B2 library is refused with the moved/rejoin failure, and its pending work is retained. B2 upgrade and rejoin are desktop-only. Live acceptance of these workflows is still open, and CR.43 stays unchecked.

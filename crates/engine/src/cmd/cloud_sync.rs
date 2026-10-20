@@ -62,6 +62,7 @@ pub fn status(s: &mut Session, params: &Value) -> Result<Value> {
         "health":health,
         "publicationBlocked":publication_blocked,"publicationFailure":publication_failure,
         "preparingMigration":preparing_migration(s),
+        "canUpgrade":crate::cloud_status::can_upgrade(s),
         "migrating":migrating(s),
         "protocol":state.protocol,"frontiers":state.append.as_ref().map(|p|&p.frontiers),"gaps":state.append.as_ref().map(|p|&p.gaps),
         "appendAudit":state.append.as_ref().map(|p|&p.scan.audit),
@@ -268,9 +269,9 @@ pub fn specs() -> Vec<CommandSpec> {
         "Upgrade cloud library format",
         [],
         None,
-        "{plan?: appendLog|rebase, cancel?, wait?}; pause library publication through the head, write the upgraded format beside the old one, then activate or retire by token; a retired head rejoins its successor",
+        "{plan?: appendLog|rebase, cancel?, wait?}; automatically choose the supported successor; elect maintenance through the head, preserve pending identities and rejoin an existing upgrade",
         always,
-        crate::cloud_append::migration::migrate
+        crate::cloud_replication::start_migration
     ));
     #[cfg(not(target_arch = "wasm32"))]
     specs.push(cmd!(

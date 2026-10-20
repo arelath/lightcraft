@@ -85,6 +85,13 @@ pub enum Outcome {
 }
 static NO_ACK: BTreeSet<String> = BTreeSet::new();
 impl Outcome {
+    pub fn protocol(&self) -> lightcraft_catalog::replication::SyncProtocol {
+        if matches!(self, Self::Append { .. }) {
+            lightcraft_catalog::replication::SyncProtocol::AppendLog
+        } else {
+            lightcraft_catalog::replication::SyncProtocol::ConditionalHead
+        }
+    }
     pub fn unchanged(state: Portable, position: HeadPosition) -> Self {
         Self::Unchanged { state: Box::new(state), position, publication: Publication::Allowed }
     }

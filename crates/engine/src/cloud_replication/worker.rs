@@ -29,9 +29,10 @@ impl Coordinator {
 struct Pending {
     owner_done: Option<mpsc::SyncSender<Option<Outcome>>>,
     started_generation: u64,
+    started_protocol: lightcraft_catalog::replication::SyncProtocol,
     started_revision: u64,
     connection: String,
-    /// Set when the result switches this catalog to the append protocol.
+    /// Owner identity for an explicit upgrade that may change protocol.
     migration_owner: Option<String>,
     upgrade: Option<crate::cloud_upgrade::Request>,
     receiver: mpsc::Receiver<crate::Result<Outcome>>,
@@ -132,8 +133,8 @@ pub fn prepare_migration(s: &mut Session, _: &Value) -> crate::Result<Value> {
     if s.cloud_replication_jobs.migrating() {
         return Err(error("migration is already running"));
     }
-    if s.catalog.sync_state().is_none_or(|state| !state.protocol.is_head()) {
-        return Err(error("migration requires an enabled conditional-head library"));
+    if !crate::cloud_status::can_upgrade(s) {
+        return Err(error("upgrade requires an enabled conditional-head or Backblaze B2 library"));
     }
     s.cloud_replication_jobs.preparing_migration = true;
     s.cloud_replication_jobs.paused = true;
@@ -153,14 +154,16 @@ pub fn start_migration(s: &mut Session, p: &Value) -> crate::Result<Value> {
     let writers_stopped = p.get("writersStopped").and_then(Value::as_bool) == Some(true);
     let request = match (p.get("cancel"), p.get("plan")) {
         (Some(Value::Bool(true)), _) => Request::Cancel,
-        (Some(Value::Bool(false)) | None, None) => Request::Upgrade { plan: crate::cloud_control::Plan::AppendLog, writers_stopped },
+        (Some(Value::Bool(false)) | None, None) => Request::Auto { writers_stopped },
         (Some(Value::Bool(false)) | None, Some(Value::String(plan))) => Request::Upgrade {
             plan: crate::cloud_control::Plan::parse(plan).ok_or_else(|| error("plan must be \"appendLog\" or \"rebase\""))?,
             writers_stopped,
         },
         _ => return Err(error("upgrade expects {plan?: \"appendLog\"|\"rebase\", cancel?: bool, writersStopped?: bool}")),
     };
-    if s.catalog.sync_state().is_some_and(|state| !state.protocol.is_head()) {
+    if s.catalog.sync_state().is_some_and(|state| !state.protocol.is_head())
+        && matches!(request, Request::Upgrade { plan: crate::cloud_control::Plan::AppendLog, .. })
+    {
         return s.execute("cloud.syncStatus", p);
     }
     if s.cloud_uploads.running() > 0 {
@@ -206,9 +209,7 @@ fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::
         .find(|connection| connection.id == state.connection)
         .ok_or_else(|| error("synchronization storage connection is not configured"))?;
     let upgrade_owner = if migrating { Some(crate::cloud_append::owner::identity(&lib.dir)?) } else { None };
-    let migration_owner = upgrade_owner
-        .clone()
-        .filter(|_| matches!(upgrade, Some(crate::cloud_upgrade::Request::Upgrade { plan: crate::cloud_control::Plan::AppendLog, .. })));
+    let migration_owner = upgrade_owner.clone().filter(|_| !matches!(upgrade, Some(crate::cloud_upgrade::Request::Cancel)));
     let resolver = s.media.asset_resolver.clone().ok_or_else(|| error("native asset storage is unavailable"))?;
     let guard =
         s.activity.start("cloudSync", if migrating { "Upgrade cloud library" } else { "Synchronize cloud library" }, crate::activity::Cancel::Yes);
@@ -217,6 +218,7 @@ fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::
     let cancel = guard.cancel_flag().ok_or_else(|| error("synchronization cancellation flag unavailable"))?;
     let worker_cancel = cancel.clone();
     let started_generation = state.generation;
+    let started_protocol = state.protocol;
     let (sender, receiver) = mpsc::sync_channel(1);
     let (owner_done, applied) = mpsc::sync_channel::<Option<Outcome>>(1);
     let coordinator = s.cloud_replication_jobs.coordinator.clone();
@@ -246,7 +248,8 @@ fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::
                     crate::cloud_append::native::synchronize_verified(&connection, &state, checkpoint, audit, &worker_cancel, &mut media)
                         .map_err(|e| EngineError::Cloud(e.into()))
                 } else {
-                    synchronize_verified(&connection, &state, checkpoint, &worker_cancel, &mut media).map_err(|e| EngineError::Cloud(e.into()))
+                    synchronize_verified_audit(&connection, &state, checkpoint, audit, &worker_cancel, &mut media)
+                        .map_err(|e| EngineError::Cloud(e.into()))
                 }
             })
             .map_err(error)
@@ -271,6 +274,7 @@ fn start_impl(s: &mut Session, p: &Value, upgrade: Option<crate::cloud_upgrade::
     s.cloud_replication_jobs.pending = Some(Pending {
         owner_done: Some(owner_done),
         started_generation,
+        started_protocol,
         started_revision,
         connection: snapshot_connection,
         migration_owner,
@@ -413,18 +417,24 @@ impl Session {
             let binding = if let Some(owner) = &pending.migration_owner {
                 let mut next = self.catalog.clone();
                 let mut state = next.sync_state().cloned().ok_or_else(|| error("synchronization identity unavailable"))?;
-                if !state.protocol.is_head() {
+                if state.protocol != pending.started_protocol {
                     return Err(error("protocol changed during migration; result retained remotely"));
                 }
-                state.protocol = lightcraft_catalog::replication::SyncProtocol::AppendLog;
-                state.migrated_from_head = true;
-                state.cursor = None;
-                state.generation = 0;
-                state.claim_owner(owner.clone(), crate::cloud_append::owner::random()?)?;
-                let op = lightcraft_catalog::Op::SetSyncState { state: Some(Box::new(state)) };
-                next.apply(op.clone())?;
-                migrated = Some(next);
-                Some(op)
+                if state.protocol != outcome.protocol() {
+                    state.protocol = outcome.protocol();
+                    state.migrated_from_head = !state.protocol.is_head();
+                    state.append = None;
+                    state.cursor = None;
+                    state.generation = 0;
+                    state.require_existing = true;
+                    if !state.protocol.is_head() {
+                        state.claim_owner(owner.clone(), crate::cloud_append::owner::random()?)?;
+                    }
+                    let op = lightcraft_catalog::Op::SetSyncState { state: Some(Box::new(state)) };
+                    next.apply(op.clone())?;
+                    migrated = Some(next);
+                    Some(op)
+                } else { None }
             } else {
                 None
             };
@@ -452,7 +462,7 @@ impl Session {
             }
             let mut value = outcome.report();
             value["unchanged"] = json!(false);
-            value["migrated"] = json!(pending.migration_owner.is_some());
+            value["migrated"] = json!(migrated.is_some());
             value["upgraded"] = json!(pending.upgrade.is_some());
             value["legacyHistoryRetained"] = json!(true);
             value["protocol"] = json!(self.catalog.sync_state().map(|s| s.protocol));
@@ -604,6 +614,7 @@ mod tests {
         s.cloud_replication_jobs.pending = Some(Pending {
             owner_done: None,
             started_generation: local.generation,
+            started_protocol: local.protocol,
             started_revision: s.catalog.revision,
             connection: local.connection.clone(),
             migration_owner: None,
@@ -993,6 +1004,71 @@ mod tests {
         assert_eq!(s.catalog.custom_label_name(lightcraft_catalog::ColorLabel::Red), Some("Newest red"));
         let (_, loaded, _) = Journal::open(Box::new(files.files)).unwrap();
         assert_eq!(loaded.sync_state(), s.catalog.sync_state());
+    }
+    #[test]
+    fn append_to_head_binding_and_ack_are_atomic_and_keep_authors_and_late_work() {
+        let (mut s, files) = session();
+        let mut state = s.catalog.sync_state().unwrap().clone();
+        state.protocol = lightcraft_catalog::replication::SyncProtocol::AppendLog;
+        state.migrated_from_head = true;
+        state.local_owner = "existing-owner".into();
+        s.apply_system(Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+        s.persist().unwrap();
+        let before = s.catalog.sync_state().unwrap().clone();
+        let preparing = |s: &mut Session| {
+            ready(s);
+            let pending = s.cloud_replication_jobs.pending.as_mut().unwrap();
+            pending.migration_owner = Some("existing-owner".into());
+            pending.upgrade = Some(crate::cloud_upgrade::Request::Auto { writers_stopped: false });
+        };
+        preparing(&mut s);
+        files.fail.store(true, Ordering::Relaxed);
+        s.poll_cloud_replication();
+        assert_eq!(s.catalog.sync_state(), Some(&before));
+        let (_, loaded, _) = Journal::open(Box::new(files.files.clone())).unwrap();
+        assert_eq!(loaded.sync_state(), Some(&before));
+        files.fail.store(false, Ordering::Relaxed);
+        s.persist().unwrap();
+        preparing(&mut s);
+        let mut late = s.catalog.sync_state().unwrap().clone();
+        let mutation = late
+            .enqueue(vec![lightcraft_catalog::replication::Change {
+                entity: "library:library".into(),
+                field: "label.Blue".into(),
+                base: None,
+                value: json!("Late blue"),
+            }])
+            .unwrap()
+            .unwrap();
+        s.apply_system(Op::SetSyncState { state: Some(Box::new(late)) }).unwrap();
+        s.poll_cloud_replication();
+        let state = s.catalog.sync_state().unwrap();
+        assert!(state.protocol.is_head());
+        assert_eq!(state.device, before.device);
+        assert_eq!(state.local_owner, before.local_owner);
+        assert_eq!(state.previous_authors, before.previous_authors);
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending.get(&mutation.revision.id()), Some(&mutation));
+        assert!(state.require_existing && state.append.is_none() && !state.migrated_from_head);
+        assert_eq!(state.generation, 1);
+        assert_eq!(s.catalog.custom_label_name(lightcraft_catalog::ColorLabel::Blue), Some("Late blue"));
+        let (_, loaded, _) = Journal::open(Box::new(files.files)).unwrap();
+        assert_eq!(loaded.sync_state(), Some(state));
+        assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["result"]["migrated"], true);
+    }
+    #[test]
+    fn same_protocol_upgrade_keeps_owner_cursor_and_reports_no_binding_change() {
+        let (mut s, _) = session();
+        ready(&mut s);
+        s.poll_cloud_replication();
+        let before = s.catalog.sync_state().unwrap().clone();
+        ready_same_head(&mut s, 1);
+        let pending = s.cloud_replication_jobs.pending.as_mut().unwrap();
+        pending.migration_owner = Some("existing-owner".into());
+        pending.upgrade = Some(crate::cloud_upgrade::Request::Auto { writers_stopped: false });
+        s.poll_cloud_replication();
+        assert_eq!(s.catalog.sync_state(), Some(&before));
+        assert_eq!(s.cloud_replication_jobs.reports.last().unwrap()["result"]["migrated"], false);
     }
     #[test]
     fn cancelled_or_stale_migration_never_switches_the_local_protocol() {

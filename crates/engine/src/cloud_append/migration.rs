@@ -4,7 +4,9 @@ use lightcraft_catalog::replication::{AppendProgress, publication_prefixes};
 use serde_json::Value;
 use std::sync::atomic::AtomicBool;
 pub fn migrate(s: &mut Session, p: &Value) -> Result<Value> {
-    crate::cloud_replication::start_migration(s, p)
+    let mut params = p.as_object().cloned().ok_or_else(|| EngineError::Other("migration parameters must be an object".into()))?;
+    params.entry("plan").or_insert_with(|| Value::String("appendLog".into()));
+    crate::cloud_replication::start_migration(s, &Value::Object(params))
 }
 /// Only the remotely committed seed is published; owner-thread persistence changes local mode.
 pub(crate) fn seed(

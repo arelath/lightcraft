@@ -20,12 +20,14 @@ fn owned_key(prefix: &str, library: &str, key: &str) -> bool {
     if tail.strip_prefix("associated/xmp/").and_then(|s| s.strip_suffix(".xmp")).is_some_and(hash) {
         return true;
     }
-    if tail == "catalog/head.json" {
+    if matches!(tail, "catalog/head.json" | "catalog/b2-authority.json") {
         return true;
     }
     let parts: Vec<_> = tail.split('/').collect();
     match parts.as_slice() {
-        ["catalog", kind, file] if matches!(*kind, "changes" | "checkpoints" | "receipts") => file.strip_suffix(".json").is_some_and(hash),
+        ["catalog", kind, file] if matches!(*kind, "changes" | "checkpoints" | "receipts" | "authority" | "legacy") => {
+            file.strip_suffix(".json").is_some_and(hash)
+        }
         ["catalog", "epochs", epoch, kind, file]
             if epoch.parse::<u64>().is_ok_and(|n| n >= 2) && matches!(*kind, "changes" | "checkpoints" | "receipts") =>
         {
@@ -84,6 +86,16 @@ struct Target<'a> {
 type DeletionReview = (Value, Vec<ObjectVersion>, Vec<(String, String)>);
 fn inventory(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result<Vec<ObjectVersion>> {
     let versions = connection.library_versions(cancel).map_err(asset_error)?;
+    if versions.iter().any(|v| {
+        v.key == format!("{}/catalog/b2-authority.json", connection.prefix)
+            || v.key.starts_with(&format!("{}/catalog/authority/", connection.prefix))
+            || v.key.starts_with(&format!("{}/catalog/legacy/", connection.prefix))
+    }) {
+        let (head, _, _) = connection.b2_read_head(cancel).map_err(asset_error)?;
+        if head.library.as_deref() != Some(library) {
+            return Err(error("B2 authority belongs to another library; nothing erased"));
+        }
+    }
     let root = format!("{}/", connection.prefix);
     for entry in &versions {
         if !owned_key(&connection.prefix, library, &entry.key) {
@@ -117,7 +129,18 @@ fn inventory(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> R
     }
     Err(error("storage listing exceeded its page budget; nothing erased"))
 }
-fn head(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result<Option<(crate::cloud_records::Head, String)>> {
+struct HeadSnapshot {
+    head: crate::cloud_records::Head,
+    token: String,
+    object: Option<crate::cloud_records::RecordRef>,
+}
+fn head(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result<Option<HeadSnapshot>> {
+    if let Some((head, token, object)) = connection.b2_try_read_head(cancel).map_err(asset_error)? {
+        if head.library.as_deref() != Some(library) {
+            return Err(error("storage head belongs to another library; nothing erased"));
+        }
+        return Ok(Some(HeadSnapshot { head, token, object: Some(object) }));
+    }
     let key = format!("{}/catalog/head.json", connection.prefix);
     let Some(reply) = connection.get_small(&key, 16 << 10, cancel).map_err(asset_error)? else { return Ok(None) };
     let head = crate::cloud_records::Head::decode(&reply.bytes).map_err(|blocked| error(blocked.to_string()))?;
@@ -126,8 +149,10 @@ fn head(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result
     }
     if head.control().map_err(error)?.state != State::Deleted {
         head.validate_scope(&connection.prefix, library).map_err(error)?;
+    } else {
+        head.validate_deleted(&connection.prefix, library).map_err(|b| error(b.to_string()))?;
     }
-    Ok(Some((head, reply.etag.ok_or_else(|| error("storage head has no concurrency token"))?)))
+    Ok(Some(HeadSnapshot { head, token: reply.etag.ok_or_else(|| error("storage head has no concurrency token"))?, object: None }))
 }
 fn control(connection: &S3Connection, library: &str, versions: &[ObjectVersion], cancel: &AtomicBool) -> Result<Control> {
     let prefix = crate::cloud_append::control::prefix(&connection.prefix, library).map_err(asset_error)?;
@@ -157,8 +182,8 @@ fn preview(
     if !protocol.is_head() && !versions.iter().any(|v| v.key.starts_with(&format!("{}/sync-v2/{library}/", connection.prefix))) {
         return Err(error("the selected cloud library was not found; nothing erased"));
     }
-    if let Some((head, _)) = &current_head {
-        head.control().map_err(error)?.delete().map_err(|b| error(b.to_string()))?;
+    if let Some(snapshot) = &current_head {
+        snapshot.head.control().map_err(error)?.delete().map_err(|b| error(b.to_string()))?;
     }
     if versions.iter().any(|v| v.key.starts_with(&format!("{}/sync-v2/{library}/", connection.prefix))) {
         control(connection, library, &versions, cancel)?.delete().map_err(|b| error(b.to_string()))?;
@@ -195,7 +220,9 @@ fn erase(
     )
     .map_err(io)?;
     let mut barriers = BTreeMap::<String, Vec<u8>>::new();
-    if let Some((mut head, etag)) = head(connection, library, cancel)? {
+    let mut b2_barrier = None;
+    if let Some(snapshot) = head(connection, library, cancel)? {
+        let mut head = snapshot.head.clone();
         head.control = Some(head.control().map_err(error)?.delete().map_err(|b| error(b.to_string()))?);
         head.version = 4;
         // Retain no checkpoint or recipe data in the permanent deletion barrier.
@@ -210,10 +237,43 @@ fn erase(
             size: 1,
         };
         let bytes = serde_json::to_vec(&head).map_err(|e| error(e.to_string()))?;
-        let key = format!("{}/catalog/head.json", connection.prefix);
-        if connection.get_small(&key, 16 << 10, cancel).map_err(asset_error)?.is_none_or(|r| r.bytes != bytes) {
-            connection.put_small(&key, &bytes, PutCondition::Matches(&etag), cancel).map_err(asset_error)?;
-        }
+        let key = if snapshot.object.is_some() {
+            if serde_json::to_vec(&snapshot.head).map_err(|e| error(e.to_string()))? != bytes {
+                match connection.b2_write_head(&snapshot.token, &head, cancel) {
+                    Ok(_) => {}
+                    Err(e) if e.uncertain_write() => {}
+                    Err(e) => return Err(asset_error(e)),
+                }
+            }
+            let (confirmed, _, object) = connection.b2_read_head(cancel).map_err(asset_error)?;
+            if serde_json::to_vec(&confirmed).map_err(|e| error(e.to_string()))? != bytes {
+                return Err(error("B2 deletion barrier was not confirmed; no media deleted; review again"));
+            }
+            b2_barrier = Some(object.clone());
+            for (key, expected) in [
+                (format!("{}/catalog/b2-authority.json", connection.prefix), None),
+                (
+                    crate::cloud_append::manifest_key(&connection.prefix, library).map_err(asset_error)?,
+                    Some(crate::cloud_append::manifest(library).map_err(asset_error)?),
+                ),
+            ] {
+                let stored = connection
+                    .get_small(&key, 16 << 10, cancel)
+                    .map_err(asset_error)?
+                    .ok_or_else(|| error("B2 compatibility barrier disappeared; review again"))?;
+                if expected.is_some_and(|expected| expected != stored.bytes) {
+                    return Err(error("B2 compatibility manifest changed; nothing erased"));
+                }
+                barriers.insert(key, stored.bytes);
+            }
+            object.key
+        } else {
+            let key = format!("{}/catalog/head.json", connection.prefix);
+            if connection.get_small(&key, 16 << 10, cancel).map_err(asset_error)?.is_none_or(|r| r.bytes != bytes) {
+                connection.put_small(&key, &bytes, PutCondition::Matches(&snapshot.token), cancel).map_err(asset_error)?;
+            }
+            key
+        };
         barriers.insert(key, bytes);
     }
     if before.iter().any(|v| v.key.starts_with(&format!("{}/sync-v2/{library}/", connection.prefix))) {
@@ -245,6 +305,11 @@ fn erase(
             return Err(error("deletion barrier changed; another device may still be writing; review again"));
         }
     }
+    if let Some(expected) = &b2_barrier
+        && connection.b2_read_head(cancel).map_err(asset_error)?.2 != *expected
+    {
+        return Err(error("B2 authority changed after deletion; no media deleted; review again"));
+    }
     let mut removed = 0u64;
     for object in &planned {
         if barriers.contains_key(&object.key) && object.latest {
@@ -267,6 +332,11 @@ fn erase(
         }
     }
     let remaining = inventory(connection, library, cancel)?;
+    if let Some(expected) = &b2_barrier
+        && connection.b2_read_head(cancel).map_err(asset_error)?.2 != *expected
+    {
+        return Err(error("B2 deletion authority changed; keep devices stopped and review erasure again"));
+    }
     if remaining.iter().any(|v| !v.latest || !barriers.contains_key(&v.key)) {
         return Err(error("cloud objects remain or a writer is still active; keep devices stopped and review deletion again"));
     }

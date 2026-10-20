@@ -15,6 +15,7 @@ use std::sync::atomic::AtomicBool;
 
 type Result<T> = std::result::Result<T, CloudFailure>;
 const ATTEMPTS: usize = 16;
+mod b2;
 mod lease;
 use crate::cloud_control::lease::Lease;
 use std::sync::Mutex;
@@ -169,6 +170,9 @@ fn owned<'a>(head: &'a Head, token: &str) -> Result<&'a crate::cloud_control::Mi
 fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &AtomicBool) -> Result<Outcome> {
     let library = &local.library;
     let (head, token) = acquire(connection, library, Plan::Rebase, owner, cancel)?;
+    if head.legacy_append.is_some() {
+        b2::fence(connection, &head, cancel)?;
+    }
     with_lease(connection, library, head.control().map_err(invalid)?, cancel, |cancel, ownership| {
         let migration = owned(&head, &token)?.clone();
         let spec = head.control().map_err(invalid)?.migration_spec()?;
@@ -251,6 +255,9 @@ fn rebase(connection: &S3Connection, local: &SyncState, owner: &str, cancel: &At
 /// head-mode writers stop at the CAS instead of relying on operator coordination.
 /// A device that finds the head already retired rejoins without writing anything.
 fn append_log(connection: &S3Connection, local: &SyncState, owner: &str, writers_stopped: bool, cancel: &AtomicBool) -> Result<Outcome> {
+    if connection.b2_head_enabled(cancel)? {
+        return Err(CloudFailure::new(FailureKind::Unsupported, "this B2 library uses fenced publication; upgrade it with the rebase plan"));
+    }
     let library = &local.library;
     let manifest = crate::assets::sha256(&crate::cloud_append::manifest(library)?).0;
     if publication::read_head(connection, cancel)?.is_none() {
@@ -335,6 +342,10 @@ fn cancel_upgrade(connection: &S3Connection, local: &SyncState, owner: &str, can
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request {
+    /// Resolve the supported successor in the worker, without UI-thread I/O.
+    Auto {
+        writers_stopped: bool,
+    },
     /// `writers_stopped`: operator confirmation, used only when the provider rejects
     /// conditional writes (the head then cannot accept any commit and is already frozen).
     Upgrade {
@@ -345,9 +356,20 @@ pub enum Request {
 }
 pub fn run(connection: &S3Connection, local: &SyncState, owner: &str, request: Request, cancel: &AtomicBool) -> Result<Outcome> {
     if !local.protocol.is_head() {
-        return Err(CloudFailure::new(FailureKind::Unsupported, "this library already uses append synchronization"));
+        return match request {
+            Request::Auto { .. } | Request::Upgrade { plan: Plan::Rebase, .. } => b2::upgrade(connection, local, owner, cancel),
+            Request::Cancel if connection.b2_head_enabled(cancel)? => cancel_upgrade(connection, local, owner, cancel),
+            _ => Err(CloudFailure::new(FailureKind::Unsupported, "this library already uses append synchronization")),
+        };
     }
     match request {
+        Request::Auto { writers_stopped } => {
+            if connection.b2_head_enabled(cancel)? {
+                rebase(connection, local, owner, cancel)
+            } else {
+                append_log(connection, local, owner, writers_stopped, cancel)
+            }
+        }
         Request::Upgrade { plan: Plan::Rebase, .. } => rebase(connection, local, owner, cancel),
         Request::Upgrade { plan: Plan::AppendLog, writers_stopped } => append_log(connection, local, owner, writers_stopped, cancel),
         Request::Cancel => cancel_upgrade(connection, local, owner, cancel),

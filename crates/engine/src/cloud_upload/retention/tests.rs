@@ -96,6 +96,54 @@ fn upgraded_heads_epoch_records_and_append_control_are_audited_not_refused() {
     assert!(audit.record("library", &key.replace(".json", "0.json"), &bytes).is_err());
 }
 #[test]
+fn b2_authority_requires_legacy_manifest_and_all_referenced_metadata() {
+    use crate::cloud_records::{Batch, Head, LegacyIntake, RecordRef, object_key};
+    let intake = LegacyIntake::new("library", Default::default()).unwrap();
+    let legacy_bytes = serde_json::to_vec(&intake).unwrap();
+    let legacy_hash = sha256(&legacy_bytes);
+    let legacy = RecordRef { key: object_key("library", 1, "legacy", &legacy_hash.0), size: legacy_bytes.len() as u64, hash: legacy_hash };
+    let batch = serde_json::to_vec(&Batch { version: 3, parent: None, imports: vec![], mutations: vec![], checkpoint_marker: true }).unwrap();
+    let batch_hash = sha256(&batch);
+    let tip = RecordRef { key: object_key("library", 2, "changes", &batch_hash.0), size: batch.len() as u64, hash: batch_hash };
+    let mut control = crate::cloud_control::Control::initial("library");
+    control.epoch = 2;
+    control.active_metadata_root = crate::cloud_control::epoch_root(2);
+    let mut head = Head::next(None, tip.clone(), "library", None, control).unwrap();
+    head.version = 5;
+    head.legacy_append = Some(legacy.clone());
+    let head_bytes = serde_json::to_vec(&head).unwrap();
+    let head_key = format!("library/catalog/authority/{}.json", sha256(&head_bytes).0);
+    let manifest_key = crate::cloud_append::manifest_key("library", "library").unwrap();
+    let descriptor = serde_json::to_vec(&json!({"version":1,"protocol":"b2-bucket-head-v1","binding":"a".repeat(64)})).unwrap();
+    let records = [
+        ("library/catalog/b2-authority.json".into(), descriptor),
+        (manifest_key.clone(), crate::cloud_append::manifest("library").unwrap()),
+        (legacy.key.clone(), legacy_bytes),
+        (tip.key.clone(), batch),
+        (head_key, head_bytes),
+    ];
+    let mut audit = audit::Audit::default();
+    audit.b2 = true;
+    let mut keys = BTreeSet::new();
+    for (key, bytes) in &records {
+        audit.record("library", key, bytes).unwrap();
+        keys.insert(key.clone());
+    }
+    audit.complete(&keys).unwrap();
+    for missing in [&legacy.key, &tip.key, &manifest_key] {
+        let mut incomplete = keys.clone();
+        incomplete.remove(missing);
+        assert!(audit.complete(&incomplete).is_err(), "missing {missing} must refuse reclamation");
+    }
+    for (key, bytes) in records.iter().filter(|(key, _)| key.contains("authority") || key.contains("legacy")) {
+        assert!(audit::Audit::default().record("library", key, bytes).is_err(), "B2 metadata requires a validated provider authority");
+    }
+    let mut future = serde_json::to_value(&head).unwrap();
+    future["version"] = json!(6);
+    let bytes = serde_json::to_vec(&future).unwrap();
+    assert!(audit.record("library", &format!("library/catalog/authority/{}.json", sha256(&bytes).0), &bytes).is_err());
+}
+#[test]
 fn retention_dates_and_candidate_paths_are_strict() {
     assert_eq!(modified("Mon, 01 Jan 2024 00:00:00 GMT").unwrap(), 1704067200);
     assert!(modified("Mon, 99 Jan 2024 00:00:00 GMT").is_err());

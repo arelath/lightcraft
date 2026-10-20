@@ -306,7 +306,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, data: &Value) {
                 let more = ui.menu_button(crate::i18n::tr("More…"), |ui| {
                     ui.set_width(214.);
                     navigation(app, ui, "button:cloudMaintenance", "Storage tools…", "dialog.cloudMaintenance", json!({}));
-                    if app.session.catalog.sync_state().is_some_and(|state| state.protocol.is_head()) {
+                    if data["canUpgrade"].as_bool().unwrap_or_else(||lightcraft_engine::cloud_status::can_upgrade(&app.session)) {
                         navigation(app, ui, "button:cloudSyncMigrate", "Migrate library…", "dialog.cloudMigrate", json!({}));
                     }
                     navigation(app, ui, "button:cloudDeleteOpen", "Delete entire cloud library…", "dialog.cloudDelete", json!({}));
