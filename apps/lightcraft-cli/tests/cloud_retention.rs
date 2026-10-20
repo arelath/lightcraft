@@ -16,6 +16,54 @@ fn apply(token: &Value) -> Value {
 }
 
 #[test]
+fn a_newly_joined_empty_library_can_preview_without_creating_managed_storage() {
+    for protocol in ["conditional-head-v1", "append-log-v1"] {
+        let f = Fixture::new();
+        f.state.lock().unwrap().append_mode = protocol == "append-log-v1";
+        let config = json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"});
+        let source = f.dir.join("empty-source");
+        let rows = run(
+            &f,
+            &source,
+            &[
+                ("cloud.configure", config.clone()),
+                ("cloud.syncEnable", json!({"connection":"personal","protocol":protocol})),
+                ("cloud.sync", json!({})),
+            ],
+        );
+        let library = rows[1]["result"]["library"].as_str().unwrap();
+        let joined = f.dir.join("empty-joined");
+        run(
+            &f,
+            &joined,
+            &[
+                ("cloud.configure", config),
+                ("cloud.syncEnable", json!({"connection":"personal","library":library,"protocol":protocol})),
+                ("cloud.sync", json!({})),
+                ("cloud.pause", json!({})),
+            ],
+        );
+        let root = joined.join("Managed");
+        assert!(!root.exists());
+        let (before, requests) = {
+            let state = f.state.lock().unwrap();
+            (state.objects.clone(), state.requests.len())
+        };
+        for _ in 0..2 {
+            assert!(preview(&f, &joined)["candidates"].as_array().unwrap().is_empty());
+            assert!(!root.exists(), "preview must leave absent staging storage untouched");
+        }
+        std::fs::create_dir_all(root.join("staging")).unwrap();
+        std::fs::write(root.join("staging/broken.json"), b"{broken").unwrap();
+        let (out, _) = f.run(&joined, &[("cloud.reclaim", json!({"connection":"personal"}))]);
+        assert!(!out.status.success(), "existing corrupt local metadata still refuses reclamation");
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.objects, before);
+        assert!(state.requests.iter().skip(requests).all(|(method, _)| method == "GET"));
+        assert_eq!(state.signature_errors, 0);
+    }
+}
+#[test]
 fn reclamation_rechecks_preview_history_preconditions_and_preserves_deleted_published_media() {
     for protocol in ["conditional-head-v1", "append-log-v1"] {
         let f = Fixture::new();

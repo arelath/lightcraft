@@ -32,6 +32,59 @@ fn preview(f: &Fixture, lib: &Path, id: &str) -> Value {
 fn apply(id: &str, p: &Value) -> Value {
     json!({"library":id,"apply":true,"preview":p["preview"],"confirmation":"DELETE CLOUD LIBRARY","allDevicesStopped":true})
 }
+fn setup_empty_join(f: &Fixture, protocol: &str) -> (std::path::PathBuf, String) {
+    f.state.lock().unwrap().append_mode = protocol == "append-log-v1";
+    let config = json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"});
+    let created = run(
+        f,
+        &f.dir.join("empty-source"),
+        &[("cloud.configure", config.clone()), ("cloud.syncEnable", json!({"connection":"personal","protocol":protocol})), ("cloud.sync", json!({}))],
+    );
+    let id = created[1]["result"]["library"].as_str().unwrap().to_owned();
+    let joined = f.dir.join("empty-joined");
+    run(
+        f,
+        &joined,
+        &[
+            ("cloud.configure", config),
+            ("cloud.syncEnable", json!({"connection":"personal","library":id,"protocol":protocol})),
+            ("cloud.sync", json!({})),
+            ("cloud.pause", json!({})),
+        ],
+    );
+    (joined, id)
+}
+#[test]
+fn a_joined_empty_library_can_be_erased_with_a_durable_local_barrier() {
+    for protocol in ["conditional-head-v1", "append-log-v1"] {
+        let f = Fixture::new();
+        let (joined, id) = setup_empty_join(&f, protocol);
+        let id = id.as_str();
+        let root = joined.join("Managed");
+        assert!(!root.exists());
+        let p = preview(&f, &joined, id);
+        assert!(!root.exists(), "review must not create local staging");
+        assert!(!f.state.lock().unwrap().requests.iter().any(|(m, _)| m == "DELETE"));
+        std::fs::write(&root, b"keep local file").unwrap();
+        let before = f.state.lock().unwrap().requests.len();
+        let (out, _) = f.run(&joined, &[("cloud.deleteLibrary", apply(id, &p))]);
+        assert!(!out.status.success(), "a file at the staging root must refuse deletion");
+        assert_eq!(std::fs::read(&root).unwrap(), b"keep local file");
+        assert!(f.state.lock().unwrap().requests.iter().skip(before).all(|(m, _)| m == "GET"));
+        std::fs::remove_file(&root).unwrap();
+        let done = run(&f, &joined, &[("cloud.deleteLibrary", apply(id, &p))]);
+        assert_eq!(done[0]["result"]["applied"], true);
+        let marker = root.join(format!("erased-library-{}.json", support::hash(id.as_bytes())));
+        let durable: Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+        assert_eq!(durable["library"], id);
+        assert_eq!(durable["complete"], true);
+        let status = run(&f, &joined, &[("cloud.overview", json!({}))]);
+        assert_eq!(status[0]["result"]["erasure"]["complete"], true);
+        let (out, _) = f.run(&joined, &[("cloud.resume", json!({}))]);
+        assert!(!out.status.success(), "reopened empty library must keep its deletion barrier");
+        assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+    }
+}
 #[test]
 fn erase_requires_typed_consent_fresh_inventory_and_removes_versions_parts_and_history() {
     for protocol in ["conditional-head-v1", "append-log-v1"] {
@@ -173,11 +226,22 @@ fn an_empty_writable_bucket_is_probed_read_only_then_initialized_on_first_sync()
 #[test]
 #[ignore = "explicit native presented-window acceptance; requires LIGHTCRAFT_NATIVE_ERASE_APP"]
 fn native_cloud_library_deletion_requires_typed_phrase_and_erases_only_the_fixture() {
+    native_deletion(false);
+}
+#[test]
+#[ignore = "explicit native presented-window acceptance; requires LIGHTCRAFT_NATIVE_ERASE_APP"]
+fn native_empty_cloud_library_deletion_keeps_the_durable_stop_barrier() {
+    native_deletion(true);
+}
+fn native_deletion(empty: bool) {
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
     let f = Fixture::new();
-    let (lib, id) = setup(&f, "append-log-v1");
+    let (lib, id) = if empty { setup_empty_join(&f, "append-log-v1") } else { setup(&f, "append-log-v1") };
+    if empty {
+        assert!(!lib.join("Managed").exists());
+    }
     let executable = std::env::var("LIGHTCRAFT_NATIVE_ERASE_APP").unwrap();
     let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_ERASE_SNAPSHOTS").unwrap());
     std::fs::create_dir_all(&artifacts).unwrap();
@@ -274,6 +338,10 @@ fn native_cloud_library_deletion_requires_typed_phrase_and_erases_only_the_fixtu
     let overview = ask(&mut reader, "engine.execute", json!({"command":"cloud.overview"}));
     assert_eq!(overview["erasure"]["complete"], true);
     assert_eq!(overview["summary"]["cloudOriginalBytes"], 0);
+    let marker = lib.join("Managed").join(format!("erased-library-{}.json", support::hash(id.as_bytes())));
+    let durable: Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+    assert_eq!(durable["library"], id);
+    assert_eq!(durable["complete"], true);
     click(&mut reader, "button:cloudDeleteReview");
     screenshot(&mut reader, &artifacts, "deleted-details");
     ask(&mut reader, "app.quit", json!({}));

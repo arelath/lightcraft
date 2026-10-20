@@ -213,6 +213,14 @@ fn erase(
     let Target { connection, library } = target;
     let root = resolver.durable_root().ok_or_else(|| error("no durable library storage for deletion intent"))?;
     resolver.validate_storage().map_err(asset_error)?;
+    // Joining an empty library configures Managed before any staging creates it.
+    // Persist the local stop barrier before touching the remote authority.
+    match std::fs::symlink_metadata(&root) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+        Ok(_) => return Err(error("managed storage root is redirected or is not a directory; nothing erased")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&root).map_err(io)?,
+        Err(e) => return Err(io(e)),
+    }
     let path = root.join(format!("erased-library-{}.json", sha256(library.as_bytes()).0));
     lightcraft_catalog::safe_file::write_atomic(
         &path,

@@ -144,6 +144,34 @@ fn b2_authority_requires_legacy_manifest_and_all_referenced_metadata() {
     assert!(audit.record("library", &format!("library/catalog/authority/{}.json", sha256(&bytes).0), &bytes).is_err());
 }
 #[test]
+fn empty_staging_root_is_read_only_but_existing_metadata_must_be_valid() {
+    let base = std::env::temp_dir().join(format!("lightcraft-retention-local-{}", crate::cloud_control::token().unwrap()));
+    std::fs::create_dir(&base).unwrap();
+    let root = base.join("Managed");
+    let cancel = AtomicBool::new(false);
+    let mut audit = audit::Audit::default();
+    local_references(&root, &mut audit, &cancel).unwrap();
+    assert!(!root.exists(), "preview must not create staging storage");
+    cancel.store(true, Ordering::Relaxed);
+    assert!(local_references(&root, &mut audit, &cancel).is_err());
+    cancel.store(false, Ordering::Relaxed);
+    std::fs::write(&root, b"not a directory").unwrap();
+    assert!(local_references(&root, &mut audit, &cancel).is_err());
+    std::fs::remove_file(&root).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    let nested = root.join("staging");
+    std::fs::create_dir(&nested).unwrap();
+    let metadata = nested.join("intent.json");
+    let hash = "c".repeat(64);
+    let key = format!("library/originals/{hash}");
+    std::fs::write(&metadata, json!({"original":key}).to_string()).unwrap();
+    local_references(&root, &mut audit, &cancel).unwrap();
+    assert!(audit.protects(&key, &hash));
+    std::fs::write(metadata, b"{broken").unwrap();
+    assert!(local_references(&root, &mut audit, &cancel).is_err());
+    std::fs::remove_dir_all(base).unwrap();
+}
+#[test]
 fn retention_dates_and_candidate_paths_are_strict() {
     assert_eq!(modified("Mon, 01 Jan 2024 00:00:00 GMT").unwrap(), 1704067200);
     assert!(modified("Mon, 99 Jan 2024 00:00:00 GMT").is_err());

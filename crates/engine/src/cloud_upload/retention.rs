@@ -103,6 +103,20 @@ fn list(connection: &S3Connection, cancel: &AtomicBool) -> Result<BTreeSet<Strin
     Err(error("retention listing exceeded its page budget; no deletion applied"))
 }
 fn local_references(root: &Path, audit: &mut audit::Audit, cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(error("retention cancelled; local staged data retained"));
+    }
+    // A newly joined library has a configured durable root before its first
+    // staged file creates it. Only this initial absence means no local data;
+    // any disappearance after the scan starts must still refuse reclamation.
+    let meta = match std::fs::symlink_metadata(root) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io(e)),
+    };
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err(error("managed storage root is not a real directory; no reclamation applied"));
+    }
     let mut pending = vec![(root.to_path_buf(), 0usize)];
     let mut entries = 0usize;
     let mut bytes = 0u64;
