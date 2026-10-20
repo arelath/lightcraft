@@ -215,6 +215,17 @@ fn live_recovery(ordinary_sync: bool, upgrade: bool) {
             probe.c.erase_version(&version, &probe.cancel)?;
         }
         use crate::cloud_records::b2_control::{Action, Reply};
+        let descriptor = serde_json::to_vec(&json!({"version":1,"protocol":"b2-bucket-head-v1","binding":Scope::new(&probe.c)?.binding}))
+            .map_err(|_| invalid("test descriptor"))?;
+        probe.c.put_verified_metadata(&format!("{}/catalog/b2-authority.json", probe.c.prefix), &descriptor, &probe.cancel)?;
+        require(
+            probe.control(Action::Read { for_upgrade: false }).is_err_and(|f| f.remedy == Some(crate::cloud_status::Recovery::FinishUpgrade)),
+            "ordinary signer read initialized an interrupted authority",
+        )?;
+        require(
+            matches!(probe.control(Action::Read { for_upgrade: true }), Ok(Reply::Read { current: None })),
+            "explicit signer upgrade cannot resume interrupted initialization",
+        )?;
         require(
             matches!(probe.control(Action::Initialize { head: Box::new(head.clone()) }), Ok(Reply::Updated {})),
             "personal signer did not initialize the fenced source",
@@ -248,7 +259,7 @@ fn live_recovery(ordinary_sync: bool, upgrade: bool) {
         probe.keys.insert(crate::cloud_append::control::key(&probe.c.prefix, &fence)?);
         probe.control(Action::Fence { expected: expected.clone(), library: library.clone() }).map_err(|e| invalid(&e.to_string()))?;
         probe.control(Action::Write { expected, head: Box::new(active.clone()) }).map_err(|e| invalid(&e.to_string()))?;
-        let read = probe.control(Action::Read {}).map_err(|e| invalid(&e.to_string()))?;
+        let read = probe.control(Action::Read { for_upgrade: false }).map_err(|e| invalid(&e.to_string()))?;
         let encoded = serde_json::to_string(&read).map_err(|_| invalid("control response encoding"))?;
         require(!encoded.contains(&observed.auth.token) && !encoded.contains("bucketInfo"), "personal signer exposed native authorization material")?;
         require(

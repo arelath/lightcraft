@@ -14,13 +14,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lightcraft_engine::cloud_outcome::HeadPosition;
 pub use lightcraft_engine::cloud_outcome::Outcome;
-struct Remote {
-    head: Option<(Head, String)>,
-    state: SyncState,
+pub(super) struct Remote {
+    pub(super) head: Option<(Head, String)>,
+    pub(super) state: SyncState,
     tail_records: u64,
     recovery: Option<(RecordRef, u64)>,
 }
-fn encode(value: &impl serde::Serialize, max: usize) -> Result<Vec<u8>, CloudFailure> {
+pub(super) fn encode(value: &impl serde::Serialize, max: usize) -> Result<Vec<u8>, CloudFailure> {
     let bytes = serde_json::to_vec(value).map_err(CloudFailure::from)?;
     if bytes.len() > max {
         return Err(CloudFailure::new(
@@ -30,7 +30,7 @@ fn encode(value: &impl serde::Serialize, max: usize) -> Result<Vec<u8>, CloudFai
     }
     Ok(bytes)
 }
-async fn object(provider: &Provider, reference: &RecordRef, max: usize) -> Result<Vec<u8>, CloudFailure> {
+pub(super) async fn object(provider: &Provider, reference: &RecordRef, max: usize) -> Result<Vec<u8>, CloudFailure> {
     let reply = provider.request("GET", &reference.key, None, None, None, max).await?;
     if reply.status != 200 {
         return Err(CloudFailure::http("catalog object", reply.status));
@@ -40,7 +40,7 @@ async fn object(provider: &Provider, reference: &RecordRef, max: usize) -> Resul
     }
     Ok(reply.bytes)
 }
-async fn read(
+pub(super) async fn read(
     provider: &Provider,
     library: &str,
     segmented: bool,
@@ -134,6 +134,18 @@ async fn read(
     Ok(remote)
 }
 pub(super) async fn read_head(provider: &Provider, library: &str) -> Result<Option<(Head, String)>, CloudFailure> {
+    if b2_enabled(provider).await? {
+        let snapshot = provider
+            .b2_read(false)
+            .await?
+            .ok_or_else(|| CloudFailure::from(lightcraft_engine::cloud_control::Blocked::FinishUpgrade("B2 initialization".into())))?;
+        snapshot.head.control()?.may_read()?;
+        snapshot.head.validate_scope_typed(&provider.connection.prefix, library)?;
+        if snapshot.head.legacy_append.is_none() {
+            return Err(CloudFailure::integrity("B2 authority lost its original append binding"));
+        }
+        return Ok(Some((*snapshot.head, snapshot.token)));
+    }
     let key = format!("{}/catalog/head.json", provider.connection.prefix);
     let reply = provider.request("GET", &key, None, None, None, 16 << 10).await?;
     if reply.status == 404 {
@@ -144,10 +156,53 @@ pub(super) async fn read_head(provider: &Provider, library: &str) -> Result<Opti
     }
     let etag = reply.etag.ok_or("catalog head has no exposed ETag; check bucket CORS")?;
     let head = Head::decode(&reply.bytes)?;
+    if head.legacy_append.is_some() {
+        return Err(CloudFailure::new(FailureKind::Unsupported, "this library needs its configured B2 control service; pending work retained")
+            .with_remedy(lightcraft_engine::cloud_status::Recovery::EditConnection));
+    }
     head.validate_scope_typed(&provider.connection.prefix, library)?;
     Ok(Some((head, etag)))
 }
+pub(super) async fn b2_enabled(provider: &Provider) -> Result<bool, CloudFailure> {
+    if !provider.connection.supports_b2_authority() {
+        return Ok(false);
+    }
+    let reply = provider.request("GET", &format!("{}/catalog/b2-authority.json", provider.connection.prefix), None, None, None, 4096).await?;
+    match reply.status {
+        200 => Ok(true),
+        404 => Ok(false),
+        status => Err(CloudFailure::http("library authority descriptor", status)),
+    }
+}
+pub(super) fn retry_cas(failure: &CloudFailure) -> bool {
+    failure.retryable() && failure.retry_after_ms.is_none()
+}
+/// A control token selects exactly one authority. Never fall back from B2 CAS to
+/// a raw S3 head after an error, or after a descriptor appeared meanwhile.
+pub(super) async fn write_head(provider: &Provider, expected: Option<&str>, head: &Head) -> Result<(), CloudFailure> {
+    if let Some(token) = expected.filter(|token| token.starts_with("b2:")) {
+        return provider.b2_write(token, head).await;
+    }
+    if b2_enabled(provider).await? {
+        return Err(CloudFailure::new(FailureKind::Unsupported, "this library's publication authority changed; rejoin it before publishing")
+            .with_remedy(lightcraft_engine::cloud_status::Recovery::Rejoin));
+    }
+    let bytes = encode(head, 16 << 10)?;
+    let reply = provider
+        .request("PUT", &format!("{}/catalog/head.json", provider.connection.prefix), None, Some(expected.unwrap_or("*")), Some(&bytes), 16 << 10)
+        .await?;
+    match reply.status {
+        200 | 201 | 204 => Ok(()),
+        status => Err(CloudFailure::http("conditional head write", status)),
+    }
+}
 pub(super) async fn immutable(provider: &Provider, key: &str, bytes: &[u8]) -> Result<(), CloudFailure> {
+    if provider.connection.supports_b2_authority() {
+        return match provider.connection.b2_immutable_kind(key, bytes)? {
+            super::ImmutableKind::Catalog => provider.put_catalog(key, bytes).await,
+            super::ImmutableKind::Append => provider.put_immutable(key, bytes).await,
+        };
+    }
     let outcome = provider.request("PUT", key, None, Some("*"), Some(bytes), 16 << 10).await;
     match outcome {
         Ok(reply) if matches!(reply.status, 200 | 201 | 204) => Ok(()),
@@ -200,16 +255,23 @@ pub async fn synchronize(
     let marker = lightcraft_engine::cloud_append::manifest_key(&provider.connection.prefix, &local.library).map_err(CloudFailure::from)?;
     let existing = provider.request("GET", &marker, None, None, None, 16 << 10).await?;
     if existing.status == 200 {
-        return Err(CloudFailure::from(lightcraft_engine::assets::AssetError::Moved(
-            "this library moved to append synchronization; rejoin it before continuing".into(),
-        )));
+        let upgraded = read_head(provider, &local.library).await?;
+        if !upgraded.as_ref().is_some_and(|(head, token)| token.starts_with("b2:") && head.legacy_append.is_some()) {
+            return Err(CloudFailure::from(lightcraft_engine::assets::AssetError::Moved(
+                "this library moved to append synchronization; rejoin it before continuing".into(),
+            )));
+        }
+        if existing.bytes != lightcraft_engine::cloud_append::manifest(&local.library).map_err(CloudFailure::from)? {
+            return Err(CloudFailure::integrity("the original append manifest changed"));
+        }
     }
-    if existing.status != 404 {
+    if !matches!(existing.status, 200 | 404) {
         return Err("could not verify protocol compatibility; pending work retained".into());
     }
     local.validate().map_err(CloudFailure::from)?;
     let mut verified = BTreeSet::new();
     let mut archive_proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
+    let mut legacy_attempted = false;
     for _ in 0..64 {
         let mut remote = read(provider, &local.library, true, &mut archive_proofs).await?;
         if local.require_existing && remote.head.is_none() {
@@ -228,6 +290,15 @@ pub async fn synchronize(
             let checkpoint = checkpoint(provider, &mut remote.state, covers, generation, epoch).await?;
             publish(provider, remote.head.as_ref().map(|(head, etag)| (head, etag.as_str())), Vec::new(), Some(checkpoint), &local.library).await?;
             continue;
+        }
+        if !legacy_attempted && capability.is_allowed() && remote.head.as_ref().is_some_and(|(h, _)| h.legacy_append.is_some()) {
+            legacy_attempted = true;
+            match super::legacy::admit(provider, &remote, audit).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(failure) if retry_cas(&failure) => continue,
+                Err(failure) => return Err(failure),
+            }
         }
         let checkpoint_needed = checkpoint_requested || remote.tail_records >= AUTO_CHECKPOINT_BATCHES;
         super::history::hydrate(provider, &mut remote.state, local, &mut archive_proofs).await?;
@@ -315,7 +386,7 @@ pub(super) async fn migration_seed(
     Ok(read(provider, library, false, proofs).await?.state.portable())
 }
 
-async fn checkpoint(
+pub(super) async fn checkpoint(
     provider: &Provider,
     state: &mut SyncState,
     covers: RecordRef,
@@ -354,22 +425,9 @@ async fn publish(
     let tip = RecordRef { key, size: bytes.len() as u64, hash };
     immutable(provider, &tip.key, &bytes).await?;
     let head = Head::next(previous.map(|(head, _)| head), tip, library, checkpoint, control)?;
-    let bytes = encode(&head, 16 << 10)?;
-    match provider
-        .request(
-            "PUT",
-            &format!("{}/catalog/head.json", provider.connection.prefix),
-            None,
-            Some(previous.map_or("*", |(_, etag)| etag)),
-            Some(&bytes),
-            16 << 10,
-        )
-        .await
-    {
-        Ok(reply) if matches!(reply.status, 200 | 201 | 204 | 412) => Ok(()),
-        Err(error) if error.retryable() => Ok(()),
-        Err(error) => Err(error),
-        Ok(reply) => Err(CloudFailure::http("conditional head write", reply.status)),
+    match write_head(provider, previous.map(|(_, token)| token), &head).await {
+        Err(error) if retry_cas(&error) => Ok(()),
+        result => result,
     }
 }
 

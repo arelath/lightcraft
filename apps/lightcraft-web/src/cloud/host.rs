@@ -35,7 +35,7 @@ enum Stage {
     Acquire { command: String, params: Value, sources: Vec<(PhotoId, Source)>, lease: ByteLease },
 }
 struct Job {
-    /// The result switches this catalog to the append protocol.
+    /// A format upgrade/rejoin; the result, not this flag, selects its protocol.
     migrating: bool,
     upgrade: Option<super::upgrade::Request>,
     guard: TaskGuard,
@@ -201,7 +201,14 @@ impl Host {
                 "endpoint":v.connection.bucket_root.as_deref().unwrap_or(""),"profile":"","storageOrigin":v.connection.storage_origin,"authorizeEndpoint":v.connection.authorize_endpoint,"bucketRoot":v.connection.bucket_root})).collect::<Vec<_>>()}))),
             "cloud.syncEnable" => Some(self.enable(s, p)),
             "cloud.sync" => Some(self.start(s, p)),
-            "cloud.migrateAppend" | "cloud.upgradeLibrary" => Some(self.migrate(s, p)),
+            "cloud.upgradeLibrary" => Some(self.migrate(s, p)),
+            "cloud.migrateAppend" => Some({
+                let mut p = p.clone();
+                if let Some(object) = p.as_object_mut() {
+                    object.insert("plan".into(), json!("appendLog"));
+                }
+                self.migrate(s, &p)
+            }),
             "cloud.prepareMigration" => Some(self.prepare_migration(s)),
             "cloud.syncStatus" => Some(self.status(s, p)),
             "cloud.overview" => Some(self.overview(s)),
@@ -321,6 +328,15 @@ impl Host {
         }
         self.status(s, &json!({}))
     }
+    pub fn can_upgrade(&self, s: &Session) -> bool {
+        s.catalog.sync_state().is_some_and(|state| {
+            state.protocol.is_head()
+                || self
+                    .data
+                    .try_borrow()
+                    .is_ok_and(|data| data.providers.get(&state.connection).is_some_and(|p| p.connection.supports_b2_authority()))
+        })
+    }
     fn status(&self, s: &mut Session, params: &Value) -> Result<Value, String> {
         let mut status = s.execute("cloud.syncStatus", params).map_err(|e| e.to_string())?;
         let data = self.data.borrow();
@@ -332,6 +348,7 @@ impl Host {
         status["canResume"] = json!(!data.sync_running);
         status["preparingMigration"] = json!(data.preparing_migration);
         status["migrating"] = json!(data.jobs.iter().any(|job| job.migrating));
+        status["canUpgrade"] = json!(self.can_upgrade(s));
         status["reports"] = json!(data.reports);
         status["health"] = data.health.view_at(
             s.catalog.sync_state().is_some(),
@@ -357,6 +374,7 @@ impl Host {
         out["preparingMigration"] = json!(data.preparing_migration);
         out["migrating"] = json!(data.jobs.iter().any(|j| j.migrating));
         out["canResume"] = json!(!data.sync_running);
+        out["canUpgrade"] = json!(self.can_upgrade(s));
         out["health"]["sync"] = data.health.view_at(
             s.catalog.sync_state().is_some(),
             data.sync_running,
@@ -400,7 +418,7 @@ impl Host {
         }
     }
     fn start_job(&self, s: &mut Session, p: &Value, upgrade: Option<super::upgrade::Request>) -> Result<Value, StartError> {
-        let migrating = matches!(upgrade, Some(super::upgrade::Request::Append { .. }));
+        let migrating = upgrade.is_some_and(|r| r != super::upgrade::Request::Cancel);
         if s.cloud_paused && upgrade.is_none() {
             return Err(StartError::guard("cloud syncing is paused on this device; choose Resume Syncing (cloud.resume) first"));
         }
@@ -445,25 +463,25 @@ impl Host {
         Ok(json!({"task":task,"background":true}))
     }
     fn migrate(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
-        if s.catalog.sync_state().is_some_and(|s| !s.protocol.is_head()) {
-            return self.status(s, &json!({}));
-        }
         let params = p.as_object().ok_or("upgrade parameters must be an object")?;
         let writers_stopped = match params.get("writersStopped") {
             None => false,
             Some(value) => value.as_bool().ok_or("writersStopped must be true or false")?,
         };
-        let request = match (params.get("cancel"), params.get("plan").and_then(Value::as_str)) {
-            (Some(Value::Bool(true)), _) => super::upgrade::Request::Cancel,
-            (_, None | Some("appendLog")) => super::upgrade::Request::Append { writers_stopped },
-            (_, Some("rebase")) => return Err("rebase upgrades run in the desktop app or CLI; browsing continues here".into()),
-            _ => return Err("upgrade expects {plan?: \"appendLog\", cancel?: bool}".into()),
+        let cancel = params.get("cancel").map(|v| v.as_bool().ok_or("cancel must be true or false")).transpose()?.unwrap_or(false);
+        let plan = params.get("plan").map(|v| v.as_str().ok_or("plan must be appendLog or rebase")).transpose()?;
+        let request = match (cancel, plan) {
+            (true, _) => super::upgrade::Request::Cancel,
+            (_, None) => super::upgrade::Request::Auto { writers_stopped },
+            (_, Some("appendLog")) => super::upgrade::Request::Append { writers_stopped },
+            (_, Some("rebase")) => super::upgrade::Request::Rebase,
+            _ => return Err("upgrade expects {plan?: \"appendLog\" | \"rebase\", cancel?: bool}".into()),
         };
         self.start_job(s, p, Some(request)).map_err(|error| self.start_failure(error))
     }
     fn prepare_migration(&self, s: &Session) -> Result<Value, String> {
-        if s.catalog.sync_state().is_none_or(|state| !state.protocol.is_head()) {
-            return Err("migration requires an enabled conditional-head library".into());
+        if !self.can_upgrade(s) {
+            return Err("this cloud destination does not support library upgrades".into());
         }
         let mut data = self.data.borrow_mut();
         if data.jobs.iter().any(|job| job.migrating) {
@@ -725,15 +743,15 @@ impl Host {
                     }
                     let mut binding = None;
                     let mut next = app.session.catalog.clone();
-                    if job.migrating {
-                        let mut state = next.sync_state().cloned().ok_or("synchronization identity unavailable")?;
-                        state.protocol = lightcraft_engine::catalog::replication::SyncProtocol::AppendLog;
-                        state.migrated_from_head = true;
-                        state.cursor = None;
-                        state.generation = 0;
-                        state
-                            .claim_owner(self.owner.clone().ok_or("persistent installation identity unavailable")?, random_identity()?)
-                            .map_err(CloudFailure::from)?;
+                    if job.migrating
+                        && let Some(mut state) =
+                            super::durability::upgraded_binding(next.sync_state().ok_or("synchronization identity unavailable")?, outcome.protocol())
+                    {
+                        if !state.protocol.is_head() {
+                            state
+                                .claim_owner(self.owner.clone().ok_or("persistent installation identity unavailable")?, random_identity()?)
+                                .map_err(CloudFailure::from)?;
+                        }
                         let op = Op::SetSyncState { state: Some(Box::new(state)) };
                         next.apply(op.clone()).map_err(CloudFailure::from)?;
                         binding = Some(op);

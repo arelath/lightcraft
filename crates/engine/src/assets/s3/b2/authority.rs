@@ -49,7 +49,8 @@ impl S3Connection {
         }
     }
     fn b2_observed_head(&self, observed: &Observed, cancel: &AtomicBool) -> Result<Head> {
-        let reference = observed.head().ok_or_else(|| invalid("upgrade authority is not initialized; resume the append upgrade"))?;
+        let reference =
+            observed.head().ok_or_else(|| AssetError::Blocked(crate::cloud_control::Blocked::FinishUpgrade("B2 initialization".into())))?;
         let reply = self.get_small(&reference.key, MAX_AUTHORITY as usize, cancel)?.ok_or(AssetError::Missing)?;
         if reply.bytes.len() as u64 != reference.size || sha256(&reply.bytes) != reference.hash {
             return Err(AssetError::Integrity);

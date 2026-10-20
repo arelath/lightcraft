@@ -1,6 +1,6 @@
 # Browser cloud adapter
 
-Last updated: 2026-10-17
+Last updated: 2026-10-20
 
 This document specifies the current browser adapter. The shared wire contract is
 [cloud-sync-protocol.md](cloud-sync-protocol.md); operational gaps are indexed in
@@ -171,9 +171,10 @@ puts the conditional head into maintenance, so other current devices stop publis
 manual coordination (the optional confirmation applies only when no head can hold that
 barrier). Cancel keeps it paused; reconfiguring the signer or reconnecting does not resume it.
 Explicit Sync now resumes cancelled preparation. The pause does not survive app restart.
-`cloud.prepareMigration` and `cloud.upgradeLibrary {plan?:"appendLog", cancel?, writersStopped?}`
-(alias `cloud.migrateAppend`) expose the same control flow as the desktop, using the same head
-transitions and token confirmation; `rebase` upgrades run in the desktop app or CLI. Observe
+`cloud.prepareMigration` and `cloud.upgradeLibrary {plan?:"appendLog"|"rebase", cancel?, writersStopped?}`
+expose the same control flow as the desktop, using the same head transitions and
+token confirmation. The omitted plan chooses the supported upgrade or rejoin;
+`cloud.migrateAppend` explicitly selects `appendLog`. Observe
 Activity and the background report before retrying `cloud.sync`. Stopping the local worker after
 remote seed publication preserves local mode/pending work; retry to finish the same upgrade.
 Explicit remote maintenance cancellation requires a durable `preparing` marker;
@@ -182,6 +183,22 @@ Migration saves the remotely verified seed and local mode durably without acknow
 unsent pending work. Each other catalog rejoins a retired head with the same command, which
 writes nothing remotely. Browser append scans honour append control records like native ones.
 See [cloud-sync-protocol.md](cloud-sync-protocol.md#library-control-and-format-upgrades-2026-10-17).
+
+Canonical B2 destinations with a configured bucket root can upgrade append storage
+through the matching [personal signer's authority endpoint](browser-signer.md#backblaze-authority-endpoint).
+The signer holds native B2 permissions; the browser retains only its session token.
+Upgrade eligibility uses cached connection settings, without per-frame requests.
+The initial seed excludes local pending work. Switching Append to Head preserves
+the current author, owner and every pending ID/digest; the binding and received
+state are saved together before the durable acknowledgement receipt can clear work.
+Head rebases keep their existing binding. Late original-root input is read without
+publishing to the retired source, committed through authority CAS and reread before
+an outcome or ACK. Historical audits continue detecting behind-cursor forks.
+Ordinary reads refuse a published descriptor without its head; explicit upgrade
+can inspect and resume initialization. An older signer, authentication error or
+typed Retry-After refusal retains work and its specific recovery information.
+Live B2 browser/provider acceptance remains open; local contract tests do not
+verify provider permissions, CORS deployment or account transaction limits.
 
 Existing requests retain the original JSON contract. Append requests add:
 
@@ -334,3 +351,4 @@ lock and recovery boundary.
 | 2026-10-17 | CR.19: explicit original decode budgets, shared descriptor limits and oversized-photo proxy selection after original caching. |
 
 | 2026-10-17 | CR.52: verified interrupted-cache recovery, all-library protection reconstruction and durable save fences. |
+| 2026-10-20 | CR.43: signer-backed B2 upgrade/rejoin, head rebase, late-input admission and identity-preserving durable binding. |

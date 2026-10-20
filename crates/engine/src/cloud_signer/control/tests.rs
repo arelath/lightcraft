@@ -41,7 +41,7 @@ fn exchange(raw: &str, called: bool, failure: Option<CloudFailure>) -> (u16, Val
             invoked = true;
             match failure {
                 Some(failure) => Err(failure),
-                None if matches!(request.action, Action::Read {}) => Ok(Reply::Read { current: None }),
+                None if matches!(request.action, Action::Read { .. }) => Ok(Reply::Read { current: None }),
                 None => Ok(Reply::Updated {}),
             }
         });
@@ -71,6 +71,7 @@ fn post(body: Value, called: bool) -> (u16, Value) {
 fn control_http_authorizes_only_typed_destination_bound_operations() {
     let actions = [
         json!({"operation":"read"}),
+        json!({"operation":"read","forUpgrade":true}),
         json!({"operation":"initialize","head":head()}),
         json!({"operation":"write","expected":format!("b2:12:{}", "b".repeat(64)),"head":head()}),
         json!({"operation":"fence","expected":format!("b2:12:{}", "b".repeat(64)),"library":"example-library"}),
@@ -101,7 +102,12 @@ fn control_http_authorizes_only_typed_destination_bound_operations() {
         bad["bucketRoot"] = json!(root);
         assert_eq!(post(bad, false).0, 403, "{root}");
     }
-    for action in [json!({"operation":"read","unexpected":true}), json!({"operation":"erase"}), json!({"operation":"read","bucketInfo":{}})] {
+    for action in [
+        json!({"operation":"read","unexpected":true}),
+        json!({"operation":"read","forUpgrade":"true"}),
+        json!({"operation":"erase"}),
+        json!({"operation":"read","bucketInfo":{}}),
+    ] {
         assert_eq!(post(request(action), false).0, 400);
     }
     let mut bad = valid;

@@ -166,6 +166,7 @@ fn request(url: &str, authorization: &str, body: Option<&Value>, cancel: &Atomic
     let mut bytes = Cursor::new(&encoded);
     let headers = vec![("authorization", authorization.into()), ("content-type", "application/json".into())];
     let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
+    log::debug!(target:"lightcraft_cloud_requests", "B2 {} {}", if body.is_some() { "POST" } else { "GET" }, url.path);
     let mut response = http::request(
         if body.is_some() { Method::Post } else { Method::Get },
         &url,

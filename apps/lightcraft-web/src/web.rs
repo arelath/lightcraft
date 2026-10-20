@@ -169,6 +169,7 @@ fn services(originals: Originals, backend: Option<Backend>, files: Files, frozen
     let restore_backend = backend.clone();
     Services {
         cloud_action: None,
+        cloud_can_upgrade: None,
         picker: None,
         pick_display_profile: None,
         screen_profile: None,
@@ -481,6 +482,10 @@ impl WebApp {
         cloud.install(&mut session, &cc.egui_ctx);
         let mut platform = services(originals.clone(), backend.clone(), files.clone(), frozen.clone(), cc.egui_ctx.clone());
         platform.cloud_action = Some(cloud.action());
+        platform.cloud_can_upgrade = Some(Box::new({
+            let cloud = cloud.clone();
+            move |s| cloud.can_upgrade(s)
+        }));
         let mut app = LightcraftApp::new(session, platform).with_chinese_font(chinese_font);
         let ui_written = files.get("ui.json").unwrap_or_default();
         if let Ok(ui) = serde_json::from_slice::<UiState>(&ui_written) {

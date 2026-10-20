@@ -16,6 +16,23 @@ pub struct Connection {
     pub bucket_root: Option<String>,
 }
 impl Connection {
+    /// Receipt archives retain their original append namespace even after a
+    /// head upgrade. Validate each family before choosing its scoped grant.
+    pub fn b2_immutable_kind(&self, key: &str, bytes: &[u8]) -> Result<ImmutableKind, lightcraft_engine::cloud_status::CloudFailure> {
+        self.validate_key(key)?;
+        if key.starts_with(&format!("{}/catalog/", self.prefix)) {
+            lightcraft_engine::cloud_records::b2_catalog::validate(&self.prefix, key, bytes)?;
+            Ok(ImmutableKind::Catalog)
+        } else {
+            lightcraft_engine::cloud_append::immutable_metadata(key, bytes)?;
+            Ok(ImmutableKind::Append)
+        }
+    }
+    /// Cached destination capability only; service permissions are checked by
+    /// the explicit operation, never by a UI frame.
+    pub fn supports_b2_authority(&self) -> bool {
+        self.bucket_root.is_some() && lightcraft_engine::cloud_setup::b2_runtime_endpoint(&self.storage_origin).is_some()
+    }
     /// Authorized URL credentials can rotate without changing the object namespace.
     pub fn same_destination(&self, other: &Self) -> bool {
         self.id == other.id && self.prefix == other.prefix && self.storage_origin == other.storage_origin && self.bucket_root == other.bucket_root
@@ -54,6 +71,11 @@ impl Connection {
         }
         Ok(())
     }
+}
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImmutableKind {
+    Catalog,
+    Append,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -112,6 +134,8 @@ pub mod durability;
 mod history;
 #[cfg(target_arch = "wasm32")]
 pub mod host;
+#[cfg(target_arch = "wasm32")]
+mod legacy;
 pub mod memory;
 #[cfg(target_arch = "wasm32")]
 pub mod protocol;
@@ -125,6 +149,57 @@ pub use transport::Provider;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn b2_upgrade_capability_uses_only_canonical_cached_destinations() {
+        let connection = Connection {
+            id: "personal".into(),
+            prefix: "library".into(),
+            authorize_endpoint: "https://signer.example/authorize".into(),
+            storage_origin: "https://s3.us-east-005.backblazeb2.com".into(),
+            bucket_root: Some("https://s3.us-east-005.backblazeb2.com/photos/".into()),
+        };
+        assert!(connection.supports_b2_authority());
+        assert!(!Connection { bucket_root: None, ..connection.clone() }.supports_b2_authority());
+        for origin in [
+            "https://us1",
+            "https://s3.us-east-005.backblazeb2.com.example",
+            "http://s3.us-east-005.backblazeb2.com",
+            "https://s3.us-east-005.backblazeb2.com/path",
+        ] {
+            assert!(!Connection { storage_origin: origin.into(), ..connection.clone() }.supports_b2_authority(), "{origin}");
+        }
+    }
+    #[test]
+    fn upgraded_b2_heads_keep_receipt_archives_in_the_append_grant() {
+        use lightcraft_engine::{
+            catalog::replication::{Change, SyncState},
+            cloud_records::{Batch, object_key},
+        };
+        let connection = Connection {
+            id: "personal".into(),
+            prefix: "library".into(),
+            authorize_endpoint: "https://signer.example/authorize".into(),
+            storage_origin: "https://s3.us-east-005.backblazeb2.com".into(),
+            bucket_root: Some("https://s3.us-east-005.backblazeb2.com/photos/".into()),
+        };
+        let mut state = SyncState::new("example-library".into(), "browser".into(), "personal".into()).unwrap();
+        for rating in [1, 5] {
+            state.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: serde_json::json!(rating) }]).unwrap();
+        }
+        let plan = state.archive_plan().unwrap();
+        assert!(!plan.objects.is_empty(), "rebase compacts superseded receipts");
+        for (hash, node) in &plan.objects {
+            let bytes = serde_json::to_vec(node).unwrap();
+            let key = lightcraft_engine::cloud_history::key(&connection.prefix, &state.library, hash).unwrap();
+            assert!(lightcraft_engine::cloud_records::b2_catalog::validate(&connection.prefix, &key, &bytes).is_err());
+            assert_eq!(connection.b2_immutable_kind(&key, &bytes).unwrap(), ImmutableKind::Append);
+        }
+        let bytes = serde_json::to_vec(&Batch { version: 3, parent: None, imports: vec![], mutations: vec![], checkpoint_marker: true }).unwrap();
+        let key = object_key(&connection.prefix, 2, "changes", &lightcraft_engine::assets::sha256(&bytes).0);
+        assert_eq!(connection.b2_immutable_kind(&key, &bytes).unwrap(), ImmutableKind::Catalog);
+        assert!(connection.b2_immutable_kind("library/catalog/head.json", &bytes).is_err());
+        assert!(connection.b2_immutable_kind("library/originals/arbitrary", &bytes).is_err());
+    }
     #[test]
     fn all_writes_require_body_binding_and_case_duplicate_headers_are_rejected() {
         let mut auth = Authorized { url: "https://bucket.example/object?signed".into(), expires_at: 1, headers: BTreeMap::new() };

@@ -173,6 +173,7 @@ pub type HostAction = Box<dyn FnMut(&mut Session) -> Result<Value, String>>;
 /// Optional asynchronous platform adapter. `None` delegates ordinary commands to the
 /// shared registry; handled commands return a task whose durable result arrives later.
 pub type CloudAction = Box<dyn FnMut(&mut Session, &str, &Value) -> Option<Result<Value, String>>>;
+pub type CloudCanUpgrade = Box<dyn Fn(&Session) -> bool>;
 
 /// The system's dark/light appearance where egui doesn't report one (Linux desktops whose
 /// windowing layer says nothing, e.g. many Wayland compositors). The host answers from what it
@@ -183,6 +184,8 @@ pub type SystemThemeFn = Box<dyn Fn(&egui::Context) -> Option<egui::Theme>>;
 #[derive(Default)]
 pub struct Services {
     pub cloud_action: Option<CloudAction>,
+    /// Read only the host's cached destination capability, without storage I/O.
+    pub cloud_can_upgrade: Option<CloudCanUpgrade>,
     /// Native file dialogs for commands, shown off the UI thread and answered later
     /// (`pick`; #191). With it, the synchronous pickers below serve only the buttons inside
     /// dialogs; without it (the web, tests) they answer the commands too.

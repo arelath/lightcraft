@@ -377,6 +377,21 @@ fn cloud_migration_dialog_relies_on_library_maintenance_and_cancel_keeps_pause()
 }
 
 #[test]
+fn browser_upgrade_menu_uses_cached_provider_capability() {
+    use lightcraft_engine::catalog::replication::{SyncProtocol, SyncState};
+    let mut session = lightcraft_engine::Session::with_demo();
+    let mut state = SyncState::new("library".into(), "browser".into(), "personal".into()).unwrap();
+    state.protocol = SyncProtocol::AppendLog;
+    session.catalog.apply(lightcraft_engine::catalog::Op::SetSyncState { state: Some(Box::new(state)) }).unwrap();
+    let mut app = LightcraftApp::new(session, Services { cloud_can_upgrade: Some(Box::new(|_| true)), ..Default::default() });
+    assert!(crate::menus::ui_enabled(&app, "dialog.cloudMigrate"));
+    app.services.cloud_can_upgrade = Some(Box::new(|_| false));
+    assert!(!crate::menus::ui_enabled(&app, "dialog.cloudMigrate"));
+    app.services.cloud_can_upgrade = None;
+    assert!(!crate::menus::ui_enabled(&app, "dialog.cloudMigrate"), "native fallback does not invent a B2 connection");
+}
+
+#[test]
 fn cloud_popup_says_publishing_is_blocked_and_counts_field_conflicts() {
     let services = Services {
         cloud_action: Some(Box::new(|_, id, _| {

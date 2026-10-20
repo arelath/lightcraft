@@ -171,12 +171,14 @@ Temporary credentials can expire before the returned URL lifetime. Custom provid
 must support the signed checksum and the chosen synchronization protocol; URL issuance
 alone does not verify provider behavior.
 
-### Backblaze authority endpoint (server component)
+### Backblaze authority endpoint
 
-The signer now provides `POST /authorize/control` for the B2 authority adapter.
-The browser upgrade/sync runner does not use it yet; upgraded B2 libraries remain
-desktop-only until that integration and runtime acceptance are complete (CR.43).
-Deploying this endpoint alone does not enable browser upgrade or rejoin.
+The browser uses `POST /authorize/control` to upgrade an append library on B2,
+rejoin its upgraded head and commit subsequent metadata. Deploy the matching
+signer and forward this route before upgrading. An older/unreachable service
+retains pending edits and reports compatibility or connectivity recovery. Healthy
+append libraries continue using their existing object/list grants until upgraded.
+Live provider/UI acceptance remains open under CR.43/CR.45.
 
 It uses the same exact Origin, bearer session token, JSON content type and preflight
 rules as `/authorize`, with a separate 32 KiB request/response bound and a 16 KiB
@@ -215,6 +217,13 @@ publication is an interrupted upgrade error, not an empty library. Writes return
 before acknowledging edits. Failures return `result: "failed"` plus a typed `failure`,
 preserving contention, update/finish-upgrade recovery, HTTP provenance and captured
 retry delay. They contain no native authorization response.
+Browser decoding checks newer head/control envelopes before strict fields, so a
+newer signer/library requests a LightCraft update without misreporting damaged history.
+
+Only an explicit upgrade sends `read` with `forUpgrade: true`. After validating
+the descriptor and native authority permissions, it may inspect an interrupted
+descriptor-without-pointer initialization and resume it. Ordinary reads remain
+fail-closed; this inspection does not create a head or acknowledge work.
 
 B2 immutable presigning additionally permits exact-hash catalog changes (2 MiB),
 checkpoints (64 MiB), their canonical epoch namespaces, and original-root legacy
@@ -267,6 +276,7 @@ URLs, storage keys or session tokens into reports.
 | --- | --- | --- |
 | Import/adopt originals into managed cloud storage | Supported, durable upload/staging and XMP | Publish from desktop; ordinary browser imports remain local |
 | Join/read/edit metadata and develop recipes | Both protocols | Both protocols through this signer |
+| B2 append upgrade/rejoin and head rebase | Native B2 revision authority | Scoped `/authorize/control` service; pending identities and durable ACK ordering retained |
 | Original decoding | 512 MiB / 128 MP sensor budget | 512 MiB transfer, 32 MP decode budget; larger shared photos need smart previews |
 | Shared photo descriptors | Up to 128 MP | Up to 128 MP; does not grant original decode capacity |
 | Rendered export | Original by default; explicit preview export | Same policy within browser decode limits; explicit preview export stays at preview resolution |
@@ -286,3 +296,4 @@ verification in that deployment; local fixture acceptance is not evidence of tho
 | Date | Change |
 | --- | --- |
 | 2026-10-17 | CR.20: maintained personal signer recipe, exact scope, rotation and native/browser capability matrix. |
+| 2026-10-20 | CR.43: browser authority routing, explicit interrupted-initialization inspection, fenced rebase/rejoin and immutable catalog grants. Live UI/provider validation remains open. |

@@ -12,6 +12,7 @@ use std::sync::{
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, Response};
+mod b2;
 
 fn js_error(_: JsValue) -> String {
     "browser network/storage operation failed; reconnect or reauthorize and retry".into()
@@ -337,6 +338,16 @@ impl Provider {
     }
     pub async fn put_immutable(&self, key: &str, bytes: &[u8]) -> Result<(), CloudFailure> {
         lightcraft_engine::cloud_append::immutable_metadata(key, bytes).map_err(CloudFailure::from)?;
+        self.put_verified(key, bytes).await
+    }
+    pub async fn put_catalog(&self, key: &str, bytes: &[u8]) -> Result<(), CloudFailure> {
+        if !self.connection.supports_b2_authority() {
+            return Err(CloudFailure::new(FailureKind::Unsupported, "this destination does not support B2 catalog publication"));
+        }
+        lightcraft_engine::cloud_records::b2_catalog::validate(&self.connection.prefix, key, bytes)?;
+        self.put_verified(key, bytes).await
+    }
+    async fn put_verified(&self, key: &str, bytes: &[u8]) -> Result<(), CloudFailure> {
         let existing = self.request("GET", key, None, None, None, 64 << 20).await?;
         if existing.status == 200 {
             return if existing.bytes == bytes { Ok(()) } else { Err(CloudFailure::integrity("immutable object identity collision")) };

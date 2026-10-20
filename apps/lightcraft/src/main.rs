@@ -405,6 +405,7 @@ fn services(cc: &eframe::CreationContext<'_>, log_file: Option<&std::path::Path>
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let _ = DIALOG_PARENT.set(rfd::FileDialog::new().set_parent(cc));
     Services {
+        cloud_can_upgrade: None,
         cloud_action: None,
         // Commands' file dialogs run on their own thread (#191): a dialog on the UI thread
         // stopped the window answering the compositor, which then reported the app as hung.

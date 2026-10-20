@@ -6,6 +6,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const ACK_FILE: &str = "browser-cloud-ack.json";
+/// Binding and received state are journaled in one catalog batch. Changing to a
+/// head keeps the original author, owner and pending IDs; only transport cursors
+/// are reset. The caller retains the established Head→Append author rotation.
+pub fn upgraded_binding(state: &SyncState, target: lightcraft_engine::catalog::replication::SyncProtocol) -> Option<SyncState> {
+    if state.protocol == target {
+        return None;
+    }
+    let mut next = state.clone();
+    next.protocol = target;
+    next.migrated_from_head = !target.is_head();
+    next.cursor = None;
+    next.generation = 0;
+    next.append = None;
+    next.require_existing = true;
+    Some(next)
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AckReceipt {
@@ -126,6 +142,41 @@ mod tests {
     use super::*;
     use lightcraft_engine::catalog::replication::Change;
     use serde_json::json;
+    #[test]
+    fn append_upgrade_preserves_pending_identity_and_requires_a_durable_head_ack() {
+        use lightcraft_engine::{catalog::replication::SyncProtocol, cloud_append::Planner};
+        let mut local = SyncState::new("library".into(), "browser".into(), "connection".into()).unwrap();
+        local.protocol = SyncProtocol::AppendLog;
+        local.local_owner = "original-owner".into();
+        let mutation =
+            local.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base: None, value: json!(4) }]).unwrap().unwrap();
+        let mut planner = Planner::new(&local).unwrap();
+        planner.stage(mutation.clone()).unwrap();
+        local.acknowledge_append(&BTreeSet::new(), planner.progress().unwrap()).unwrap();
+        let mut upgraded = upgraded_binding(&local, SyncProtocol::ConditionalHead).unwrap();
+        assert_eq!(upgraded.device, local.device);
+        assert_eq!(upgraded.local_owner, local.local_owner);
+        assert_eq!(upgraded.pending, local.pending);
+        assert_eq!(upgraded.received, local.received);
+        assert!(upgraded.append.is_none() && upgraded.cursor.is_none());
+        assert_eq!(upgraded.generation, 0);
+        assert!(upgraded.require_existing && !upgraded.migrated_from_head);
+        let ids = BTreeSet::from([mutation.revision.id()]);
+        let receipt = AckReceipt::new(&upgraded, &ids, "a".repeat(64), 3).unwrap();
+        assert!(!receipt.finish(&mut upgraded).unwrap(), "an uncommitted position cannot drop pending edits");
+        assert_eq!(upgraded.pending, local.pending);
+        upgraded.acknowledge(&BTreeSet::new(), "a".repeat(64), 3).unwrap();
+        let mut reloaded: SyncState = serde_json::from_slice(&serde_json::to_vec(&upgraded).unwrap()).unwrap();
+        assert!(receipt.finish(&mut reloaded).unwrap());
+        assert!(reloaded.pending.is_empty());
+        assert_eq!(reloaded.device, local.device);
+        assert_eq!(reloaded.local_owner, local.local_owner);
+        assert_eq!(reloaded.received, local.received);
+        assert!(upgraded_binding(&reloaded, SyncProtocol::ConditionalHead).is_none(), "same-protocol rebase retains its durable position");
+        let append = upgraded_binding(&reloaded, SyncProtocol::AppendLog).unwrap();
+        assert!(append.migrated_from_head && append.require_existing);
+        assert_eq!(append.local_owner, local.local_owner, "only the host's established Head-to-Append path rotates ownership");
+    }
     #[test]
     fn archived_pending_ack_survives_witness_removal_and_reload() {
         use lightcraft_engine::{

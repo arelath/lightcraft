@@ -46,7 +46,7 @@ pub(super) fn validate(connection: &S3Connection, request: &Request) -> Result<(
             .with_remedy(Recovery::EditConnection));
     }
     let head = match &request.action {
-        Action::Read {} => return Ok(()),
+        Action::Read { .. } => return Ok(()),
         Action::Fence { expected, library } => {
             token(expected)?;
             return if lightcraft_catalog::assets::identifier(library) {
@@ -80,8 +80,18 @@ pub(crate) fn execute(connection: &S3Connection, request: &Request) -> Result<Re
     validate(connection, request)?;
     let cancel = AtomicBool::new(false);
     match &request.action {
-        Action::Read {} => {
-            let current = connection.b2_try_read_head(&cancel)?.map(|(head, token, _)| Snapshot { head: Box::new(head), token });
+        Action::Read { for_upgrade } => {
+            let head = if *for_upgrade {
+                // Check unknown descriptors before native authorization, but reread
+                // a newly installed descriptor if a concurrent initializer won.
+                connection.b2_head_enabled(&cancel)?;
+                let observed = connection.b2_read_authority(&cancel)?;
+                observed.require_writable()?;
+                if observed.head().is_none() { None } else { Some(connection.b2_read_head(&cancel)?) }
+            } else {
+                connection.b2_try_read_head(&cancel)?
+            };
+            let current = head.map(|(head, token, _)| Snapshot { head: Box::new(head), token });
             Ok(Reply::Read { current })
         }
         Action::Initialize { head } => {

@@ -10,12 +10,18 @@ use lightcraft_engine::cloud_records::{Batch, Head, RecordRef, object_key};
 use lightcraft_engine::cloud_status::{CloudFailure, FailureKind};
 
 const ATTEMPTS: usize = 16;
+mod b2;
 mod lease;
+mod rebase;
 use lightcraft_engine::cloud_control::lease::Lease;
 use std::cell::RefCell;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request {
+    Auto {
+        writers_stopped: bool,
+    },
+    Rebase,
     /// `writers_stopped` is used only when the head cannot hold the barrier.
     Append {
         writers_stopped: bool,
@@ -63,26 +69,32 @@ async fn transition_control(
     for _ in 0..ATTEMPTS {
         let (head, etag, observed) = current(provider, library).await?;
         let Some(wanted) = next(&head, &observed)? else { return Ok(head) };
+        if wanted == observed {
+            return Ok(head);
+        }
         let batch = Batch { version: 3, parent: Some(head.tip.clone()), imports: Vec::new(), mutations: Vec::new(), checkpoint_marker: true };
         let bytes = serde_json::to_vec(&batch).map_err(CloudFailure::from)?;
         let hash = sha256(&bytes);
         let tip = RecordRef { key: object_key(&provider.connection.prefix, wanted.epoch, "changes", &hash.0), size: bytes.len() as u64, hash };
         // Classify a 501 before the shared immutable writer turns it into text.
-        let probe = provider.request("PUT", &tip.key, None, Some("*"), Some(&bytes), 16 << 10).await;
+        let probe = if etag.starts_with("b2:") {
+            immutable(provider, &tip.key, &bytes).await?;
+            None
+        } else {
+            Some(provider.request("PUT", &tip.key, None, Some("*"), Some(&bytes), 16 << 10).await)
+        };
         match probe {
-            Ok(reply) if reply.status == 501 => return Err(Failure::Unsupported),
-            Ok(reply) if matches!(reply.status, 200 | 201 | 204) => {}
+            Some(Ok(reply)) if reply.status == 501 => return Err(Failure::Unsupported),
+            Some(Ok(reply)) if matches!(reply.status, 200 | 201 | 204) => {}
+            None => {}
             _ => immutable(provider, &tip.key, &bytes).await?,
         }
         let replacement = Head::next(Some(&head), tip, library, head.checkpoint.clone(), wanted.clone()).map_err(CloudFailure::from)?;
-        let body = serde_json::to_vec(&replacement).map_err(CloudFailure::from)?;
-        let key = format!("{}/catalog/head.json", provider.connection.prefix);
-        match provider.request("PUT", &key, None, Some(&etag), Some(&body), 16 << 10).await {
-            Ok(reply) if reply.status == 501 => return Err(Failure::Unsupported),
-            Ok(reply) if !matches!(reply.status, 200 | 201 | 204 | 412) => {
-                return Err(CloudFailure::http("conditional head write", reply.status).into());
-            }
-            _ => {}
+        match super::protocol::write_head(provider, Some(&etag), &replacement).await {
+            Err(error) if error.http_status == Some(501) => return Err(Failure::Unsupported),
+            Err(error) if super::protocol::retry_cas(&error) => {}
+            Err(error) => return Err(error.into()),
+            Ok(()) => {}
         }
         let (confirmed, _, after) = current(provider, library).await?;
         if after == wanted {
@@ -101,13 +113,17 @@ fn taken_over() -> CloudFailure {
 
 /// Seed append-log, then retire the head; or rejoin a head that is already retired.
 async fn append(provider: &Provider, local: &SyncState, owner: &str, writers_stopped: bool) -> Result<Outcome, CloudFailure> {
+    if super::protocol::b2_enabled(provider).await? {
+        return Err(CloudFailure::new(FailureKind::Unsupported, "this B2 library uses fenced publication; use the rebase plan"));
+    }
     let library = &local.library;
     let manifest = sha256(&lightcraft_engine::cloud_append::manifest(library).map_err(CloudFailure::from)?).0;
     let legacy = |failure: CloudFailure| -> Result<(), CloudFailure> {
         if writers_stopped {
             Ok(())
         } else {
-            Err(CloudFailure::new(failure.kind, format!("{}; stop every other device, then retry with writersStopped:true", failure.message)))
+            let message = format!("{}; stop every other device, then retry with writersStopped:true", failure.message);
+            Err(CloudFailure { message, ..failure })
         }
     };
     let Some((_, _, observed)) = (match read_head(provider, library).await? {
@@ -175,7 +191,7 @@ async fn append(provider: &Provider, local: &SyncState, owner: &str, writers_sto
     probe.generation = 0;
     probe.pending.clear();
     probe.require_existing = true;
-    super::append::synchronize(provider, &probe, false, true).await
+    super::append::receive_only(provider, &probe).await
 }
 
 async fn cancel(provider: &Provider, local: &SyncState, owner: &str) -> Result<Outcome, CloudFailure> {
@@ -191,9 +207,21 @@ async fn cancel(provider: &Provider, local: &SyncState, owner: &str) -> Result<O
 
 pub async fn run(provider: &Provider, local: &SyncState, owner: &str, request: Request) -> Result<Outcome, CloudFailure> {
     if !local.protocol.is_head() {
-        return Err(CloudFailure::new(FailureKind::Unsupported, "this library already uses append synchronization"));
+        return match request {
+            Request::Auto { .. } | Request::Rebase => b2::run(provider, local, owner).await,
+            Request::Cancel if super::protocol::b2_enabled(provider).await? => cancel(provider, local, owner).await,
+            _ => Err(CloudFailure::new(FailureKind::Unsupported, "this library already uses append synchronization")),
+        };
     }
     match request {
+        Request::Auto { writers_stopped } => {
+            if super::protocol::b2_enabled(provider).await? {
+                rebase::run(provider, local, owner).await
+            } else {
+                append(provider, local, owner, writers_stopped).await
+            }
+        }
+        Request::Rebase => rebase::run(provider, local, owner).await,
         Request::Append { writers_stopped } => append(provider, local, owner, writers_stopped).await,
         Request::Cancel => cancel(provider, local, owner).await,
     }

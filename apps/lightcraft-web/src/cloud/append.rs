@@ -38,6 +38,46 @@ async fn get(provider: &Provider, key: &str, limit: usize) -> Result<Vec<u8>, Cl
     Ok(r.bytes)
 }
 pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: bool, audit: bool) -> Result<Outcome, CloudFailure> {
+    synchronize_mode(provider, local, checkpoint, audit, false, false).await
+}
+pub(super) async fn receive_only(provider: &Provider, local: &SyncState) -> Result<Outcome, CloudFailure> {
+    let mut probe = local.clone();
+    probe.require_existing = true;
+    synchronize_mode(provider, &probe, false, true, true, false).await
+}
+pub(super) struct LegacyReceived {
+    pub state: lightcraft_engine::catalog::replication::Portable,
+    pub intake: lightcraft_engine::cloud_records::LegacyIntake,
+}
+pub(super) async fn receive_legacy(
+    provider: &Provider,
+    head: &lightcraft_engine::cloud_records::Head,
+    committed: &lightcraft_engine::catalog::replication::Portable,
+    audit: bool,
+) -> Result<LegacyReceived, CloudFailure> {
+    head.validate_scope_typed(&provider.connection.prefix, &committed.library)?;
+    let control = head.control()?;
+    control.may_publish()?;
+    if control.epoch < 2 {
+        return Err(CloudFailure::integrity("legacy recovery requires an active upgraded authority"));
+    }
+    let intake = super::legacy::intake(provider, head).await?;
+    let probe = intake.probe(committed, &provider.connection.id)?;
+    let outcome = synchronize_mode(provider, &probe, false, audit, true, true).await?;
+    let progress = outcome.append_progress().ok_or("legacy recovery has no verified discovery progress")?;
+    Ok(LegacyReceived {
+        state: outcome.state().clone(),
+        intake: lightcraft_engine::cloud_records::LegacyIntake::new(&committed.library, progress.scan.clone())?,
+    })
+}
+async fn synchronize_mode(
+    provider: &Provider,
+    local: &SyncState,
+    checkpoint: bool,
+    audit: bool,
+    receive_only: bool,
+    legacy: bool,
+) -> Result<Outcome, CloudFailure> {
     if provider.connection.bucket_root.is_none() {
         return Err("append mode requires a configured bucketRoot and a signer supporting list/putImmutable".into());
     }
@@ -45,13 +85,15 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
     let manifest_key = core::manifest_key(&provider.connection.prefix, &local.library).map_err(ce)?;
     let manifest = core::manifest(&local.library).map_err(ce)?;
     // Cooperative barrier: read the latest library control before any write.
-    let (control_keys, _) = scan(provider, list(core::control::prefix(&provider.connection.prefix, &local.library).map_err(ce)?, false)).await?;
-    let mut records = Vec::new();
-    for key in core::control::latest(&control_keys) {
-        let bytes = get(provider, &key, core::control::MAX_CONTROL_BYTES).await?;
-        records.push((key, bytes));
-    }
-    let blocked = core::control::publication(core::control::effective(&provider.connection.prefix, &local.library, &records))?;
+    let blocked = if legacy {
+        if !receive_only {
+            return Err(CloudFailure::integrity("legacy recovery must not publish"));
+        }
+        None
+    } else {
+        core::control::publication(Ok(library_control(provider, &local.library).await?))?
+    };
+    let can_publish = !receive_only && blocked.is_none();
     if local.require_existing {
         let existing = provider.request("GET", &manifest_key, None, None, None, 16 << 10).await?;
         if existing.status == 404 {
@@ -60,7 +102,7 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
         if existing.status != 200 || existing.bytes != manifest {
             return Err("append manifest could not be verified; local work retained".into());
         }
-    } else if blocked.is_none() {
+    } else if can_publish {
         provider.put_immutable(&manifest_key, &manifest).await?;
     }
     let mut planner = core::Planner::new(local).map_err(ce)?;
@@ -114,9 +156,9 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
     audit_history(provider, &mut planner, &root, audit || checkpoint || local.append.is_none(), &fetched).await?;
     planner.drain().map_err(ce)?;
     super::history::hydrate(provider, &mut planner.remote, local, &mut planner.proofs).await?;
-    let mut pending: Vec<_> = if blocked.is_some() { Vec::new() } else { local.pending.values().collect() };
+    let mut pending: Vec<_> = if can_publish { local.pending.values().collect() } else { Vec::new() };
     pending.sort_by_key(|m| m.revision.clone());
-    let checkpoint = checkpoint && blocked.is_none();
+    let checkpoint = checkpoint && can_publish;
     loop {
         let mut changed = false;
         for m in &pending {
@@ -148,10 +190,20 @@ pub async fn synchronize(provider: &Provider, local: &SyncState, checkpoint: boo
     }
     p.remote = super::history::certify(provider, local, &p.remote, &mut planner.proofs).await?;
     let acknowledged = planner.acknowledged(local).map_err(ce)?;
-    Ok(match blocked {
+    let outcome = match blocked {
         Some(blocked) => Outcome::append_blocked(p, acknowledged, blocked),
         None => Outcome::append(p, acknowledged),
-    })
+    };
+    let capability = outcome.publication().clone();
+    Ok(if receive_only { outcome.with_publication(capability.receiving()) } else { outcome })
+}
+pub(super) async fn library_control(provider: &Provider, library: &str) -> Result<lightcraft_engine::cloud_control::Control, CloudFailure> {
+    let (keys, _) = scan(provider, list(core::control::prefix(&provider.connection.prefix, library).map_err(ce)?, false)).await?;
+    let mut records = Vec::new();
+    for key in core::control::latest(&keys) {
+        records.push((key.clone(), get(provider, &key, core::control::MAX_CONTROL_BYTES).await?));
+    }
+    Ok(core::control::effective(&provider.connection.prefix, library, &records)?)
 }
 
 pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, CloudFailure> {
