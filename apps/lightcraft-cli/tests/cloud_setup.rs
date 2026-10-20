@@ -46,6 +46,47 @@ fn the_check_finds_append_and_head_libraries_and_never_writes() {
 }
 
 #[test]
+fn b2_download_cap_is_not_reported_as_rejected_keys_even_for_an_empty_bucket() {
+    let f = Fixture::new();
+    f.state.lock().unwrap().download_cap = true;
+    let refused = test_connection(&f, "acceptance");
+    let message = refused["error"].as_str().unwrap();
+    assert!(message.contains("Backblaze B2 download limit reached"), "{refused}");
+    assert!(message.contains("Caps & Alerts"), "{refused}");
+    assert!(!message.contains("refused these keys"));
+    let state = f.state.lock().unwrap();
+    assert!(state.objects.is_empty());
+    assert!(state.requests.iter().all(|(method, _)| method == "GET"));
+    assert_eq!(state.signature_errors, 0);
+}
+
+#[test]
+fn b2_download_cap_preserves_original_download_provenance_without_writing_bytes() {
+    use lightcraft_engine::assets::{
+        AssetError, BlobStore,
+        s3::{AccessKeys, S3Connection},
+    };
+    let f = Fixture::new();
+    {
+        let mut state = f.state.lock().unwrap();
+        state.download_cap = true;
+        state.allow_typed_keys = true;
+    }
+    let connection: S3Connection = serde_json::from_value(config(&f, "unused")).unwrap();
+    let connection = connection.with_keys(AccessKeys::new("EXAMPLE_ACCESS", "EXAMPLE_SECRET").unwrap());
+    let blob = serde_json::from_value(json!({
+        "id":support::hash(b"photo"),"size":5,
+        "remote":{"connection":"personal","key":"library/photo.jpg"}
+    }))
+    .unwrap();
+    let mut output = Vec::new();
+    let error = connection.download(&blob, &mut output, &std::sync::atomic::AtomicBool::new(false), &mut |_| {}).unwrap_err();
+    assert_eq!(error, AssetError::ProviderLimit { status: 403 });
+    assert!(output.is_empty());
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+}
+
+#[test]
 fn the_check_says_what_to_fix() {
     let f = Fixture::new();
     let credentials = f.dir.join("credentials");

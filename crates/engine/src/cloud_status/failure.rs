@@ -23,6 +23,7 @@ pub enum Recovery {
     RepairRemote,
     RepairLocal,
     ReviewCapacity,
+    ReviewProviderLimits,
     CheckCompatibility,
     Update,
     Rejoin,
@@ -119,6 +120,13 @@ impl CloudFailure {
         .map(str::to_owned);
         error
     }
+    pub fn provider_limit(status: u16) -> Self {
+        let mut error = Self::new(FailureKind::Capacity, "Backblaze B2 download limit reached.")
+            .with_recovery("Review download bandwidth and Class B transaction caps in Backblaze Caps & Alerts, then use Retry Syncing. Pending edits and originals are kept.")
+            .with_remedy(Recovery::ReviewProviderLimits);
+        error.http_status = Some(status);
+        error
+    }
     pub fn retryable(&self) -> bool {
         matches!(self.kind, FailureKind::Connectivity | FailureKind::Contention)
     }
@@ -170,6 +178,7 @@ impl From<&crate::assets::AssetError> for CloudFailure {
         use crate::assets::AssetError;
         let kind = match error {
             AssetError::Http(status) => return Self::http("S3 request", *status),
+            AssetError::ProviderLimit { status } => return Self::provider_limit(*status),
             AssetError::Throttled { status, retry_after_ms } => {
                 let mut failure = Self::http("Storage control request", *status);
                 failure.retry_after_ms = Some((*retry_after_ms).min(15 * 60 * 1000));

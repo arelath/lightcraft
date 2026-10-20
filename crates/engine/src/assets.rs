@@ -82,6 +82,10 @@ pub enum AssetError {
     Network(String),
     #[error("S3 returned HTTP {0}; check endpoint, permissions and region (pending work retained)")]
     Http(u16),
+    #[error(
+        "Backblaze B2 download limit reached. Review download bandwidth and Class B transaction caps in Backblaze Caps & Alerts, then retry. Pending work is kept."
+    )]
+    ProviderLimit { status: u16 },
     /// Unwind immediate CAS retries and respect the provider's delay. A scheduled
     /// attempt rereads authority before making or acknowledging another commit.
     #[error("storage returned HTTP {status}; retry after {retry_after_ms} ms (pending work retained)")]

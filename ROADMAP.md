@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~14 points and ~340–600 h away
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (EOS R5 Mark II CR3 verified; RAW decoding 77%) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified; RAW decoding 77%) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 One-page summary of how close LightCraft is to Adobe Lightroom. Agents: read this, then pick work
 from [docs/gaps.md](docs/gaps.md). The full assessment, method and evidence are in
@@ -161,6 +161,7 @@ Ranked toward beta; detail in [docs/roadmap.md](docs/roadmap.md), gaps in [docs/
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | minor | CR.75: Bounded B2 download-cap diagnostics preserve HTTP 403, direct recovery to provider Caps & Alerts and halt automatic retries; ordinary authentication failures stay distinct. Cloud remains OOS; counts unchanged |
 | 2026-10-11 | minor | EOS R5 Mark II CR3 verified: CR3 on four verified bodies, RAW decoding 76% → 77%; headline numbers unchanged |
 | 2026-10-10 | minor | RAW measured model by model; RAW decode and colour as explicit rows: full 59% → 61%, mainstream 51% → 49%, essentials 63% → 64%; beta ~14 points |
 | 2026-10-10 | minor | Full ready restored to the additive weighted sum (~59%; method aligned with the standard, no new evidence); hours per audience; beta ~16 points away |

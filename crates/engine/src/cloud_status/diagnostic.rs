@@ -104,6 +104,9 @@ impl Diagnostic {
         if self.paused { "cloud.resume" } else { "cloud.sync" }
     }
     pub fn short_cause(&self) -> &'static str {
+        if self.recovery() == Some(Recovery::ReviewProviderLimits) {
+            return "Storage provider limit reached.";
+        }
         match self.failure.kind {
             Some(FailureKind::Connectivity) => "Storage is unavailable.",
             Some(FailureKind::Contention) => "Cloud library is busy.",

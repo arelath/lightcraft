@@ -255,7 +255,7 @@ impl S3Connection {
         } else {
             Vec::new()
         };
-        let response = self.request(
+        let mut response = self.request(
             Request {
                 method: Method::Delete,
                 key: &version.key,
@@ -267,7 +267,7 @@ impl S3Connection {
             cancel,
             &mut |_| {},
         )?;
-        status(&response)
+        status(&mut response, cancel)
     }
 }
 #[cfg(test)]

@@ -7,6 +7,7 @@ mod failure;
 mod health;
 mod polling;
 mod presentation;
+pub mod provider;
 pub use actions::{ActionKind, Actions, DeviceMode, ManualAction};
 pub use diagnostic::{Diagnostic, RetryState};
 pub use failure::{CloudFailure, FailureKind, Recovery, RetryBudget};

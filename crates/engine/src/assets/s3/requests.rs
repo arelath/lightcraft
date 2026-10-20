@@ -70,7 +70,8 @@ fn condition_headers(condition: PutCondition<'_>) -> Result<Vec<(&'static str, S
     }])
 }
 
-fn status(response: &Response) -> Result<()> {
+fn status(response: &mut Response, cancel: &AtomicBool) -> Result<()> {
+    super::error::provider_limit(response, cancel)?;
     match response.status {
         200..=299 => Ok(()),
         code @ (401 | 403) => Err(AssetError::Http(code)),
@@ -83,7 +84,7 @@ fn status(response: &Response) -> Result<()> {
 }
 
 fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result<ObjectReply> {
-    status(&response)?;
+    status(&mut response, cancel)?;
     if max > MAX_CHECKPOINT || response.content_length().is_some_and(|size| size > max as u64) {
         return Err(AssetError::Invalid("S3 response exceeds its safety limit".into()));
     }
@@ -108,12 +109,12 @@ fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result
 impl S3Connection {
     /// Retention uses complete object identity, never a listing's age alone.
     pub fn stat_object(&self, key: &str, cancel: &AtomicBool) -> Result<Option<ObjectStat>> {
-        let response =
+        let mut response =
             self.request(Request { method: Method::Head, key, query: &[], headers: &[], payload: &sha256(b"").0, body: None }, cancel, &mut |_| {})?;
         if response.status == 404 {
             return Ok(None);
         }
-        status(&response)?;
+        status(&mut response, cancel)?;
         Ok(Some(ObjectStat {
             // HEAD has no response body; the HTTP client's body length is None.
             size: response
@@ -135,12 +136,12 @@ impl S3Connection {
             return Err(AssetError::Conflict);
         }
         let headers = condition_headers(PutCondition::Matches(&expected.etag))?;
-        let response = self.request(
+        let mut response = self.request(
             Request { method: Method::Delete, key, query: &[], headers: &headers, payload: &sha256(b"").0, body: None },
             cancel,
             &mut |_| {},
         )?;
-        status(&response)?;
+        status(&mut response, cancel)?;
         if self.stat_object(key, cancel)?.is_some() {
             return Err(AssetError::Integrity);
         }

@@ -267,6 +267,14 @@ impl Provider {
                 request.headers().set(&name, &value).map_err(js_error)?;
             }
             let response = fetch(&request, &self.cancel).await?;
+            if response.status() == 403 {
+                use lightcraft_engine::cloud_status::provider::{MAX_ERROR_BODY, b2_download_cap};
+                match body(&response, MAX_ERROR_BODY, &self.cancel).await {
+                    Ok(bytes) if b2_download_cap(403, &bytes) => return Err(CloudFailure::provider_limit(403)),
+                    Err(error) if self.cancel.load(Ordering::Relaxed) => return Err(error),
+                    _ => {}
+                }
+            }
             // A transfer can outlive its URL. Re-authorize once, preserving the exact body,
             // key and precondition. A second refusal is an actionable login failure.
             if matches!(response.status(), 401 | 403) && attempt == 0 {

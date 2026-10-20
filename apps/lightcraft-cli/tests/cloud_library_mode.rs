@@ -469,6 +469,16 @@ fn replacing_saved_keys_with_named_profile_probes_and_saves_the_selected_profile
 #[test]
 #[ignore = "explicit native empty-library diagnostics acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
 fn empty_cloud_library_error_details_preserve_diagnostic_and_repair_connection() {
+    empty_cloud_library_error(false);
+}
+
+#[test]
+#[ignore = "explicit native provider cap acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn empty_cloud_library_b2_cap_details_preserve_provider_recovery() {
+    empty_cloud_library_error(true);
+}
+
+fn empty_cloud_library_error(cap: bool) {
     let f = support::Fixture::new();
     let local = f.dir.join("empty-cloud");
     let (out, rows) = f.run(
@@ -483,8 +493,13 @@ fn empty_cloud_library_error_details_preserve_diagnostic_and_repair_connection()
         ],
     );
     assert!(out.status.success(), "{rows:?}");
-    f.state.lock().unwrap().unauthorized = true;
-    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("empty-error");
+    let (remote_before, requests_before) = {
+        let state = f.state.lock().unwrap();
+        (state.objects.clone(), state.requests.len())
+    };
+    f.state.lock().unwrap().unauthorized = !cap;
+    f.state.lock().unwrap().download_cap = cap;
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join(if cap { "b2-cap" } else { "empty-error" });
     std::fs::create_dir_all(&artifacts).unwrap();
     let mut app = Desktop::start(&f, &local, &artifacts);
     app.execute("cloud.sync", json!({"wait":false}));
@@ -492,7 +507,7 @@ fn empty_cloud_library_error_details_preserve_diagnostic_and_repair_connection()
     let error = loop {
         let data = app.execute("cloud.overview", json!({}));
         assert_eq!(data["summary"]["cloudPhotos"], 0);
-        if data["health"]["sync"]["lastError"]["kind"] == "authentication" {
+        if data["health"]["sync"]["lastError"]["kind"] == if cap { "capacity" } else { "authentication" } {
             break data["health"]["sync"]["lastError"].clone();
         }
         assert!(Instant::now() < until, "authentication failure not visible: {data}");
@@ -500,6 +515,10 @@ fn empty_cloud_library_error_details_preserve_diagnostic_and_repair_connection()
     };
     assert_eq!(error["httpStatus"], 403, "native transport preserves the actual rejection code");
     app.click_when_ready("icon:cloud");
+    if cap {
+        app.wait_widget("button:cloudErrorDetails");
+        app.ask("ui.screenshot", json!({"path":artifacts.join("popup.png")}));
+    }
     app.click_when_ready("button:cloudErrorDetails");
     let until = Instant::now() + Duration::from_secs(10);
     let inspect = loop {
@@ -512,21 +531,36 @@ fn empty_cloud_library_error_details_preserve_diagnostic_and_repair_connection()
     };
     assert_eq!(inspect["cloudDiagnostic"]["failure"]["message"], error["message"], "{inspect}");
     assert_eq!(inspect["cloudDiagnostic"]["failure"]["httpStatus"], error["httpStatus"]);
-    assert_eq!(inspect["cloudDiagnostic"]["failure"]["recovery"], "editConnection");
+    assert_eq!(inspect["cloudDiagnostic"]["failure"]["recovery"], if cap { "reviewProviderLimits" } else { "editConnection" });
     std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&inspect).unwrap()).unwrap();
     app.ask("ui.screenshot", json!({"path":artifacts.join("details.png")}));
-    app.click_when_ready("button:cloudErrorConnection");
-    let until = Instant::now() + Duration::from_secs(10);
-    loop {
-        let widgets = app.ask("ui.widgets", json!({"filter":"cloudSetup"}));
-        if widgets.to_string().contains("button:cloudSetupMore") {
-            break;
+    if cap {
+        let widgets = app.ask("ui.widgets", json!({})).to_string();
+        assert!(!widgets.contains("button:cloudErrorConnection"));
+        assert!(!widgets.contains("button:cloudErrorCapacity"));
+        assert!(inspect["cloudDiagnostic"]["failure"]["action"].as_str().unwrap().contains("Caps & Alerts"));
+        assert_eq!(error["retryable"], false);
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.objects, remote_before);
+        assert!(state.requests[requests_before..].iter().all(|(method, _)| method == "GET"));
+    } else {
+        app.click_when_ready("button:cloudErrorConnection");
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let widgets = app.ask("ui.widgets", json!({"filter":"cloudSetup"}));
+            if widgets.to_string().contains("button:cloudSetupMore") {
+                break;
+            }
+            assert!(Instant::now() < until, "connection editor did not open: {widgets}");
+            std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(Instant::now() < until, "connection editor did not open: {widgets}");
-        std::thread::sleep(Duration::from_millis(50));
+        app.ask("ui.dialog.cancel", json!({}));
     }
-    app.ask("ui.dialog.cancel", json!({}));
+    if cap {
+        app.ask("ui.dialog.cancel", json!({}));
+    }
     f.state.lock().unwrap().unauthorized = false;
+    f.state.lock().unwrap().download_cap = false;
     app.execute("cloud.sync", json!({"wait":false}));
     let until = Instant::now() + Duration::from_secs(30);
     loop {

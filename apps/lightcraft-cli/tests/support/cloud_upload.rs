@@ -150,6 +150,7 @@ pub struct State {
     pub embedded_error: bool,
     pub unauthorized: bool,
     pub reject_status: Option<u16>,
+    pub download_cap: bool,
     pub signature_errors: usize,
     pub hold_part: bool,
     pub hold_head: bool,
@@ -232,6 +233,8 @@ impl Fixture {
                     (403, Vec::new(), None, false)
                 } else if let Some(status) = state.reject_status {
                     (status, Vec::new(), None, false)
+                } else if state.download_cap && method == "GET" && !target.contains("list-type=") {
+                    (403, b"<Error><Code>AccessDenied</Code><Message>Cannot download file, download bandwidth or transaction (Class B) cap exceeded. See the Caps &amp; Alerts page to increase your cap.</Message></Error>".to_vec(), None, false)
                 } else {
                     serve(&mut state, &method, &target, &headers, body)
                 };

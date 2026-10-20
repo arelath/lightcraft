@@ -429,6 +429,7 @@ impl BlobStore for S3Connection {
         let headers = signing_headers(&url, &self.region, &credentials, &timestamp)?;
         let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
         let mut response = http::get(&url, &headers, &limits).map_err(http_error)?;
+        error::provider_limit(&mut response, cancel)?;
         match response.status {
             200 => {}
             status @ (401 | 403) => return Err(AssetError::Http(status)),
@@ -472,6 +473,7 @@ pub mod b2;
 mod presign;
 pub use presign::{BrowserAuthorization, BrowserRequest};
 
+mod error;
 mod requests;
 pub use requests::{ObjectReply, ObjectStat, ObjectVersion, PutCondition};
 

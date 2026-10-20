@@ -1,6 +1,6 @@
 # Cloud storage implementation
 
-Last updated: 2026-10-19. This document describes current behavior and operational limits. The normative wire and
+Last updated: 2026-10-20. This document describes current behavior and operational limits. The normative wire and
 durability contract is [cloud-sync-protocol.md](cloud-sync-protocol.md); its receipt-history
 contract is [cloud-history-compaction-design.md](cloud-history-compaction-design.md).
 [browser-cloud.md](browser-cloud.md) defines the browser adapter contract.
@@ -8,6 +8,14 @@ contract is [cloud-history-compaction-design.md](cloud-history-compaction-design
 [cloud-reliability-tasks.md](cloud-reliability-tasks.md) is the authoritative remaining-work
 checklist. [../tasks.md](../tasks.md) indexes the original milestones. The initial
 [proposal](cloud-storage.md) is historical, not the implemented specification.
+
+B2 account download caps can reject even an absent library manifest in an empty bucket.
+LightCraft recognizes the bounded S3 `AccessDenied` response for B2's download bandwidth/
+Class B cap and reports a provider limit, retaining HTTP 403 and pending work. Setup gives
+Caps & Alerts guidance; synchronization stops automatic retries until explicitly retried.
+The same recognition runs before the browser refreshes an authorized URL. Other 403
+responses retain their authentication classification. Provider caps are separate from
+library receipt/history limits and never route to LightCraft's Storage tools.
 
 Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and published remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
 
