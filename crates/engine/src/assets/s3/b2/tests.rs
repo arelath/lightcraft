@@ -344,7 +344,7 @@ fn malformed_and_oversized_success_bodies_are_uncertain() {
             let length = if oversized { MAX_JSON + 1 } else { 5 };
             write!(stream, "HTTP/1.1 200 Test\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{{bad!").unwrap();
         });
-        let error = request(&crate::cloud_traffic::destination(&connection()), &url, "fake-token", None, &AtomicBool::new(false)).unwrap_err();
+        let error = request(&crate::cloud_traffic::destination(&connection()), &url, "fake-token", None, &AtomicBool::new(false), None).unwrap_err();
         assert!(error.uncertain_write(), "{error}");
         worker.join().unwrap();
     }

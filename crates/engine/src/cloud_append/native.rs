@@ -133,10 +133,10 @@ fn synchronize_mode(
     media: &mut crate::cloud_replication::VerifiedMedia,
 ) -> Result<crate::cloud_replication::Outcome> {
     let ScanOptions { checkpoint, audit, receive_only, legacy } = options;
-    // An active or resumed integrity audit must not mistake a durable cache hit
-    // from discovery for fresh remote evidence. The same mode covers nested receipt
-    // proof reads, and the per-pass fetched map can still share fresh downloads.
-    let fresh = audit || checkpoint || local.append.as_ref().is_none_or(|p| !p.scan.audit.complete);
+    // Explicit maintenance and receive-only audits demand fresh remote bytes,
+    // including nested receipt proofs. Routine historical discovery may reuse
+    // certified identities and cached bodies; it never claims fresh verification.
+    let fresh = audit || checkpoint;
     let fresh_connection = fresh.then(|| connection.fresh_metadata());
     let connection = fresh_connection.as_ref().unwrap_or(connection);
     if local.protocol != SyncProtocol::AppendLog {
@@ -217,7 +217,9 @@ fn synchronize_mode(
             return Err(invalid("too many append listing pages"));
         }
     }
-    audit_history(connection, &mut planner, &root, audit || checkpoint || local.append.is_none(), &fetched, cancel)?;
+    // Bounded historical discovery runs even behind acknowledged frontiers, using
+    // verified cached bytes. Its cursor never claims fresh remote verification.
+    audit_history(connection, &mut planner, &root, connection.history_discovery() || audit || checkpoint, &fetched, cancel)?;
     planner.drain()?;
     crate::cloud_history::native::hydrate(connection, &mut planner.remote, local, &mut planner.proofs, cancel)?;
     let mut pending: Vec<_> = if !can_publish { Vec::new() } else { local.pending.values().collect() };
@@ -272,7 +274,7 @@ fn synchronize_mode(
     Ok(crate::cloud_replication::Outcome::append(progress, acknowledged).with_publication(capability))
 }
 
-fn read_checkpoint(connection: &S3Connection, planner: &mut Planner, root: &str, key: &str, cancel: &AtomicBool) -> Result<usize> {
+pub(crate) fn read_checkpoint(connection: &S3Connection, planner: &mut Planner, root: &str, key: &str, cancel: &AtomicBool) -> Result<usize> {
     let reply = connection.history_record(key, MAX_OBJECT, cancel, |bytes| {
         let p: AppendProgress = serde_json::from_slice(bytes).map_err(|_| invalid("malformed append checkpoint"))?;
         p.validate(&planner.remote.library).map_err(ce)?;
@@ -287,7 +289,7 @@ fn read_checkpoint(connection: &S3Connection, planner: &mut Planner, root: &str,
     discovery::consume(planner, root, key)?;
     Ok(reply.size)
 }
-fn read_operation(connection: &S3Connection, planner: &mut Planner, key: &str, cancel: &AtomicBool) -> Result<usize> {
+pub(crate) fn read_operation(connection: &S3Connection, planner: &mut Planner, key: &str, cancel: &AtomicBool) -> Result<usize> {
     let reply = connection.history_record(key, lightcraft_catalog::replication::MAX_MUTATION_BYTES, cancel, |bytes| {
         decode_mutation(&connection.prefix, &planner.remote.library, key, bytes)
     })?;
@@ -338,6 +340,8 @@ fn audit_history(
                 }
                 let size = if let Some(size) = fetched.get(&key) {
                     *size
+                } else if !connection.fresh_history() && (namespace == "checkpoints" || discovery::known_operation(planner, root, &key)?) {
+                    0
                 } else if namespace == "checkpoints" {
                     read_checkpoint(connection, planner, root, &key, cancel)?
                 } else {

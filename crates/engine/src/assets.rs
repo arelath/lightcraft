@@ -108,6 +108,9 @@ pub enum AssetError {
     /// A synchronization limit would be exceeded; the message names the recovery.
     #[error("{0}")]
     Capacity(String),
+    /// Internal, non-failure boundary for a durably reserved verification slice.
+    #[error("remote history verification budget reserved; continue verification later")]
+    HistoryBudget,
     /// The cloud library moved to another protocol; this device must rejoin it.
     #[error("{0}")]
     Moved(String),

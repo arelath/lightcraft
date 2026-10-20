@@ -135,13 +135,19 @@ fn note(policy: &Policy) {
         h.headroom = h.headroom.max(policy.headroom);
     });
 }
-struct Lock(Function);
+pub(crate) struct Lock(Function);
 impl Drop for Lock {
     fn drop(&mut self) {
         let _ = self.0.call0(&JsValue::UNDEFINED);
     }
 }
 async fn lock() -> Result<Lock, String> {
+    named_lock("lightcraft-managed-cache-v1").await
+}
+pub(crate) async fn verification_lock() -> Result<Lock, String> {
+    named_lock("lightcraft-remote-verification-v1").await
+}
+async fn named_lock(name: &str) -> Result<Lock, String> {
     let navigator = Reflect::get(&js_sys::global(), &"navigator".into()).map_err(|_| "browser storage coordination unavailable")?;
     let locks = Reflect::get(&navigator, &"locks".into()).map_err(|_| "Web Locks unavailable; cache retained")?;
     let request = Reflect::get(&locks, &"request".into())
@@ -157,7 +163,7 @@ async fn lock() -> Result<Lock, String> {
         let _ = grant.call0(&JsValue::UNDEFINED);
         released
     });
-    let requested = request.call2(&locks, &"lightcraft-managed-cache-v1".into(), &callback).map_err(|_| "could not acquire browser cache lock")?;
+    let requested = request.call2(&locks, &name.into(), &callback).map_err(|_| "could not acquire browser storage lock")?;
     let race = Array::new();
     race.push(&granted);
     race.push(&requested);

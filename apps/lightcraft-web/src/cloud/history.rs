@@ -14,11 +14,13 @@ use lightcraft_engine::{
 
 async fn fetch(provider: &Provider, library: &str, hash: &str, witness: &mut Witness) -> Result<(), CloudFailure> {
     let key = core::key(&provider.connection.prefix, library, hash).map_err(CloudFailure::from)?;
-    let reply = provider.request("GET", &key, None, None, None, archive::MAX_NODE_BYTES).await?;
-    if reply.status != 200 {
-        return Err("receipt archive unavailable; restore retained objects, local work retained".into());
+    let (node, _) =
+        provider.history_record(&key, archive::MAX_NODE_BYTES, |bytes| archive::Node::decode(hash, bytes).map_err(CloudFailure::from)).await?;
+    if witness.len() >= archive::MAX_WITNESS_NODES {
+        return Err("receipt proof budget exceeded; local work retained".into());
     }
-    core::insert(witness, hash, &reply.bytes).map_err(CloudFailure::from)
+    witness.insert(hash.into(), node);
+    Ok(())
 }
 pub async fn certify(provider: &Provider, local: &SyncState, remote: &Portable, witness: &mut Witness) -> Result<Portable, CloudFailure> {
     let mut session = core::merge_session(local, remote).map_err(CloudFailure::from)?;

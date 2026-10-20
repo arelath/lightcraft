@@ -138,11 +138,15 @@ pub mod host;
 mod legacy;
 pub mod memory;
 #[cfg(target_arch = "wasm32")]
+mod metadata;
+#[cfg(target_arch = "wasm32")]
 pub mod protocol;
 #[cfg(target_arch = "wasm32")]
 mod transport;
 #[cfg(target_arch = "wasm32")]
 mod upgrade;
+#[cfg(target_arch = "wasm32")]
+mod verification;
 #[cfg(target_arch = "wasm32")]
 pub use transport::Provider;
 

@@ -56,6 +56,7 @@ pub mod cloud_transition;
 pub mod cloud_upgrade;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloud_upload;
+pub mod cloud_verification;
 pub mod cmd;
 pub mod config;
 pub mod contact_sheet;
@@ -548,6 +549,7 @@ impl Session {
         if matches!(
             id,
             "cloud.sync"
+                | "cloud.verifyHistory"
                 | "cloud.syncEnable"
                 | "cloud.migrateAppend"
                 | "cloud.upgradeLibrary"

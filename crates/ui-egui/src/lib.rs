@@ -15,6 +15,7 @@ mod cloud_retention;
 pub mod cloud_setup;
 mod cloud_tasks;
 mod cloud_transition;
+mod cloud_verification;
 pub mod control;
 pub mod credits;
 pub mod date_picker;
@@ -376,6 +377,7 @@ pub struct LightcraftApp {
     pub cloud_check: Option<cloud_setup::CheckTask>,
     pub(crate) cloud_transition: cloud_transition::Runtime,
     pub(crate) cloud_retention: cloud_retention::Runtime,
+    pub(crate) cloud_verification: cloud_verification::Runtime,
     dialog_library_generation: u64,
     /// A Synchronize Folder scan in progress (feeds its dialog).
     pub sync: Option<sync::SyncTask>,
@@ -497,6 +499,7 @@ impl LightcraftApp {
             model_setup: Default::default(),
             cloud_transition: Default::default(),
             cloud_retention: Default::default(),
+            cloud_verification: Default::default(),
             dialog_library_generation,
         }
     }
@@ -522,6 +525,7 @@ impl LightcraftApp {
         let result = self.run_inner(id, params);
         panels::dialogs::observe(self);
         cloud_retention::observe_command(self, id, &result);
+        cloud_verification::observe_command(self, id, &result);
         result
     }
 
@@ -1148,6 +1152,7 @@ impl LightcraftApp {
         self.session.poll_cloud_uploads();
         #[cfg(not(target_arch = "wasm32"))]
         self.session.poll_cloud_replication();
+        cloud_verification::poll(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.cloud_removal_outcome(ctx);
         #[cfg(not(target_arch = "wasm32"))]

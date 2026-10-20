@@ -61,15 +61,14 @@ Destination detail is bounded to 32 identities plus an overflow bucket. The curr
 connection-name lookup is limited to 32 bindings, with an explicit truncation flag. No cache,
 publication proof, upload verification or polling policy changes are implied by these
 diagnostics. Native immutable-body reuse is described below; further traffic reductions
-remain tracked by CR.78–CR.86.
+remain tracked by CR.79–CR.86.
 
 ## Native immutable history cache
 
 Native filesystem libraries reuse verified append operation/checkpoint and receipt-archive
 bodies in `<library>/sync-record-cache-v1/`. The disposable cache is independent of the
 movable original-media cache; moving media storage does not move history bodies. No cache
-binding is serialized into a connection, upload receipt or cloud record. In-memory/browser
-catalogs retain their existing adapters. Conditional-head batch replay is still CR.79.
+binding is serialized into a connection, upload receipt or cloud record. In-memory catalogs retain their existing adapters. Browser append-body reuse is described below. Conditional-head batch replay is still CR.79.
 
 Entries bind the canonical destination (connection ID, bucket, region, prefix and endpoint),
 exact immutable key including its content identity, verified actual byte length and body
@@ -90,14 +89,89 @@ serialize independent cache instances and invalidate stale indexes, including ol
 winding down after a library switch. The fixed eight-byte lock record is outside the body
 budget. Cancellation is checked during reads/writes and both lock waits.
 
-Historical listings and resumable discovery remain active; a newly appearing old-sequence
-key is never hidden by the cache. Explicit or continued integrity audits bypass durable
-bodies throughout discovery and nested receipt reads. They can still share fresh downloads
-within that synchronization pass. A failed fresh verification leaves the earlier cached
-body intact but fails that verification; it never acknowledges corrupted remote history.
-Ordinary cached reuse can delay detection of remote corruption or disappearance until a
-fresh audit. Audit timing and the manual-sync default are unchanged in CR.77; separating
-routine discovery from persisted, budgeted verification is CR.78.
+Historical listings and resumable discovery remain active. A different hash at an old
+sequence still goes through ordinary content/causal validation and fork rejection. Exact
+acknowledged operation receipts and consumed checkpoint identities form a durable known-key
+index: historical discovery can skip reconstructing those accepted effects entirely, even
+if the disposable body cache was evicted. These identity checks are not fresh remote-byte
+proof. Unknown/gapped records still need their verified bodies. Explicit maintenance and
+receive-only audits bypass cached bodies, including nested receipt reads.
+
+## Incremental sync and remote verification
+
+Ordinary **Sync now** (`cloud.sync {wait?:false}`) reconciles incremental author tails,
+new checkpoints and ready local changes. It also requests a bounded historical discovery
+slice; exact known identities require no old-body download. Background historical discovery
+starts at most every five minutes, with its next deadline persisted before network work;
+an unfinished discovery cursor continues on subsequent polls. Upload publication does not
+start an extra historical round per photo. Activity-aware polling remains **60 seconds**
+while active and **15 minutes** after more than 60 seconds of inactivity.
+
+**More → Verify remote history** (`cloud.verifyHistory {wait?:false}`) is a separate,
+read-only fresh-byte check. It publishes no mutations, changes no catalog/outbox state and
+can run while this device is paused. Native CLI waits by default; desktop/browser report
+an Activity task and `cloud.syncStatus.reports`. A report with `verification:true` and
+`complete:false` is a slice, not a completed scan; `deferred:true` means no request was
+admitted because its durable allowance was spent. The UI reports completion or partial
+progress once, even if the popup was closed, and discards results after a library change.
+Observing these local task reports makes no provider requests. The compatibility parameter
+`cloud.sync {audit:true}` performs synchronization followed by such a verification slice;
+maintenance (`checkpoint:true`) must be requested separately.
+
+Fresh verification uses a separate destination/library-bound durable schedule and append
+cursor. Its automatic deadline starts one week after first use and advances one week after
+a completed verification. Incomplete automatic slices continue no sooner than 15 minutes later.
+A corrupt/unsupported schedule refuses network startup rather than silently losing
+budget evidence. Credentials/profile rotation does not reset the destination's allowance.
+Native records live in `<library>/remote-verification-v1/`; browser records live under
+`cloud/remote-verification-v1/` in OPFS/IndexedDB. An OS lock/Web Lock serializes independent
+owners. Both adapters durably reserve an entire slice before any verification request.
+
+Each slice admits at most **128 HTTP requests and 128 MiB of bounded response bodies**,
+including listings, nested receipt reads and B2 authority calls. Browser-managed CORS
+preflight and transport overhead are excluded. Browser counts its own
+signer/control requests too; a signer service's internal provider calls are outside browser
+visibility. At most **four slices per persisted 24-hour reservation window** are admitted.
+Failures, cancellation, restart and unused slice capacity do not refund that reservation;
+a backwards wall clock cannot replenish it. Within a slice, admission reserves each
+response's maximum supported size before I/O and refunds unused bytes only after success.
+The append walker also targets 64 records/8 MiB between records and 16 listing pages;
+an individual checkpoint can exceed that target but cannot exceed the outer byte budget.
+Saved progress advances between complete records; one record and its nested proof must
+fit a slice's allowance.
+These are verification allowances, not a limit on necessary incremental discovery, uploads,
+media viewing, or the provider account's total traffic.
+
+Append verification saves each successful exact key before the next request and resumes
+across failures/restarts independently of cached discovery. It freshly reads checkpoints,
+operations and receipt archives, including receipt branch children. Listing gaps cannot
+hide missing consumed checkpoints, acknowledged full-receipt operation keys, or required
+archive roots. Newly introduced old keys still undergo causal/fork checks. A detected remote
+history failure stays latched across ordinary cached sync; restore the remote objects and
+complete fresh verification to clear it. Successful cached reads cannot clear that diagnosis.
+Conditional-head verification uses the existing bounded read-only checkpoint/tail reader;
+it restarts that replay when a slice is exhausted. A head history too large for one slice
+cannot complete verification until checkpoint maintenance reduces its tail. Resumable head
+replay spooling and incremental acknowledged baselines remain CR.79/CR.80/CR.86; append
+verification already resumes at its saved key.
+
+Cached/known-key discovery intentionally delays detection of corruption or disappearance
+at an already accepted remote key until a fresh check. Weekly verification is not an atomic
+snapshot of remote existence: each object is checked when its slice reads it. Previously
+compacted operation bodies have no complete local key inventory; archive certificates and
+the retained remote listing provide their integrity evidence. All newly discovered content
+is verified before acceptance; no cached identity grants authority or acknowledges pending
+work.
+
+Browser append bodies use one atomic `cloud/append-metadata-v1.json` snapshot, separate
+from pinned media. It binds the physical bucket root/origin, connection ID, prefix and exact
+key; login tokens and signer URLs are not cache identity. At most 128 bodies of at most
+1 MiB fit in an 8 MiB serialized snapshot (plus its atomic replacement). Oversized records,
+cache damage or failed writes fall back to remote verification. Original content/key/schema
+checks run again on reuse; fresh verification bypasses the snapshot. Auxiliary storage
+admission preserves catalog headroom and pinned media. A concurrent stale cache writer can
+lose reusable entries, but cannot accumulate unindexed body files. Browser conditional-head
+cache/replay work remains CR.86.
 
 Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and published remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
 

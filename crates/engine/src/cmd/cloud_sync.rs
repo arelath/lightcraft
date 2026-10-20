@@ -300,9 +300,19 @@ pub fn specs() -> Vec<CommandSpec> {
         "Synchronize cloud library",
         [],
         None,
-        "{wait?, checkpoint?}; reconcile and publish durable mutations using the library's selected protocol",
+        "{wait?, checkpoint?, audit?}; incremental synchronization; audit:true additionally requests bounded fresh verification; cloud.verifyHistory verifies without publication",
         always,
         crate::cloud_replication::start
+    ));
+    #[cfg(not(target_arch = "wasm32"))]
+    specs.push(cmd!(
+        "cloud.verifyHistory",
+        "Verify remote history",
+        [],
+        None,
+        "{wait?}; fresh bounded history verification; preserves local edits and pending work",
+        always,
+        crate::cloud_replication::verify
     ));
     specs.push(cmd!(query "cloud.configureBrowser","Configure browser cloud storage",[],None,"{id, prefix, authorizeEndpoint, storageOrigin, token?}; device-local settings and ephemeral login",always, browser_host));
     #[cfg(target_arch = "wasm32")]
@@ -313,6 +323,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "cloud.connections","Cloud storage connections",[],None,"{}",always,browser_host),
         cmd!(query "cloud.syncEnable","Enable cloud synchronization",[],None,"{connection,library?,protocol?}; omit library to create, supply its ID to join",always,browser_host),
         cmd!(query "cloud.sync","Synchronize cloud library",[],None,"{checkpoint?}; durable async synchronization",always,browser_host),
+        cmd!(query "cloud.verifyHistory","Verify remote history",[],None,"{}; fresh bounded remote history verification",always,browser_host),
         cmd!(query "cloud.fetch","Download cloud originals",[],None,"{ids?}; verified asynchronous acquisition",always,browser_host),
         cmd!(query "cloud.reconnect","Retry cloud transfers",[],None,"{}",always,browser_host),
     ]);

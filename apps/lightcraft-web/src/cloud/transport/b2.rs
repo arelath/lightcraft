@@ -43,6 +43,9 @@ impl Provider {
         if let Some(token) = self.token.borrow().as_ref() {
             request.headers().set("Authorization", &format!("Bearer {token}")).map_err(js_error)?;
         }
+        if let Some(budget) = &self.verification_budget {
+            budget.admit(b2_control::RESPONSE_LIMIT).map_err(CloudFailure::from)?;
+        }
         let response = fetch(&request, &self.cancel).await.map_err(|mut failure| {
             if failure.kind == FailureKind::Connectivity {
                 failure.recovery = service_error().recovery;
@@ -51,6 +54,9 @@ impl Provider {
         })?;
         let status = response.status();
         let bytes = body(&response, b2_control::RESPONSE_LIMIT, &self.cancel).await?;
+        if let Some(budget) = &self.verification_budget {
+            budget.read(b2_control::RESPONSE_LIMIT, bytes.len());
+        }
         match ControlReply::decode(&bytes) {
             Ok(ControlReply::Failed { failure }) => Err(failure),
             Ok(reply) if status == 200 => Ok(reply),

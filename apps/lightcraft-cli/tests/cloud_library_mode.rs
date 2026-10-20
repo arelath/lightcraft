@@ -48,17 +48,33 @@ fn native_history_cache_reuses_gap_bodies_and_explicit_audit_fetches_them_again(
     std::fs::create_dir_all(&artifacts).unwrap();
     let mut app = Desktop::start(&f, &local, &artifacts);
     for (phase, audit) in [false, false, true].into_iter().enumerate() {
+        let status = app.execute("cloud.syncStatus", json!({}));
+        let previous = status["reports"].as_array().unwrap().iter().filter_map(|report| report["task"].as_u64()).max().unwrap_or(0);
         f.state.lock().unwrap().requests.clear();
-        app.execute("cloud.sync", json!({"wait":false,"audit":audit}));
+        if audit {
+            app.click_when_ready("icon:cloud");
+            app.click_when_ready("button:cloudMore");
+            app.ask("ui.screenshot", json!({"path":artifacts.join("more.png")}));
+            app.click_when_ready("button:cloudVerifyHistory");
+        } else {
+            app.execute("cloud.sync", json!({"wait":false}));
+        }
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let status = app.execute("cloud.syncStatus", json!({}));
-            if status["running"] == false {
+            let completed = status["reports"].as_array().unwrap().iter().find(|report| report["task"].as_u64().is_some_and(|task| task > previous));
+            if status["running"] == false
+                && let Some(report) = completed
+            {
+                assert_eq!(report["ok"], true, "{status}");
+                if audit {
+                    assert_eq!(report["result"]["verification"], true, "{status}");
+                }
                 assert!(!status["gaps"].as_array().unwrap().is_empty(), "{status}");
                 assert!(status["health"]["lastError"].is_null(), "{status}");
                 break;
             }
-            assert!(Instant::now() < deadline, "sync did not finish");
+            assert!(Instant::now() < deadline, "sync did not finish: {status}");
             std::thread::sleep(Duration::from_millis(25));
         }
         let gets = f
@@ -74,7 +90,10 @@ fn native_history_cache_reuses_gap_bodies_and_explicit_audit_fetches_them_again(
     let traffic = app.execute("cloud.traffic", json!({"limit":256}));
     assert!(traffic["totals"]["localCacheHits"].as_u64().unwrap() >= 2);
     std::fs::write(artifacts.join("traffic.json"), serde_json::to_vec_pretty(&traffic).unwrap()).unwrap();
-    app.click_when_ready("icon:cloud");
+    if !app.ask("ui.widgets", json!({"filter":"button:cloudMore"})).to_string().contains("button:cloudMore") {
+        app.click_when_ready("icon:cloud");
+    }
+    app.wait_widget("button:cloudMore");
     app.ask("ui.screenshot", json!({"path":artifacts.join("popup.png")}));
     std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
     assert_eq!(f.state.lock().unwrap().signature_errors, 0);

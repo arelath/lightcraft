@@ -23,6 +23,8 @@ const MAGIC: &[u8; 8] = b"LCMETA01";
 pub(crate) struct Binding {
     cache: Option<Arc<Cache>>,
     fresh: bool,
+    skip_discovery: bool,
+    pub(crate) budget: Option<Arc<crate::cloud_verification::Budget>>,
 }
 impl std::fmt::Debug for Binding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -73,14 +75,29 @@ fn identity(connection: &S3Connection, key: &str) -> Result<[u8; 32]> {
 }
 
 impl S3Connection {
+    pub(crate) fn fresh_history(&self) -> bool {
+        self.metadata.fresh
+    }
+    pub(crate) fn history_discovery(&self) -> bool {
+        !self.metadata.skip_discovery
+    }
+    pub(crate) fn with_history_discovery(mut self, enabled: bool) -> Self {
+        self.metadata.skip_discovery = !enabled;
+        self
+    }
     pub(crate) fn with_metadata_cache(mut self, cache: Option<Arc<Cache>>) -> Self {
-        self.metadata = Binding { cache, fresh: false };
+        self.metadata = Binding { cache, fresh: false, skip_discovery: true, budget: None };
         self
     }
     /// Carries fresh-byte provenance through nested archive-proof reads as well.
     pub(crate) fn fresh_metadata(&self) -> Self {
         let mut connection = self.clone();
         connection.metadata.fresh = true;
+        connection
+    }
+    pub(crate) fn verification_connection(&self) -> Self {
+        let mut connection = self.fresh_metadata();
+        connection.metadata.budget = Some(Arc::new(crate::cloud_verification::Budget::default()));
         connection
     }
     /// The content-addressed key, body SHA-256/length and caller's schema checks

@@ -12,6 +12,20 @@ pub fn relative<'a>(root: &str, key: &'a str) -> Result<&'a str> {
 pub fn consumed(planner: &Planner, root: &str, key: &str) -> Result<bool> {
     Ok(planner.scan.checkpoints.contains(relative(root, key)?))
 }
+/// An exact certified receipt is a durable known-key index. Discovery need not
+/// reconstruct accepted effects from those bytes; a new hash at an old sequence
+/// still takes the normal read/certification path. This is never remote-byte proof.
+pub fn known_operation(planner: &Planner, root: &str, key: &str) -> Result<bool> {
+    let key = relative(root, key)?;
+    let parts: Vec<_> = key.split('/').collect();
+    let ["ops", author, name] = parts.as_slice() else { return Ok(false) };
+    let Some((sequence, digest)) = name.strip_suffix(".json").and_then(|name| name.split_once('-')) else { return Ok(false) };
+    let Ok(sequence_number) = sequence.parse::<u64>() else { return Ok(false) };
+    if sequence.len() != 20 || !sequence.bytes().all(|b| b.is_ascii_digit()) || sequence_number == 0 {
+        return Ok(false);
+    }
+    Ok(planner.remote.received.get(&format!("{author}-{sequence_number}")).is_some_and(|receipt| receipt.digest == digest))
+}
 /// Call only after hash verification, causal certification and successful merge.
 pub fn consume(planner: &mut Planner, root: &str, key: &str) -> Result<()> {
     if planner.scan.checkpoints.len() >= MAX_RECORDS && !consumed(planner, root, key)? {
@@ -34,6 +48,12 @@ pub struct Audit {
     pages: usize,
 }
 impl Audit {
+    pub fn complete(&mut self) {
+        self.state.complete = true;
+    }
+    pub fn cursor(&self) -> &AppendAudit {
+        &self.state
+    }
     pub fn new(scan: &AppendScan, requested: bool) -> Result<Self> {
         let mut state = scan.audit.clone();
         if requested && state.complete {
@@ -95,6 +115,35 @@ impl Audit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_an_exact_acknowledged_receipt_skips_historical_body_reconstruction() {
+        use lightcraft_catalog::replication::{AppendProgress, Change, SyncState};
+        let mut remote = SyncState::new("library".into(), "author".into(), "cloud".into()).unwrap();
+        remote.protocol = lightcraft_catalog::replication::SyncProtocol::AppendLog;
+        let mutation = remote
+            .enqueue(vec![Change { entity: "library:library".into(), field: "label.Red".into(), base: None, value: serde_json::json!("red") }])
+            .unwrap()
+            .unwrap();
+        let mut local = remote.clone();
+        local.pending.clear();
+        local.append = Some(Box::new(AppendProgress {
+            version: 1,
+            manifest: crate::assets::sha256(&super::super::manifest("library").unwrap()).0,
+            frontiers: remote.clock.clone(),
+            remote: remote.portable(),
+            gaps: Default::default(),
+            scan: Default::default(),
+        }));
+        let planner = Planner::new(&local).unwrap();
+        let root = super::super::root("prefix", "library").unwrap();
+        let key = super::super::mutation_key("prefix", &mutation).unwrap();
+        assert!(known_operation(&planner, &root, &key).unwrap());
+        let mut fork = mutation;
+        fork.changes[0].value = serde_json::json!("fork");
+        assert!(!known_operation(&planner, &root, &super::super::mutation_key("prefix", &fork).unwrap()).unwrap());
+        assert!(!known_operation(&planner, &root, &key.replace("00000000000000000001-", "1-")).unwrap());
+        assert!(known_operation(&planner, "other", &key).is_err());
+    }
     #[test]
     fn remote_checkpoint_hints_never_become_local_consumption_evidence() {
         let local = lightcraft_catalog::replication::SyncState::new("library".into(), "a".into(), "storage".into()).unwrap();

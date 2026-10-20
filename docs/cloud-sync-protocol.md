@@ -448,11 +448,26 @@ editing and export still work while publication is unavailable.
 
 Use `ListObjectsV2` with the exact library `ops/` prefix and delimiter `/` to discover authors.
 For each author, list the suffix strictly after its last contiguous remotely verified sequence,
-then fetch unknown records. Previously verified identities are checked separately by resumable audits. Follow every continuation page. Restart discovery
-from the root on later scans so an author inserted alphabetically before an earlier page
-cursor is still found. Start or continue a budgeted identity audit at startup, explicit Sync now and
-periodically to detect an older duplicate/fork below an incremental boundary. An individual
-Sync now completes one slice; it does not promise a complete historical audit.
+then fetch unknown records. Previously verified identities are checked by a separate
+resumable historical discovery cursor. Follow every continuation page. Restart author
+root discovery on later scans so a newly inserted earlier author is found. Ordinary Sync
+now requests bounded cached/known-key historical discovery; scheduled discovery starts
+at most every five minutes and continues interrupted slices. A different hash at an old
+sequence must be fetched and causally checked. An exact certified receipt or consumed
+checkpoint key can skip reconstructing accepted effects, without claiming current remote
+byte integrity.
+
+`cloud.verifyHistory` performs a separate read-only fresh verification. It never publishes,
+materializes changes or acknowledges pending mutations. Persist its destination-bound
+weekly deadline, independent append cursor and whole-slice reservation before remote I/O.
+Each slice admits at most 128 HTTP requests/128 MiB of bounded responses; nested receipts
+and listings share admission. Limit reservations to four per persisted 24-hour window and
+continue incomplete scheduled slices at least 15 minutes apart. Restart, cancellation and
+failure do not refund allowance. Save successful append keys before subsequent requests.
+Fresh reads bypass durable body caches, and verification failures cannot be cleared by
+ordinary cached synchronization. Validate required known-key gaps and archive branch
+children as well as listed objects. See [cloud-storage-implementation.md](cloud-storage-implementation.md#incremental-sync-and-remote-verification)
+for adapter scope, deferred completion, corruption-detection tradeoffs and head-reader limits.
 
 Maintain separate concepts:
 
@@ -614,15 +629,15 @@ For a new B2 library, configure native storage, then enable synchronization **be
 import: `cloud.syncEnable {"connection":"personal","protocol":"append-log-v1"}`. Join other
 catalogs with the same prefix, library ID and protocol. The shared setup dialog offers
 Append-only (Backblaze B2). Status reports author frontiers, gaps, pending work and conflicts;
-there is no append generation or shared-head cursor. Sync now requests an identity-audit slice;
-automatic polling uses exclusive verified author tails and starts audits every five minutes and on startup.
-An unfinished audit continues on subsequent polls without restarting its durable key cursor.
-The next automatic scan starts five seconds after completion, leaving time for explicit retry
-even when a remote scan lasts longer than the interval.
+there is no append generation or shared-head cursor. Sync now is incremental, with bounded
+known-key/cached historical discovery. Its discovery cursor and fresh verification cursor
+are separate; neither is publication authority. Automatic polling remains 60 seconds during
+activity and 15 minutes after more than 60 seconds of inactivity, measured from completion.
+Historical discovery's persisted five-minute deadline does not trigger fresh body downloads.
 All checkpoint pages are discovered; unseen immutable checkpoints are hash-verified, causally certified
 and merged once per device before their exact keys are saved with remote progress. Their device-local
 consumption set and audit cursor are never adopted from remote checkpoints, transmitted in checkpoints
-or included in publication-proof identity. Later audits reverify consumed checkpoints. No listing-page
+or included in publication-proof identity. Fresh verification rechecks consumed checkpoints. No listing-page
 snapshot guarantee is assumed. New keys inserted before an audit cursor are found in a later round.
 Staged dependencies are capped at 64 MiB, and up to 1,000 gap IDs are shown. Pending dependencies
 still exist in the retained log and are rediscovered on the next scan.

@@ -27,9 +27,13 @@ fn timestamp_ms() -> Option<u64> {
     let now = js_sys::Date::now();
     if now.is_finite() && (0. ..=8_640_000_000_000_000.).contains(&now) { Some(now as u64) } else { None }
 }
+enum Completion {
+    Synced(Outcome),
+    Verified(Value),
+}
 enum Stage {
-    SaveThenSync { checkpoint: bool, audit: bool },
-    Network { ready: Rc<RefCell<Option<Result<Outcome, CloudFailure>>>>, revision: u64, connection: String },
+    SaveThenSync { checkpoint: bool, audit: bool, automatic: bool, verification: bool },
+    Network { ready: Rc<RefCell<Option<Result<Completion, CloudFailure>>>>, revision: u64, connection: String },
     Ack { receipt: AckReceipt, result: Value },
     Received { result: Value },
     Acquire { command: String, params: Value, sources: Vec<(PhotoId, Source)>, lease: ByteLease },
@@ -37,6 +41,7 @@ enum Stage {
 struct Job {
     /// A format upgrade/rejoin; the result, not this flag, selects its protocol.
     migrating: bool,
+    verification: bool,
     upgrade: Option<super::upgrade::Request>,
     guard: TaskGuard,
     owner: Arc<()>,
@@ -74,7 +79,6 @@ struct Data {
     paused: bool,
     next_poll: Option<web_time::Instant>,
     cadence: lightcraft_engine::cloud_status::PollCadence,
-    last_audit: f64,
     health: lightcraft_engine::cloud_status::PollHealth,
     media_health: lightcraft_engine::cloud_status::ResourceHealth,
     /// Why the last completed scan could not publish (maintenance, a moved library, a newer
@@ -201,6 +205,7 @@ impl Host {
                 "endpoint":v.connection.bucket_root.as_deref().unwrap_or(""),"profile":"","storageOrigin":v.connection.storage_origin,"authorizeEndpoint":v.connection.authorize_endpoint,"bucketRoot":v.connection.bucket_root})).collect::<Vec<_>>()}))),
             "cloud.syncEnable" => Some(self.enable(s, p)),
             "cloud.sync" => Some(self.start(s, p)),
+            "cloud.verifyHistory" => Some(self.start_job(s, p, None, false, true).map_err(|e| self.start_failure(e))),
             "cloud.upgradeLibrary" => Some(self.migrate(s, p)),
             "cloud.migrateAppend" => Some({
                 let mut p = p.clone();
@@ -399,7 +404,7 @@ impl Host {
         Ok(out)
     }
     fn start(&self, s: &mut Session, p: &Value) -> Result<Value, String> {
-        let result = self.start_job(s, p, None);
+        let result = self.start_job(s, p, None, false, false);
         if result.is_ok() {
             self.data.borrow_mut().health.reset_retries();
         }
@@ -417,9 +422,16 @@ impl Host {
             }
         }
     }
-    fn start_job(&self, s: &mut Session, p: &Value, upgrade: Option<super::upgrade::Request>) -> Result<Value, StartError> {
+    fn start_job(
+        &self,
+        s: &mut Session,
+        p: &Value,
+        upgrade: Option<super::upgrade::Request>,
+        automatic: bool,
+        verification: bool,
+    ) -> Result<Value, StartError> {
         let migrating = upgrade.is_some_and(|r| r != super::upgrade::Request::Cancel);
-        if s.cloud_paused && upgrade.is_none() {
+        if s.cloud_paused && upgrade.is_none() && !verification {
             return Err(StartError::guard("cloud syncing is paused on this device; choose Resume Syncing (cloud.resume) first"));
         }
         {
@@ -442,18 +454,37 @@ impl Host {
             Some(value) => value.as_bool().ok_or_else(|| StartError::guard("checkpoint must be true or false"))?,
             None => false,
         };
-        let audit = p.get("audit").map(|v| v.as_bool().ok_or_else(|| StartError::guard("audit must be true or false"))).transpose()?.unwrap_or(true);
+        let audit = p.get("audit").map(|v| v.as_bool().ok_or_else(|| StartError::guard("audit must be true or false"))).transpose()?.unwrap_or(false)
+            || verification;
+        if audit && (checkpoint || upgrade.is_some()) {
+            return Err(StartError::guard("verify history separately from maintenance"));
+        }
         // Rejected scheduling requests must not claim/rotate a writer or mutate the catalog.
-        self.claim_owner_typed(s)?;
+        if !verification {
+            self.claim_owner_typed(s)?;
+        }
         s.persist().map_err(CloudFailure::from)?;
         let mut data = self.data.borrow_mut();
-        let guard = s.activity.start("cloudSync", if upgrade.is_some() { "Upgrade cloud library" } else { "Synchronize cloud library" }, Cancel::Yes);
+        let guard = s.activity.start(
+            "cloudSync",
+            if upgrade.is_some() {
+                "Upgrade cloud library"
+            } else if verification {
+                "Verify remote history"
+            } else {
+                "Synchronize cloud library"
+            },
+            Cancel::Yes,
+        );
         let task = guard.id();
-        let audit = audit || data.last_audit == 0. || js_sys::Date::now() - data.last_audit >= 300_000.;
-        if audit {
-            data.last_audit = js_sys::Date::now();
-        }
-        data.jobs.push(Job { migrating, upgrade, guard, owner: s.library_token(), stage: Stage::SaveThenSync { checkpoint, audit } });
+        data.jobs.push(Job {
+            migrating,
+            verification,
+            upgrade,
+            guard,
+            owner: s.library_token(),
+            stage: Stage::SaveThenSync { checkpoint, audit, automatic, verification },
+        });
         data.sync_running = true;
         data.paused = false;
         data.preparing_migration = false;
@@ -477,7 +508,7 @@ impl Host {
             (_, Some("rebase")) => super::upgrade::Request::Rebase,
             _ => return Err("upgrade expects {plan?: \"appendLog\" | \"rebase\", cancel?: bool}".into()),
         };
-        self.start_job(s, p, Some(request)).map_err(|error| self.start_failure(error))
+        self.start_job(s, p, Some(request), false, false).map_err(|error| self.start_failure(error))
     }
     fn prepare_migration(&self, s: &Session) -> Result<Value, String> {
         if !self.can_upgrade(s) {
@@ -543,6 +574,7 @@ impl Host {
         }
         self.data.borrow_mut().jobs.push(Job {
             migrating: false,
+            verification: false,
             upgrade: None,
             guard,
             owner: s.library_token(),
@@ -578,7 +610,9 @@ impl Host {
                         if current_owner {
                             data.paused = data.preparing_migration;
                             match &result {
-                                Ok(value) if value["refreshRequired"] != true => data.health.success(timestamp_ms(), Some(job.guard.id())),
+                                Ok(value) if value["refreshRequired"] != true && (!job.verification || value["complete"] == true) => {
+                                    data.health.success(timestamp_ms(), Some(job.guard.id()))
+                                }
                                 Err(_) if job.guard.is_cancelled() => {
                                     if job.migrating {
                                         data.health.fail_migration(
@@ -608,7 +642,9 @@ impl Host {
                                 }
                                 _ => {}
                             }
-                            if let Ok(value) = &result {
+                            if let Ok(value) = &result
+                                && !job.verification
+                            {
                                 data.publication_blocked = value.get("publicationBlocked").and_then(Value::as_str).map(str::to_owned);
                                 data.publication_failure = value.get("publicationFailure").and_then(|v| serde_json::from_value(v.clone()).ok());
                             }
@@ -661,7 +697,7 @@ impl Host {
                 let mut data = self.data.borrow_mut();
                 data.cadence.scanned(web_time::Instant::now());
                 data.next_poll = None;
-            } else if let Err(error) = self.start_job(&mut app.session, &json!({"wait":false,"audit":false}), None) {
+            } else if let Err(error) = self.start_job(&mut app.session, &json!({"wait":false,"audit":false}), None, true, false) {
                 crate::safety::notice(self.start_failure(error));
             }
         }
@@ -678,7 +714,7 @@ impl Host {
     fn advance(&self, job: &mut Job, app: &mut LightcraftApp, flushing: bool) -> Option<Result<Value, CloudFailure>> {
         let result = (|| -> Result<Option<Value>, CloudFailure> {
             match &mut job.stage {
-                Stage::SaveThenSync { checkpoint, audit } => {
+                Stage::SaveThenSync { checkpoint, audit, automatic, verification } => {
                     if job.guard.is_cancelled() {
                         return Err(CloudFailure::new(FailureKind::Cancelled, "synchronization cancelled; pending work retained"));
                     }
@@ -697,6 +733,9 @@ impl Host {
                     let backend = self.backend.clone().ok_or("browser storage is unavailable")?;
                     let checkpoint = *checkpoint;
                     let audit = *audit;
+                    let automatic = *automatic;
+                    let verification = *verification;
+                    let provider = provider.with_metadata(backend.clone());
                     let upgrade = job.upgrade;
                     let owner = match upgrade {
                         Some(_) => Some(self.owner.clone().ok_or("persistent installation identity unavailable")?),
@@ -706,15 +745,35 @@ impl Host {
                     let result = ready.clone();
                     job.guard.handle().detail(if upgrade.is_some() {
                         "Pausing library publication, verifying committed history and writing the upgraded format"
+                    } else if verification {
+                        "Checking remote history"
                     } else {
                         "Reconciling and publishing saved library changes"
                     });
                     wasm_bindgen_futures::spawn_local(async move {
-                        *result.borrow_mut() = Some(if let (Some(request), Some(owner)) = (upgrade, owner) {
-                            super::upgrade::run(&provider, &local, &owner, request).await
-                        } else {
-                            protocol::synchronize(&provider, &backend, &local, checkpoint, audit).await
-                        });
+                        *result.borrow_mut() = Some(
+                            async {
+                                if let (Some(request), Some(owner)) = (upgrade, owner) {
+                                    return super::upgrade::run(&provider, &local, &owner, request).await.map(Completion::Synced);
+                                }
+                                let mut run =
+                                    super::verification::Run::open(backend.clone(), &provider, &local, timestamp_ms().unwrap_or(0), audit, automatic)
+                                        .await?;
+                                if verification {
+                                    return run.verify(&provider, &local).await.map(Completion::Verified);
+                                }
+                                let provider = provider.with_discovery(run.discovery(!automatic).await?);
+                                let outcome = protocol::synchronize(&provider, &backend, &local, checkpoint, false).await?;
+                                if run.selected {
+                                    run.verify(&provider, &local).await?;
+                                }
+                                if run.failed() {
+                                    return Err(CloudFailure::integrity("Finish Verify remote history before continuing synchronization."));
+                                }
+                                Ok(Completion::Synced(outcome))
+                            }
+                            .await,
+                        );
                         crate::web::request_repaint();
                     });
                     job.stage = Stage::Network { ready, revision, connection };
@@ -722,12 +781,21 @@ impl Host {
                 }
                 Stage::Network { ready, revision, connection } => {
                     let Some(outcome) = ready.borrow_mut().take() else { return Ok(None) };
-                    let outcome = outcome?;
+                    let completion = outcome?;
+                    if let Completion::Verified(value) = completion {
+                        if job.guard.is_cancelled() {
+                            return Err(CloudFailure::new(FailureKind::Cancelled, "verification cancelled"));
+                        }
+                        return Ok(Some(value));
+                    }
+                    let Completion::Synced(outcome) = completion else {
+                        return Err(CloudFailure::local("invalid sync completion"));
+                    };
                     if job.guard.is_cancelled() {
                         return Err(CloudFailure::new(FailureKind::Cancelled, "synchronization cancelled; pending work retained"));
                     }
                     if app.session.interaction.is_some() {
-                        *ready.borrow_mut() = Some(Ok(outcome));
+                        *ready.borrow_mut() = Some(Ok(Completion::Synced(outcome)));
                         return Ok(None);
                     }
                     let same_snapshot = matches!(&outcome, Outcome::Unchanged { state, position, .. } if app.session.catalog.revision == *revision

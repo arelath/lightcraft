@@ -217,12 +217,19 @@ impl S3Connection {
         if max > MAX_CHECKPOINT {
             return Err(AssetError::Invalid("metadata limit exceeds 64 MiB".into()));
         }
+        if let Some(budget) = &self.metadata.budget {
+            budget.admit(max.max(16 << 10))?;
+        }
         let response =
             self.request(Request { method: Method::Get, key, query: &[], headers: &[], payload: &sha256(b"").0, body: None }, cancel, &mut |_| {})?;
         if response.status == 404 {
             return Ok(None);
         }
-        read_reply(response, max, cancel).map(Some)
+        let reply = read_reply(response, max, cancel)?;
+        if let Some(budget) = &self.metadata.budget {
+            budget.read(max.max(16 << 10), reply.bytes.len());
+        }
+        Ok(Some(reply))
     }
 
     pub fn put_small(&self, key: &str, bytes: &[u8], condition: PutCondition<'_>, cancel: &AtomicBool) -> Result<String> {
@@ -299,6 +306,9 @@ impl S3Connection {
         cancel: &AtomicBool,
     ) -> Result<crate::cloud_append::listing::Page> {
         list.validate(&self.prefix)?;
+        if let Some(budget) = &self.metadata.budget {
+            budget.admit(4 << 20)?;
+        }
         let mut query = vec![("list-type", "2"), ("max-keys", "1000"), ("prefix", list.prefix.as_str())];
         if list.delimiter {
             query.push(("delimiter", "/"));
@@ -315,6 +325,9 @@ impl S3Connection {
             &mut |_| {},
         )?;
         let reply = read_reply(response, 4 << 20, cancel)?;
+        if let Some(budget) = &self.metadata.budget {
+            budget.read(4 << 20, reply.bytes.len());
+        }
         crate::cloud_append::listing::parse(&reply.bytes, list)
     }
 

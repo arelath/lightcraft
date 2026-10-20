@@ -100,6 +100,10 @@ pub struct Provider {
     // An ephemeral login token, deliberately excluded from Serialize and browser storage.
     token: Rc<RefCell<Option<String>>>,
     cancel: Arc<AtomicBool>,
+    pub(super) metadata: Option<Rc<super::metadata::Cache>>,
+    pub(super) verification_budget: Option<Arc<lightcraft_engine::cloud_verification::Budget>>,
+    pub(super) fresh_history: bool,
+    pub(super) skip_discovery: bool,
 }
 pub struct Reply {
     pub status: u16,
@@ -128,10 +132,30 @@ impl Provider {
         if token.as_ref().is_some_and(|v| v.len() > 16384 || v.chars().any(char::is_control)) {
             return Err("invalid reauthorization token".into());
         }
-        Ok(Self { connection, token: Rc::new(RefCell::new(token)), cancel: Arc::new(AtomicBool::new(false)) })
+        Ok(Self {
+            connection,
+            token: Rc::new(RefCell::new(token)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            metadata: None,
+            verification_budget: None,
+            fresh_history: false,
+            skip_discovery: true,
+        })
     }
     pub fn with_cancel(&self, cancel: Arc<AtomicBool>) -> Self {
-        Self { connection: self.connection.clone(), token: self.token.clone(), cancel }
+        Self { cancel, ..self.clone() }
+    }
+    pub(super) fn with_metadata(&self, backend: Backend) -> Self {
+        Self { metadata: Some(Rc::new(super::metadata::Cache::new(backend, &self.connection))), ..self.clone() }
+    }
+    pub(super) fn verification_provider(&self) -> Self {
+        Self { fresh_history: true, verification_budget: Some(Arc::new(lightcraft_engine::cloud_verification::Budget::default())), ..self.clone() }
+    }
+    pub(super) fn fresh_provider(&self) -> Self {
+        Self { fresh_history: true, ..self.clone() }
+    }
+    pub(super) fn with_discovery(&self, enabled: bool) -> Self {
+        Self { skip_discovery: !enabled, ..self.clone() }
     }
     async fn authorize(
         &self,
@@ -252,6 +276,10 @@ impl Provider {
             if self.cancel.load(Ordering::Relaxed) {
                 return Err(CloudFailure::new(FailureKind::Cancelled, "cloud transfer cancelled; pending work retained"));
             }
+            if let Some(budget) = &self.verification_budget {
+                budget.admit(16 << 10).map_err(CloudFailure::from)?;
+                budget.admit(limit.max(16 << 10)).map_err(CloudFailure::from)?;
+            }
             let authorized = self.authorize(method, key, version, condition, data, list, immutable).await?;
             let options = RequestInit::new();
             options.set_method(method);
@@ -289,6 +317,9 @@ impl Provider {
             }
             let etag = response.headers().get("ETag").map_err(js_error)?;
             let bytes = if matches!(status, 200 | 201 | 204) { body(&response, limit, &self.cancel).await? } else { Vec::new() };
+            if let Some(budget) = &self.verification_budget {
+                budget.read(limit.max(16 << 10), bytes.len());
+            }
             return Ok(Reply { status, bytes, etag });
         }
         Err("cloud URL refresh exhausted; pending work retained".into())

@@ -12,6 +12,16 @@ are not available to this adapter. A user-controlled, stateless authorization en
 requests for one bucket/prefix; it does not store library metadata. Metadata remains in the
 direct bucket protocol described in [cloud-sync-protocol.md](cloud-sync-protocol.md).
 
+Ordinary Sync now uses incremental append discovery and a small disposable body snapshot.
+Exact acknowledged keys need no historical body reads; a different hash at an older sequence
+still undergoes causal/fork validation. Fresh **More → Verify remote history** is read-only,
+with its own durable deadline, cursor and whole-slice request/byte reservation in OPFS or
+IndexedDB. It requires Web Locks for cross-owner schedule serialization and saves the
+reservation before signer/storage I/O. Fresh verification bypasses cached bodies; a detected
+history failure cannot be cleared by an ordinary cached sync. The 60-second active/15-minute
+inactive polling cadence is unchanged. See [incremental sync and remote verification](cloud-storage-implementation.md#incremental-sync-and-remote-verification)
+for limits, weekly scheduling, delayed remote corruption detection and conditional-head scope.
+
 Connection configuration contains `id`, `prefix`, `authorizeEndpoint`, `storageOrigin`, and optional `bucketRoot`.
 It is device-local. Login tokens and returned signed URLs stay in memory. The authorization
 endpoint and storage origin require HTTPS; loopback HTTP is supported for development.

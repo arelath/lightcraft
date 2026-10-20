@@ -76,6 +76,68 @@ fn history_gets(f: &Fixture) -> Vec<String> {
         .collect()
 }
 #[test]
+fn fifty_known_operations_across_ninety_six_idle_polls_make_no_history_body_requests() {
+    let f = Fixture::new();
+    let (_, b, _) = initialize(&f);
+    let baseline = f.state.lock().unwrap().objects.keys().filter(|key| key.contains("/ops/")).count();
+    let (mut first, operations) = seed_checkpoint(&f, &b, 50 - baseline);
+    assert_eq!(operations, 50);
+    f.state.lock().unwrap().list_page_size = 1000;
+    ok(&f, &b, &[("cloud.sync", json!({}))]);
+    f.state.lock().unwrap().requests.clear();
+    let commands: Vec<_> = (0..96).map(|_| ("cloud.sync", json!({}))).collect();
+    ok(&f, &b, &commands);
+    assert!(history_gets(&f).is_empty(), "routine history discovery must reuse verified bytes");
+    let state = f.state.lock().unwrap();
+    assert_eq!(state.requests.len(), 96 * 8, "two authors, one-page listings; six incremental requests and two historical listings per poll");
+    assert_eq!(state.signature_errors, 0);
+    drop(state);
+    // Newly introduced keys behind a frontier are still validated and rejected.
+    first.changes[0].value = json!("late conflicting historical identity");
+    let key = format!("/photos/{}", lightcraft_engine::cloud_append::mutation_key("library", &first).unwrap());
+    f.state.lock().unwrap().objects.insert(key, lightcraft_engine::cloud_append::encode(&first).unwrap());
+    let before = catalog(&b).to_snapshot();
+    let (out, rows) = f.run(&b, &[("cloud.sync", json!({}))]);
+    assert!(!out.status.success(), "{rows:?}");
+    assert!(rows[0]["error"].to_string().contains("collision"), "{rows:?}");
+    assert_eq!(catalog(&b).to_snapshot(), before);
+}
+#[test]
+fn verification_is_read_only_and_fresh_corruption_remains_latched_until_reverified() {
+    let f = Fixture::new();
+    let (_, b, _) = initialize(&f);
+    seed_checkpoint(&f, &b, 6);
+    ok(&f, &b, &[("cloud.sync", json!({}))]);
+    let key = f.state.lock().unwrap().objects.keys().find(|key| key.contains("/ops/000-history/")).unwrap().clone();
+    let bytes = f.state.lock().unwrap().objects.insert(key.clone(), b"damaged remote bytes".to_vec()).unwrap();
+    ok(&f, &b, &[("cloud.sync", json!({}))]); // Cached discovery deliberately delays remote corruption detection.
+    let before = catalog(&b).to_snapshot();
+    let (out, rows) = f.run(&b, &[("cloud.verifyHistory", json!({}))]);
+    assert!(!out.status.success(), "{rows:?}");
+    assert_eq!(catalog(&b).to_snapshot(), before);
+    f.state.lock().unwrap().requests.clear();
+    let (out, _) = f.run(&b, &[("cloud.sync", json!({}))]);
+    assert!(!out.status.success());
+    assert!(f.state.lock().unwrap().requests.is_empty(), "cached synchronization cannot clear a known verification failure");
+    f.state.lock().unwrap().objects.insert(key, bytes);
+    let rows = ok(&f, &b, &[("cloud.verifyHistory", json!({}))]);
+    assert_eq!(rows[0]["result"]["complete"], true);
+    ok(&f, &b, &[("photo.rate", json!({"ids":[1],"rating":4}))]);
+    let before = catalog(&b).to_snapshot();
+    assert!(!catalog(&b).sync_state().unwrap().pending.is_empty());
+    let remote = f.state.lock().unwrap().objects.clone();
+    let rows = ok(&f, &b, &[("cloud.verifyHistory", json!({}))]);
+    assert_eq!(rows[0]["result"]["complete"], true);
+    assert_eq!(catalog(&b).to_snapshot(), before);
+    assert_eq!(f.state.lock().unwrap().objects, remote);
+    let missing = f.state.lock().unwrap().objects.keys().find(|key| key.contains("/ops/000-history/")).unwrap().clone();
+    f.state.lock().unwrap().objects.remove(&missing);
+    let (out, rows) = f.run(&b, &[("cloud.verifyHistory", json!({}))]);
+    assert!(!out.status.success(), "a missing known object cannot vanish from a verification listing: {rows:?}");
+    assert_eq!(catalog(&b).to_snapshot(), before);
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+}
+#[test]
 fn durable_bodies_reduce_repeated_gap_reads_without_turning_a_fresh_audit_into_cached_proof() {
     let f = Fixture::new();
     let (a, b, _) = initialize(&f);
@@ -120,18 +182,20 @@ fn consumed_checkpoints_and_covered_history_are_not_downloaded_by_ordinary_polls
         let (_, b, _) = initialize(&f);
         let (_, operations) = seed_checkpoint(&f, &b, count);
         // One requested audit, enough slices to finish it, then three idle polls.
-        let mut commands = vec![("cloud.sync", json!({"audit":true}))];
+        let mut commands = vec![("cloud.sync", json!({}))];
         commands.extend((0..(operations / 64 + 4)).map(|_| ("cloud.sync", json!({"audit":false}))));
         let rows = ok(&f, &b, &commands);
         let progress = catalog(&b).sync_state().unwrap().append.clone().unwrap();
-        assert!(progress.scan.audit.complete);
-        assert_eq!(progress.scan.audit.round, 2);
+        assert!(progress.scan.audit.round > 0);
         assert_eq!(progress.scan.checkpoints.len(), 1);
         let gets = history_gets(&f);
-        assert_eq!(gets.len(), operations + 1, "history size {count}: {gets:?}");
+        assert_eq!(
+            gets.len(),
+            1,
+            "certified checkpoint receipts identify known operations without body reconstruction; history size {count}: {gets:?}"
+        );
         assert_eq!(gets.iter().collect::<std::collections::BTreeSet<_>>().len(), gets.len(), "no repeated history GET within an audit pass");
-        assert!(rows.iter().all(|row| row["result"]["audit"]["round"] == 2), "{rows:?}");
-        assert!(rows.iter().rev().take(3).all(|row| row["result"]["audit"]["complete"] == true));
+        assert!(rows.iter().all(|row| row["result"]["gaps"].as_array().unwrap().is_empty()), "{rows:?}");
         assert_eq!(f.state.lock().unwrap().signature_errors, 0);
         let before = catalog(&b).sync_state().unwrap().clone();
         {
@@ -139,7 +203,7 @@ fn consumed_checkpoints_and_covered_history_are_not_downloaded_by_ordinary_polls
             let checkpoint = remote.objects.keys().find(|key| key.contains("/checkpoints/")).unwrap().clone();
             remote.objects.insert(checkpoint, b"corrupt consumed checkpoint".to_vec());
         }
-        let (out, _) = f.run(&b, &[("cloud.sync", json!({"audit":true}))]);
+        let (out, _) = f.run(&b, &[("cloud.verifyHistory", json!({}))]);
         assert!(!out.status.success(), "deliberate later verification still detects corruption");
         assert_eq!(catalog(&b).sync_state().unwrap(), &before);
     }
@@ -149,23 +213,36 @@ fn bounded_audit_resumes_after_restart_and_rejects_an_old_identity_fork() {
     let f = Fixture::new();
     let (_, b, _) = initialize(&f);
     let (mut first, operations) = seed_checkpoint(&f, &b, 160);
+    // Warm discovery without claiming a fresh verification. Verification owns an
+    // independent durable cursor and never changes the catalog or pending IDs.
+    ok(&f, &b, &[("cloud.sync", json!({})), ("cloud.sync", json!({})), ("cloud.sync", json!({}))]);
+    let before_verify = catalog(&b).to_snapshot();
+    f.state.lock().unwrap().requests.clear();
     let mut cursor = None;
-    for slice in 0..8 {
+    let mut complete = false;
+    for slice in 0..4 {
         let before = history_gets(&f).len();
-        ok(&f, &b, &[("cloud.sync", json!({"audit":true}))]);
-        let loaded = catalog(&b);
-        let progress = loaded.sync_state().unwrap().append.as_ref().unwrap();
-        assert_eq!(progress.scan.audit.round, 2);
+        let rows = ok(&f, &b, &[("cloud.verifyHistory", json!({}))]);
+        let path = std::fs::read_dir(b.join("remote-verification-v1"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension().is_some_and(|e| e == "json"))
+            .unwrap();
+        let schedule: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(schedule["cursor"]["round"], 1);
         assert!(history_gets(&f).len() - before <= 64);
-        assert!(progress.scan.audit.after > cursor);
-        cursor = progress.scan.audit.after.clone();
-        if progress.scan.audit.complete {
+        let after = schedule["cursor"]["after"].as_str().map(str::to_owned);
+        assert!(after > cursor);
+        cursor = after;
+        assert_eq!(catalog(&b).to_snapshot(), before_verify);
+        complete = rows[0]["result"]["complete"] == true;
+        if complete {
             assert!(slice > 0);
             break;
         }
     }
+    assert!(complete);
     let loaded = catalog(&b);
-    assert!(loaded.sync_state().unwrap().append.as_ref().unwrap().scan.audit.complete);
     let gets = history_gets(&f);
     assert_eq!(gets.len(), operations + 1);
     assert_eq!(gets.iter().collect::<std::collections::BTreeSet<_>>().len(), gets.len());
@@ -173,7 +250,7 @@ fn bounded_audit_resumes_after_restart_and_rejects_an_old_identity_fork() {
     let fork_key = format!("/photos/{}", lightcraft_engine::cloud_append::mutation_key("library", &first).unwrap());
     f.state.lock().unwrap().objects.insert(fork_key, lightcraft_engine::cloud_append::encode(&first).unwrap());
     let before = loaded.sync_state().unwrap().clone();
-    let (out, rows) = f.run(&b, &[("cloud.sync", json!({"audit":true}))]);
+    let (out, rows) = f.run(&b, &[("cloud.sync", json!({}))]);
     assert!(!out.status.success());
     assert!(rows[0]["error"].to_string().contains("collision"), "{rows:?}");
     assert_eq!(catalog(&b).sync_state().unwrap(), &before, "failed audit never saves its cursor or discards local work");

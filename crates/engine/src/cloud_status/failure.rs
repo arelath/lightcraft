@@ -192,7 +192,7 @@ impl From<&crate::assets::AssetError> for CloudFailure {
             AssetError::Missing | AssetError::Invalid(_) => FailureKind::InvalidHistory,
             AssetError::Disk(_) => FailureKind::LocalResource,
             AssetError::Unsupported(_) => FailureKind::Unsupported,
-            AssetError::Capacity(_) => FailureKind::Capacity,
+            AssetError::Capacity(_) | AssetError::HistoryBudget => FailureKind::Capacity,
             AssetError::Moved(_) => {
                 return Self::new(FailureKind::Unsupported, error.to_string()).with_recovery(RETIRED).with_remedy(Recovery::Rejoin);
             }

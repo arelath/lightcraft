@@ -78,6 +78,8 @@ async fn synchronize_mode(
     receive_only: bool,
     legacy: bool,
 ) -> Result<Outcome, CloudFailure> {
+    let fresh_provider = (audit || checkpoint || receive_only).then(|| provider.fresh_provider());
+    let provider = fresh_provider.as_ref().unwrap_or(provider);
     if provider.connection.bucket_root.is_none() {
         return Err("append mode requires a configured bucketRoot and a signer supporting list/putImmutable".into());
     }
@@ -153,7 +155,7 @@ async fn synchronize_mode(
             return Err("too many append listing pages".into());
         }
     }
-    audit_history(provider, &mut planner, &root, audit || checkpoint || local.append.is_none(), &fetched).await?;
+    audit_history(provider, &mut planner, &root, !provider.skip_discovery || audit || checkpoint || receive_only, &fetched).await?;
     planner.drain().map_err(ce)?;
     super::history::hydrate(provider, &mut planner.remote, local, &mut planner.proofs).await?;
     let mut pending: Vec<_> = if can_publish { local.pending.values().collect() } else { Vec::new() };
@@ -228,22 +230,29 @@ pub async fn migrate(provider: &Provider, local: &SyncState) -> Result<Outcome, 
     Ok(Outcome::append(p, Default::default()))
 }
 
-async fn read_checkpoint(provider: &Provider, planner: &mut core::Planner, root: &str, key: &str) -> Result<usize, CloudFailure> {
-    let bytes = get(provider, key, core::MAX_OBJECT).await?;
-    core::immutable_metadata(key, &bytes).map_err(ce)?;
-    let p: lightcraft_engine::catalog::replication::AppendProgress = serde_json::from_slice(&bytes).map_err(|_| "malformed append checkpoint")?;
-    p.validate(&planner.remote.library).map_err(CloudFailure::from)?;
-    if p.manifest != sha256(&core::manifest(&planner.remote.library).map_err(ce)?).0 || !p.gaps.is_empty() {
-        return Err("incomplete append checkpoint".into());
-    }
+pub(super) async fn read_checkpoint(provider: &Provider, planner: &mut core::Planner, root: &str, key: &str) -> Result<usize, CloudFailure> {
+    let (p, size) = provider
+        .history_record(key, core::MAX_OBJECT, |bytes| {
+            let p: lightcraft_engine::catalog::replication::AppendProgress =
+                serde_json::from_slice(bytes).map_err(|_| "malformed append checkpoint")?;
+            p.validate(&planner.remote.library).map_err(CloudFailure::from)?;
+            if p.manifest != sha256(&core::manifest(&planner.remote.library).map_err(ce)?).0 || !p.gaps.is_empty() {
+                return Err("incomplete append checkpoint".into());
+            }
+            Ok(p)
+        })
+        .await?;
     let remote = super::history::certify(provider, &planner.remote, &p.remote, &mut planner.proofs).await?;
     planner.remote.merge(&remote).map_err(CloudFailure::from)?;
     core::discovery::consume(planner, root, key).map_err(ce)?;
-    Ok(bytes.len())
+    Ok(size)
 }
-async fn read_operation(provider: &Provider, planner: &mut core::Planner, key: &str) -> Result<usize, CloudFailure> {
-    let bytes = get(provider, key, lightcraft_engine::catalog::replication::MAX_MUTATION_BYTES).await?;
-    let mutation = core::decode_mutation(&provider.connection.prefix, &planner.remote.library, key, &bytes).map_err(ce)?;
+pub(super) async fn read_operation(provider: &Provider, planner: &mut core::Planner, key: &str) -> Result<usize, CloudFailure> {
+    let (mutation, size) = provider
+        .history_record(key, lightcraft_engine::catalog::replication::MAX_MUTATION_BYTES, |bytes| {
+            core::decode_mutation(&provider.connection.prefix, &planner.remote.library, key, bytes).map_err(ce)
+        })
+        .await?;
     if lightcraft_engine::catalog::replication::archive::covers(&planner.remote.archives, &mutation.revision.id()) {
         super::history::prove(provider, &planner.remote, &mutation, &mut planner.proofs).await?;
     }
@@ -251,7 +260,7 @@ async fn read_operation(provider: &Provider, planner: &mut core::Planner, key: &
     if planner.proofs.len() > 8192 {
         planner.proofs.clear();
     }
-    Ok(bytes.len())
+    Ok(size)
 }
 async fn audit_history(
     provider: &Provider,
@@ -288,6 +297,10 @@ async fn audit_history(
                 }
                 let size = if let Some(size) = fetched.get(&key) {
                     *size
+                } else if !provider.fresh_history
+                    && (namespace == "checkpoints" || core::discovery::known_operation(planner, root, &key).map_err(ce)?)
+                {
+                    0
                 } else if namespace == "checkpoints" {
                     read_checkpoint(provider, planner, root, &key).await?
                 } else {

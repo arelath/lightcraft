@@ -506,5 +506,5 @@ use crate::cloud_control::Control;
 mod legacy;
 mod worker;
 pub(crate) use worker::Coordinator;
-pub use worker::{Jobs, pause_publication, prepare_migration, resume_publication, start, start_migration};
+pub use worker::{Jobs, pause_publication, prepare_migration, resume_publication, start, start_migration, verify};
 pub(crate) use worker::{request_poll, retry_after_reconnect};

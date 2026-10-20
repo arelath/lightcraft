@@ -157,7 +157,14 @@ fn endpoint(raw: &str) -> Result<String> {
     }
     Ok(format!("https://{}", url.host))
 }
-fn request(destination: &str, url: &str, authorization: &str, body: Option<&Value>, cancel: &AtomicBool) -> Result<Value> {
+fn request(
+    destination: &str,
+    url: &str,
+    authorization: &str,
+    body: Option<&Value>,
+    cancel: &AtomicBool,
+    budget: Option<&crate::cloud_verification::Budget>,
+) -> Result<Value> {
     let url = Url::parse(url).map_err(http_error)?;
     throttle::check(&url, cancel)?;
     let encoded = body.map(serde_json::to_vec).transpose().map_err(|_| invalid("request"))?.unwrap_or_default();
@@ -167,6 +174,9 @@ fn request(destination: &str, url: &str, authorization: &str, body: Option<&Valu
     let mut bytes = Cursor::new(&encoded);
     let headers = vec![("authorization", authorization.into()), ("content-type", "application/json".into())];
     let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
+    if let Some(budget) = budget {
+        budget.admit(MAX_JSON)?;
+    }
     let mut response = crate::cloud_traffic::request(
         crate::cloud_traffic::Target {
             destination,
@@ -213,6 +223,9 @@ fn request(destination: &str, url: &str, authorization: &str, body: Option<&Valu
         result.try_reserve(size).map_err(|_| AssetError::Disk("not enough memory for Backblaze control response".into()))?;
         result.extend_from_slice(chunk.get(..size).ok_or(AssetError::Integrity)?);
     }
+    if let Some(budget) = budget {
+        budget.read(MAX_JSON, result.len());
+    }
     serde_json::from_slice(&result).map_err(|_| unconfirmed())
 }
 fn text(value: &Value, key: &str, max: usize) -> Result<String> {
@@ -246,7 +259,7 @@ fn authorize(c: &S3Connection, cancel: &AtomicBool, refresh: bool) -> Result<Arc
         crate::cloud_traffic::reuse(false);
         return Ok(auth);
     }
-    let value = request(&crate::cloud_traffic::destination(c), AUTH_URL, &basic(&credentials)?, None, cancel)?;
+    let value = request(&crate::cloud_traffic::destination(c), AUTH_URL, &basic(&credentials)?, None, cancel, c.metadata.budget.as_deref())?;
     let storage = value.get("apiInfo").and_then(|v| v.get("storageApi")).ok_or_else(|| invalid("account API"))?;
     let api = endpoint(&text(storage, "apiUrl", 512)?)?;
     let s3 = text(storage, "s3ApiUrl", 512)?;
@@ -284,6 +297,7 @@ fn bucket(c: &S3Connection, auth: &Auth, cancel: &AtomicBool) -> Result<Value> {
         &auth.token,
         Some(&json!({"accountId":auth.account,"bucketName":c.bucket,"bucketTypes":["allPrivate","allPublic"]})),
         cancel,
+        c.metadata.budget.as_deref(),
     )?;
     let buckets = reply.get("buckets").and_then(Value::as_array).filter(|v| v.len() == 1).ok_or_else(|| unsupported("bucket is unavailable"))?;
     let bucket = buckets.first().ok_or_else(|| unsupported("bucket is unavailable"))?;
@@ -401,7 +415,7 @@ fn validate_head(connection: &S3Connection, head: &crate::cloud_records::Head) -
 
 fn update(observed: &Observed, next: &Map<String, Value>, auth: &Auth, cancel: &AtomicBool) -> Result<()> {
     let body = json!({"accountId":auth.account,"bucketId":observed.bucket_id,"ifRevisionIs":observed.revision,"bucketInfo":next});
-    let reply = request(&observed.destination, &format!("{}/b2api/v4/b2_update_bucket", auth.api), &auth.token, Some(&body), cancel)?;
+    let reply = request(&observed.destination, &format!("{}/b2api/v4/b2_update_bucket", auth.api), &auth.token, Some(&body), cancel, None)?;
     if reply.get("bucketId").and_then(Value::as_str) != Some(observed.bucket_id.as_str())
         || reply.get("accountId").and_then(Value::as_str) != Some(auth.account.as_str())
         || reply.get("revision").and_then(Value::as_u64).is_none_or(|revision| revision <= observed.revision)
