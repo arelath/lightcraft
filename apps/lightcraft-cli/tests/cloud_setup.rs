@@ -51,7 +51,7 @@ fn b2_download_cap_is_not_reported_as_rejected_keys_even_for_an_empty_bucket() {
     f.state.lock().unwrap().download_cap = true;
     let refused = test_connection(&f, "acceptance");
     let message = refused["error"].as_str().unwrap();
-    assert!(message.contains("Backblaze B2 download limit reached"), "{refused}");
+    assert!(message.contains("Backblaze B2 usage limit reached"), "{refused}");
     assert!(message.contains("Caps & Alerts"), "{refused}");
     assert!(!message.contains("refused these keys"));
     let state = f.state.lock().unwrap();

@@ -145,6 +145,11 @@ pub fn resume(s: &mut Session, _: &Value) -> Result<Value> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        if let Some(library) = s.library.as_mut() {
+            for connection in library.cloud_connections()? {
+                let _ = connection.retry_admission();
+            }
+        }
         s.cloud_uploads.request_resume(true);
         crate::cloud_import::retry_library(s);
         crate::cloud_replication::resume_publication(s);

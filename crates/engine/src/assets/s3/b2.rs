@@ -19,7 +19,7 @@ const MAX_INFO: usize = 10_000;
 const MAX_AUTHORITY: u64 = 16 << 10;
 const AUTH_URL: &str = "https://api.backblazeb2.com/b2api/v4/b2_authorize_account";
 mod authority;
-mod throttle;
+
 fn unsupported(why: &str) -> AssetError {
     AssetError::Unsupported(format!("Backblaze library control {why}; cloud data and pending changes are retained"))
 }
@@ -38,6 +38,7 @@ struct Auth {
     api: String,
     token: String,
     writable: bool,
+    admission: crate::cloud_admission::Scope,
 }
 struct Cached {
     expires: Instant,
@@ -159,6 +160,7 @@ fn endpoint(raw: &str) -> Result<String> {
 }
 fn request(
     destination: &str,
+    admission: crate::cloud_admission::Scope,
     url: &str,
     authorization: &str,
     body: Option<&Value>,
@@ -166,7 +168,7 @@ fn request(
     budget: Option<&crate::cloud_verification::Budget>,
 ) -> Result<Value> {
     let url = Url::parse(url).map_err(http_error)?;
-    throttle::check(&url, cancel)?;
+    admission.check(cancel)?;
     let encoded = body.map(serde_json::to_vec).transpose().map_err(|_| invalid("request"))?.unwrap_or_default();
     if encoded.len() > MAX_JSON {
         return Err(invalid("request size"));
@@ -199,11 +201,12 @@ fn request(
         &limits,
         &mut |_| {},
     )
-    .map_err(http_error)?;
+    .map_err(http_error)?
+    .admitted(admission);
+    super::error::provider_limit(&mut response, cancel)?;
     match response.status {
         200 => {}
         409 | 412 => return Err(AssetError::Conflict),
-        code @ (429 | 503) => return Err(throttle::defer(&url, code, response.header("retry-after"))),
         301 | 302 | 303 | 307 | 308 => return Err(configuration("API redirected; check the storage region")),
         code => return Err(AssetError::Http(code)),
     }
@@ -263,7 +266,9 @@ fn authorize(c: &S3Connection, cancel: &AtomicBool, refresh: bool) -> Result<Arc
     if c.metadata.endpoint.is_some() {
         return Err(configuration("local provider tests require a seeded native authorization"));
     }
-    let value = request(&crate::cloud_traffic::destination(c), AUTH_URL, &basic(&credentials)?, None, cancel, c.metadata.budget.as_deref())?;
+    let admission = c.admission_scope(&credentials);
+    let value =
+        request(&crate::cloud_traffic::destination(c), admission, AUTH_URL, &basic(&credentials)?, None, cancel, c.metadata.budget.as_deref())?;
     let storage = value.get("apiInfo").and_then(|v| v.get("storageApi")).ok_or_else(|| invalid("account API"))?;
     let api = endpoint(&text(storage, "apiUrl", 512)?)?;
     let s3 = text(storage, "s3ApiUrl", 512)?;
@@ -283,6 +288,7 @@ fn authorize(c: &S3Connection, cancel: &AtomicBool, refresh: bool) -> Result<Arc
         account: text(&value, "accountId", 256)?,
         token: text(&value, "authorizationToken", 16 << 10)?,
         api,
+        admission,
         writable: capabilities.iter().any(|v| v.as_str() == Some("writeBuckets")),
     });
     let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -297,6 +303,7 @@ fn authorize(c: &S3Connection, cancel: &AtomicBool, refresh: bool) -> Result<Arc
 fn bucket(c: &S3Connection, auth: &Auth, cancel: &AtomicBool) -> Result<Value> {
     let reply = request(
         &crate::cloud_traffic::destination(c),
+        auth.admission,
         &format!("{}/b2api/v4/b2_list_buckets", auth.api),
         &auth.token,
         Some(&json!({"accountId":auth.account,"bucketName":c.bucket,"bucketTypes":["allPrivate","allPublic"]})),
@@ -433,7 +440,8 @@ fn validate_head(connection: &S3Connection, head: &crate::cloud_records::Head) -
 
 fn update(observed: &Observed, next: &Map<String, Value>, auth: &Auth, cancel: &AtomicBool) -> Result<()> {
     let body = json!({"accountId":auth.account,"bucketId":observed.bucket_id,"ifRevisionIs":observed.revision,"bucketInfo":next});
-    let reply = request(&observed.destination, &format!("{}/b2api/v4/b2_update_bucket", auth.api), &auth.token, Some(&body), cancel, None)?;
+    let reply =
+        request(&observed.destination, auth.admission, &format!("{}/b2api/v4/b2_update_bucket", auth.api), &auth.token, Some(&body), cancel, None)?;
     if reply.get("bucketId").and_then(Value::as_str) != Some(observed.bucket_id.as_str())
         || reply.get("accountId").and_then(Value::as_str) != Some(auth.account.as_str())
         || reply.get("revision").and_then(Value::as_u64).is_none_or(|revision| revision <= observed.revision)

@@ -31,11 +31,13 @@ impl Combined {
             .with_metadata_cache(Some(Arc::new(crate::cloud_metadata::Cache::new(objects.dir.join("metadata")))))
             .test_endpoint(&objects.endpoint);
         let fingerprint = sha256(&serde_json::to_vec(&(&access, "TEST_SECRET", &c.endpoint)).unwrap()).0;
+        let mut auth = native.observed().auth;
+        Arc::get_mut(&mut auth).unwrap().admission = c.admission_scope(&c.credentials().unwrap());
         AUTH_CACHE
             .get_or_init(Default::default)
             .lock()
             .unwrap()
-            .insert(fingerprint.clone(), Cached { expires: Instant::now() + Duration::from_secs(300), auth: native.observed().auth });
+            .insert(fingerprint.clone(), Cached { expires: Instant::now() + Duration::from_secs(300), auth });
         let combined = Self { native, objects, c, fingerprint };
         combined.seed();
         combined
@@ -322,4 +324,37 @@ fn incomplete_legacy_discovery_continues_without_starting_another_round_at_the_n
         assert!(matches!(f.sync(&f.accepted(&outcome)), crate::cloud_outcome::Outcome::Unchanged { .. }));
         assert!(f.objects.state.lock().unwrap().requests.is_empty(), "completed scans wait for the scheduled deadline");
     }
+}
+
+#[test]
+fn account_caps_and_cooldowns_cross_native_b2_and_s3_without_additional_requests() {
+    for native in [false, true] {
+        let f = Combined::new();
+        let cancel = AtomicBool::new(false);
+        if native {
+            let mut state = f.native.state.lock().unwrap();
+            state.fault = Some(403);
+            state.cap_code = Some("transaction_cap_exceeded".into());
+        } else {
+            f.objects.state.lock().unwrap().download_cap = true;
+        }
+        let failure =
+            if native { f.c.b2_read_authority(&cancel).err().unwrap() } else { f.c.get_small("library/refused", 1024, &cancel).unwrap_err() };
+        assert_eq!(failure, AssetError::ProviderLimit { status: 403 });
+        assert!(matches!(f.c.b2_read_authority(&cancel), Err(AssetError::ProviderLimit { .. })));
+        assert_eq!(f.c.get_small("library/untouched", 1024, &cancel).unwrap_err(), AssetError::ProviderLimit { status: 403 });
+        assert_eq!(f.native.state.lock().unwrap().requests, if native { 1 } else { 0 });
+        assert_eq!(f.objects.state.lock().unwrap().requests.len(), if native { 0 } else { 1 });
+    }
+    let f = Combined::new();
+    let cancel = AtomicBool::new(false);
+    {
+        let mut state = f.native.state.lock().unwrap();
+        state.fault = Some(429);
+        state.retry_after = Some("60".into());
+    }
+    assert!(matches!(f.c.b2_read_authority(&cancel), Err(AssetError::Throttled { status: 429, retry_after_ms: 60000 })));
+    assert!(matches!(f.c.get_small("library/untouched", 1024, &cancel), Err(AssetError::Throttled { .. })));
+    assert_eq!(f.native.state.lock().unwrap().requests, 1);
+    assert!(f.objects.state.lock().unwrap().requests.is_empty());
 }

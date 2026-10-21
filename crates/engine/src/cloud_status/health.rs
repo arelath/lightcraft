@@ -157,6 +157,13 @@ impl ResourceHealth {
             self.failures.insert(resource, Failure::new(message, task));
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn fail_typed(&mut self, resource: String, error: &CloudFailure, task: Option<u64>) {
+        self.fail(resource.clone(), &error.message, task);
+        if let Some(failure) = self.failures.get_mut(&resource) {
+            *failure = Failure::classified(error, task);
+        }
+    }
     pub fn success(&mut self, resource: &str) {
         self.failures.remove(resource);
         self.failed_resources.remove(resource);

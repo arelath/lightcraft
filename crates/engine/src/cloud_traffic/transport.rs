@@ -81,6 +81,7 @@ impl Drop for Attempt {
 pub(crate) struct Response {
     raw: http::Response,
     attempt: Attempt,
+    admission: Option<crate::cloud_admission::Scope>,
 }
 impl std::ops::Deref for Response {
     type Target = http::Response;
@@ -104,8 +105,25 @@ impl Response {
             }
         }
     }
+    pub(crate) fn admitted(mut self, scope: crate::cloud_admission::Scope) -> Self {
+        self.admission = Some(scope);
+        self
+    }
+    pub(crate) fn throttled(&self) -> Option<crate::assets::AssetError> {
+        matches!(self.status, 429 | 503).then(|| {
+            self.admission.map_or(crate::assets::AssetError::Throttled { status: self.status, retry_after_ms: 2000 }, |scope| {
+                scope.throttle(self.status, self.header("retry-after"))
+            })
+        })
+    }
     pub fn provider_cap(&mut self) {
-        self.attempt.record.provider_refusal = Some("b2DownloadOrClassBCapExceeded");
+        self.provider_cap_code("b2DownloadOrClassBCapExceeded");
+    }
+    pub(crate) fn provider_cap_code(&mut self, code: &'static str) {
+        if let Some(scope) = self.admission {
+            scope.cap(self.status);
+        }
+        self.attempt.record.provider_refusal = Some(code);
     }
 }
 
@@ -132,7 +150,7 @@ pub(crate) fn request(
         Ok(raw) => {
             attempt.record.status = Some(raw.status);
             attempt.record.body_complete = target.method == Method::Head || raw.content_length() == Some(0) || matches!(raw.status, 204 | 304);
-            Ok(Response { raw, attempt })
+            Ok(Response { raw, attempt, admission: None })
         }
         Err(error) => {
             attempt.record.transport_failure = true;

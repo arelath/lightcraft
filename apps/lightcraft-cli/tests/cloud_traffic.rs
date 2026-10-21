@@ -74,7 +74,7 @@ fn cap_errors_are_counted_with_their_response_bytes_and_typed_refusal() {
     f.state.lock().unwrap().download_cap = true;
     let (out, rows) = f.run(&f.dir.join("empty"), &[("cloud.testConnection", config(&f)), ("cloud.traffic", json!({"limit":256}))]);
     assert!(!out.status.success());
-    assert!(rows[0]["error"].as_str().unwrap().contains("B2 download limit"));
+    assert!(rows[0]["error"].as_str().unwrap().contains("B2 usage limit"));
     let report = &rows[1]["result"];
     let state = f.state.lock().unwrap();
     assert_eq!(report["totals"]["attempts"], state.requests.len() as u64);

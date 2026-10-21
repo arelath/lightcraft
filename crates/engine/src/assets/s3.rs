@@ -441,6 +441,21 @@ impl BlobStore for S3Connection {
     }
 }
 impl S3Connection {
+    fn admission_scope(&self, credentials: &Credentials) -> crate::cloud_admission::Scope {
+        let service = match self.endpoint.as_deref() {
+            None => "aws-s3",
+            Some(endpoint) if crate::cloud_setup::b2_runtime_endpoint(endpoint).is_some() => "backblaze-b2",
+            Some(endpoint) => endpoint.trim_end_matches('/'),
+        };
+        crate::cloud_admission::Scope::new(service, &credentials.access, &credentials.secret)
+    }
+    pub(crate) fn check_admission(&self, cancel: &AtomicBool) -> Result<()> {
+        self.admission_scope(&self.credentials()?).check(cancel)
+    }
+    pub(crate) fn retry_admission(&self) -> Result<()> {
+        self.admission_scope(&self.credentials()?).retry();
+        Ok(())
+    }
     /// The returned version belongs to the completed GET, never a separate observation.
     pub(crate) fn download_observed(
         &self,
@@ -451,6 +466,8 @@ impl S3Connection {
     ) -> Result<Option<String>> {
         let url = self.url(blob)?;
         let credentials = self.credentials()?;
+        let admission = self.admission_scope(&credentials);
+        admission.check(cancel)?;
         let now = time::OffsetDateTime::now_utc();
         let timestamp =
             format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", now.year(), u8::from(now.month()), now.day(), now.hour(), now.minute(), now.second());
@@ -471,7 +488,8 @@ impl S3Connection {
             &limits,
             &mut |_| {},
         )
-        .map_err(http_error)?;
+        .map_err(http_error)?
+        .admitted(admission);
         error::provider_limit(&mut response, cancel)?;
         match response.status {
             200 => {}

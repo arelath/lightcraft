@@ -3,6 +3,9 @@ use super::*;
 use crate::cloud_status::provider::{MAX_ERROR_BODY, b2_download_cap};
 
 pub(super) fn provider_limit(response: &mut crate::cloud_traffic::Response, cancel: &AtomicBool) -> Result<()> {
+    if let Some(error) = response.throttled() {
+        return Err(error);
+    }
     if response.status != 403 || response.content_length().is_some_and(|n| n > MAX_ERROR_BODY as u64) {
         return Ok(());
     }
@@ -25,9 +28,25 @@ pub(super) fn provider_limit(response: &mut crate::cloud_traffic::Response, canc
         bytes.try_reserve(n).map_err(|_| AssetError::Disk("not enough memory for storage diagnostic".into()))?;
         bytes.extend_from_slice(buffer.get(..n).ok_or(AssetError::Integrity)?);
     }
-    if b2_download_cap(response.status, &bytes) {
-        response.provider_cap();
+    if b2_download_cap(response.status, &bytes) || native_cap(response.status, &bytes) {
+        if native_cap(response.status, &bytes) {
+            response.provider_cap_code("b2AccountCapExceeded");
+        } else {
+            response.provider_cap();
+        }
         return Err(AssetError::ProviderLimit { status: response.status });
     }
     Ok(())
+}
+
+fn native_cap(status: u16, bytes: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Refusal {
+        status: u16,
+        code: String,
+    }
+    status == 403
+        && serde_json::from_slice::<Refusal>(bytes).is_ok_and(|body| {
+            body.status == status && matches!(body.code.as_str(), "cap_exceeded" | "transaction_cap_exceeded" | "download_cap_exceeded")
+        })
 }

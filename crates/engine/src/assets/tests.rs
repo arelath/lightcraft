@@ -1282,3 +1282,27 @@ fn bound_destinations_reject_retargeting_before_settings_or_resolver_changes_in_
 }
 
 mod live_pins;
+
+#[test]
+fn offline_copies_stop_after_the_first_account_cap_or_shared_throttle() {
+    for refusal in [AssetError::ProviderLimit { status: 403 }, AssetError::Throttled { status: 429, retry_after_ms: 60000 }] {
+        let scratch = Scratch::new();
+        let provider = Arc::new(MemoryStore { bytes: vec![], reads: AtomicUsize::new(0), error: Some(refusal) });
+        let resolver = Arc::new(AssetResolver::new(scratch.0.clone()));
+        resolver.connect("memory".into(), provider.clone()).unwrap();
+        let blobs = (0..20)
+            .map(|n| {
+                let b = blob(format!("original-{n}").as_bytes());
+                (b.id.clone(), b)
+            })
+            .collect();
+        resolver.set_keep_all(super::cache::KeepAll { originals: true, previews: false }, blobs).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while resolver.keep_all_running.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(provider.reads.load(Ordering::Relaxed), 1, "untouched offline copies remain eligible for explicit demand");
+        assert_eq!(resolver.cache_status().used_bytes, 0);
+    }
+}

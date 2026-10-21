@@ -224,6 +224,9 @@ fn start_impl(
         .into_iter()
         .find(|connection| connection.id == state.connection)
         .ok_or_else(|| error("synchronization storage connection is not configured"))?;
+    if !background_poll {
+        connection.retry_admission().map_err(|error| EngineError::Cloud(error.into()))?;
+    }
     let mut verification_run = if lib.on_disk && !migrating {
         Some(
             crate::cloud_verification::native::Run::open(

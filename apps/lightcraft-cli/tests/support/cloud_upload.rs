@@ -183,6 +183,7 @@ pub struct State {
     pub unauthorized: bool,
     pub reject_status: Option<u16>,
     pub download_cap: bool,
+    pub retry_after: Option<String>,
     pub signature_errors: usize,
     pub hold_part: bool,
     pub hold_head: bool,
@@ -330,6 +331,7 @@ impl Fixture {
                         checksum_headers.push(("x-amz-meta-sha256", checksum(state.objects.get(object_key).unwrap())));
                     }
                 }
+                let retry_after = state.retry_after.clone();
                 let retention_modified = state.retention_modified.clone();
                 drop(state);
                 if hold_part || hold_head || hold_abort || hold_get {
@@ -354,6 +356,9 @@ impl Fixture {
                 }
                 let mut stream = reader.into_inner();
                 write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n", response.len()).unwrap();
+                if let Some(delay) = retry_after {
+                    write!(stream, "Retry-After: {delay}\r\n").unwrap();
+                }
                 if let Some(etag) = etag {
                     write!(stream, "ETag: {etag}\r\n").unwrap();
                 }

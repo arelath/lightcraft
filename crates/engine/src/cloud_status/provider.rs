@@ -144,6 +144,6 @@ mod tests {
         let diagnostic = Diagnostic::from_overview(&value, false).unwrap();
         assert_eq!(diagnostic.recovery(), Some(Recovery::ReviewProviderLimits));
         assert_eq!(diagnostic.short_cause(), "Storage provider limit reached.");
-        assert!(diagnostic.advice().contains("Class B"));
+        assert!(diagnostic.advice().contains("transaction caps"));
     }
 }

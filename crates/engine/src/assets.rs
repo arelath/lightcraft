@@ -83,7 +83,7 @@ pub enum AssetError {
     #[error("S3 returned HTTP {0}; check endpoint, permissions and region (pending work retained)")]
     Http(u16),
     #[error(
-        "Backblaze B2 download limit reached. Review download bandwidth and Class B transaction caps in Backblaze Caps & Alerts, then retry. Pending work is kept."
+        "Backblaze B2 usage limit reached. Review storage, download bandwidth and transaction caps in Backblaze Caps & Alerts, then retry. Pending work is kept."
     )]
     ProviderLimit { status: u16 },
     /// Unwind immediate CAS retries and respect the provider's delay. A scheduled
@@ -479,8 +479,10 @@ impl AssetResolver {
         {
             #[cfg(not(target_arch = "wasm32"))]
             let _traffic = crate::cloud_traffic::Scope::purpose(crate::cloud_traffic::Purpose::Preview);
-            if let Ok(lease) = self.acquire(preview, cancel) {
-                return Ok((lease, true));
+            match self.acquire(preview, cancel) {
+                Ok(lease) => return Ok((lease, true)),
+                Err(error @ (AssetError::ProviderLimit { .. } | AssetError::Throttled { .. })) => return Err(error),
+                Err(_) => {}
             }
             if cancel.load(Ordering::Relaxed) {
                 return Err(AssetError::Cancelled);
@@ -867,7 +869,9 @@ impl AssetResolver {
                         tried.insert(blob.id.clone());
                         match resolver.acquire(&blob, &cancel) {
                             Ok(_) => {}
-                            Err(AssetError::Cancelled) => return Err(AssetError::Cancelled.to_string()),
+                            Err(error @ (AssetError::Cancelled | AssetError::ProviderLimit { .. } | AssetError::Throttled { .. })) => {
+                                return Err(error.to_string());
+                            }
                             Err(error) => log::warn!("offline copy of {}: {error}", blob.id.0),
                         }
                     }

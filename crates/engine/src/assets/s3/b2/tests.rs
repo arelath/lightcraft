@@ -105,6 +105,8 @@ fn basic_uses_rfc4648_padding_without_serializing_keys() {
 
 #[derive(Default)]
 struct ServerState {
+    cap_code: Option<String>,
+    retry_after: Option<String>,
     bucket_name: Option<String>,
     requests: u64,
     request_bytes: u64,
@@ -195,7 +197,10 @@ impl Server {
         let mut status = 200;
         let value = if let Some(code) = state.fault.take() {
             status = code;
-            json!({"error":"synthetic refusal"})
+            state
+                .cap_code
+                .as_ref()
+                .map_or_else(|| json!({"error":"synthetic refusal"}), |code| json!({"status":status,"code":code,"message":"synthetic cap"}))
         } else if header.starts_with("POST /b2api/v4/b2_list_buckets ") {
             let name = state.bucket_name.as_deref().unwrap_or("photos-test");
             assert_eq!(body, json!({"accountId":"account","bucketName":name,"bucketTypes":["allPrivate","allPublic"]}));
@@ -225,7 +230,11 @@ impl Server {
         };
         let bytes = serde_json::to_vec(&value).unwrap();
         state.response_bytes += bytes.len() as u64;
-        write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+        write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n", bytes.len()).unwrap();
+        if let Some(delay) = &state.retry_after {
+            write!(stream, "Retry-After: {delay}\r\n").unwrap();
+        }
+        stream.write_all(b"\r\n").unwrap();
         let _ = stream.write_all(&bytes);
     }
     fn observed(&self) -> Observed {
@@ -239,7 +248,13 @@ impl Server {
             entry: scope.entry,
             bucket_id: "bucket-id".into(),
             info: state.info.clone(),
-            auth: Arc::new(Auth { account: "account".into(), api: self.api.clone(), token: "fake-token".into(), writable: true }),
+            auth: Arc::new(Auth {
+                account: "account".into(),
+                api: self.api.clone(),
+                token: "fake-token".into(),
+                writable: true,
+                admission: crate::cloud_admission::Scope::new(&self.api, "fake-key", "fake-secret"),
+            }),
         }
     }
 }
@@ -314,7 +329,13 @@ fn redirects_authentication_and_cancellation_never_write_bucket_metadata() {
     assert!(matches!(update(&old, &old.info, &old.auth, &AtomicBool::new(true)), Err(AssetError::Cancelled)));
     assert_eq!(server.state.lock().unwrap().writes, 0);
     let mut readonly = old;
-    readonly.auth = Arc::new(Auth { account: "account".into(), api: server.api.clone(), token: "fake-token".into(), writable: false });
+    readonly.auth = Arc::new(Auth {
+        account: "account".into(),
+        api: server.api.clone(),
+        token: "fake-token".into(),
+        writable: false,
+        admission: readonly.auth.admission,
+    });
     let failure: crate::cloud_status::CloudFailure = readonly.require_writable().unwrap_err().into();
     assert_eq!(
         failure.remedy.unwrap_or_else(|| crate::cloud_status::Recovery::for_kind(failure.kind)),
@@ -347,7 +368,9 @@ fn malformed_and_oversized_success_bodies_are_uncertain() {
             let length = if oversized { MAX_JSON + 1 } else { 5 };
             write!(stream, "HTTP/1.1 200 Test\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{{bad!").unwrap();
         });
-        let error = request(&crate::cloud_traffic::destination(&connection()), &url, "fake-token", None, &AtomicBool::new(false), None).unwrap_err();
+        let admission = crate::cloud_admission::Scope::new(&url, "test-key", "test-secret");
+        let error = request(&crate::cloud_traffic::destination(&connection()), admission, &url, "fake-token", None, &AtomicBool::new(false), None)
+            .unwrap_err();
         assert!(error.uncertain_write(), "{error}");
         worker.join().unwrap();
     }

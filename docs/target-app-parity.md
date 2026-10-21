@@ -1,6 +1,6 @@
 # Target-app parity: LightCraft vs Adobe Lightroom
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (CR.83: qualified AWS upload checksum admission; CR.82: version-bound native media verification receipts; CR.81: operation-scoped B2 authority and immutable metadata reuse; CR.80: certified native remote baselines and pending overlays; CR.79: bounded native conditional-history byte reuse; CR.78: separate incremental sync and durable budgeted verification; CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified: RAW decoding 76% → 77%; headline numbers unchanged) · **Target:** Adobe Lightroom Classic 15.5 (August 2026) and Lightroom 9.6 (desktop)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (CR.84: shared native quota suspension and throttling; CR.83: qualified AWS upload checksum admission; CR.82: version-bound native media verification receipts; CR.81: operation-scoped B2 authority and immutable metadata reuse; CR.80: certified native remote baselines and pending overlays; CR.79: bounded native conditional-history byte reuse; CR.78: separate incremental sync and durable budgeted verification; CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified: RAW decoding 76% → 77%; headline numbers unchanged) · **Target:** Adobe Lightroom Classic 15.5 (August 2026) and Lightroom 9.6 (desktop)
 
 The authoritative assessment of how close LightCraft is to Lightroom. The row-by-row checklist is
 [parity-checklist.md](parity-checklist.md); the ranked work list is [gaps.md](gaps.md); deep areas
@@ -297,6 +297,7 @@ P2 items 12–25 h; look tuning, performance, packaging, hardening 25–45 h.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | minor | CR.84: Native metadata, media and B2 control share credential-scoped quota suspension and Retry-After; cached reads remain usable and untouched work stays queued. Cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.83: Native qualified AWS uploads can use validated SHA-256 and exact-version admission instead of media readback; B2, unknown, uncertain and fresh-verification paths retain readback. Cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.82: Native recovery reuses a completed media byte proof only after confirming its exact immutable provider version; missing or mismatched evidence retains full verification. Cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.81: Native B2 synchronization shares one verified authority observation per pass, reuses exact immutable metadata and schedules legacy discovery separately; writes require fresh confirmation. Cloud is OOS and parity counts are unchanged |

@@ -121,8 +121,8 @@ impl CloudFailure {
         error
     }
     pub fn provider_limit(status: u16) -> Self {
-        let mut error = Self::new(FailureKind::Capacity, "Backblaze B2 download limit reached.")
-            .with_recovery("Review download bandwidth and Class B transaction caps in Backblaze Caps & Alerts, then use Retry Syncing. Pending edits and originals are kept.")
+        let mut error = Self::new(FailureKind::Capacity, "Backblaze B2 usage limit reached.")
+            .with_recovery("Review storage, download bandwidth and transaction caps in Backblaze Caps & Alerts, then use Retry Syncing. Pending edits and originals are kept.")
             .with_remedy(Recovery::ReviewProviderLimits);
         error.http_status = Some(status);
         error

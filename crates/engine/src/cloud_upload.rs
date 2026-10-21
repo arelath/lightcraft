@@ -263,6 +263,7 @@ enum Event {
         id: String,
         error: Option<String>,
     },
+    Suspended(crate::cloud_status::CloudFailure),
     Finished(Result<Value>),
 }
 
@@ -644,6 +645,7 @@ impl Uploads {
         self.requested = true;
         self.include_failed |= include_failed;
         if include_failed {
+            self.health.success("provider");
             self.attempted.clear();
             self.finalization_retry.clear();
         }
@@ -880,10 +882,10 @@ fn items(s: &mut Session, p: &Value, abort: bool) -> Result<(Vec<Item>, Vec<Valu
 
 pub fn start(s: &mut Session, p: &Value) -> Result<Value> {
     crate::cloud_transition::ensure_command(s, "cloud.upload")?;
-    start_impl(s, p, false, None)
+    start_impl(s, p, false, None, true)
 }
 pub fn abort(s: &mut Session, p: &Value) -> Result<Value> {
-    start_impl(s, p, true, None)
+    start_impl(s, p, true, None, true)
 }
 
 pub(crate) fn remove_local(s: &mut Session, p: &Value, blobs: Vec<Blob>, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
@@ -964,7 +966,7 @@ pub fn observed_removal(s: &mut Session, p: &Value, observer: &mut dyn FnMut(u64
 /// The serving thread polls its transport hook while workers transfer bytes.
 /// A zero total means unknown: reads for verification and retry traffic are included.
 pub fn observed(s: &mut Session, p: &Value, abort: bool, observer: &mut dyn FnMut(u64, u64, &str) -> bool) -> Result<Value> {
-    s.execute_fn(if abort { "cloud.abortUploads" } else { "cloud.upload" }, |s| start_impl(s, p, abort, Some(observer)))
+    s.execute_fn(if abort { "cloud.abortUploads" } else { "cloud.upload" }, |s| start_impl(s, p, abort, Some(observer), true))
 }
 
 fn save_preflight(s: &mut Session, ready: &[Item], skipped: &mut [Value], verify: bool) -> Result<()> {
@@ -997,7 +999,7 @@ fn save_preflight(s: &mut Session, ready: &[Item], skipped: &mut [Value], verify
     Ok(())
 }
 
-fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>) -> Result<Value> {
+fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn FnMut(u64, u64, &str) -> bool>, explicit: bool) -> Result<Value> {
     ensure_not_erased(s)?;
     if !abort && s.catalog.sync_state().is_none() {
         return Err(error(
@@ -1024,6 +1026,11 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
     }
     s.persist()?; // A queued import must be durable before any network operation.
     let (mut items, mut skipped) = items(s, p, abort)?;
+    if explicit {
+        for item in &items {
+            item.connection.retry_admission().map_err(|error| EngineError::Cloud(error.into()))?;
+        }
+    }
     // A skipped item is a durable queue outcome even if no worker can start.
     save_preflight(s, &items, &mut skipped, p["verify"] == true)?;
     if items.is_empty() {
@@ -1091,6 +1098,17 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
                     if worker_cancel.load(Ordering::Relaxed) {
                         return Err(error("upload cancelled; originals and multipart receipts retained"));
                     }
+                    if let Err(reason) = item.connection.check_admission(&worker_cancel) {
+                        if matches!(reason, AssetError::ProviderLimit { .. } | AssetError::Throttled { .. }) {
+                            let _ = sender.send(Event::Suspended(crate::cloud_status::CloudFailure::from(reason.clone())));
+                        }
+                        // No phase transition has occurred for this or following items.
+                        for untouched in items.iter().skip_while(|candidate| candidate.id != item.id) {
+                            untouched.item_result(&sender, &Ok(Value::Null));
+                        }
+                        failures.push(reason.to_string());
+                        break;
+                    }
                     if abort {
                         let result = item.abort(&sender, &worker_cancel);
                         item.item_result(&sender, &result);
@@ -1109,6 +1127,15 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
                                 let result = Err(error(reason.to_string()));
                                 item.item_result(&sender, &result);
                                 failures.push(reason.to_string());
+                                if let Err(reason @ (AssetError::ProviderLimit { .. } | AssetError::Throttled { .. })) =
+                                    item.connection.check_admission(&worker_cancel)
+                                {
+                                    let _ = sender.send(Event::Suspended(crate::cloud_status::CloudFailure::from(reason)));
+                                    for untouched in items.iter().skip_while(|candidate| candidate.id != item.id).skip(1) {
+                                        untouched.item_result(&sender, &Ok(Value::Null));
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1229,7 +1256,7 @@ impl Session {
             return;
         }
         self.cloud_uploads.attempted.extend(ids.iter().cloned());
-        if let Err(e) = start(self, &json!({"imports": &ids, "wait": false})) {
+        if let Err(e) = start_impl(self, &json!({"imports": &ids, "wait": false}), false, None, false) {
             let mut skipped: Vec<_> = ids.iter().map(|id| json!({"import":id,"error":e.to_string()})).collect();
             if let Err(reason) = save_preflight(self, &[], &mut skipped, false) {
                 log::warn!("queued upload preparation could not be saved: {reason}");
@@ -1309,6 +1336,7 @@ impl Session {
                             pending.item_outcomes.insert(id,error);
                         }
                     }
+                    Ok(Event::Suspended(failure)) => { uploads.requested = false; uploads.health.fail_typed("provider".into(), &failure, Some(pending.guard.id())); }
                     Ok(Event::Finished(result)) => {
                         task_health(&mut uploads.health,self,pending,&result);
                         if Arc::ptr_eq(&pending.library, &self.library_token()) && pending.connection_revision == pending.resolver.connection_revision()

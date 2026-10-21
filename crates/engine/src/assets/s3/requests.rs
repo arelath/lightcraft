@@ -199,6 +199,8 @@ impl S3Connection {
     pub(super) fn request(&self, request: Request<'_>, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<Response> {
         let url = self.request_url(request.key, request.query)?;
         let credentials = self.credentials()?;
+        let admission = self.admission_scope(&credentials);
+        admission.check(cancel)?;
         let now = time::OffsetDateTime::now_utc();
         let timestamp =
             format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", now.year(), u8::from(now.month()), now.day(), now.hour(), now.minute(), now.second());
@@ -230,6 +232,7 @@ impl S3Connection {
             &limits,
             progress,
         )
+        .map(|response| response.admitted(admission))
         .map_err(http_error)
     }
 

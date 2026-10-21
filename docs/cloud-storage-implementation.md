@@ -131,6 +131,37 @@ in-memory libraries and versionless providers retain full verification. Qualifie
 [B2 multipart completion](https://www.backblaze.com/apidocs/s3-complete-multipart-upload).
 Validation uses local signed counterparts; live provider acceptance remains open.
 
+## Shared native quota admission
+
+S3 metadata, streamed media and native B2 control check one process-wide admission
+registry before starting each HTTP attempt. A recognized B2 cap refusal suspends
+the same provider/credential scope across buckets and library prefixes. The native
+JSON cap codes and the existing exact S3 download/Class-B diagnostic are recognized
+from bounded error bodies. Ordinary permission errors do not suspend an account.
+The registry retains a salted credential digest, never keys, bearer tokens or signed
+URLs. Canonical B2 regions share one service identity; AWS and unknown compatible
+services remain separate. Different keys belonging to one account cannot reliably
+be associated through S3 alone; a changed key may need its own first refusal.
+
+HTTP 429/503 Retry-After seconds share a monotonic cooldown across all three paths.
+Delays retain the existing bounded policy (1 second–15 minutes, 2-second default).
+An explicit Retry Syncing/Sync now/upload retry clears a cap, but cannot bypass an
+active cooldown. Automatic starts never clear it. A restart permits another probe.
+There are at most 128 suspended scopes; overflow fails closed rather than evicting
+an active restriction. Overflow suspension requires restart to recover.
+
+Already in-flight attempts may complete. Offline-copy workers stop on a cap or
+throttle. Preview failure propagates that refusal instead of fetching the original;
+already cached media remains available. Upload workers stop before untouched items
+change phase, and automatic continuation stops until explicit retry. Per-item errors
+still allow unrelated transfers, and uncertain-write receipts retain reconciliation.
+No quota state changes publication proof, deletion admission or durable ACK ordering.
+
+Provider references checked 2026-10-20: [B2 integration checklist](https://www.backblaze.com/docs/cloud-storage-integration-checklist)
+and [native transaction-cap response](https://www.backblaze.com/apidocs/b2-create-bucket).
+Validation uses signed loopback storage and synthetic cap/cooldown responses; it does
+not consume live B2 allowance or establish live AWS/B2 acceptance.
+
 ## Qualified native upload checksums
 
 AWS's default endpoint supports a conservative SHA-256 admission path. A single PUT

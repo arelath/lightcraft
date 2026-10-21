@@ -735,3 +735,29 @@ fn mcp_cleanup_answers_ping_and_cancellation_retains_the_uncertain_receipt() {
     assert_eq!(rows[0]["result"]["results"][0]["aborted"], 1);
     assert_eq!(fixture.state.lock().unwrap().signature_errors, 0);
 }
+
+#[test]
+fn an_account_cap_stops_the_upload_batch_and_leaves_untouched_imports_queued() {
+    let f = Fixture::new();
+    let library = f.dir.join("library");
+    let imports = (0..20).map(|_| f.import(&library, false)).collect::<Vec<_>>();
+    {
+        let mut state = f.state.lock().unwrap();
+        state.requests.clear();
+        state.download_cap = true;
+    }
+    let (_, rows) = f.run(&library, &[("cloud.upload", json!({})), ("cloud.uploadStatus", json!({})), ("cloud.overview", json!({}))]);
+    assert_eq!(rows[0]["ok"], false, "{rows:?}");
+    assert_eq!(f.state.lock().unwrap().requests.len(), 1, "no request for subsequent untouched photos");
+    let entries = rows[1]["result"]["uploads"].as_object().unwrap();
+    assert_eq!(entries.values().filter(|entry| entry["state"] == "failed").count(), 1);
+    assert_eq!(entries.values().filter(|entry| entry["state"] == "savedLocally" && entry["error"].is_null()).count(), 19);
+    assert_eq!(rows[2]["result"]["health"]["uploads"]["activity"]["failures"]["provider"]["recovery"], "reviewProviderLimits");
+    for (_, path) in &imports {
+        assert!(path.exists(), "staged original retained");
+    }
+    f.state.lock().unwrap().download_cap = false;
+    let (out, rows) = f.run(&library, &[("cloud.upload", json!({})), ("cloud.uploadStatus", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    assert!(rows[1]["result"]["uploads"].as_object().unwrap().values().all(|entry| entry["state"] == "synchronized"));
+}
