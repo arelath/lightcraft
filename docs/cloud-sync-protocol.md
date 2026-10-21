@@ -944,6 +944,17 @@ checkpoints trigger reconstruction so checkpoint-only recovery effects are recei
 changed anchor at the same causal position is refused. Fresh verification and checkpoint
 maintenance retain uncached remote reconstruction.
 
+### Native B2 observation scope
+
+One native conditional sync shares a verified bucket revision and exact immutable B2
+metadata references. Every authority write attempt invalidates that observation; a new
+read confirms publication, including after a lost response or competing CAS. Immutable
+byte reuse cannot certify the current mutable pointer. Each subsequent operation starts
+with a new bucket observation. Legacy discovery uses the durable background discovery
+schedule; incomplete scans continue until complete without starting a new round. Manual
+sync/audit still discovers late and behind-frontier input. Fresh remote
+verification bypasses persisted immutable metadata.
+
 ### Browser bounded history replay
 
 Browser head replay now uses the same 4,096-record window, 1,024-record automatic

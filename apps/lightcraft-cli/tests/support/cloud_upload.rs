@@ -298,7 +298,9 @@ impl Fixture {
         Self { dir, endpoint, state, stop, worker: Some(worker) }
     }
     pub fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lightcraft-cli"));
+        // Engine protocol tests reuse the server without building or launching the CLI.
+        let binary = option_env!("CARGO_BIN_EXE_lightcraft-cli").map(PathBuf::from).unwrap_or_else(|| self.dir.join("CLI-binary-not-built"));
+        let mut command = Command::new(binary);
         command.env("AWS_SHARED_CREDENTIALS_FILE", self.dir.join("credentials"));
         command.env("LIGHTCRAFT_CONFIG_DIR", self.dir.join("config"));
         command

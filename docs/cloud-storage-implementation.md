@@ -61,7 +61,7 @@ Destination detail is bounded to 32 identities plus an overflow bucket. The curr
 connection-name lookup is limited to 32 bindings, with an explicit truncation flag. No cache,
 publication proof, upload verification or polling policy changes are implied by these
 diagnostics. Native immutable-body reuse is described below; further traffic reductions
-remain tracked by CR.81–CR.86.
+remain tracked by CR.82–CR.86.
 
 ## Native immutable history cache
 
@@ -150,6 +150,35 @@ Expired cursors/checkpoint boundaries retain
 verified full replay and prefix recovery. Explicit checkpoint maintenance and fresh remote
 verification bypass the cached baseline. Corruption of old remote bytes may therefore be
 detected later by fresh verification, as with other known-history reuse.
+
+## Native B2 authority reuse
+
+Each conditional synchronization call creates a new, runtime-only observation scope.
+Protocol validation, incremental reads and publication checks share one verified native
+bucket revision and its exact immutable descriptor/head/intake/manifest bodies. The
+mutable bucket observation is never persisted. Every write path invalidates it on
+success, conflict, cancellation or uncertainty, including validation failures; publication
+confirmation and the next operation require a fresh bucket observation. A stale revision
+can only lose the provider CAS, not overwrite a concurrent writer.
+
+Immutable bodies are bound to the full destination/key/hash/size and revalidated against
+the owning schema on reuse. They share the existing 4,096-entry / 256 MiB disposable cache;
+a pass also retains at most 32 bodies / 8 MiB. A staged head may reuse bytes only after
+its upload has completed exact readback. These byte proofs never prove publication of
+the bucket pointer. Fresh verification bypasses persisted bodies and starts a new scope.
+Known record lengths reserve bounded verification budget rather than the maximum intake
+size. Cache loss/corruption falls back to remote reads; remote damage to known immutable
+objects can be detected later by fresh verification.
+
+Unchanged upgraded heads return promptly when legacy discovery is not due. The existing
+persisted five-minute discovery deadline governs background legacy scans; manual Sync now,
+explicit audits and checkpoint maintenance request discovery. An incomplete remote scan
+continues on ordinary polls without waiting for another deadline or restarting its round.
+A due scan still discovers
+new keys behind known author frontiers and rejects forks before publishing local work.
+Per-blob deletion/maintenance admission outside synchronization retains fresh authority
+reads. Deleted and newer-writer controls retain their typed recovery through protocol validation.
+Connection settings, credentials and remote/catalog formats are unchanged.
 
 ## Incremental sync and remote verification
 

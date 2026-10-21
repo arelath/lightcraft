@@ -1,6 +1,11 @@
 //! Adopt verified legacy input only through the current conditional authority.
 use super::*;
 
+pub(super) fn due(connection: &S3Connection, head: Option<&Head>, requested: bool, cancel: &AtomicBool) -> Result<bool> {
+    let Some(head) = head.filter(|head| head.legacy_append.is_some()) else { return Ok(false) };
+    Ok(requested || connection.b2_legacy_pending(head, cancel)?)
+}
+
 pub(super) fn admit(connection: &S3Connection, remote: &Remote, audit: bool, cancel: &AtomicBool) -> Result<bool> {
     let Some((head, token)) = &remote.head else { return Ok(false) };
     if head.legacy_append.is_none() {
@@ -17,6 +22,7 @@ pub(super) fn admit(connection: &S3Connection, remote: &Remote, audit: bool, can
     let hash = sha256(&bytes);
     let reference = RecordRef { key: crate::cloud_records::object_key(&connection.prefix, 1, "legacy", &hash.0), size: bytes.len() as u64, hash };
     connection.b2_put_catalog_immutable(&reference.key, &bytes, cancel)?;
+    connection.remember_verified_metadata(&reference, &bytes, cancel)?;
     let mut next = if changed {
         let control = head.control().map_err(invalid)?;
         let mut state = SyncState::restore_durable(&received.state, "legacy-recovery".into(), connection.id.clone()).map_err(catalog_error)?;

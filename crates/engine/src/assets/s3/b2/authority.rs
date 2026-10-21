@@ -40,23 +40,24 @@ impl S3Connection {
             return Ok(false);
         }
         let scope = Scope::new(self)?;
-        match self.get_small(&scope.descriptor_key(), 4096, cancel)? {
+        let bytes = scope.descriptor()?;
+        let reference = RecordRef { key: scope.descriptor_key(), size: bytes.len() as u64, hash: sha256(&bytes) };
+        match self.metadata_record(&reference, 4096, cancel, |bytes| scope.verify_descriptor(bytes))? {
             None => Ok(false),
-            Some(reply) => {
-                scope.verify_descriptor(&reply.bytes)?;
-                Ok(true)
-            }
+            Some(_) => Ok(true),
         }
     }
     fn b2_observed_head(&self, observed: &Observed, cancel: &AtomicBool) -> Result<Head> {
         let reference =
             observed.head().ok_or_else(|| AssetError::Blocked(crate::cloud_control::Blocked::FinishUpgrade("B2 initialization".into())))?;
-        let reply = self.get_small(&reference.key, MAX_AUTHORITY as usize, cancel)?.ok_or(AssetError::Missing)?;
-        if reply.bytes.len() as u64 != reference.size || sha256(&reply.bytes) != reference.hash {
-            return Err(AssetError::Integrity);
-        }
-        let head = Head::decode(&reply.bytes).map_err(AssetError::Blocked)?;
-        validate_head(self, &head)?;
+        let head = self
+            .metadata_record(reference, MAX_AUTHORITY as usize, cancel, |bytes| {
+                let head = Head::decode(bytes).map_err(AssetError::Blocked)?;
+                validate_head(self, &head)?;
+                Ok(head)
+            })?
+            .ok_or(AssetError::Missing)?
+            .value;
         if head.control.as_ref().is_none_or(|c| c.state != State::Deleted) {
             if head.control.as_ref().is_some_and(|c| c.state == State::Active && c.epoch < 2) {
                 return Err(invalid("active authority precedes the upgraded epoch"));
@@ -98,21 +99,54 @@ impl S3Connection {
         {
             return Err(invalid("legacy intake namespace"));
         }
-        let reply = self.get_small(&reference.key, crate::cloud_records::MAX_INTAKE as usize, cancel)?.ok_or(AssetError::Missing)?;
-        if reply.bytes.len() as u64 != reference.size || sha256(&reply.bytes) != reference.hash {
-            return Err(AssetError::Integrity);
-        }
-        let intake = LegacyIntake::decode(&reply.bytes, library).map_err(AssetError::Blocked)?;
+        let intake = self
+            .metadata_record(reference, crate::cloud_records::MAX_INTAKE as usize, cancel, |bytes| {
+                LegacyIntake::decode(bytes, library).map_err(AssetError::Blocked)
+            })?
+            .ok_or(AssetError::Missing)?
+            .value;
         let key = crate::cloud_append::manifest_key(&self.prefix, library)?;
         let expected = crate::cloud_append::manifest(library)?;
-        if self.get_small(&key, 16 << 10, cancel)?.is_none_or(|reply| reply.bytes != expected) {
+        let manifest = RecordRef { key, size: expected.len() as u64, hash: sha256(&expected) };
+        if self
+            .metadata_record(
+                &manifest,
+                16 << 10,
+                cancel,
+                |bytes| {
+                    if bytes == expected { Ok(()) } else { Err(invalid("original append manifest changed")) }
+                },
+            )?
+            .is_none()
+        {
             return Err(invalid("original append manifest is absent or changed"));
         }
+        if let Some(operation) = &self.metadata.operation {
+            *operation.legacy_pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some((reference.clone(), !intake.scan.audit.complete));
+        }
         Ok(intake)
+    }
+    pub(crate) fn b2_legacy_pending(&self, head: &Head, cancel: &AtomicBool) -> Result<bool> {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(AssetError::Cancelled);
+        }
+        let Some(reference) = &head.legacy_append else { return Ok(false) };
+        if let Some(operation) = &self.metadata.operation
+            && let Some((saved, pending)) = &*operation.legacy_pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            && saved == reference
+        {
+            return Ok(*pending);
+        }
+        Ok(!self.b2_legacy_intake(head, cancel)?.scan.audit.complete)
     }
     /// Install the first authority only for an explicitly frozen append source.
     /// No active or unrelated raw S3 head may be bridged or overwritten.
     pub fn b2_initialize_head(&self, next: &Head, cancel: &AtomicBool) -> Result<RecordRef> {
+        self.authority_context().b2_initialize_in_scope(next, cancel)
+    }
+    fn b2_initialize_in_scope(&self, next: &Head, cancel: &AtomicBool) -> Result<RecordRef> {
+        let _write = self.authority_write();
         validate_initial(self, next)?;
         // Validate descriptor and native permissions before staging any output.
         self.b2_head_enabled(cancel)?;
@@ -156,7 +190,10 @@ impl S3Connection {
             return Err(invalid("initial source boundary is not frozen"));
         }
         let scope = Scope::new(self)?;
-        self.put_verified_metadata(&scope.descriptor_key(), &scope.descriptor()?, cancel)?;
+        let bytes = scope.descriptor()?;
+        let descriptor = RecordRef { key: scope.descriptor_key(), size: bytes.len() as u64, hash: sha256(&bytes) };
+        self.put_verified_metadata(&descriptor.key, &bytes, cancel)?;
+        self.remember_verified_metadata(&descriptor, &bytes, cancel)?;
         let reference = self.b2_stage_head(next, cancel)?;
         self.b2_compare_exchange_authority(&observed, &reference, cancel)?;
         Ok(reference)
@@ -164,6 +201,10 @@ impl S3Connection {
     /// Replace only the exact observed authority. Scope, generation, terminal
     /// state and legacy binding are checked before uploading a candidate head.
     pub fn b2_write_head(&self, expected: &str, next: &Head, cancel: &AtomicBool) -> Result<RecordRef> {
+        self.authority_context().b2_write_in_scope(expected, next, cancel)
+    }
+    fn b2_write_in_scope(&self, expected: &str, next: &Head, cancel: &AtomicBool) -> Result<RecordRef> {
+        let _write = self.authority_write();
         if !self.b2_head_enabled(cancel)? {
             return Err(invalid("authority descriptor is absent"));
         }

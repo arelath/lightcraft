@@ -68,6 +68,12 @@ impl S3Connection {
     /// Sign this connection's requests with `keys` instead of the saved profile.
     pub fn with_keys(mut self, keys: AccessKeys) -> Self {
         self.keys = TypedKeys(Some(keys));
+        self.metadata.operation = None;
+        self
+    }
+    #[cfg(test)]
+    pub(crate) fn test_endpoint(mut self, endpoint: &str) -> Self {
+        self.metadata.endpoint = Some(endpoint.to_owned());
         self
     }
 
@@ -82,6 +88,7 @@ impl S3Connection {
     pub(crate) fn storage_snapshot(&self) -> Self {
         let mut storage = self.clone().canonicalized();
         storage.profile = None;
+        storage.metadata.operation = None;
         storage
     }
 
@@ -164,6 +171,8 @@ impl S3Connection {
             Some(endpoint) => format!("{}/{}", endpoint.trim_end_matches('/'), self.bucket),
             None => format!("https://{}.s3.{}.amazonaws.com", self.bucket, self.region),
         };
+        #[cfg(test)]
+        let base = self.metadata.endpoint.as_ref().map_or(base, |endpoint| format!("{endpoint}/{}", self.bucket));
         let mut full = format!("{}/{}", base, encode(&blob.remote.key, true));
         if let Some(version) = &blob.remote.version {
             full.push_str(&format!("?versionId={}", encode(version, false)));

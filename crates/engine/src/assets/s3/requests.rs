@@ -156,6 +156,8 @@ impl S3Connection {
                 Some(e) => format!("{}/{}/", e.trim_end_matches('/'), self.bucket),
                 None => format!("https://{}.s3.{}.amazonaws.com/", self.bucket, self.region),
             };
+            #[cfg(test)]
+            let base = self.metadata.endpoint.as_ref().map_or(base, |endpoint| format!("{endpoint}/{}/", self.bucket));
             Url::parse(&base).map_err(|_| AssetError::Invalid("invalid bucket root".into()))?
         } else {
             let blob = Blob { id: sha256(b""), size: 1, remote: RemoteLocation { connection: self.id.clone(), key: key.into(), version: None } };

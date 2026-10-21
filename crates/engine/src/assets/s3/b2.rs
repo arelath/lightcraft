@@ -259,6 +259,10 @@ fn authorize(c: &S3Connection, cancel: &AtomicBool, refresh: bool) -> Result<Arc
         crate::cloud_traffic::reuse(false);
         return Ok(auth);
     }
+    #[cfg(test)]
+    if c.metadata.endpoint.is_some() {
+        return Err(configuration("local provider tests require a seeded native authorization"));
+    }
     let value = request(&crate::cloud_traffic::destination(c), AUTH_URL, &basic(&credentials)?, None, cancel, c.metadata.budget.as_deref())?;
     let storage = value.get("apiInfo").and_then(|v| v.get("storageApi")).ok_or_else(|| invalid("account API"))?;
     let api = endpoint(&text(storage, "apiUrl", 512)?)?;
@@ -346,11 +350,21 @@ impl S3Connection {
         let reference = RecordRef { key: format!("{}/authority/{}.json", scope.root, hash.0), size: bytes.len() as u64, hash };
         scope.pointer(&reference)?;
         self.put_verified_metadata(&reference.key, &bytes, cancel)?;
+        self.remember_verified_metadata(&reference, &bytes, cancel)?;
         Ok(reference)
     }
     /// Read the scoped pointer and an opaque revision snapshot; no control data is mutated.
     pub fn b2_read_authority(&self, cancel: &AtomicBool) -> Result<Observed> {
         let scope = Scope::new(self)?;
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(AssetError::Cancelled);
+        }
+        if let Some(operation) = &self.metadata.operation
+            && let Some(observed) = operation.observed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        {
+            crate::cloud_traffic::reuse(true);
+            return Ok(observed);
+        }
         let mut auth = authorize(self, cancel, false)?;
         let value = match bucket(self, &auth, cancel) {
             Err(AssetError::Http(401)) => {
@@ -361,7 +375,7 @@ impl S3Connection {
         };
         let info = info(&value)?;
         let head = scope.decode(info.get(&scope.entry))?;
-        Ok(Observed {
+        let observed = Observed {
             destination: crate::cloud_traffic::destination(self),
             revision: value.get("revision").and_then(Value::as_u64).ok_or_else(|| invalid("bucket revision"))?,
             head,
@@ -370,11 +384,16 @@ impl S3Connection {
             bucket_id: text(&value, "bucketId", 256)?,
             info,
             auth,
-        })
+        };
+        if let Some(operation) = &self.metadata.operation {
+            *operation.observed.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observed.clone());
+        }
+        Ok(observed)
     }
     /// Atomically install an already verified content-addressed authority. A failed
     /// revision check cannot make the object visible; uncertain responses require reread.
     pub fn b2_compare_exchange_authority(&self, observed: &Observed, next: &RecordRef, cancel: &AtomicBool) -> Result<()> {
+        let _write = self.authority_write();
         let scope = Scope::new(self)?;
         if scope.binding != observed.scope || scope.entry != observed.entry {
             return Err(invalid("observed scope"));
@@ -385,12 +404,11 @@ impl S3Connection {
         bounded_info(&info)?;
         // The provider boundary never publishes an unverified pointer. A content-addressed
         // orphan is harmless; only bucket revision CAS makes it authoritative.
-        let reply = self.get_small(&next.key, MAX_AUTHORITY as usize, cancel)?.ok_or(AssetError::Missing)?;
-        if reply.bytes.len() as u64 != next.size || sha256(&reply.bytes) != next.hash {
-            return Err(AssetError::Integrity);
-        }
-        let head = crate::cloud_records::Head::decode(&reply.bytes).map_err(AssetError::Blocked)?;
-        validate_head(self, &head)?;
+        self.metadata_record(next, MAX_AUTHORITY as usize, cancel, |bytes| {
+            let head = crate::cloud_records::Head::decode(bytes).map_err(AssetError::Blocked)?;
+            validate_head(self, &head)
+        })?
+        .ok_or(AssetError::Missing)?;
         let update = |auth: &Auth| update(observed, &info, auth, cancel);
         match update(&observed.auth) {
             Err(AssetError::Http(401)) => {

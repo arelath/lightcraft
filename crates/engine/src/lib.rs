@@ -10,6 +10,9 @@
 //! run them off the UI thread.
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+extern crate self as lightcraft_engine;
+
 // Model/cache types remain available without linking the optional inference crate.
 #[cfg(not(feature = "denoise"))]
 extern crate lightcraft_denoise_core as lightcraft_denoise;

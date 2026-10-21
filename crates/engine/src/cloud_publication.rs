@@ -95,14 +95,15 @@ pub(crate) fn write_head(connection: &S3Connection, previous: Option<&str>, head
 /// An original append manifest remains a fence to obsolete head writers. Only
 /// its validated B2 successor may keep using the conditional publication model.
 pub(crate) fn ensure_head_protocol(connection: &S3Connection, library: &str, cancel: &AtomicBool) -> Result<()> {
-    if connection.get_small(&crate::cloud_append::manifest_key(&connection.prefix, library)?, 16 << 10, cancel)?.is_none() {
-        return Ok(());
-    }
-    if let Some((head, _, _)) = connection.b2_try_read_head(cancel)?
-        && head.library.as_deref() == Some(library)
-        && head.legacy_append.is_some()
-    {
+    if let Some((head, _, _)) = connection.b2_try_read_head(cancel)? {
+        // Terminal and incompatible controls retain their typed recovery even
+        // though deletion deliberately removes the old personal intake pointer.
         head.validate_scope_typed(&connection.prefix, library).map_err(AssetError::Blocked)?;
+        if head.legacy_append.is_some() {
+            return Ok(());
+        }
+    }
+    if connection.get_small(&crate::cloud_append::manifest_key(&connection.prefix, library)?, 16 << 10, cancel)?.is_none() {
         return Ok(());
     }
     Err(AssetError::Moved(

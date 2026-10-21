@@ -9,6 +9,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod authority;
+pub(crate) use authority::Operation;
 mod baseline;
 pub(crate) use baseline::HeadBaseline;
 mod storage;
@@ -27,6 +29,9 @@ pub(crate) struct Binding {
     fresh: bool,
     skip_discovery: bool,
     pub(crate) budget: Option<Arc<crate::cloud_verification::Budget>>,
+    pub(crate) operation: Option<Arc<Operation>>,
+    #[cfg(test)]
+    pub(crate) endpoint: Option<String>,
 }
 impl std::fmt::Debug for Binding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -88,13 +93,14 @@ impl S3Connection {
         self
     }
     pub(crate) fn with_metadata_cache(mut self, cache: Option<Arc<Cache>>) -> Self {
-        self.metadata = Binding { cache, fresh: false, skip_discovery: true, budget: None };
+        self.metadata = Binding { cache, skip_discovery: true, ..Binding::default() };
         self
     }
     /// Carries fresh-byte provenance through nested archive-proof reads as well.
     pub(crate) fn fresh_metadata(&self) -> Self {
         let mut connection = self.clone();
         connection.metadata.fresh = true;
+        connection.metadata.operation = None;
         connection
     }
     pub(crate) fn verification_connection(&self) -> Self {

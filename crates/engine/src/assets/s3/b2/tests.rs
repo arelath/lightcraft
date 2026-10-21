@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::Ordering;
 mod integration;
+mod snapshot;
 
 fn connection() -> S3Connection {
     serde_json::from_value(json!({"id":"personal","bucket":"photos-test","region":"us-east-005","prefix":"library/a","endpoint":"https://s3.us-east-005.backblazeb2.com"})).unwrap()
@@ -104,6 +105,7 @@ fn basic_uses_rfc4648_padding_without_serializing_keys() {
 
 #[derive(Default)]
 struct ServerState {
+    bucket_name: Option<String>,
     requests: u64,
     request_bytes: u64,
     response_bytes: u64,
@@ -195,8 +197,9 @@ impl Server {
             status = code;
             json!({"error":"synthetic refusal"})
         } else if header.starts_with("POST /b2api/v4/b2_list_buckets ") {
-            assert_eq!(body, json!({"accountId":"account","bucketName":"photos-test","bucketTypes":["allPrivate","allPublic"]}));
-            json!({"buckets":[{"accountId":"account","bucketId":"bucket-id","bucketName":"photos-test","revision":state.revision,"bucketInfo":state.info}]})
+            let name = state.bucket_name.as_deref().unwrap_or("photos-test");
+            assert_eq!(body, json!({"accountId":"account","bucketName":name,"bucketTypes":["allPrivate","allPublic"]}));
+            json!({"buckets":[{"accountId":"account","bucketId":"bucket-id","bucketName":name,"revision":state.revision,"bucketInfo":state.info}]})
         } else {
             assert!(header.starts_with("POST /b2api/v4/b2_update_bucket "));
             let keys: Vec<_> = body.as_object().unwrap().keys().map(String::as_str).collect();

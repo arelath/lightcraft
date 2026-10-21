@@ -122,7 +122,7 @@ fn read_window(
     }
     Ok(remote)
 }
-/// Durable cursors seed only acknowledged state. Pending local revisions never seed reads.
+/// Incremental cursors seed only certified remote state. Pending local revisions never seed reads.
 fn read_incremental(
     connection: &S3Connection,
     local: &SyncState,
@@ -240,6 +240,8 @@ pub(crate) fn receive_only(connection: &S3Connection, local: &SyncState, cancel:
     if local.protocol == lightcraft_catalog::replication::SyncProtocol::AppendLog {
         return crate::cloud_append::native::receive_only(connection, local, cancel);
     }
+    let connection = connection.authority_operation();
+    let connection = &connection;
     publication::ensure_head_protocol(connection, &local.library, cancel)?;
     let mut proofs = Default::default();
     let remote = read_with_witness(connection, &local.library, &mut proofs, cancel)?;
@@ -304,6 +306,8 @@ fn synchronize_head(
     cancel: &AtomicBool,
     media: &mut VerifiedMedia,
 ) -> Result<Outcome> {
+    let connection = connection.authority_operation();
+    let connection = &connection;
     publication::ensure_head_protocol(connection, &local.library, cancel)?;
     local.validate().map_err(catalog_error)?;
     let mut baseline = if checkpoint_requested { None } else { connection.head_baseline(local, cancel)? };
@@ -319,7 +323,8 @@ fn synchronize_head(
             if baseline.is_some() && !anchor_matches {
                 return Err(invalid("remote checkpoint changed at the acknowledged head; local work retained"));
             }
-            if anchor_matches && head.legacy_append.is_none() && tail_length(&head) < AUTO_CHECKPOINT_BATCHES {
+            let discover = legacy::due(connection, Some(&head), connection.history_discovery() || audit, cancel)?;
+            if anchor_matches && !discover && tail_length(&head) < AUTO_CHECKPOINT_BATCHES {
                 let capability = Publication::head(Some(&head), &local.library).map_err(AssetError::Blocked)?;
                 return Ok(Outcome::unchanged(local.portable(), HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?)
                     .with_publication(capability));
@@ -368,7 +373,15 @@ fn synchronize_head(
         // committed together. Reread even after success or a lost CAS response.
         // One attempt per poll prevents a completed requested audit restarting
         // itself on every retry, and bounds work under competing publishers.
-        if !intake_checked && capability.is_allowed() {
+        if !intake_checked
+            && capability.is_allowed()
+            && legacy::due(
+                connection,
+                remote.head.as_ref().map(|(head, _)| head),
+                connection.history_discovery() || audit || checkpoint_requested,
+                cancel,
+            )?
+        {
             intake_checked = true;
             match legacy::admit(connection, &remote, audit, cancel) {
                 Ok(true) => continue,
