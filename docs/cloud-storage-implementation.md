@@ -390,7 +390,8 @@ uploads), deduplicated by remote object identity. The tooltip states that previe
 metadata and other libraries are excluded, as are locally staged originals. The last
 successful remote check appears in the idle state. Uploads show active photos out of active plus
 waiting photos alongside current transfer bytes, a progress bar, and changes awaiting
-publication. The photo count describes concurrent work, not completed photos.
+publication. The photo count describes started transfer/publication work, not completed
+photos; merely admitting an item to a multi-photo task leaves it waiting until its worker starts.
 
 Check-circle, sync-arrows and warning-triangle footer icons distinguish the three main
 states. Pause, conflict-branch and cloud-off icons identify attention causes; navigation
@@ -1188,3 +1189,27 @@ The browser now routes upgraded B2 head reads and metadata commits through the s
 Immutable head catalogs and append receipt archives use separate validated grants. Browser runtime testing caught receipt compaction using the catalog-only grant; family validation now keeps receipt archives in their original namespace. An explicit upgrade can inspect a verified descriptor without an initialized pointer and resume it; ordinary authority reads refuse that interrupted state. Old signers, bad logins, typed throttles and captured retry delays preserve their specific recovery and pending work. Upgrade availability comes from cached destination capability. The obsolete desktop-only warning is removed.
 
 Local OPFS/IndexedDB runtime acceptance covers failure, interruption, rejoin/reload, late-input commit-before-ACK, identity rebase, competing upgraders, repeated lease renewal, takeover and historical-fork refusal. These contract fixtures exercise the browser and durable storage, while the native authority has separate transition/HTTP/live evidence. They do not establish live browser CORS, native provider request costs or current provider compatibility. The attempted fresh B2 run is blocked by its download/Class B transaction cap; the temporary CORS rule was removed. No AWS test bucket/profile exists. CR.43–CR.45 remain open; evidence is in the reliability checklist. Mutation schema remains 1; no schema converter was invented for CR.44.
+
+
+### Bounded ready-upload publication (CR.85, 2026-10-21)
+
+Automatic resumption selects at most 32 imports per task. Four media workers transfer
+independently; identical blob transfers share a cancellable destination/revision-bound
+gate. Once the task's ready results are collected, the per-library publication permit
+serializes one synchronization pass. The owner first saves and supplies its latest
+catalog outbox, rejecting changed libraries, destinations, protocols, cancellation or
+failed saves. Media readiness never acknowledges edits. Existing per-import publication
+proofs and durable catalog/sidecar acknowledgement remain authoritative, including
+imports acknowledged by a sibling batch. Interrupted finalization remains local-only
+recovery, and original staging survives cancellation and errors.
+
+Fresh deletion/maintenance discovery still precedes each blob transfer. Immutable
+content-addressed append control bodies use verified cache reuse after that fresh
+listing; a new deletion or fork remains visible. Future/unrecognized control envelopes
+cannot enter the cache; a bounded raw reread retains their typed Update refusal.
+Explicit fresh verification bypasses
+the cache. Quota suspension prevents untouched items starting; up to four in-flight
+workers in a task may already have issued requests. Four upload tasks remain the
+existing upper bound. Per-task byte progress aggregates the bounded current worker streams independently
+from cumulative request-byte accounting; per-photo queue
+counts remain catalog-derived. No remote schema or publication guarantee changes.

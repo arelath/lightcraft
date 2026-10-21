@@ -20,6 +20,8 @@ struct Shared {
     destination: Option<S3Connection>,
     ready: BTreeSet<Key>,
     active: BTreeMap<Key, usize>,
+    transferring: BTreeSet<Key>,
+    transferred: BTreeSet<Key>,
 }
 impl SharedMedia {
     pub(crate) fn prepare(&self, revision: u64, connection: &S3Connection, pending: bool) {
@@ -31,6 +33,7 @@ impl SharedMedia {
             *shared = Shared { revision: Some(revision), destination: Some(connection.storage_snapshot()), ..Shared::default() };
         } else if !pending && shared.active.is_empty() {
             shared.ready.clear();
+            shared.transferred.clear();
         }
     }
     pub(crate) fn producer(self: &Arc<Self>, revision: u64, connection: &S3Connection, blobs: impl Iterator<Item = Blob>, fresh: bool) -> Producer {
@@ -40,6 +43,7 @@ impl SharedMedia {
             for key in &keys {
                 if fresh {
                     shared.ready.remove(key);
+                    shared.transferred.remove(key);
                 }
                 if shared.active.len() < MAX_EVIDENCE || shared.active.contains_key(key) {
                     let count = shared.active.entry(key.clone()).or_default();
@@ -110,6 +114,21 @@ impl VerifiedMedia {
             }
         }
     }
+    /// Transfer-only reuse follows a saved per-blob owner phase. Publication still
+    /// requires every import blob and its ObjectsVerified phase to be durable.
+    pub(crate) fn transferred(&self, connection: &S3Connection, blob: &Blob) {
+        let Some((shared, revision)) = &self.shared else { return };
+        if !self.contains(connection, blob) {
+            return;
+        }
+        let mut state = shared.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.revision == Some(*revision)
+            && state.destination.as_ref().is_some_and(|saved| saved.same_destination(connection))
+            && state.transferred.len() < MAX_EVIDENCE
+        {
+            state.transferred.insert(Self::key(blob));
+        }
+    }
     fn key(blob: &Blob) -> Key {
         (blob.id.clone(), blob.remote.key.clone(), blob.remote.version.clone(), blob.size)
     }
@@ -156,7 +175,15 @@ impl VerifiedMedia {
         }
         if let Some((shared, revision)) = &self.shared {
             let (ready, active) = shared.status(*revision, connection, &Self::key(blob));
-            if ready && !self.fresh {
+            let transferred = if self.publication {
+                false
+            } else {
+                let state = shared.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.revision == Some(*revision)
+                    && state.destination.as_ref().is_some_and(|saved| saved.same_destination(connection))
+                    && state.transferred.contains(&Self::key(blob))
+            };
+            if (ready || transferred) && !self.fresh {
                 crate::cloud_traffic::reuse(true);
                 self.record(connection, blob);
                 return Ok(true);
@@ -231,6 +258,48 @@ impl Write for Check {
     }
 }
 
+/// Serializes one complete check/upload/verification turn for identical blobs.
+/// The short-held shared-state mutex never covers I/O or owner acknowledgement.
+pub(crate) struct BlobPermit {
+    shared: Arc<SharedMedia>,
+    revision: u64,
+    destination: S3Connection,
+    key: Key,
+}
+impl Drop for BlobPermit {
+    fn drop(&mut self) {
+        let mut state = self.shared.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.revision == Some(self.revision) && state.destination.as_ref().is_some_and(|saved| saved.same_destination(&self.destination)) {
+            state.transferring.remove(&self.key);
+        }
+    }
+}
+impl VerifiedMedia {
+    pub(crate) fn acquire_blob(&self, connection: &S3Connection, blob: &Blob, cancel: &AtomicBool) -> Result<Option<BlobPermit>> {
+        let Some((shared, revision)) = &self.shared else { return Ok(None) };
+        let key = Self::key(blob);
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(AssetError::Cancelled);
+            }
+            {
+                let mut state = shared.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.revision != Some(*revision) || state.destination.as_ref().is_none_or(|saved| !saved.same_destination(connection)) {
+                    return Err(AssetError::Invalid("media destination changed; staged data retained".into()));
+                }
+                if !state.transferring.contains(&key) {
+                    if state.transferring.len() >= MAX_EVIDENCE {
+                        return Err(AssetError::Capacity("too many concurrent cloud media transfers".into()));
+                    }
+                    state.transferring.insert(key.clone());
+                    return Ok(Some(BlobPermit { shared: shared.clone(), revision: *revision, destination: connection.storage_snapshot(), key }));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +330,9 @@ mod tests {
         assert!(!publisher.verify(&connection, &blob, &AtomicBool::new(false), &mut |_| {}).unwrap());
         let mut transfer = VerifiedMedia::coordinated(shared.clone(), 1, None, false);
         transfer.record(&connection, &blob);
+        transfer.transferred(&connection, &blob);
+        let mut sibling_transfer = VerifiedMedia::coordinated(shared.clone(), 1, None, false);
+        assert!(sibling_transfer.verify(&connection, &blob, &AtomicBool::new(false), &mut |_| {}).unwrap());
         assert!(!publisher.verify(&connection, &blob, &AtomicBool::new(false), &mut |_| {}).unwrap());
         transfer.ready(&connection, std::iter::once(blob.clone()));
         assert!(publisher.verify(&connection, &blob, &AtomicBool::new(false), &mut |_| {}).unwrap());
@@ -328,5 +400,50 @@ mod tests {
         assert!(evidence.contains(&other, &blob));
         assert!(!evidence.contains(&connection, &blob));
         assert!(matches!(evidence.verify(&other, &blob, &AtomicBool::new(true), &mut |_| {}), Err(AssetError::Cancelled)));
+    }
+}
+
+#[cfg(test)]
+mod blob_gate_tests {
+    use super::*;
+    #[test]
+    fn identical_media_waits_with_cancellation_while_other_blobs_and_new_destinations_progress() {
+        let c: S3Connection = serde_json::from_value(
+            serde_json::json!({"id":"test","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":"http://127.0.0.1:1"}),
+        )
+        .unwrap();
+        let blob = Blob {
+            id: crate::assets::sha256(b"blob"),
+            size: 4,
+            remote: lightcraft_catalog::assets::RemoteLocation { connection: "test".into(), key: "library/original".into(), version: None },
+        };
+        let shared = Arc::new(SharedMedia::default());
+        shared.prepare(1, &c, true);
+        let media = VerifiedMedia::coordinated(shared.clone(), 1, None, false);
+        let first = media.acquire_blob(&c, &blob, &AtomicBool::new(false)).unwrap().unwrap();
+        let mut another = blob.clone();
+        another.remote.key.push_str("-different");
+        let independent = media.acquire_blob(&c, &another, &AtomicBool::new(false)).unwrap().unwrap();
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let (send, receive) = std::sync::mpsc::channel();
+            let worker_media = VerifiedMedia::coordinated(shared.clone(), 1, None, false);
+            let c = &c;
+            let blob = &blob;
+            let cancel = &cancel;
+            let worker = scope.spawn(move || send.send(worker_media.acquire_blob(c, blob, cancel).err()).unwrap());
+            assert!(matches!(receive.recv_timeout(std::time::Duration::from_millis(50)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+            cancel.store(true, Ordering::Relaxed);
+            assert_eq!(receive.recv_timeout(std::time::Duration::from_secs(2)).unwrap(), Some(AssetError::Cancelled));
+            worker.join().unwrap();
+        });
+        shared.prepare(2, &c, true);
+        let replacement =
+            VerifiedMedia::coordinated(shared.clone(), 2, None, false).acquire_blob(&c, &blob, &AtomicBool::new(false)).unwrap().unwrap();
+        drop(first);
+        drop(independent);
+        assert_eq!(shared.0.lock().unwrap().transferring.len(), 1, "old leases cannot release a replacement scope");
+        drop(replacement);
+        assert!(shared.0.lock().unwrap().transferring.is_empty());
     }
 }

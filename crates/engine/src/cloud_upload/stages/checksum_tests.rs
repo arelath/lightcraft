@@ -44,7 +44,7 @@ fn an_interrupted_staged_multipart_upload_resumes_its_selected_algorithm_without
     let blob = item.imported.asset.original.clone();
     f.state.lock().unwrap().media_versions.insert(format!("/photos/{}", blob.remote.key), "staged-version".into());
     let guard = s.activity.start("upload", "Checksum interruption test", crate::activity::Cancel::Yes);
-    let progress = UploadProgress { handle: guard.handle(), bytes: Arc::new(AtomicU64::new(0)) };
+    let progress = UploadProgress { handle: guard.handle(), bytes: Arc::new(AtomicU64::new(0)), current: None, slot: 0 };
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = cancel.clone();
     let worker = std::thread::spawn(move || {
@@ -95,7 +95,7 @@ fn an_interrupted_staged_multipart_upload_resumes_its_selected_algorithm_without
     routed(&mut item, &f);
     let mut receipt = item.load_receipt(&AtomicBool::new(false), false).unwrap();
     let guard = restored.activity.start("upload", "Checksum resume test", crate::activity::Cancel::Yes);
-    let progress = UploadProgress { handle: guard.handle(), bytes: Arc::new(AtomicU64::new(0)) };
+    let progress = UploadProgress { handle: guard.handle(), bytes: Arc::new(AtomicU64::new(0)), current: None, slot: 0 };
     let mut media = VerifiedMedia::default();
     item.upload_blob(&mut receipt, &original, &AtomicBool::new(false), &progress, &mut media).unwrap();
     assert!(item.remote_verified(&original, &AtomicBool::new(false), &progress, &mut media).unwrap());

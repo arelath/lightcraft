@@ -39,8 +39,14 @@ pub(crate) fn library_control(connection: &S3Connection, library: &str, cancel: 
     let (keys, _) = scan(connection, list(control::prefix(&connection.prefix, library)?, false), cancel)?;
     let mut records = Vec::new();
     for key in control::latest(&keys) {
-        let reply = connection.get_small(&key, control::MAX_CONTROL_BYTES, cancel)?.ok_or(AssetError::Missing)?;
-        records.push((key, reply.bytes));
+        let body = match connection.history_record(&key, control::MAX_CONTROL_BYTES, cancel, |bytes| Ok(bytes.to_vec())) {
+            Ok(body) => body.value,
+            // A future control envelope cannot enter this build's immutable cache.
+            // Decode its bounded original body below to preserve Update recovery.
+            Err(AssetError::Invalid(_)) => connection.get_small(&key, control::MAX_CONTROL_BYTES, cancel)?.ok_or(AssetError::Missing)?.bytes,
+            Err(reason) => return Err(reason),
+        };
+        records.push((key, body));
     }
     control::effective(&connection.prefix, library, &records).map_err(AssetError::Blocked)
 }

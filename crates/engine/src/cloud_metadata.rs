@@ -71,8 +71,22 @@ fn identity(connection: &S3Connection, key: &str) -> Result<[u8; 32]> {
     connection.validate()?;
     let root = format!("{}/", keys::in_library(connection.prefix.trim_end_matches('/'), "sync-v2")?);
     let relative = key.strip_prefix(&root).ok_or_else(|| AssetError::Invalid("history key is outside its destination".into()))?;
-    if !matches!(relative.split('/').nth(1), Some("ops" | "checkpoints" | "receipts")) {
+    if !matches!(relative.split('/').nth(1), Some("ops" | "checkpoints" | "receipts" | "control")) {
         return Err(AssetError::Invalid("cache requires an immutable history namespace".into()));
+    }
+    if relative.split('/').nth(1) == Some("control") {
+        let valid = relative.split('/').count() == 3
+            && relative.rsplit('/').next().and_then(|name| name.split_once('-')).is_some_and(|(revision, hash)| {
+                revision.len() == 20
+                    && revision.bytes().all(|byte| byte.is_ascii_digit())
+                    && revision.parse::<u64>().is_ok()
+                    && hash
+                        .strip_suffix(".json")
+                        .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+            });
+        if !valid {
+            return Err(AssetError::Invalid("invalid immutable control key".into()));
+        }
     }
     keys::in_library("", key)?;
     let mut hash = Sha256::new();

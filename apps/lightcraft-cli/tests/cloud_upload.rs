@@ -748,13 +748,14 @@ fn an_account_cap_stops_the_upload_batch_and_leaves_untouched_imports_queued() {
     }
     let (_, rows) = f.run(&library, &[("cloud.upload", json!({})), ("cloud.uploadStatus", json!({})), ("cloud.overview", json!({}))]);
     assert_eq!(rows[0]["ok"], false, "{rows:?}");
-    assert_eq!(f.state.lock().unwrap().requests.len(), 1, "no request for subsequent untouched photos");
+    assert!((1..=4).contains(&f.state.lock().unwrap().requests.len()), "only already in-flight media workers may finish after refusal");
     let entries = rows[1]["result"]["uploads"].as_object().unwrap();
-    assert_eq!(entries.values().filter(|entry| entry["state"] == "failed").count(), 1);
-    assert_eq!(entries.values().filter(|entry| entry["state"] == "savedLocally" && entry["error"].is_null()).count(), 19);
+    let failed = entries.values().filter(|entry| entry["state"] == "failed").count();
+    assert!((1..=4).contains(&failed));
+    assert_eq!(entries.values().filter(|entry| entry["state"] == "savedLocally" && entry["error"].is_null()).count(), 20 - failed);
     assert_eq!(rows[2]["result"]["health"]["uploads"]["activity"]["failures"]["provider"]["recovery"], "reviewProviderLimits");
     for (_, path) in &imports {
-        assert!(path.exists(), "staged original retained");
+        assert!(path.exists(), "source original retained");
     }
     f.state.lock().unwrap().download_cap = false;
     let (out, rows) = f.run(&library, &[("cloud.upload", json!({})), ("cloud.uploadStatus", json!({}))]);

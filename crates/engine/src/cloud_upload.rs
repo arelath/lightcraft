@@ -22,9 +22,11 @@ use std::time::Duration;
 
 const PART_BYTES: usize = 8 << 20;
 const MAX_RECEIPT: u64 = 4 << 20;
+mod batch;
 mod cleanup;
 mod erase;
 mod finalize;
+mod publisher;
 mod retention;
 pub(crate) use erase::ensure_not_erased;
 pub use erase::{start as erase_library, status as erasure_status};
@@ -234,6 +236,11 @@ pub(crate) fn staging_proofs(root: &Path, policy: &crate::assets::managed::Polic
 }
 
 enum Event {
+    Snapshot {
+        connection: S3Connection,
+        expected: Arc<lightcraft_catalog::replication::SyncState>,
+        reply: mpsc::SyncSender<Result<publisher::Snapshot>>,
+    },
     Finalized {
         id: String,
         proof: UploadFinalization,
@@ -280,17 +287,32 @@ struct Item {
     resolver: Arc<AssetResolver>,
 }
 
+#[derive(Clone)]
 struct UploadProgress {
     handle: TaskHandle,
     bytes: Arc<AtomicU64>,
+    current: Option<Arc<std::sync::Mutex<[(u64, u64); batch::WORKERS]>>>,
+    slot: usize,
 }
 impl UploadProgress {
     fn detail(&self, text: &str) {
         self.handle.detail(text);
     }
     fn progress(&self, done: u64, total: u64) {
-        self.handle.progress(done, total);
+        if let Some(current) = &self.current {
+            let mut streams = current.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(stream) = streams.get_mut(self.slot) else { return };
+            *stream = (done.min(total), total);
+            let (done, total) = streams.iter().fold((0_u64, 0_u64), |(done, total), (d, t)| (done.saturating_add(*d), total.saturating_add(*t)));
+            self.handle.progress(done, total);
+        } else {
+            self.handle.progress(done, total);
+        }
     }
+    fn for_worker(&self, slot: usize) -> Self {
+        Self { slot, ..self.clone() }
+    }
+
     fn observe(&self, previous: &mut u64, done: u64, offset: u64, total: u64) {
         let delta = done.saturating_sub(*previous);
         let _ = self.bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| Some(value.saturating_add(delta)));
@@ -628,7 +650,7 @@ impl Uploads {
             .filter(|p| p.maintenance.is_none())
             .flat_map(|p| p.ids.keys())
             .filter_map(|id| catalog.upload_intents().get(id))
-            .filter(|i| !matches!(i.state, UploadState::Synchronized | UploadState::Superseded))
+            .filter(|i| matches!(i.state, UploadState::Uploading | UploadState::ObjectsVerified | UploadState::Published))
             .map(|i| i.photo_id)
             .collect::<BTreeSet<_>>()
             .len()
@@ -1077,7 +1099,12 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
                 Some(id),
             );
             let _producers = producers;
-            let progress = UploadProgress { handle, bytes: worker_bytes };
+            let progress = UploadProgress {
+                handle,
+                bytes: worker_bytes,
+                current: (items.len() > 1).then(|| Arc::new(std::sync::Mutex::new([(0, 0); batch::WORKERS]))),
+                slot: 0,
+            };
             let result = crate::guard::catch("cloud upload worker", || {
                 let mut results = Vec::new();
                 let mut failures = Vec::new();
@@ -1088,57 +1115,17 @@ fn start_impl(s: &mut Session, p: &Value, abort: bool, observer: Option<&mut dyn
                     fresh,
                 );
                 let mut ready = Vec::new();
-                for item in &items {
-                    let _traffic = crate::cloud_traffic::Scope::operation(
-                        crate::cloud_traffic::Purpose::Upload,
-                        item.sync.as_deref().map(|state| state.library.as_str()),
-                        Some(&item.id),
-                        Some(id),
-                    );
-                    if worker_cancel.load(Ordering::Relaxed) {
-                        return Err(error("upload cancelled; originals and multipart receipts retained"));
-                    }
-                    if let Err(reason) = item.connection.check_admission(&worker_cancel) {
-                        if matches!(reason, AssetError::ProviderLimit { .. } | AssetError::Throttled { .. }) {
-                            let _ = sender.send(Event::Suspended(crate::cloud_status::CloudFailure::from(reason.clone())));
-                        }
-                        // No phase transition has occurred for this or following items.
-                        for untouched in items.iter().skip_while(|candidate| candidate.id != item.id) {
-                            untouched.item_result(&sender, &Ok(Value::Null));
-                        }
-                        failures.push(reason.to_string());
-                        break;
-                    }
-                    if abort {
-                        let result = item.abort(&sender, &worker_cancel);
-                        item.item_result(&sender, &result);
-                        match result {
-                            Ok(value) => results.push(value),
-                            Err(reason) => failures.push(reason.to_string()),
-                        }
-                    } else {
-                        match item.ensure_media(&sender, &worker_cancel, &progress, &mut media) {
-                            Ok(verified) => {
-                                media.ready(&item.connection, blobs(&item.imported.asset).cloned());
-                                let _ = sender.send(Event::MediaReady { attempt: item.attempt, id: item.id.clone() });
-                                ready.push((item, verified));
-                            }
-                            Err(reason) => {
-                                let result = Err(error(reason.to_string()));
-                                item.item_result(&sender, &result);
-                                failures.push(reason.to_string());
-                                if let Err(reason @ (AssetError::ProviderLimit { .. } | AssetError::Throttled { .. })) =
-                                    item.connection.check_admission(&worker_cancel)
-                                {
-                                    let _ = sender.send(Event::Suspended(crate::cloud_status::CloudFailure::from(reason)));
-                                    for untouched in items.iter().skip_while(|candidate| candidate.id != item.id).skip(1) {
-                                        untouched.item_result(&sender, &Ok(Value::Null));
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                if abort {
+                    let completed = batch::abort(&items, &sender, &worker_cancel)?;
+                    results = completed.0;
+                    failures = completed.1;
+                } else {
+                    let prepared = batch::prepare(&items, &sender, &worker_cancel, &progress, connection_revision, fresh);
+                    ready = prepared.ready;
+                    failures.extend(prepared.failures);
+                }
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return Err(error("upload cancelled; originals and multipart receipts retained"));
                 }
                 if !ready.is_empty() {
                     match stages::publish_ready(&mut ready, &sender, &worker_cancel, &progress, &mut media) {
@@ -1244,7 +1231,7 @@ impl Session {
                             .any(|pending| pending.maintenance_connection() == Some(asset.original.remote.connection.as_str()))
                     })
             })
-            .take(1)
+            .take(batch::IMPORTS)
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         if ids.is_empty() {
@@ -1289,6 +1276,10 @@ impl Session {
                         if Arc::ptr_eq(&pending.library, &self.library_token()) && pending.connection_revision == pending.resolver.connection_revision()
                             && let Err(reason) = &result { finalize::record_error(self, &id, &reason.to_string()); }
                         let _ = reply.send(result);
+                    }
+                    Ok(Event::Snapshot { connection, expected, reply }) => {
+                        let result=publisher::owner(self,pending,&connection,&expected);
+                        let _=reply.send(result);
                     }
                     Ok(Event::Publication { outcome, started_generation, covered, reply }) => {
                         let result = (|| {
@@ -1372,6 +1363,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    mod batching;
     use super::*;
     use lightcraft_catalog::assets::{AssetId, RemoteLocation};
     use lightcraft_catalog::{FsStore, Photo, PhotoId, Store};

@@ -1901,3 +1901,107 @@ fn guided_discovery_lists_all_validated_pages_and_retires_only_the_old_protocol_
         assert_eq!(state.signature_errors, 0);
     }
 }
+
+#[test]
+#[ignore = "explicit native batched-publisher acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn prepared_uploads_share_one_automatic_batch_and_preserve_every_durable_receipt() {
+    use lightcraft_engine::catalog::{FsStore, Journal, uploads::UploadState};
+    for (protocol, count) in [("conditional-head-v1", 20_usize), ("append-log-v1", 20), ("conditional-head-v1", 48), ("append-log-v1", 48)] {
+        let f = support::Fixture::new();
+        f.state.lock().unwrap().append_mode = protocol == "append-log-v1";
+        let library = f.dir.join("prepared-batch");
+        let imports = (0..count).map(|_| f.import_unsynchronized(&library, false)).collect::<Vec<_>>();
+        let (out, rows) = f.run(&library, &[("cloud.syncEnable", json!({"connection":"personal","protocol":protocol})), ("cloud.pause", json!({}))]);
+        assert!(out.status.success(), "{rows:?}");
+        for (_, source) in &imports {
+            std::fs::remove_file(source).unwrap();
+        }
+        // Derive remote originals from the durable catalog, independent of UI JSON shape.
+        let (_, catalog, _) = Journal::open(Box::new(FsStore::open(&library).unwrap())).unwrap();
+        let originals = catalog.upload_intents().values().map(|intent| catalog.asset(&intent.asset_id).unwrap().original.clone()).collect::<Vec<_>>();
+        let keys = originals.iter().map(|original| format!("/photos/{}", original.remote.key)).collect::<Vec<_>>();
+        drop(catalog);
+        let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join(format!("batch-{protocol}-{count}"));
+        std::fs::create_dir_all(&artifacts).unwrap();
+        f.state.lock().unwrap().requests.clear();
+        let mut app = Desktop::start(&f, &library, &artifacts);
+        f.state.lock().unwrap().hold_get = keys.first().cloned();
+        app.execute("cloud.resume", json!({}));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !f.state.lock().unwrap().requests.iter().any(|(method, key)| method == "GET" && Some(key) == keys.first()) {
+            assert!(Instant::now() < deadline, "media workers did not start");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        for original in &originals {
+            assert!(library.join("Managed/blobs").join(&original.id.0).exists(), "staging remains before acknowledgement");
+        }
+        let progress = app.execute("cloud.overview", json!({}));
+        assert_eq!(progress["summary"]["queuedFiles"], count, "the complete batch is queued immediately: {progress}");
+        let active = progress["uploadingFiles"].as_u64().unwrap();
+        assert!((1..=4 * count.div_ceil(32) as u64).contains(&active), "only started items are active, not the entire admitted batch: {progress}");
+        assert_eq!(active + progress["waitingFiles"].as_u64().unwrap(), count as u64);
+        app.ask("ui.clickWidget", json!({"id":"icon:cloud"}));
+        app.ask("ui.screenshot", json!({"path":artifacts.join("progress.png"),"headless":true}));
+        app.ask("ui.clickWidget", json!({"id":"icon:cloud"}));
+        f.state.lock().unwrap().hold_get = None;
+        app.settled(&f, &keys);
+        let status = app.execute("cloud.uploadStatus", json!({}));
+        assert_eq!(status["uploads"].as_object().unwrap().len(), count);
+        assert!(status["uploads"].as_object().unwrap().values().all(|entry| entry["state"] == "synchronized"));
+        let sizes = status["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|report| report["result"]["results"].as_array().map(Vec::len))
+            .filter(|size| *size > 0)
+            .collect::<Vec<_>>();
+        let batches = sizes.len();
+        let expected_batches = count.div_ceil(32);
+        assert_eq!(sizes.iter().sum::<usize>(), count, "every import belongs to one bounded publication batch: {status}");
+        assert!(sizes.iter().all(|size| *size <= 32));
+        assert_eq!(batches, expected_batches, "all prepared imports share bounded automatic publication batches: {status}");
+        let traffic = app.execute("cloud.traffic", json!({"limit":256}));
+        let head_hash = lightcraft_engine::assets::sha256(b"/photos/library/catalog/head.json").0;
+        let head_reads = traffic["recentRequests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|request| request["purpose"] == "publication" && request["method"] == "GET" && request["resource"] == head_hash)
+            .count();
+        let manifest_reads = f
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(method, path)| method == "GET" && path.contains("/manifest/") && !path.contains('?'))
+            .count();
+        assert!(head_reads <= 16 * expected_batches, "publication setup must follow bounded batches, not 20 photos: {head_reads}");
+        assert!(manifest_reads <= 4 * expected_batches + 4, "append discovery must be shared: {manifest_reads}");
+        println!(
+            "prepared batch: protocol={protocol}, imports={count}, upload_batches={batches}, publication_head_gets={head_reads}, all_manifest_gets={manifest_reads}"
+        );
+        std::fs::write(artifacts.join("traffic.json"), serde_json::to_vec_pretty(&traffic).unwrap()).unwrap();
+        app.ask("ui.clickWidget", json!({"id":"icon:cloud"}));
+        app.ask("ui.screenshot", json!({"path":artifacts.join("popup.png").to_string_lossy()}));
+        std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+        app.execute("cloud.pause", json!({}));
+        app.ask("app.quit", json!({}));
+        assert!(app.child.wait().unwrap().success());
+        let (_, saved, _) = Journal::open(Box::new(FsStore::open(&library).unwrap())).unwrap();
+        for (id, path) in &imports {
+            let intent = &saved.upload_intents()[id];
+            assert_eq!(intent.state, UploadState::Synchronized);
+            assert!(intent.finalization.is_none());
+            assert!(!path.exists());
+            let original = &saved.asset(&intent.asset_id).unwrap().original;
+            let remote = f.state.lock().unwrap().objects[&format!("/photos/{}", original.remote.key)].clone();
+            assert_eq!(lightcraft_engine::assets::sha256(&remote), original.id);
+            assert_eq!(remote.len() as u64, original.size);
+            let receipt: Value = serde_json::from_slice(&std::fs::read(library.join("Managed/uploads").join(format!("{id}.json"))).unwrap()).unwrap();
+            assert_eq!(receipt["state"], "synchronized");
+            assert!(receipt["appendProof"].as_object().is_some_and(|proof| !proof.is_empty()));
+        }
+        assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+    }
+}

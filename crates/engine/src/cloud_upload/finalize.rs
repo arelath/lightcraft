@@ -13,7 +13,7 @@ pub(super) struct Ready {
     proof: UploadFinalization,
 }
 
-fn ready(s: &mut Session, ids: &BTreeSet<String>) -> Result<Vec<Ready>> {
+pub(super) fn ready(s: &mut Session, ids: &BTreeSet<String>) -> Result<Vec<Ready>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }

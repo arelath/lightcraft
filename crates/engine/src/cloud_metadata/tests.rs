@@ -307,3 +307,52 @@ fn restarted_history_reader_reuses_verified_bytes_but_a_fresh_read_detects_corru
     stop.store(true, Ordering::Relaxed);
     worker.join().unwrap();
 }
+
+#[test]
+fn cached_control_bodies_preserve_fresh_listing_deletion_conflicts_and_explicit_verification() {
+    use crate::assets::s3::{AccessKeys, fixture::Fixture};
+    use crate::cloud_append::{control, native};
+    let f = Fixture::new();
+    {
+        let mut state = f.state.lock().unwrap();
+        state.allow_typed_keys = true;
+        state.append_mode = true;
+    }
+    let c: S3Connection =
+        serde_json::from_value(serde_json::json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint}))
+            .unwrap();
+    let c = c
+        .with_keys(AccessKeys::new("EXAMPLE_ACCESS", "EXAMPLE_SECRET").unwrap())
+        .with_metadata_cache(Some(Arc::new(Cache::new(f.dir.join("metadata")))));
+    let initial = crate::cloud_control::Control::initial_append("lib");
+    let seed = |control: &crate::cloud_control::Control| {
+        let key = control::key("library", control).unwrap();
+        f.state.lock().unwrap().objects.insert(format!("/photos/{key}"), control::encode(control).unwrap());
+        key
+    };
+    seed(&initial);
+    let cancel = AtomicBool::new(false);
+    assert_eq!(native::library_control(&c, "lib", &cancel).unwrap(), initial);
+    for _ in 0..20 {
+        native::ensure_readable(&c, "lib", &cancel).unwrap();
+    }
+    {
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.list_calls, 21);
+        assert_eq!(state.requests.iter().filter(|(method, path)| method == "GET" && !path.contains('?')).count(), 1);
+    }
+    let reopened = c.clone().with_metadata_cache(Some(Arc::new(Cache::new(f.dir.join("metadata")))));
+    native::ensure_readable(&reopened, "lib", &cancel).unwrap();
+    let deleted = initial.delete().unwrap();
+    let key = seed(&deleted);
+    assert!(matches!(native::ensure_readable(&reopened, "lib", &cancel), Err(AssetError::Blocked(crate::cloud_control::Blocked::Deleted))));
+    f.state.lock().unwrap().objects.insert(format!("/photos/{key}"), b"corrupt".to_vec());
+    assert!(matches!(native::ensure_readable(&reopened, "lib", &cancel), Err(AssetError::Blocked(crate::cloud_control::Blocked::Deleted))));
+    assert!(reopened.fresh_metadata().history_record(&key, control::MAX_CONTROL_BYTES, &cancel, |bytes| Ok(bytes.to_vec())).is_err());
+    seed(&deleted);
+    let mut fork = initial.clone();
+    fork.revision = deleted.revision;
+    seed(&fork);
+    assert!(matches!(native::ensure_readable(&reopened, "lib", &cancel), Err(AssetError::Blocked(crate::cloud_control::Blocked::Conflict(_)))));
+    assert_eq!(f.state.lock().unwrap().signature_errors, 0);
+}

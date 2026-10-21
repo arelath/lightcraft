@@ -100,7 +100,7 @@ pub(super) fn completion_ops(
 }
 
 impl Item {
-    fn load_receipt(&self, cancel: &AtomicBool, abort: bool) -> Result<Receipt> {
+    pub(super) fn load_receipt(&self, cancel: &AtomicBool, abort: bool) -> Result<Receipt> {
         let path = self.root.join("uploads").join(format!("{}.json", self.id));
         let frozen = self
             .sync
@@ -193,6 +193,7 @@ impl Item {
             self.write_receipt(&receipt, cancel)?;
             self.phase(&receipt, events, cancel)?;
             for blob in blobs(&receipt.imported.asset).cloned().collect::<Vec<_>>() {
+                let _blob_permit = media.acquire_blob(&self.connection, &blob, cancel).map_err(|reason| error(reason.to_string()))?;
                 // A restored catalog has no local erasure marker. Read the remote
                 // terminal barrier before any media PUT or multipart recovery.
                 if let Some(local) = &self.sync {
@@ -226,6 +227,7 @@ impl Item {
                 receipt.verified.insert(blob.remote.key.clone());
                 self.write_receipt(&receipt, cancel)?;
                 self.phase(&receipt, events, cancel)?;
+                media.transferred(&self.connection, &blob);
             }
             remote_invalid = false; // Every remote object is now byte verified.
             receipt.state = UploadState::ObjectsVerified;
@@ -265,14 +267,20 @@ impl Item {
         }
         result
     }
-    fn finalize_receipt(&self, receipt: &mut Receipt, events: &mpsc::SyncSender<Event>, cancel: &AtomicBool) -> Result<Value> {
+    fn finalize_receipt(
+        &self,
+        receipt: &mut Receipt,
+        local: &lightcraft_catalog::replication::SyncState,
+        events: &mpsc::SyncSender<Event>,
+        cancel: &AtomicBool,
+    ) -> Result<Value> {
         receipt.state = UploadState::Published;
         self.write_receipt(receipt, cancel)?;
         self.phase(receipt, events, cancel)?;
         receipt.state = UploadState::Synchronized;
         self.phase(receipt, events, cancel)?;
         self.write_receipt(receipt, cancel)?;
-        if let Some(local) = &self.sync {
+        {
             let proof = UploadFinalization {
                 version: 1,
                 protocol: local.protocol,
@@ -315,11 +323,21 @@ pub(super) fn publish_ready(
 ) -> Result<Vec<Result<Value>>> {
     let _traffic = crate::cloud_traffic::Scope::purpose(crate::cloud_traffic::Purpose::Publication);
     let first = ready.first().map(|(item, _)| *item).ok_or_else(|| error("no verified media ready for publication"))?;
-    let local = transitions::publication_binding(
+    transitions::publication_binding(
         ready.iter().map(|(item, _)| transitions::PublicationBinding { connection: &item.connection, state: item.sync.as_deref() }),
     )?;
     media.publication();
-    let permit = first.coordinator.acquire(cancel)?;
+    let mut permit = first.coordinator.acquire(cancel)?;
+    let mut snapshot = publisher::request(first, events, cancel)?;
+    if ready.iter().all(|(item, _)| snapshot.complete.contains(&item.id)) {
+        drop(permit);
+        if let Some(results) = publisher::finish_complete(ready, &snapshot, events, cancel)? {
+            return Ok(results);
+        }
+        permit = first.coordinator.acquire(cancel)?;
+        snapshot = publisher::request(first, events, cancel)?;
+    }
+    let local = snapshot.state.as_ref();
     task.detail("Publishing verified library changes");
     let outcome = crate::cloud_replication::synchronize_verified(&first.connection, local, false, cancel, media).map_err(|e| error(e.to_string()))?;
     let mut published_ids = BTreeSet::new();
@@ -383,7 +401,7 @@ pub(super) fn publish_ready(
         .iter_mut()
         .map(|(item, verified)| {
             let result = if published_ids.contains(&item.id) {
-                item.finalize_receipt(&mut verified.receipt, events, cancel)
+                item.finalize_receipt(&mut verified.receipt, local, events, cancel)
             } else {
                 task.detail("Objects verified · waiting for other causal imports");
                 Ok(json!({"import":item.id,"objectsVerified":true,"publicationPending":true}))
