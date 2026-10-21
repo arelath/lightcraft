@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~14 points and ~340–600 h away
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (CR.81: operation-scoped B2 authority and immutable metadata reuse; CR.80: certified native remote baselines and pending overlays; CR.79: bounded native conditional-history byte reuse; CR.78: separate incremental sync and durable budgeted verification; CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified; RAW decoding 77%) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (CR.82: version-bound native media verification receipts; CR.81: operation-scoped B2 authority and immutable metadata reuse; CR.80: certified native remote baselines and pending overlays; CR.79: bounded native conditional-history byte reuse; CR.78: separate incremental sync and durable budgeted verification; CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified; RAW decoding 77%) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 One-page summary of how close LightCraft is to Adobe Lightroom. Agents: read this, then pick work
 from [docs/gaps.md](docs/gaps.md). The full assessment, method and evidence are in
@@ -161,6 +161,7 @@ Ranked toward beta; detail in [docs/roadmap.md](docs/roadmap.md), gaps in [docs/
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | minor | CR.82: Native recovery reuses a completed media byte proof only after confirming its exact immutable provider version; missing or mismatched evidence retains full verification. Cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.81: Native B2 synchronization shares one verified authority observation per pass, reuses exact immutable metadata and schedules legacy discovery separately; writes require fresh confirmation. Cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.80: Native pending edits use a separate certified remote baseline and confirm only new history; restart/cache failures retain full replay and exact atomic acknowledgement. Cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.79: Native conditional-history traversal/replay shares a bounded verified byte spool, preserving recovery and pending-edit guards. Browser replay and baseline separation remain open; cloud is OOS and parity counts are unchanged |

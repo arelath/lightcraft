@@ -1,10 +1,8 @@
 use super::*;
 use crate::assets::s3::AccessKeys;
+use crate::assets::s3::fixture as s3_fixture;
 use crate::cloud_records::{Batch, Head, LegacyIntake};
 use lightcraft_catalog::replication::{Change, SyncState};
-#[allow(dead_code)]
-#[path = "../../../../../../../apps/lightcraft-cli/tests/support/cloud_upload.rs"]
-mod s3_fixture;
 
 struct Combined {
     native: Server,

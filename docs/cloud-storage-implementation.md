@@ -61,7 +61,7 @@ Destination detail is bounded to 32 identities plus an overflow bucket. The curr
 connection-name lookup is limited to 32 bindings, with an explicit truncation flag. No cache,
 publication proof, upload verification or polling policy changes are implied by these
 diagnostics. Native immutable-body reuse is described below; further traffic reductions
-remain tracked by CR.82–CR.86.
+remain tracked by CR.83–CR.86.
 
 ## Native immutable history cache
 
@@ -96,6 +96,41 @@ index: historical discovery can skip reconstructing those accepted effects entir
 if the disposable body cache was evicted. These identity checks are not fresh remote-byte
 proof. Unknown/gapped records still need their verified bodies. Explicit maintenance and
 receive-only audits bypass cached bodies, including nested receipt reads.
+
+## Native version-bound media verification receipts
+
+Persistent native libraries may reuse a completed full SHA-256/length verification
+after recovery. A disposable receipt records the canonical destination, exact key,
+expected hash/size, requested historical version (if any), actual GET response
+version, verification method and successful result. Only AWS's default endpoint
+and recognized canonical B2 endpoints qualify; unknown compatible providers retain
+full readback. Empty, null, invalid or absent version IDs never qualify.
+
+Every recovered proof requires a new HEAD for the applicable object (including its
+versionId when pinned). Both actual version and size must match the completed byte
+proof. HEAD is not new content proof: changed/missing versions, damaged/missing
+receipts or unsupported metadata fall back to full SHA-256 readback; a missing
+object is unverified. Authentication, cap, cancellation and network failures
+propagate rather than silently downgrading verification. Fresh verification skips
+receipts. In-memory shared readiness and exact durable publication acknowledgements
+retain their existing independent roles.
+
+Receipts share the disposable sync-record-cache-v1 envelope, atomic publication,
+OS locking and 4,096-entry / 256 MiB budget; each receipt is at most 16 KiB. Cache
+failure or eviction only loses this optimization. No catalog, cloud wire or durable
+upload-receipt schema changes. Successful single PUT and validated multipart
+completion responses expose their version IDs, but those headers alone do not
+create a content proof. Uncertain completion still requires complete readback.
+
+This reduces repeated verification download bytes after restart, not first-upload
+readback or Class B transaction counts: HEAD is still a provider request. Native
+in-memory libraries and versionless providers retain full verification. Provider
+checksum admission remains CR.83. Provider contracts: [AWS version IDs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/versioning-workflows.html),
+[B2 GET](https://www.backblaze.com/apidocs/s3-get-object),
+[B2 HEAD](https://www.backblaze.com/apidocs/s3-head-object),
+[B2 PUT](https://www.backblaze.com/apidocs/s3-put-object) and
+[B2 multipart completion](https://www.backblaze.com/apidocs/s3-complete-multipart-upload).
+Validation uses local signed counterparts; live provider acceptance remains open.
 
 ## Native conditional-history replay spool
 

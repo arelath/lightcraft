@@ -24,6 +24,7 @@ pub(super) const PART_BYTES: usize = 8 << 20;
 pub struct ObjectReply {
     pub bytes: Vec<u8>,
     pub etag: Option<String>,
+    pub version: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -90,6 +91,7 @@ fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result
         return Err(AssetError::Invalid("S3 response exceeds its safety limit".into()));
     }
     let etag = response.header("etag").map(etag).transpose()?;
+    let version = response.header("x-amz-version-id").map(str::to_owned);
     let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 64 << 10];
@@ -104,14 +106,25 @@ fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result
         bytes.try_reserve(n).map_err(|_| AssetError::Disk("not enough memory for the S3 response".into()))?;
         bytes.extend_from_slice(buffer.get(..n).ok_or(AssetError::Integrity)?);
     }
-    Ok(ObjectReply { bytes, etag })
+    Ok(ObjectReply { bytes, etag, version })
 }
 
 impl S3Connection {
     /// Retention uses complete object identity, never a listing's age alone.
     pub fn stat_object(&self, key: &str, cancel: &AtomicBool) -> Result<Option<ObjectStat>> {
-        let mut response =
-            self.request(Request { method: Method::Head, key, query: &[], headers: &[], payload: &sha256(b"").0, body: None }, cancel, &mut |_| {})?;
+        self.stat_version(key, None, cancel)
+    }
+    pub(crate) fn stat_blob(&self, blob: &Blob, cancel: &AtomicBool) -> Result<Option<ObjectStat>> {
+        self.validate_blob(blob)?;
+        self.stat_version(&blob.remote.key, blob.remote.version.as_deref(), cancel)
+    }
+    fn stat_version(&self, key: &str, version: Option<&str>, cancel: &AtomicBool) -> Result<Option<ObjectStat>> {
+        let query: Vec<_> = version.map(|version| ("versionId", version)).into_iter().collect();
+        let mut response = self.request(
+            Request { method: Method::Head, key, query: &query, headers: &[], payload: &sha256(b"").0, body: None },
+            cancel,
+            &mut |_| {},
+        )?;
         if response.status == 404 {
             return Ok(None);
         }
@@ -334,14 +347,24 @@ impl S3Connection {
     }
 
     pub fn put_blob(&self, blob: &Blob, reader: &mut dyn Read, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
-        self.put_blob_mode(blob, reader, cancel, progress, false)
+        self.put_blob_observed(blob, reader, cancel, progress, false).map(|_| ())
     }
     pub fn put_blob_immutable(&self, blob: &Blob, reader: &mut dyn Read, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
         crate::cloud_append::immutable_blob(blob)?;
-        self.put_blob_mode(blob, reader, cancel, progress, true)
+        self.put_blob_observed(blob, reader, cancel, progress, true).map(|_| ())
     }
-    fn put_blob_mode(&self, blob: &Blob, reader: &mut dyn Read, cancel: &AtomicBool, progress: &mut dyn FnMut(u64), immutable: bool) -> Result<()> {
+    pub fn put_blob_observed(
+        &self,
+        blob: &Blob,
+        reader: &mut dyn Read,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(u64),
+        immutable: bool,
+    ) -> Result<Option<String>> {
         blob.validate().map_err(AssetError::Invalid)?;
+        if immutable {
+            crate::cloud_append::immutable_blob(blob)?;
+        }
         if blob.remote.version.is_some() {
             return Err(AssetError::Invalid("uploads cannot target a historical object version".into()));
         }
@@ -358,8 +381,7 @@ impl S3Connection {
             cancel,
             progress,
         )?;
-        read_reply(response, MAX_REPLY, cancel)?;
-        Ok(())
+        Ok(read_reply(response, MAX_REPLY, cancel)?.version)
     }
 
     pub fn start_multipart(&self, blob: &Blob, cancel: &AtomicBool) -> Result<String> {
@@ -421,14 +443,24 @@ impl S3Connection {
     }
 
     pub fn complete_multipart(&self, blob: &Blob, upload_id: &str, parts: &[(u16, String)], cancel: &AtomicBool) -> Result<()> {
-        self.complete_multipart_mode(blob, upload_id, parts, cancel, false)
+        self.complete_multipart_observed(blob, upload_id, parts, cancel, false).map(|_| ())
     }
     pub fn complete_multipart_immutable(&self, blob: &Blob, upload_id: &str, parts: &[(u16, String)], cancel: &AtomicBool) -> Result<()> {
         crate::cloud_append::immutable_blob(blob)?;
-        self.complete_multipart_mode(blob, upload_id, parts, cancel, true)
+        self.complete_multipart_observed(blob, upload_id, parts, cancel, true).map(|_| ())
     }
-    fn complete_multipart_mode(&self, blob: &Blob, upload_id: &str, parts: &[(u16, String)], cancel: &AtomicBool, immutable: bool) -> Result<()> {
+    pub fn complete_multipart_observed(
+        &self,
+        blob: &Blob,
+        upload_id: &str,
+        parts: &[(u16, String)],
+        cancel: &AtomicBool,
+        immutable: bool,
+    ) -> Result<Option<String>> {
         blob.validate().map_err(AssetError::Invalid)?;
+        if immutable {
+            crate::cloud_append::immutable_blob(blob)?;
+        }
         if blob.remote.version.is_some() {
             return Err(AssetError::Invalid("multipart uploads cannot target a historical version".into()));
         }
@@ -460,7 +492,7 @@ impl S3Connection {
         // S3 may return HTTP 200 before deciding that completion failed.
         let fields = parse_xml(&reply.bytes, "CompleteMultipartUploadResult")?;
         etag(fields.get("ETag").ok_or_else(|| AssetError::Invalid("completion response has no ETag".into()))?)?;
-        Ok(())
+        Ok(reply.version)
     }
 
     /// Abort only a recorded upload identity. Cancellation alone retains resumable parts.

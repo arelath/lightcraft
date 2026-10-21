@@ -1,7 +1,7 @@
-//! Fresh byte evidence belongs to the live library publication coordinator.
-//! It is never reconstructed from persisted verified-key markers.
+//! Byte evidence belongs to the live publication coordinator. Recovery may reuse
+//! a completed byte proof only after checking its exact immutable provider version.
 use crate::assets::s3::S3Connection;
-use crate::assets::{AssetError, BlobStore, Result};
+use crate::assets::{AssetError, Result};
 use lightcraft_catalog::assets::{Blob, BlobId};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -130,6 +130,7 @@ impl VerifiedMedia {
             return Err(AssetError::Cancelled);
         }
         connection.validate_blob(blob)?;
+        let _traffic = crate::cloud_traffic::Scope::purpose(crate::cloud_traffic::Purpose::UploadVerification);
         if self.contains(connection, blob) {
             crate::cloud_traffic::reuse(false);
             return Ok(true);
@@ -146,10 +147,23 @@ impl VerifiedMedia {
                 return Ok(false);
             }
         }
+        if !self.fresh
+            && let Some(version) = connection.media_receipt(blob, cancel)?
+        {
+            match connection.stat_blob(blob, cancel) {
+                Ok(Some(stat)) if stat.version.as_deref() == Some(version.as_str()) && stat.size == blob.size => {
+                    crate::cloud_traffic::reuse(false);
+                    self.record(connection, blob);
+                    return Ok(true);
+                }
+                Ok(None) => return Ok(false),
+                Ok(Some(_)) | Err(AssetError::Unsupported(_) | AssetError::Invalid(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let mut check = Check { hash: Sha256::new(), count: 0, expected: blob.size, exceeded: false };
         let mut previous = 0;
-        let _traffic = crate::cloud_traffic::Scope::purpose(crate::cloud_traffic::Purpose::UploadVerification);
-        let result = connection.download(blob, &mut check, cancel, &mut |done| {
+        let result = connection.download_observed(blob, &mut check, cancel, &mut |done| {
             if let Some(bytes) = &self.bytes {
                 let delta = done.saturating_sub(previous);
                 let _ = bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| Some(value.saturating_add(delta)));
@@ -161,11 +175,15 @@ impl VerifiedMedia {
             Err(_) if check.exceeded => Err(AssetError::Integrity),
             Err(AssetError::Missing) => Ok(false),
             Err(reason) => Err(reason),
-            Ok(()) if check.count == blob.size && format!("{:x}", check.hash.finalize()) == blob.id.0 => {
+            Ok(version) if check.count == blob.size && format!("{:x}", check.hash.finalize()) == blob.id.0 => {
+                if blob.remote.version.as_ref().zip(version.as_ref()).is_some_and(|(requested, actual)| requested != actual) {
+                    return Err(AssetError::Integrity);
+                }
+                connection.remember_media_receipt(blob, version.as_deref(), crate::cloud_metadata::MediaVerification::StreamedSha256, cancel)?;
                 self.record(connection, blob);
                 Ok(true)
             }
-            Ok(()) => Err(AssetError::Integrity),
+            Ok(_) => Err(AssetError::Integrity),
         }
     }
 }

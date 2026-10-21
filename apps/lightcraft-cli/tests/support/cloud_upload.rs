@@ -160,6 +160,7 @@ pub struct State {
     pub unsupported_conditional: bool,
     pub delete_conflict: bool,
     pub versioned_media: bool,
+    pub media_versions: BTreeMap<String, String>,
     pub retention_modified: Option<String>,
     pub next_head: Option<Vec<u8>>,
     /// Swap an isolated fixture snapshot after serving an exact GET response.
@@ -255,7 +256,11 @@ impl Fixture {
                     response_bytes: if method == "HEAD" || lose || hold_part || hold_head || hold_abort { 0 } else { response.len() as u64 },
                     status,
                 });
-                let versioned_media = state.versioned_media;
+                let (object_key, query) = target.split_once('?').unwrap_or((&target, ""));
+                let requested_version = query.split('&').find_map(|pair| pair.strip_prefix("versionId=")).map(decode);
+                let response_version = requested_version
+                    .or_else(|| state.media_versions.get(object_key).cloned())
+                    .or_else(|| state.versioned_media.then(|| "fixture-version".into()));
                 let retention_modified = state.retention_modified.clone();
                 drop(state);
                 if hold_part || hold_head || hold_abort || hold_get {
@@ -285,9 +290,11 @@ impl Fixture {
                 }
                 if method == "HEAD" {
                     write!(stream, "Last-Modified: {}\r\n", retention_modified.as_deref().unwrap_or("Mon, 01 Jan 2024 00:00:00 GMT")).unwrap();
-                    if versioned_media {
-                        stream.write_all(b"x-amz-version-id: fixture-version\r\n").unwrap();
-                    }
+                }
+                if (200..300).contains(&status)
+                    && let Some(version) = response_version
+                {
+                    write!(stream, "x-amz-version-id: {version}\r\n").unwrap();
                 }
                 stream.write_all(b"\r\n").unwrap();
                 if method != "HEAD" {
@@ -509,7 +516,16 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
             status = 404;
         }
     } else if method == "GET" || method == "HEAD" {
-        if let Some(bytes) = state.objects.get(key) {
+        let bytes = if let Some(version) = query.get("versionId") {
+            if state.media_versions.get(key) == Some(version) {
+                state.objects.get(key)
+            } else {
+                state.historical_versions.get(&(key.to_owned(), version.clone())).and_then(Option::as_ref)
+            }
+        } else {
+            state.objects.get(key)
+        };
+        if let Some(bytes) = bytes {
             response = bytes.clone();
             etag = Some(tag(bytes));
         } else {

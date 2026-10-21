@@ -17,6 +17,12 @@ reuse cannot establish that a remote object still exists or has unchanged remote
 corruption/disappearance may be detected later at fresh verification. See the
 [cache policy and limits](cloud-storage-implementation.md#native-immutable-history-cache).
 
+Native media byte proof may survive restart as a disposable version-bound receipt.
+Reuse requires a fresh observation of the exact immutable provider version and size;
+missing/mismatched proof falls back to complete SHA-256 readback. A receipt proves
+media only, never publication or pending acknowledgement. Fresh verification bypasses
+it. See [media receipt limits](cloud-storage-implementation.md#native-version-bound-media-verification-receipts).
+
 Configure the same bucket and library prefix on each computer. In File → Cloud Synchronization,
 the first computer leaves Library ID blank; subsequent computers enter the first computer's
 Library ID (also shown in Info). Connection names and credentials belong to each computer.

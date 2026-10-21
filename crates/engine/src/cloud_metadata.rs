@@ -13,6 +13,8 @@ mod authority;
 pub(crate) use authority::Operation;
 mod baseline;
 pub(crate) use baseline::HeadBaseline;
+mod media;
+pub(crate) use media::MediaVerification;
 mod storage;
 use storage::State;
 

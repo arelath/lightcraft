@@ -432,6 +432,18 @@ fn sign_request(url: &Url, region: &str, credentials: &Credentials, timestamp: &
 
 impl BlobStore for S3Connection {
     fn download(&self, blob: &Blob, out: &mut dyn Write, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<()> {
+        self.download_observed(blob, out, cancel, progress).map(|_| ())
+    }
+}
+impl S3Connection {
+    /// The returned version belongs to the completed GET, never a separate observation.
+    pub(crate) fn download_observed(
+        &self,
+        blob: &Blob,
+        out: &mut dyn Write,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(u64),
+    ) -> Result<Option<String>> {
         let url = self.url(blob)?;
         let credentials = self.credentials()?;
         let now = time::OffsetDateTime::now_utc();
@@ -465,6 +477,7 @@ impl BlobStore for S3Connection {
         if response.content_length().is_some_and(|n| n != blob.size) {
             return Err(AssetError::Integrity);
         }
+        let version = response.header("x-amz-version-id").map(str::to_owned);
         let mut buf = [0u8; 64 << 10];
         let mut done = 0u64;
         loop {
@@ -479,7 +492,7 @@ impl BlobStore for S3Connection {
             out.write_all(buf.get(..n).ok_or(AssetError::Integrity)?).map_err(super::disk)?;
             progress(done);
         }
-        Ok(())
+        Ok(version)
     }
 }
 
@@ -698,3 +711,8 @@ aws_secret_access_key=y
         assert!(AccessKeys::new("a\nb", "s").is_err());
     }
 }
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../../apps/lightcraft-cli/tests/support/cloud_upload.rs"]
+pub(crate) mod fixture;
