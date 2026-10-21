@@ -284,7 +284,10 @@ mod tests {
                 storage: Some(connection.clone()),
                 state: UploadState::SavedLocally,
                 verified: BTreeSet::new(),
-                multipart: BTreeMap::from([("library/original".into(), Multipart { id: "recorded-upload".into(), parts: BTreeMap::new() })]),
+                multipart: BTreeMap::from([(
+                    "library/original".into(),
+                    Multipart { id: "recorded-upload".into(), parts: BTreeMap::new(), checksum: MultipartChecksum::None },
+                )]),
                 generation: None,
                 error: None,
             };

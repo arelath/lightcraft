@@ -8,6 +8,8 @@ const MAX_RECEIPT: usize = 16 << 10;
 #[serde(rename_all = "camelCase")]
 pub(crate) enum MediaVerification {
     StreamedSha256,
+    AwsPutSha256,
+    AwsMultipartSha256,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -68,6 +70,11 @@ impl S3Connection {
             }
             match proof.method {
                 MediaVerification::StreamedSha256 => {}
+                MediaVerification::AwsPutSha256 | MediaVerification::AwsMultipartSha256 => {
+                    if self.endpoint.is_some() {
+                        return Err(AssetError::Integrity);
+                    }
+                }
             }
             Ok(proof.actual_version)
         };

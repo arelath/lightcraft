@@ -2,7 +2,7 @@
 //! progress themselves; owner-thread phase changes are acknowledged only after journal save.
 
 use crate::activity::{TaskGuard, TaskHandle};
-use crate::assets::s3::S3Connection;
+use crate::assets::s3::{ChecksumPart, MultipartChecksum, MultipartCompletion, PartRequest, S3Connection};
 use crate::assets::{AssetError, AssetResolver, TransferManager, sha256};
 use crate::cloud_publication::Imported;
 use crate::{EngineError, Result, Session};
@@ -12,6 +12,7 @@ use lightcraft_catalog::uploads::{UploadBlock, UploadIntent, UploadState};
 use lightcraft_catalog::{Op, Source};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -44,12 +45,16 @@ struct Part {
     etag: String,
     hash: BlobId,
     size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_checksum: Option<String>,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Multipart {
     id: String,
     parts: BTreeMap<u16, Part>,
+    #[serde(default, skip_serializing_if = "MultipartChecksum::is_none")]
+    checksum: MultipartChecksum,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -126,6 +131,9 @@ impl Receipt {
             if upload.id.is_empty() || upload.id.len() > 1024 || upload.id.chars().any(char::is_control) || upload.parts.len() > 512 {
                 return Err(error("invalid multipart receipt; preserved"));
             }
+            if !upload.checksum.is_none() && self.storage.as_ref().is_none_or(|storage| storage.endpoint.is_some()) {
+                return Err(error("multipart checksum selection does not match its storage; staged data preserved"));
+            }
             for (number, part) in &upload.parts {
                 let offset = u64::from(*number)
                     .checked_sub(1)
@@ -139,6 +147,8 @@ impl Receipt {
                     || part.etag == "*"
                     || part.etag.len() > 512
                     || part.etag.chars().any(char::is_control)
+                    || (upload.checksum.is_none() && part.provider_checksum.is_some())
+                    || part.provider_checksum.as_ref().is_some_and(|checksum| crate::assets::s3::part_checksum(&part.hash).as_ref() != Ok(checksum))
                 {
                     return Err(error("invalid multipart part receipt; preserved"));
                 }
@@ -392,14 +402,21 @@ impl Item {
             task.detail(&format!("{} · uploading {}", self.imported.photo.file_name, self.rendition(blob)));
             let mut observed = 0;
             let result = self.resolver.background_transfer(blob, cancel, || {
-                if self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()) {
-                    self.connection.put_blob_immutable(blob, &mut file, cancel, &mut |done| task.observe(&mut observed, done, 0, blob.size))
-                } else {
-                    self.connection.put_blob(blob, &mut file, cancel, &mut |done| task.observe(&mut observed, done, 0, blob.size))
-                }
+                self.connection.put_blob_checksum(
+                    blob,
+                    &mut file,
+                    cancel,
+                    &mut |done| task.observe(&mut observed, done, 0, blob.size),
+                    self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()),
+                )
             });
             match result {
-                Ok(()) => return Ok(()),
+                Ok(evidence) => {
+                    self.resolver
+                        .background_transfer(blob, cancel, || media.admit_upload(&self.connection, blob, evidence, cancel))
+                        .map_err(|e| error(e.to_string()))?;
+                    return Ok(());
+                }
                 Err(e) if e.uncertain_write() => {
                     if self.remote_verified(blob, cancel, task, media).map_err(|e| error(e.to_string()))? {
                         return Ok(());
@@ -414,11 +431,11 @@ impl Item {
                 return Err(error("upload cancelled; multipart receipt retained"));
             }
             if !receipt.multipart.contains_key(&blob.remote.key) {
-                let id = self
+                let (id, checksum) = self
                     .resolver
-                    .background_transfer(blob, cancel, || self.connection.start_multipart(blob, cancel))
+                    .background_transfer(blob, cancel, || self.connection.start_multipart_checksum(blob, cancel))
                     .map_err(|e| error(e.to_string()))?;
-                receipt.multipart.insert(blob.remote.key.clone(), Multipart { id: id.clone(), parts: BTreeMap::new() });
+                receipt.multipart.insert(blob.remote.key.clone(), Multipart { id: id.clone(), parts: BTreeMap::new(), checksum });
                 if let Err(error) = self.write_receipt(receipt, cancel) {
                     // No part may be sent before its upload identity is durable.
                     let _ = self.connection.abort_multipart(blob, &id, &AtomicBool::new(false));
@@ -426,6 +443,8 @@ impl Item {
                 }
             }
             let upload_id = receipt.multipart.get(&blob.remote.key).ok_or_else(|| error("multipart receipt disappeared"))?.id.clone();
+            let checksum = receipt.multipart.get(&blob.remote.key).ok_or_else(|| error("multipart receipt disappeared"))?.checksum;
+            let mut full_hash = Sha256::new();
             let mut file = std::fs::File::open(lease.path()).map_err(io)?;
             let mut offset = 0u64;
             let mut number = 1u16;
@@ -439,23 +458,29 @@ impl Item {
                 bytes.try_reserve_exact(count).map_err(|_| error("not enough memory for multipart upload"))?;
                 bytes.resize(count, 0);
                 file.read_exact(&mut bytes).map_err(io)?;
+                full_hash.update(&bytes);
                 let hash = sha256(&bytes);
                 let saved = receipt.multipart.get(&blob.remote.key).and_then(|upload| upload.parts.get(&number));
                 if !saved.is_some_and(|part| part.hash == hash && part.size == count as u64) {
                     task.detail(&format!("{} · uploading {} / part {number}", self.imported.photo.file_name, self.rendition(blob)));
                     let mut observed = 0;
                     let token = self.resolver.background_transfer(blob, cancel, || {
-                        self.connection
-                            .upload_part(blob, &upload_id, number, &bytes, cancel, &mut |done| task.observe(&mut observed, done, offset, blob.size))
+                        self.connection.upload_part_checksum(
+                            blob,
+                            PartRequest { upload_id: &upload_id, number, checksum },
+                            &bytes,
+                            cancel,
+                            &mut |done| task.observe(&mut observed, done, offset, blob.size),
+                        )
                     });
                     match token {
-                        Ok(etag) => {
+                        Ok((etag, provider_checksum)) => {
                             receipt
                                 .multipart
                                 .get_mut(&blob.remote.key)
                                 .ok_or_else(|| error("multipart receipt disappeared"))?
                                 .parts
-                                .insert(number, Part { etag, hash, size: count as u64 });
+                                .insert(number, Part { etag, hash, size: count as u64, provider_checksum });
                             self.write_receipt(receipt, cancel)?;
                         }
                         Err(AssetError::Missing) => {
@@ -470,24 +495,48 @@ impl Item {
                 task.progress(offset, blob.size);
             }
             if !restart {
+                let source_hash = BlobId(format!("{:x}", full_hash.finalize()));
+                if source_hash != blob.id {
+                    return Err(error("staged original changed during upload; retain the original and retry"));
+                }
                 let parts = receipt
                     .multipart
                     .get(&blob.remote.key)
                     .ok_or_else(|| error("multipart receipt disappeared"))?
                     .parts
                     .iter()
-                    .map(|(number, part)| (*number, part.etag.clone()))
+                    .map(|(number, part)| ChecksumPart {
+                        number: *number,
+                        etag: part.etag.clone(),
+                        hash: part.hash.clone(),
+                        size: part.size,
+                        checksum: part.provider_checksum.clone(),
+                    })
                     .collect::<Vec<_>>();
                 task.detail(&format!("{} · completing {}", self.imported.photo.file_name, self.rendition(blob)));
                 let completed = self.resolver.background_transfer(blob, cancel, || {
-                    if self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()) {
-                        self.connection.complete_multipart_immutable(blob, &upload_id, &parts, cancel)
-                    } else {
-                        self.connection.complete_multipart(blob, &upload_id, &parts, cancel)
-                    }
+                    self.connection.complete_multipart_checksum(
+                        blob,
+                        MultipartCompletion {
+                            upload_id: &upload_id,
+                            parts: &parts,
+                            source_hash: &source_hash,
+                            checksum,
+                            immutable: self.sync.as_ref().is_some_and(|s| !s.protocol.is_head()),
+                        },
+                        cancel,
+                    )
                 });
                 match completed {
-                    Ok(()) => return Ok(()),
+                    Ok(evidence) => {
+                        // A validated successful completion has no unfinished parts to abort.
+                        receipt.multipart.remove(&blob.remote.key);
+                        self.write_receipt(receipt, cancel)?;
+                        self.resolver
+                            .background_transfer(blob, cancel, || media.admit_upload(&self.connection, blob, evidence, cancel))
+                            .map_err(|e| error(e.to_string()))?;
+                        return Ok(());
+                    }
                     Err(e) if matches!(e, AssetError::Missing) || e.uncertain_write() => {
                         if self.remote_verified(blob, cancel, task, media).map_err(|e| error(e.to_string()))? {
                             return Ok(());

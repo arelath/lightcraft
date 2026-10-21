@@ -14,7 +14,7 @@ pub(crate) use authority::Operation;
 mod baseline;
 pub(crate) use baseline::HeadBaseline;
 mod media;
-pub(crate) use media::MediaVerification;
+pub(crate) use media::{MediaVerification, immutable_version};
 mod storage;
 use storage::State;
 

@@ -63,33 +63,11 @@ fn listing_scope(prefix: &str) -> bool {
     matches!(parts.as_slice(), ["sync-v2", library, "ops" | "checkpoints" | "control", ""] if identifier(library))
         || matches!(parts.as_slice(), ["sync-v2", library, "ops", author, ""] if identifier(library) && identifier(author))
 }
-// SHA-256 is exactly 32 bytes. This small encoder needs no browser or SDK dependency.
+// Shared strict SHA-256-to-base64 conversion; signer failures keep their scope diagnosis.
 fn checksum(hex: &str) -> Result<String> {
-    if !hash(hex) {
-        return Err(denied());
-    }
-    let mut bytes = Vec::with_capacity(32);
-    for pair in hex.as_bytes().chunks_exact(2) {
-        let high = pair.first().copied().and_then(|b| char::from(b).to_digit(16)).ok_or_else(denied)?;
-        let low = pair.get(1).copied().and_then(|b| char::from(b).to_digit(16)).ok_or_else(denied)?;
-        bytes.push((high * 16 + low) as u8);
-    }
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let a = chunk.first().copied().unwrap_or(0);
-        let b = chunk.get(1).copied().unwrap_or(0);
-        let c = chunk.get(2).copied().unwrap_or(0);
-        for (position, index) in [a >> 2, ((a & 3) << 4) | (b >> 4), ((b & 15) << 2) | (c >> 6), c & 63].into_iter().enumerate() {
-            if position > chunk.len() {
-                out.push('=');
-            } else {
-                out.push(char::from(*ALPHABET.get(usize::from(index)).ok_or_else(denied)?));
-            }
-        }
-    }
-    Ok(out)
+    super::checksum::base64_digest(hex).map_err(|_| denied())
 }
+
 impl S3Connection {
     /// Personal signer scope: reads under a dedicated prefix, bounded metadata writes,
     /// append discovery only. Media upload, deletion and arbitrary listing are not granted.

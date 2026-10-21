@@ -101,8 +101,8 @@ receive-only audits bypass cached bodies, including nested receipt reads.
 
 Persistent native libraries may reuse a completed full SHA-256/length verification
 after recovery. A disposable receipt records the canonical destination, exact key,
-expected hash/size, requested historical version (if any), actual GET response
-version, verification method and successful result. Only AWS's default endpoint
+expected hash/size, requested historical version (if any), actual provider response
+version from the completed byte/checksum proof, verification method and successful result. Only AWS's default endpoint
 and recognized canonical B2 endpoints qualify; unknown compatible providers retain
 full readback. Empty, null, invalid or absent version IDs never qualify.
 
@@ -117,20 +117,58 @@ retain their existing independent roles.
 
 Receipts share the disposable sync-record-cache-v1 envelope, atomic publication,
 OS locking and 4,096-entry / 256 MiB budget; each receipt is at most 16 KiB. Cache
-failure or eviction only loses this optimization. No catalog, cloud wire or durable
-upload-receipt schema changes. Successful single PUT and validated multipart
+failure or eviction only loses this optimization. No catalog or cloud wire schema changes. Multipart receipts may include the optional
+checksum-selection/evidence fields described below. Successful single PUT and validated multipart
 completion responses expose their version IDs, but those headers alone do not
 create a content proof. Uncertain completion still requires complete readback.
 
-This reduces repeated verification download bytes after restart, not first-upload
-readback or Class B transaction counts: HEAD is still a provider request. Native
-in-memory libraries and versionless providers retain full verification. Provider
-checksum admission remains CR.83. Provider contracts: [AWS version IDs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/versioning-workflows.html),
+This reduces repeated verification download bytes after restart, not Class B
+transaction counts: HEAD is still a provider request. Native
+in-memory libraries and versionless providers retain full verification. Qualified new-upload checksum admission is described below. Provider contracts: [AWS version IDs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/versioning-workflows.html),
 [B2 GET](https://www.backblaze.com/apidocs/s3-get-object),
 [B2 HEAD](https://www.backblaze.com/apidocs/s3-head-object),
 [B2 PUT](https://www.backblaze.com/apidocs/s3-put-object) and
 [B2 multipart completion](https://www.backblaze.com/apidocs/s3-complete-multipart-upload).
 Validation uses local signed counterparts; live provider acceptance remains open.
+
+## Qualified native upload checksums
+
+AWS's default endpoint supports a conservative SHA-256 admission path. A single PUT
+sends the expected checksum in its signed checksum header, hashes the exact streamed
+source bytes again, and requires the matching provider checksum and a non-null version.
+Multipart uploads explicitly select SHA256/COMPOSITE at initiation. Selection and
+per-part provider evidence persist with the resumable upload; missing old fields default
+to no checksum admission. Every source chunk is hashed again, including skipped/resumed
+parts, and the whole source SHA-256 must match before completion. Ordered part hashes
+produce the expected binary-digest composite plus part count. Completion must return
+the exact checksum, COMPOSITE type, bucket/key and immutable version. HTTP-200 Error
+documents are failures. ETags remain concurrency tokens; user-authored metadata is ignored.
+
+An opaque completed-upload proof is scoped to destination/key/hash/size/version and
+cannot become publication readiness until a separate HEAD confirms that exact current
+version and size. It then persists through the same bounded media receipt cache. Missing
+or version-mismatched evidence falls back to full readback; contradictory checksums/types
+fail integrity validation. Uncertain responses, explicit fresh verification, older uploads,
+unconfirmed selection and missing part/completion proof retain full readback. Successful
+validated multipart completion removes its durable unfinished-upload entry, avoiding a
+redundant abort; uncertain completions retain their original reconciliation/cleanup path.
+
+B2 and custom compatible endpoints do not opt in based on S3 compatibility or echoed
+metadata. Their new uploads still receive full readback; B2's version-bound recovery
+receipts remain useful. AWS buckets without usable version IDs also retain readback.
+No live AWS bucket is available for acceptance. This path is verified against a signed
+local counterpart that independently checks payloads, selection, part checksums and
+the final composite. Full media downloads remain the compatibility and audit path.
+
+Provider contract references, checked 2026-10-20: [AWS PutObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html),
+[CreateMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html),
+[UploadPart](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPart.html),
+[CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html),
+[checksum selection/type rules](https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html),
+and the [SHA-256 composite example](https://docs.aws.amazon.com/AmazonS3/latest/userguide/tutorial-s3-mpu-additional-checksums.html).
+The current [B2 PUT](https://www.backblaze.com/apidocs/s3-put-object) and
+[B2 completion](https://www.backblaze.com/apidocs/s3-complete-multipart-upload) documents
+do not establish an equivalent validated SHA-256 guarantee; support is deliberately not inferred.
 
 ## Native conditional-history replay spool
 

@@ -113,6 +113,25 @@ impl VerifiedMedia {
     fn key(blob: &Blob) -> Key {
         (blob.id.clone(), blob.remote.key.clone(), blob.remote.version.clone(), blob.size)
     }
+    /// An opaque conclusive provider proof still needs exact-version admission.
+    /// Explicit verification always reads remote bytes instead.
+    pub(crate) fn admit_upload(
+        &mut self,
+        connection: &S3Connection,
+        blob: &Blob,
+        evidence: Option<crate::assets::s3::UploadEvidence>,
+        cancel: &AtomicBool,
+    ) -> Result<()> {
+        if self.fresh || connection.fresh_history() {
+            return Ok(());
+        }
+        if let Some(evidence) = evidence
+            && evidence.certify(connection, blob, cancel)?
+        {
+            self.record(connection, blob);
+        }
+        Ok(())
+    }
     pub fn contains(&self, connection: &S3Connection, blob: &Blob) -> bool {
         self.destination.as_ref().is_some_and(|saved| saved.same_destination(connection)) && self.keys.contains(&Self::key(blob))
     }

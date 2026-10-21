@@ -16,7 +16,7 @@ use std::time::Duration;
 mod versions;
 pub use versions::ObjectVersion;
 
-const MAX_REPLY: usize = 2 << 20;
+pub(super) const MAX_REPLY: usize = 2 << 20;
 const MAX_CHECKPOINT: usize = 64 << 20;
 pub(super) const PART_BYTES: usize = 8 << 20;
 
@@ -25,6 +25,9 @@ pub struct ObjectReply {
     pub bytes: Vec<u8>,
     pub etag: Option<String>,
     pub version: Option<String>,
+    pub checksum: Option<String>,
+    pub checksum_type: Option<String>,
+    pub checksum_algorithm: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -42,30 +45,30 @@ pub enum PutCondition<'a> {
     Matches(&'a str),
 }
 
-struct Request<'a> {
-    method: Method,
-    key: &'a str,
-    query: &'a [(&'a str, &'a str)],
-    headers: &'a [(&'static str, String)],
-    payload: &'a str,
-    body: Option<RequestBody<'a>>,
+pub(super) struct Request<'a> {
+    pub(super) method: Method,
+    pub(super) key: &'a str,
+    pub(super) query: &'a [(&'a str, &'a str)],
+    pub(super) headers: &'a [(&'static str, String)],
+    pub(super) payload: &'a str,
+    pub(super) body: Option<RequestBody<'a>>,
 }
 
-fn identifier(id: &str) -> Result<()> {
+pub(super) fn identifier(id: &str) -> Result<()> {
     if id.is_empty() || id.len() > 1024 || id.chars().any(char::is_control) {
         return Err(AssetError::Invalid("invalid multipart upload identity".into()));
     }
     Ok(())
 }
 
-fn etag(value: &str) -> Result<String> {
+pub(super) fn etag(value: &str) -> Result<String> {
     if value.is_empty() || value == "*" || value.len() > 512 || value.chars().any(char::is_control) {
         return Err(AssetError::Unsupported("storage returned an invalid concurrency token".into()));
     }
     Ok(value.into())
 }
 
-fn condition_headers(condition: PutCondition<'_>) -> Result<Vec<(&'static str, String)>> {
+pub(super) fn condition_headers(condition: PutCondition<'_>) -> Result<Vec<(&'static str, String)>> {
     Ok(vec![match condition {
         PutCondition::Absent => ("if-none-match", "*".into()),
         PutCondition::Matches(value) => ("if-match", etag(value)?),
@@ -85,13 +88,16 @@ fn status(response: &mut Response, cancel: &AtomicBool) -> Result<()> {
     }
 }
 
-fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result<ObjectReply> {
+pub(super) fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result<ObjectReply> {
     status(&mut response, cancel)?;
     if max > MAX_CHECKPOINT || response.content_length().is_some_and(|size| size > max as u64) {
         return Err(AssetError::Invalid("S3 response exceeds its safety limit".into()));
     }
     let etag = response.header("etag").map(etag).transpose()?;
     let version = response.header("x-amz-version-id").map(str::to_owned);
+    let checksum = response.header("x-amz-checksum-sha256").map(str::to_owned);
+    let checksum_type = response.header("x-amz-checksum-type").map(str::to_owned);
+    let checksum_algorithm = response.header("x-amz-checksum-algorithm").map(str::to_owned);
     let limits = Limits { connect: Duration::from_secs(15), stall: Duration::from_secs(30), cancel };
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 64 << 10];
@@ -106,7 +112,7 @@ fn read_reply(mut response: Response, max: usize, cancel: &AtomicBool) -> Result
         bytes.try_reserve(n).map_err(|_| AssetError::Disk("not enough memory for the S3 response".into()))?;
         bytes.extend_from_slice(buffer.get(..n).ok_or(AssetError::Integrity)?);
     }
-    Ok(ObjectReply { bytes, etag, version })
+    Ok(ObjectReply { bytes, etag, version, checksum, checksum_type, checksum_algorithm })
 }
 
 impl S3Connection {
@@ -190,7 +196,7 @@ impl S3Connection {
         Ok(url)
     }
 
-    fn request(&self, request: Request<'_>, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<Response> {
+    pub(super) fn request(&self, request: Request<'_>, cancel: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<Response> {
         let url = self.request_url(request.key, request.query)?;
         let credentials = self.credentials()?;
         let now = time::OffsetDateTime::now_utc();
@@ -553,7 +559,7 @@ impl S3Connection {
     }
 }
 
-fn parse_xml(bytes: &[u8], expected: &str) -> Result<BTreeMap<String, String>> {
+pub(super) fn parse_xml(bytes: &[u8], expected: &str) -> Result<BTreeMap<String, String>> {
     fn invalid() -> AssetError {
         AssetError::Invalid("invalid or unsupported S3 XML response".into())
     }
@@ -593,9 +599,12 @@ fn parse_xml(bytes: &[u8], expected: &str) -> Result<BTreeMap<String, String>> {
                 saw_error |= name == "Error";
                 path.push(name);
                 if path.len() == 2
-                    && path
-                        .last()
-                        .is_some_and(|name| matches!(name.as_str(), "UploadId" | "ETag" | "Code" | "Bucket" | "Key" | "IsTruncated" | "Part"))
+                    && path.last().is_some_and(|name| {
+                        matches!(
+                            name.as_str(),
+                            "UploadId" | "ETag" | "Code" | "Bucket" | "Key" | "IsTruncated" | "Part" | "ChecksumSHA256" | "ChecksumType"
+                        )
+                    })
                 {
                     let name = path.last().ok_or_else(invalid)?.clone();
                     if fields.insert(name, String::new()).is_some() {

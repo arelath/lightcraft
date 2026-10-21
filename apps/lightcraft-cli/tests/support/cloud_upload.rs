@@ -15,6 +15,38 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 pub fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+// Independent wire counterparty: encode binary digests, never production helpers.
+fn digest64(bytes: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    assert_eq!(bytes.len(), 32);
+    let mut text = String::new();
+    for chunk in bytes.chunks(3) {
+        let word = (u32::from(chunk[0]) << 16) | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8) | u32::from(*chunk.get(2).unwrap_or(&0));
+        for shift in [18, 12, 6, 0] {
+            text.push(CHARS[((word >> shift) & 63) as usize] as char);
+        }
+        if chunk.len() < 3 {
+            text.pop();
+            text.push('=');
+        }
+        if chunk.len() < 2 {
+            text.pop();
+            text.pop();
+            text.push_str("==");
+        }
+    }
+    text
+}
+fn checksum(bytes: &[u8]) -> String {
+    digest64(&Sha256::digest(bytes))
+}
+fn composite_checksum(parts: &BTreeMap<u16, Vec<u8>>) -> String {
+    let mut digest = Sha256::new();
+    for bytes in parts.values() {
+        digest.update(Sha256::digest(bytes));
+    }
+    format!("{}-{}", digest64(&digest.finalize()), parts.len())
+}
 fn tag(bytes: &[u8]) -> String {
     format!("\"{}\"", &hash(bytes)[..32])
 }
@@ -159,6 +191,9 @@ pub struct State {
     pub defer_abort: usize,
     pub unsupported_conditional: bool,
     pub delete_conflict: bool,
+    pub aws_checksums: bool,
+    pub checksum_fault: Option<String>,
+    pub multipart_checksums: std::collections::BTreeSet<String>,
     pub versioned_media: bool,
     pub media_versions: BTreeMap<String, String>,
     pub retention_modified: Option<String>,
@@ -227,6 +262,7 @@ impl Fixture {
                 let valid = signature(&method, &target, &headers, &body, state.allow_typed_keys, &state.additional_keys);
                 state.requests.push((method.clone(), target.clone()));
                 let request_bytes = body.len() as u64;
+                let request_checksum = state.aws_checksums.then(|| checksum(&body));
                 let (status, response, etag, lose) = if !valid || state.unauthorized {
                     if !valid {
                         state.signature_errors += 1;
@@ -258,9 +294,42 @@ impl Fixture {
                 });
                 let (object_key, query) = target.split_once('?').unwrap_or((&target, ""));
                 let requested_version = query.split('&').find_map(|pair| pair.strip_prefix("versionId=")).map(decode);
-                let response_version = requested_version
+                let mut response_version = requested_version
                     .or_else(|| state.media_versions.get(object_key).cloned())
                     .or_else(|| state.versioned_media.then(|| "fixture-version".into()));
+                let parameters: BTreeMap<_, _> =
+                    query.split('&').filter_map(|pair| pair.split_once('=')).map(|(key, value)| (decode(key), decode(value))).collect();
+                let initialize = method == "POST" && parameters.contains_key("uploads");
+                let part = method == "PUT" && parameters.contains_key("partNumber");
+                let final_upload = (method == "PUT" && query.is_empty()) || (method == "POST" && parameters.contains_key("uploadId"));
+                let selected = parameters.get("uploadId").is_some_and(|id| state.multipart_checksums.contains(id));
+                let initialized = initialize && state.multipart_checksums.contains(&format!("fixture+/{}/=", state.created));
+                let fault = state.checksum_fault.as_deref();
+                let mut checksum_headers = Vec::new();
+                if state.aws_checksums && (200..300).contains(&status) {
+                    if initialized && fault != Some("missing-init") {
+                        checksum_headers.push(("x-amz-checksum-algorithm", "SHA256".to_string()));
+                        checksum_headers.push(("x-amz-checksum-type", "COMPOSITE".to_string()));
+                    }
+                    if (part && selected && fault != Some("missing-part"))
+                        || (method == "PUT" && query.is_empty() && !matches!(fault, Some("missing-final" | "metadata-only")))
+                    {
+                        checksum_headers.push((
+                            "x-amz-checksum-sha256",
+                            if fault == Some("wrong") { "wrong-checksum".into() } else { request_checksum.clone().unwrap() },
+                        ));
+                    }
+                    if method == "PUT" && query.is_empty() {
+                        checksum_headers
+                            .push(("x-amz-checksum-type", if fault == Some("wrong-type") { "COMPOSITE".into() } else { "FULL_OBJECT".into() }));
+                    }
+                    if final_upload && fault == Some("wrong-version") {
+                        response_version = Some("wrong-response-version".into());
+                    }
+                    if final_upload && fault == Some("metadata-only") {
+                        checksum_headers.push(("x-amz-meta-sha256", checksum(state.objects.get(object_key).unwrap())));
+                    }
+                }
                 let retention_modified = state.retention_modified.clone();
                 drop(state);
                 if hold_part || hold_head || hold_abort || hold_get {
@@ -295,6 +364,9 @@ impl Fixture {
                     && let Some(version) = response_version
                 {
                     write!(stream, "x-amz-version-id: {version}\r\n").unwrap();
+                }
+                for (name, value) in checksum_headers {
+                    write!(stream, "{name}: {value}\r\n").unwrap();
                 }
                 stream.write_all(b"\r\n").unwrap();
                 if method != "HEAD" {
@@ -382,6 +454,15 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
             (decode(key), decode(value))
         })
         .collect::<BTreeMap<_, _>>();
+    if state.aws_checksums && method == "PUT" {
+        let expected = checksum(&body);
+        let selected = query.get("uploadId").is_some_and(|id| state.multipart_checksums.contains(id));
+        if headers.get("x-amz-checksum-sha256").is_some_and(|actual| actual != &expected)
+            || (selected && headers.get("x-amz-checksum-sha256") != Some(&expected))
+        {
+            return (400, b"<Error><Code>BadDigest</Code></Error>".to_vec(), None, false);
+        }
+    }
     if method == "PUT"
         && serde_json::from_slice::<Value>(&body).ok().is_some_and(|v| v["state"] == "deleted" || v["control"]["state"] == "deleted")
         && let Some((key, bytes)) = state.object_after_erasure_barrier.take()
@@ -557,6 +638,12 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
     } else if method == "POST" && query.contains_key("uploads") {
         state.created += 1;
         let id = format!("fixture+/{}/=", state.created);
+        if state.aws_checksums && headers.get("x-amz-checksum-algorithm").map(String::as_str) == Some("SHA256") {
+            if headers.get("x-amz-checksum-type").map(String::as_str) != Some("COMPOSITE") {
+                return (400, Vec::new(), None, false);
+            }
+            state.multipart_checksums.insert(id.clone());
+        }
         state.multipart.insert(id.clone(), (key.to_string(), BTreeMap::new()));
         response = format!("<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>").into_bytes();
     } else if let Some(id) = query.get("uploadId") {
@@ -565,6 +652,7 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
                 state.defer_abort -= 1;
                 204
             } else if state.multipart.remove(id).is_some() {
+                state.multipart_checksums.remove(id);
                 204
             } else {
                 404
@@ -592,13 +680,38 @@ fn serve(state: &mut State, method: &str, target: &str, headers: &BTreeMap<Strin
                         assert!(xml.contains(&format!("<PartNumber>{number}</PartNumber>")));
                         assert!(xml.contains(&format!("<ETag>&quot;{}&quot;</ETag>", &hash(bytes)[..32])));
                     }
+                    let extra = if state.aws_checksums && state.multipart_checksums.contains(id) {
+                        if headers.get("x-amz-checksum-type").map(String::as_str) != Some("COMPOSITE") {
+                            return (400, Vec::new(), None, false);
+                        }
+                        for bytes in parts.values() {
+                            if !xml.contains(&format!("<ChecksumSHA256>{}</ChecksumSHA256>", checksum(bytes))) {
+                                return (400, b"<Error><Code>BadDigest</Code></Error>".to_vec(), None, false);
+                            }
+                        }
+                        let fault = state.checksum_fault.as_deref();
+                        let sum = if matches!(fault, Some("wrong" | "wrong-final")) { "wrong-checksum".into() } else { composite_checksum(parts) };
+                        let kind = if fault == Some("wrong-type") { "FULL_OBJECT" } else { "COMPOSITE" };
+                        let object = if fault == Some("wrong-key") { "other-object" } else { key.strip_prefix("/photos/").unwrap() };
+                        let proof = if matches!(fault, Some("missing-final" | "metadata-only")) {
+                            String::new()
+                        } else {
+                            format!("<ChecksumSHA256>{sum}</ChecksumSHA256><ChecksumType>{kind}</ChecksumType>")
+                        };
+                        format!("<Bucket>photos</Bucket><Key>{object}</Key>{proof}")
+                    } else {
+                        String::new()
+                    };
                     let bytes = parts.values().flatten().copied().collect::<Vec<_>>();
                     etag = Some(tag(&bytes));
-                    response =
-                        format!("<CompleteMultipartUploadResult><ETag>&quot;{}&quot;</ETag></CompleteMultipartUploadResult>", &hash(&bytes)[..32])
-                            .into_bytes();
+                    response = format!(
+                        "<CompleteMultipartUploadResult><ETag>&quot;{}&quot;</ETag>{extra}</CompleteMultipartUploadResult>",
+                        &hash(&bytes)[..32]
+                    )
+                    .into_bytes();
                     state.objects.insert(key.to_owned(), bytes);
                     state.multipart.remove(id);
+                    state.multipart_checksums.remove(id);
                     lose = std::mem::take(&mut state.lost_complete);
                 }
             } else {

@@ -402,7 +402,12 @@ fn sign_request(url: &Url, region: &str, credentials: &Credentials, timestamp: &
         headers.push(("x-amz-security-token", token.clone()));
     }
     for (name, value) in request.extra {
-        if !matches!(*name, "if-match" | "if-none-match" | "content-type") || value.chars().any(char::is_control) || value.len() > 2048 {
+        if !matches!(
+            *name,
+            "if-match" | "if-none-match" | "content-type" | "x-amz-checksum-sha256" | "x-amz-checksum-algorithm" | "x-amz-checksum-type"
+        ) || value.chars().any(char::is_control)
+            || value.len() > 2048
+        {
             return Err(AssetError::Invalid("invalid signed request header".into()));
         }
         headers.push((*name, value.clone()));
@@ -512,7 +517,9 @@ pub mod b2;
 mod presign;
 pub use presign::{BrowserAuthorization, BrowserRequest};
 
+mod checksum;
 mod error;
+pub(crate) use checksum::{ChecksumPart, MultipartChecksum, MultipartCompletion, PartRequest, UploadEvidence, part_checksum};
 mod requests;
 pub use requests::{ObjectReply, ObjectStat, ObjectVersion, PutCondition};
 

@@ -536,3 +536,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "stages/checksum_tests.rs"]
+mod checksum_tests;

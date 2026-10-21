@@ -19,7 +19,8 @@ corruption/disappearance may be detected later at fresh verification. See the
 
 Native media byte proof may survive restart as a disposable version-bound receipt.
 Reuse requires a fresh observation of the exact immutable provider version and size;
-missing/mismatched proof falls back to complete SHA-256 readback. A receipt proves
+missing/mismatched proof falls back to complete SHA-256 readback. Qualified AWS new uploads may supply independently validated SHA-256/version proof
+under the [upload checksum contract](cloud-storage-implementation.md#qualified-native-upload-checksums). A receipt proves
 media only, never publication or pending acknowledgement. Fresh verification bypasses
 it. See [media receipt limits](cloud-storage-implementation.md#native-version-bound-media-verification-receipts).
 
