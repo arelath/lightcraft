@@ -9,6 +9,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod baseline;
+pub(crate) use baseline::HeadBaseline;
 mod storage;
 use storage::State;
 

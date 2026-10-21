@@ -53,7 +53,11 @@ fn overlong_head_history_checkpoints_verified_prefixes_and_resumes_without_losin
     let (out, rows) = f.run(&a, &[("cloud.sync", json!({"checkpoint":true}))]);
     assert!(!out.status.success(), "{rows:?}");
     let prefix: Value = serde_json::from_slice(&f.state.lock().unwrap().objects["/photos/library/catalog/head.json"]).unwrap();
-    assert!(prefix["checkpoint"]["generation"].as_u64().unwrap() < old["generation"].as_u64().unwrap());
+    assert!(
+        prefix["checkpoint"]["generation"].as_u64().is_some_and(|generation| generation < old["generation"].as_u64().unwrap()),
+        "recovery did not publish its prefix: {rows:?} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_ne!(prefix["checkpoint"]["covers"], old["tip"]);
     assert_eq!(saved_catalog(&a).sync_state().unwrap().pending, pending);
     {

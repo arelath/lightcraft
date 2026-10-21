@@ -14,6 +14,54 @@ struct Desktop {
 }
 
 #[test]
+#[ignore = "explicit native acknowledged-baseline acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
+fn native_resume_publishes_an_offline_edit_without_downloads_of_a_thousand_acknowledged_batches() {
+    let f = support::Fixture::new();
+    let local = f.dir.join("head-baseline");
+    f.import(&local, false);
+    let (out, rows) = f.run(&local, &[("cloud.upload", json!({})), ("cloud.sync", json!({}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let sizes = history::extend_markers(&f, 1000);
+    let (out, rows) = f.run(&local, &[("cloud.sync", json!({})), ("cloud.pause", json!({})), ("photo.rate", json!({"ids":[1],"rating":4}))]);
+    assert!(out.status.success(), "{rows:?}");
+    let before = lightcraft_engine::catalog::Journal::open(Box::new(lightcraft_engine::catalog::FsStore::open(&local).unwrap())).unwrap().1;
+    let pending = before.sync_state().unwrap().pending.clone();
+    assert_eq!(pending.len(), 1);
+    let artifacts = std::path::PathBuf::from(std::env::var("LIGHTCRAFT_LIBRARY_SNAPSHOTS").unwrap()).join("head-baseline");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut app = Desktop::start(&f, &local, &artifacts);
+    assert_eq!(app.execute("cloud.syncStatus", json!({}))["pending"], 1);
+    f.state.lock().unwrap().traffic.clear();
+    app.click_when_ready("icon:cloud");
+    app.wait_widget("indicator:cloudFooterPause");
+    app.click_when_ready("button:cloudPauseResume");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = app.execute("cloud.syncStatus", json!({}));
+        if status["userPaused"] == false && status["pending"] == 0 && status["running"] == false {
+            break;
+        }
+        assert!(Instant::now() < deadline, "resume did not publish the saved edit: {status}");
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    history::assert_cost(&f, &sizes, 0);
+    if !app.ask("ui.widgets", json!({"filter":"popup:cloud"})).to_string().contains("popup:cloud") {
+        app.click_when_ready("icon:cloud");
+    }
+    app.wait_widget("indicator:cloudFooterCheckCircle");
+    app.ask("ui.screenshot", json!({"path":artifacts.join("popup.png"),"headless":true}));
+    std::fs::write(artifacts.join("inspect.json"), serde_json::to_vec_pretty(&app.ask("ui.inspect", json!({}))).unwrap()).unwrap();
+    app.ask("app.quit", json!({}));
+    drop(app);
+    let after = lightcraft_engine::catalog::Journal::open(Box::new(lightcraft_engine::catalog::FsStore::open(&local).unwrap())).unwrap().1;
+    assert_eq!(after.photo(lightcraft_engine::catalog::PhotoId(1)).unwrap().rating, 4);
+    assert!(after.sync_state().unwrap().pending.is_empty());
+    for (id, mutation) in pending {
+        assert_eq!(after.sync_state().unwrap().received[&id].digest, mutation.digest().unwrap());
+    }
+}
+
+#[test]
 #[ignore = "explicit native conditional-history spool acceptance; requires LIGHTCRAFT_NATIVE_LIBRARY_APP"]
 fn native_verification_replays_a_hundred_batches_once_without_acknowledging_pending_edits() {
     let f = support::Fixture::new();

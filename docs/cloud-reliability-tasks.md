@@ -5,9 +5,9 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
-Current status (2026-10-20): CR.1–CR.42, CR.46–CR.79 are complete.
+Current status (2026-10-20): CR.1–CR.42, CR.46–CR.80 are complete.
 CR.43–CR.45 remain open.
-CR.80–CR.86 are open: reduce provider traffic without weakening synchronization or media integrity.
+CR.81–CR.86 are open: reduce provider traffic without weakening synchronization or media integrity.
 Dated verification notes below
 describe their original snapshots; current operational limits remain in
 [cloud-storage-implementation.md](cloud-storage-implementation.md).
@@ -20,7 +20,7 @@ Source: supplied review of `9aae8b53`. Its request/day and download-byte example
 - [x] CR.77 — Reuse durably verified immutable synchronization records. Cache bodies by complete destination/content identity with bounded disk/memory use and crash-safe publication; verify bytes before cache admission and reuse. Continue discovering new keys behind author frontiers and rejecting forks. Fresh remote verification bypasses cached bodies. Cover restart, corrupt cache entries, changed destinations, old-sequence conflicts and capacity/eviction.
 - [x] CR.78 — Separate incremental synchronization from remote integrity verification. Make ordinary Sync now incremental. Give fresh remote history verification its own command, persistent schedule and request/byte budgets, independent of activity-aware polling. Preserve interrupted audit progress and historical-key discovery. Simulate 24 idle hours with 50 known operations; bound total traffic and show known history is not repeatedly downloaded. Document delayed detection of remote corruption/disappearance when cached proof is used.
 - [x] CR.79 — Reuse conditional-history bytes during traversal/replay. Use a bounded verified spool/cache instead of fetching each batch twice. Preserve hostile-input limits, history certification, cancellation and cleanup. Assert exact GET/byte savings and unchanged outcomes for long tails, missing/corrupt history and recovery.
-- [ ] CR.80 — Separate the acknowledged remote baseline from pending local edits. Incrementally advance certified remote state and apply the pending overlay; after publication, confirm current authority and fetch only additional work before durable acknowledgement. Do not remove the pending-state safety guard without a replacement proof. Test warm edit costs at 10/100/1,000 batches, concurrent writers, uncertain writes, restart and exact pending preservation.
+- [x] CR.80 — Separate the acknowledged remote baseline from pending local edits. Incrementally advance certified remote state and apply the pending overlay; after publication, confirm current authority and fetch only additional work before durable acknowledgement. Do not remove the pending-state safety guard without a replacement proof. Test warm edit costs at 10/100/1,000 batches, concurrent writers, uncertain writes, restart and exact pending preservation.
 - [ ] CR.81 — Share a verified B2 authority snapshot within each operation. Reuse verified immutable descriptor/head/intake/manifest bodies and the observed bucket revision through one synchronization call. Refresh mutable observations after conflict or uncertain writes, and confirm successful writes independently. Give legacy recovery a separate bounded schedule so unchanged upgraded libraries return promptly without missing late append input. Assert request counts and fencing/upgrade/late-writer safety.
 - [ ] CR.82 — Persist strong media verification receipts. Retain destination, object key, actual remote version ID, expected hash/size and verification method/result. Capture upload response version information. On restart, reuse proof only when the exact verified version is still applicable; otherwise perform full verification. Test restart before metadata acknowledgement, replacement/deletion, missing receipts, versionless providers, multipart and uncertain completion. HEAD alone and uploader-authored metadata are not content proof.
 - [ ] CR.83 — Add provider-validated upload checksum admission where supported. Verify the provider's single-part and multipart checksum/completion guarantees before enabling a bandwidth-saving path. Admit only independently justified checksum/version evidence; retain full readback for uncertain writes, unsupported capabilities and explicit integrity audits. Test corrupt payloads, forged metadata, mismatched response/version and compatibility fallback. This task depends on verified provider guarantees, not an assumption that a successful upload proves bytes.
@@ -28,7 +28,7 @@ Source: supplied review of `9aae8b53`. Its request/day and download-byte example
 - [ ] CR.85 — Batch ready uploads through one per-library publisher. Let media workers complete independently, gather bounded ready imports, and synchronize/publicize using a fresh catalog snapshot. Preserve per-import durable acknowledgement, dependency waiting, cancellation and restart. Share immutable control-body proof while retaining fresh deletion/maintenance admission during long batches. Assert per-photo/per-batch request counts and unchanged queue/progress behavior.
 - [ ] CR.86 — Make browser conditional-head polling incremental. Check verified authority/cursor before downloading unchanged checkpoint/tail data; use the shared verified immutable cache and an acknowledged baseline separate from pending local changes. Avoid duplicate traversal/replay reads and retain OPFS/IndexedDB durability, quota recovery and causal proofs. Assert unchanged polls fetch no checkpoint/tail once verified state is available, and cover concurrent edits, reload, lost responses and rejoin.
 
-Remaining priority: CR.82/CR.83 for bandwidth, CR.84 for refusal containment, then CR.81/CR.80 and CR.85/CR.86. CR.76–CR.79 are complete. Integrity, deletion barriers, maintenance fencing and exact durable acknowledgement remain acceptance requirements throughout. A successful cached read does not prove the remote object still exists; only a fresh remote verification establishes that at the time checked.
+Remaining priority: CR.82/CR.83 for bandwidth, CR.84 for refusal containment, then CR.81 and CR.85/CR.86. CR.76–CR.80 are complete. Integrity, deletion barriers, maintenance fencing and exact durable acknowledgement remain acceptance requirements throughout. A successful cached read does not prove the remote object still exists; only a fresh remote verification establishes that at the time checked.
 
 ## Original reliability checklist
 
@@ -2025,3 +2025,43 @@ this is not scale or responsiveness acceptance. All requests used signed local f
 consuming no live B2 allowance. All eight `cargo +1.95.0 xtask ci` gates pass
 (`target/cloud-cr79-ci.log`): formatting, strict workspace Clippy, HEIF, workspace tests,
 parity, layers, assets and WebAssembly. CR.79 is complete; CR.80–CR.86 remain open.
+
+
+2026-10-20 — CR.80 implementation: native conditional-head synchronization now keeps
+certified remote state separate from the original pending overlay. A bounded disposable
+baseline entry is keyed by destination/library/durable cursor/generation and revalidated
+on restart; cache failure, eviction, corruption or mismatch retains full verified replay.
+The original pending-state reader guard remains: only a separately certified pending-free
+baseline can seed incremental reads. A cache write ahead of failed acknowledgement cannot
+be reached from an older durable cursor. Exact state/cursor/outbox acknowledgement remains
+one owner-thread journal operation; no catalog/wire format or state-capacity change.
+Operation-local advancement captures only the observed remote state before optimistic
+publication, so competing CAS and lost responses fetch new work without certifying local
+candidate effects. Fresh verification and checkpoint maintenance bypass the baseline.
+
+Focused verification passes (`target/cloud-cr80-baseline-anchored.log`,
+`target/cloud-cr80-checkpoint-accepted.log`): two baseline unit tests cover restart,
+all destination fields, durable cursor/generation mismatch, failed-ACK cache advancement,
+schema/library validation, corrupted/missing cache and fresh-read/cancellation bypass.
+Nine signed CLI regressions prove 10/100/1,000-batch warm edits after restart require
+zero old-tail GETs and exactly one newly published change-batch GET for confirmation.
+Previously unseen remote work is fetched once, including with pending edits; losing or
+damaging the baseline falls back to a certified history read. A 1,000-batch warm history
+also survives a competing writer plus lost immutable/head responses with exact pending
+identities and converged edits. All 20 ordinary cloud-sync integration tests pass,
+including rollback, interrupted recovery, expired cursors, missing archive proofs and
+unsupported conditional writes. The rollback path now retains its specific diagnosis.
+The explicit larger scale test remains ignored. A newly added regression first failed
+when recovery edits existed only in a newer checkpoint at the saved cursor boundary.
+Baselines now retain the exact checkpoint anchor; a changed checkpoint forces verified
+reconstruction, preventing marker-only replay from missing recovered effects.
+
+Actual native Resume acceptance passes (`target/cloud-cr80-native-acceptance-final.log`):
+a saved edit after restart publishes and durably acknowledges with zero downloads of
+1,000 acknowledged batches. The up-to-date popup and four-star photo were inspected
+(`target/cloud-cr80-native/head-baseline/`). The one-photo debug sample is frame 1.14 ms /
+update 31.14 ms, not scale or responsiveness acceptance. All traffic used local signed
+fixtures and consumed no live B2 allowance. All eight repository gates pass
+(`target/cloud-cr80-ci-final.log`): formatting, warning-free clippy, optional HEIC,
+workspace tests, parity, layering, assets and WebAssembly. CR.80 is complete;
+CR.81–CR.86 remain open.

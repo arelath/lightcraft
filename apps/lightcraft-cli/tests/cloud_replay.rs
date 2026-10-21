@@ -71,13 +71,13 @@ fn an_incremental_window_overflow_checkpoints_its_certified_oldest_prefix_withou
     let storage = f.state.lock().unwrap();
     let current: Value = serde_json::from_slice(&storage.objects["/photos/library/catalog/head.json"]).unwrap();
     assert!(current["checkpoint"]["generation"].as_u64().unwrap() >= head["generation"].as_u64().unwrap() - 1);
-    // The last uncovered batch is visited by later recovery walks. No claim of
-    // cross-walk body reuse or an incremental pending overlay is made here.
-    assert_eq!(storage.traffic.iter().filter(|request| request.method == "GET" && request.target == newest).count(), 3);
+    // The last uncovered batch is visited by the initial scan and the read after
+    // publishing the prefix checkpoint. Its new anchor skips a redundant cursor scan.
+    assert_eq!(storage.traffic.iter().filter(|request| request.method == "GET" && request.target == newest).count(), 2);
 }
 
 #[test]
-fn pending_edits_keep_the_full_replay_guard_but_each_pass_reuses_its_own_bytes() {
+fn pending_edits_use_a_separate_remote_baseline_and_fetch_new_history_only_once() {
     for count in [10, 100, 1000] {
         let f = Fixture::new();
         let path = initialize(&f);
@@ -86,13 +86,163 @@ fn pending_edits_keep_the_full_replay_guard_but_each_pass_reuses_its_own_bytes()
         assert_eq!(catalog(&path).sync_state().unwrap().pending.len(), 1);
         clear(&f);
         run(&f, &path, &[("cloud.sync", json!({}))]);
-        // Pre-publication and confirmation are separate certified reads. CR.80
-        // owns making this independent of the already acknowledged tail length.
-        history::assert_cost(&f, &sizes, 2);
+        // New remote work is fetched once; confirming our publication starts from
+        // that certified baseline, independently of the original pending overlay.
+        history::assert_cost(&f, &sizes, 1);
         let final_catalog = catalog(&path);
         assert!(final_catalog.sync_state().unwrap().pending.is_empty());
         assert_eq!(final_catalog.photo(PhotoId(1)).unwrap().rating, 5);
     }
+}
+
+#[test]
+fn warm_edits_after_restart_do_not_download_acknowledged_history_at_any_tail_length() {
+    for count in [10, 100, 1000] {
+        let f = Fixture::new();
+        let path = initialize(&f);
+        let sizes = history::extend_markers(&f, count);
+        run(&f, &path, &[("cloud.sync", json!({}))]);
+        for rating in [4, 5] {
+            run(&f, &path, &[("photo.rate", json!({"ids":[1],"rating":rating}))]);
+            clear(&f);
+            run(&f, &path, &[("cloud.sync", json!({}))]);
+            history::assert_cost(&f, &sizes, 0);
+            let storage = f.state.lock().unwrap();
+            let change_gets =
+                storage.traffic.iter().filter(|request| request.method == "GET" && request.target.contains("/catalog/changes/")).count();
+            assert_eq!(change_gets, 1, "history={count}: freshly confirm only the newly published batch");
+            drop(storage);
+            let after = catalog(&path);
+            assert_eq!(after.photo(PhotoId(1)).unwrap().rating, rating);
+            assert!(after.sync_state().unwrap().pending.is_empty());
+        }
+    }
+}
+
+#[test]
+fn lost_or_corrupt_baselines_keep_pending_work_and_fall_back_to_certified_history() {
+    for corrupt in [false, true] {
+        let f = Fixture::new();
+        let path = initialize(&f);
+        let sizes = history::extend_markers(&f, 100);
+        run(&f, &path, &[("cloud.sync", json!({}))]);
+        let root = path.join("sync-record-cache-v1");
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|extension| extension == "body") {
+                if corrupt {
+                    std::fs::write(path, b"broken cache body").unwrap();
+                } else {
+                    std::fs::remove_file(path).unwrap();
+                }
+            }
+        }
+        run(&f, &path, &[("photo.rate", json!({"ids":[1],"rating":4}))]);
+        let pending = catalog(&path).sync_state().unwrap().pending.clone();
+        assert_eq!(pending.len(), 1);
+        clear(&f);
+        run(&f, &path, &[("cloud.sync", json!({}))]);
+        history::assert_cost(&f, &sizes, 1);
+        let after = catalog(&path);
+        assert!(after.sync_state().unwrap().pending.is_empty());
+        for (id, mutation) in pending {
+            assert_eq!(after.sync_state().unwrap().received[&id].digest, mutation.digest().unwrap());
+        }
+        assert_eq!(after.photo(PhotoId(1)).unwrap().rating, 4);
+    }
+}
+
+#[test]
+fn a_warm_baseline_handles_competing_and_uncertain_publication_without_replaying_the_old_tail() {
+    let f = Fixture::new();
+    let a = initialize(&f);
+    let b = f.dir.join("competitor");
+    let library = catalog(&a).sync_state().unwrap().library.clone();
+    run(
+        &f,
+        &b,
+        &[
+            (
+                "cloud.configure",
+                json!({"id":"personal","bucket":"photos","region":"us-east-1","prefix":"library","endpoint":f.endpoint,"profile":"acceptance"}),
+            ),
+            ("cloud.syncEnable", json!({"connection":"personal","library":library})),
+            ("cloud.sync", json!({})),
+        ],
+    );
+    let sizes = history::extend_markers(&f, 1000);
+    run(&f, &a, &[("cloud.sync", json!({}))]);
+    run(&f, &b, &[("cloud.sync", json!({}))]);
+    let old_head = f.state.lock().unwrap().objects["/photos/library/catalog/head.json"].clone();
+    run(&f, &b, &[("photo.rate", json!({"ids":[1],"rating":3})), ("cloud.sync", json!({}))]);
+    {
+        let mut storage = f.state.lock().unwrap();
+        let competing = storage.objects["/photos/library/catalog/head.json"].clone();
+        storage.objects.insert("/photos/library/catalog/head.json".into(), old_head);
+        storage.next_head = Some(competing);
+        storage.lost_head = true;
+        storage.lost_put = true;
+    }
+    run(&f, &a, &[("develop.set", json!({"id":1,"control":"light.exposure","value":0.75}))]);
+    let pending = catalog(&a).sync_state().unwrap().pending.clone();
+    clear(&f);
+    run(&f, &a, &[("cloud.sync", json!({}))]);
+    history::assert_cost(&f, &sizes, 0);
+    let after = catalog(&a);
+    assert!(after.sync_state().unwrap().pending.is_empty());
+    for (id, mutation) in pending {
+        assert_eq!(after.sync_state().unwrap().received[&id].digest, mutation.digest().unwrap());
+    }
+    assert_eq!(after.photo(PhotoId(1)).unwrap().rating, 3);
+    assert_eq!(after.photo(PhotoId(1)).unwrap().develop.light.exposure, 0.75);
+    run(&f, &b, &[("cloud.sync", json!({}))]);
+    assert_eq!(catalog(&b).photo(PhotoId(1)).unwrap().develop, after.photo(PhotoId(1)).unwrap().develop);
+}
+
+#[test]
+fn a_new_checkpoint_at_the_baseline_boundary_cannot_hide_checkpoint_only_recovery_edits() {
+    use lightcraft_engine::catalog::assets::BlobId;
+    use lightcraft_engine::catalog::replication::{Change, SyncState};
+    use lightcraft_engine::cloud_records::{Checkpoint, CheckpointRef, Head, RecordRef};
+    let f = Fixture::new();
+    let path = initialize(&f);
+    history::extend_markers(&f, 100);
+    run(&f, &path, &[("cloud.sync", json!({}))]);
+    let saved = catalog(&path);
+    let local = saved.sync_state().unwrap();
+    let mut recovered = SyncState::restore_durable(&local.portable(), "checkpoint-writer".into(), "personal".into()).unwrap();
+    let entity = format!("photo:{}", saved.cloud_identity("photo:1").unwrap());
+    let base = recovered.winning(&entity, "meta.caption").map(|(stamp, _)| stamp);
+    recovered.enqueue(vec![Change { entity, field: "meta.caption".into(), base, value: json!("Recovered through the new checkpoint") }]).unwrap();
+    run(&f, &path, &[("photo.rate", json!({"ids":[1],"rating":4}))]);
+    {
+        let mut storage = f.state.lock().unwrap();
+        let old: Head = serde_json::from_slice(&storage.objects["/photos/library/catalog/head.json"]).unwrap();
+        let checkpoint =
+            Checkpoint { version: 1, generation: old.generation, covers: old.tip.clone(), state: recovered.portable(), imports: Default::default() };
+        let bytes = serde_json::to_vec(&checkpoint).unwrap();
+        let hash = support::hash(&bytes);
+        let object = RecordRef { key: format!("library/catalog/checkpoints/{hash}.json"), hash: BlobId(hash), size: bytes.len() as u64 };
+        storage.objects.insert(format!("/photos/{}", object.key), bytes);
+        let bytes = serde_json::to_vec(&json!({"version":3,"parent":old.tip,"imports":[],"checkpointMarker":true})).unwrap();
+        let hash = support::hash(&bytes);
+        let tip = RecordRef { key: format!("library/catalog/changes/{hash}.json"), hash: BlobId(hash), size: bytes.len() as u64 };
+        storage.objects.insert(format!("/photos/{}", tip.key), bytes);
+        let head = Head::next(
+            Some(&old),
+            tip,
+            &local.library,
+            Some(CheckpointRef { object, covers: old.tip.clone(), generation: old.generation }),
+            old.control().unwrap(),
+        )
+        .unwrap();
+        storage.objects.insert("/photos/library/catalog/head.json".into(), serde_json::to_vec(&head).unwrap());
+    }
+    run(&f, &path, &[("cloud.sync", json!({}))]);
+    let after = catalog(&path);
+    assert_eq!(after.photo(PhotoId(1)).unwrap().meta.caption, "Recovered through the new checkpoint");
+    assert_eq!(after.photo(PhotoId(1)).unwrap().rating, 4);
+    assert!(after.sync_state().unwrap().pending.is_empty());
 }
 
 #[test]

@@ -929,6 +929,21 @@ retain their existing no-write path. Browser replay still has separate traversal
 GETs below. CR.79 records exact native request/byte savings and memory evidence; append
 checkpoint consumption and audit bounds follow below.
 
+### Native remote baseline and pending overlay
+
+An optional disposable local baseline contains certified pure remote state at an exact
+already-durable destination/library/cursor/generation. It never contains the device's
+unpublished overlay. On absence, corruption, retargeting or position mismatch, pending
+work still forces full verified replay. Current authority and ancestry are read before
+advancing the baseline, and exact remote receipts remain necessary to acknowledge edits.
+The last observed remote state seeds publication confirmation; optimistic candidate effects
+cannot seed that read, including after lost replies or competing CAS. Baseline cache writes
+do not change the outbox and do not replace the atomic catalog state/cursor/ACK operation.
+The saved checkpoint anchor must match current authority before incremental reuse. New
+checkpoints trigger reconstruction so checkpoint-only recovery effects are received; a
+changed anchor at the same causal position is refused. Fresh verification and checkpoint
+maintenance retain uncached remote reconstruction.
+
 ### Browser bounded history replay
 
 Browser head replay now uses the same 4,096-record window, 1,024-record automatic

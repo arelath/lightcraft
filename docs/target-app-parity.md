@@ -1,6 +1,6 @@
 # Target-app parity: LightCraft vs Adobe Lightroom
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (CR.79: bounded native conditional-history byte reuse; CR.78: separate incremental sync and durable budgeted verification; CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified: RAW decoding 76% → 77%; headline numbers unchanged) · **Target:** Adobe Lightroom Classic 15.5 (August 2026) and Lightroom 9.6 (desktop)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-20 · **Change:** minor (CR.80: certified native remote baselines and pending overlays; CR.79: bounded native conditional-history byte reuse; CR.78: separate incremental sync and durable budgeted verification; CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified: RAW decoding 76% → 77%; headline numbers unchanged) · **Target:** Adobe Lightroom Classic 15.5 (August 2026) and Lightroom 9.6 (desktop)
 
 The authoritative assessment of how close LightCraft is to Lightroom. The row-by-row checklist is
 [parity-checklist.md](parity-checklist.md); the ranked work list is [gaps.md](gaps.md); deep areas
@@ -297,6 +297,7 @@ P2 items 12–25 h; look tuning, performance, packaging, hardening 25–45 h.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | minor | CR.80: Native pending edits use a separate certified remote baseline and confirm only new history; restart/cache failures retain full replay and exact atomic acknowledgement. Cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.79: Native conditional-history traversal/replay shares a bounded verified byte spool, preserving recovery and pending-edit guards. Browser replay and baseline separation remain open; cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.78: Incremental known-key/cached discovery is separate from read-only fresh verification, with persistent deadlines, cursor and request/byte reservations. Native and browser append paths retain late-key fork checks; cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.77: Bounded durable native append/receipt-body reuse rechecks destination, content and schema, preserves causal/fork checks and bypasses cache for fresh audits. Audit scheduling remains CR.78; cloud is OOS and parity counts are unchanged |

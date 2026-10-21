@@ -126,6 +126,7 @@ fn read_window(
 fn read_incremental(
     connection: &S3Connection,
     local: &SyncState,
+    checkpoint: Option<&Option<CheckpointRef>>,
     archive_proofs: &mut lightcraft_catalog::replication::archive::Witness,
     cancel: &AtomicBool,
 ) -> Result<Remote> {
@@ -134,8 +135,20 @@ fn read_incremental(
     }
     let head = publication::read_head(connection, cancel)?;
     let Some((current, _)) = &head else { return read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), archive_proofs, cancel) };
-    if current.library.as_deref() != Some(local.library.as_str()) || current.generation < local.generation {
-        return Err(invalid("remote library or generation changed inconsistently"));
+    if current.library.as_deref() != Some(local.library.as_str()) {
+        return Err(invalid("remote library changed inconsistently; local work retained"));
+    }
+    if current.generation < local.generation {
+        return Err(invalid("remote catalog rolled back below the acknowledged generation; local work retained"));
+    }
+    // Recovery can put new effects in a checkpoint rather than its marker batch.
+    // A baseline is reusable only while its exact checkpoint anchor is unchanged.
+    let anchor_changed = checkpoint.map_or(current.checkpoint.is_some(), |known| known != &current.checkpoint);
+    if anchor_changed {
+        if checkpoint.is_some() && local.cursor.as_deref() == Some(current.tip.hash.0.as_str()) {
+            return Err(invalid("remote checkpoint changed at the acknowledged head; local work retained"));
+        }
+        return read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), archive_proofs, cancel);
     }
     // A cursor is only a hash; discover its full reference without buffering batches.
     let mut index = replay::Index::new()?;
@@ -277,8 +290,23 @@ fn synchronize_verified_audit(
     if local.protocol == lightcraft_catalog::replication::SyncProtocol::AppendLog {
         return crate::cloud_append::native::synchronize_verified(connection, local, checkpoint_requested, audit, cancel, media);
     }
+    synchronize_head(connection, local, checkpoint_requested, audit, cancel, media)
+}
+fn remembered(connection: &S3Connection, outcome: Outcome, checkpoint: Option<CheckpointRef>, cancel: &AtomicBool) -> Result<Outcome> {
+    connection.remember_head_baseline(&outcome, checkpoint, cancel)?;
+    Ok(outcome)
+}
+fn synchronize_head(
+    connection: &S3Connection,
+    local: &SyncState,
+    checkpoint_requested: bool,
+    audit: bool,
+    cancel: &AtomicBool,
+    media: &mut VerifiedMedia,
+) -> Result<Outcome> {
     publication::ensure_head_protocol(connection, &local.library, cancel)?;
     local.validate().map_err(catalog_error)?;
+    let mut baseline = if checkpoint_requested { None } else { connection.head_baseline(local, cancel)? };
     if local.pending.is_empty() && !checkpoint_requested {
         let current = publication::read_head(connection, cancel)?;
         if let Some((head, _)) = current
@@ -287,7 +315,11 @@ fn synchronize_verified_audit(
             if head.library.as_deref() != Some(local.library.as_str()) || head.generation != local.generation {
                 return Err(invalid("remote library/cursor generation changed inconsistently"));
             }
-            if head.legacy_append.is_none() && tail_length(&head) < AUTO_CHECKPOINT_BATCHES {
+            let anchor_matches = baseline.as_ref().map_or(head.checkpoint.is_none(), |known| known.checkpoint == head.checkpoint);
+            if baseline.is_some() && !anchor_matches {
+                return Err(invalid("remote checkpoint changed at the acknowledged head; local work retained"));
+            }
+            if anchor_matches && head.legacy_append.is_none() && tail_length(&head) < AUTO_CHECKPOINT_BATCHES {
                 let capability = Publication::head(Some(&head), &local.library).map_err(AssetError::Blocked)?;
                 return Ok(Outcome::unchanged(local.portable(), HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?)
                     .with_publication(capability));
@@ -302,7 +334,13 @@ fn synchronize_verified_audit(
         let mut remote = if checkpoint_requested {
             read_window(connection, &local.library, Some(RECOVERY_SEGMENT_BATCHES), &mut archive_proofs, cancel)?
         } else {
-            read_incremental(connection, local, &mut archive_proofs, cancel)?
+            read_incremental(
+                connection,
+                baseline.as_ref().map_or(local, |known| &known.state),
+                baseline.as_ref().map(|known| &known.checkpoint),
+                &mut archive_proofs,
+                cancel,
+            )?
         };
         if local.require_existing && remote.head.is_none() {
             return Err(invalid("cannot join: remote library is absent; verify its destination and library ID; local work retained"));
@@ -341,6 +379,15 @@ fn synchronize_verified_audit(
         }
         let checkpoint_needed = checkpoint_requested || remote.tail_records >= AUTO_CHECKPOINT_BATCHES;
         crate::cloud_history::native::hydrate(connection, &mut remote.state, local, &mut archive_proofs, cancel)?;
+        // This state contains only certified remote effects. Keep the original
+        // outbox separate, and seed the next read from this observed head, never
+        // from the optimistic effects inserted below before a possibly lost CAS.
+        if !checkpoint_requested && let Some((head, _)) = &remote.head {
+            let mut observed = remote.state.clone();
+            observed.cursor = Some(head.tip.hash.0.clone());
+            observed.generation = head.generation;
+            baseline = Some(crate::cloud_metadata::HeadBaseline { state: observed, checkpoint: head.checkpoint.clone() });
+        }
         let mut pending = Vec::new();
         let mut acknowledged = BTreeSet::new();
         for mutation in local.pending.values() {
@@ -364,8 +411,13 @@ fn synchronize_verified_audit(
                 return Err(invalid("remote catalog is empty; initial library metadata must be queued first"));
             };
             let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
-            return Ok(Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged)
-                .with_publication(capability));
+            return remembered(
+                connection,
+                Outcome::head(state, HeadPosition::new(head.tip.hash.0, head.generation).map_err(invalid)?, acknowledged)
+                    .with_publication(capability),
+                head.checkpoint,
+                cancel,
+            );
         }
         if let Publication::Blocked(blocked) = capability {
             // Receive-only: apply remote state, acknowledge what it already contains and
@@ -373,7 +425,7 @@ fn synchronize_verified_audit(
             let Some((head, _)) = &remote.head else { return Err(AssetError::Blocked(blocked)) };
             let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
             let position = HeadPosition::new(head.tip.hash.0.clone(), head.generation).map_err(invalid)?;
-            return Ok(Outcome::head_blocked(state, position, acknowledged, blocked));
+            return remembered(connection, Outcome::head_blocked(state, position, acknowledged, blocked), head.checkpoint.clone(), cancel);
         }
         let pending_count = pending.len();
         pending = crate::cloud_sync::publication_order(pending, &remote.state.clock).map_err(|e| invalid(e.to_string()))?;
@@ -412,14 +464,15 @@ fn synchronize_verified_audit(
                 return Err(invalid("pending mutation cannot fit a 2 MiB change batch"));
             }
             let state = crate::cloud_history::native::certify(connection, local, &remote.state.portable(), &mut archive_proofs, cancel)?;
-            return Ok(if let Some((head, _)) = &remote.head {
+            let outcome = if let Some((head, _)) = &remote.head {
                 Outcome::head(state, HeadPosition::new(head.tip.hash.0.clone(), head.generation).map_err(invalid)?, acknowledged)
             } else {
                 if !acknowledged.is_empty() {
                     return Err(invalid("empty remote head cannot acknowledge mutations"));
                 }
                 Outcome::empty(state)
-            });
+            };
+            return remembered(connection, outcome, remote.head.and_then(|(head, _)| head.checkpoint), cancel);
         }
         let newly_referenced: Vec<_> = chunk.iter().filter(|mutation| !dependency_proof.contains(&mutation.revision.id())).cloned().collect();
         dependencies_verified(connection, &newly_referenced, cancel, media)?;
