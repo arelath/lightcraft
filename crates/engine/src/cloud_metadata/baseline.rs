@@ -3,7 +3,7 @@
 //! matching cursor makes the new entry unreachable, and a miss keeps full replay.
 use super::*;
 use crate::cloud_outcome::{HeadPosition, Outcome};
-use crate::cloud_records::CheckpointRef;
+use crate::cloud_records::{CheckpointRef, RecordRef};
 use lightcraft_catalog::replication::{Portable, SyncState};
 use serde::{Deserialize, Serialize};
 
@@ -15,16 +15,18 @@ struct Baseline {
     destination: String,
     cursor: String,
     generation: u64,
+    tip: RecordRef,
     checkpoint: Option<CheckpointRef>,
     remote: Portable,
 }
 pub(crate) struct HeadBaseline {
     pub state: SyncState,
+    pub tip: RecordRef,
     pub checkpoint: Option<CheckpointRef>,
 }
 fn identity(connection: &S3Connection, library: &str, position: &HeadPosition) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(b"lightcraft-certified-head-baseline-v1\0");
+    hash.update(b"lightcraft-certified-head-baseline-v2\0");
     let destination = crate::cloud_traffic::destination(connection);
     for value in [destination.as_str(), library, position.cursor()] {
         hash.update((value.len() as u64).to_le_bytes());
@@ -50,19 +52,28 @@ impl S3Connection {
         };
         let checked = || -> Result<HeadBaseline> {
             let baseline: Baseline = serde_json::from_slice(&bytes).map_err(|_| AssetError::Integrity)?;
-            if baseline.version != 1
+            if baseline.version != 2
                 || baseline.destination != crate::cloud_traffic::destination(self)
                 || baseline.cursor != *cursor
                 || baseline.generation != local.generation
+                || baseline.tip.hash.0 != *cursor
                 || baseline.remote.library != local.library
                 || !baseline.remote.proofs.is_empty()
             {
                 return Err(AssetError::Integrity);
             }
+            baseline.tip.validate_scope(&self.prefix, "changes", 2 << 20).map_err(AssetError::Invalid)?;
+            if let Some(c) = &baseline.checkpoint {
+                c.object.validate_scope(&self.prefix, "checkpoints", 64 << 20).map_err(AssetError::Invalid)?;
+                c.covers.validate_scope(&self.prefix, "changes", 2 << 20).map_err(AssetError::Invalid)?;
+                if c.generation == 0 || c.generation >= baseline.generation {
+                    return Err(AssetError::Integrity);
+                }
+            }
             let mut state = SyncState::restore_durable(&baseline.remote, "remote".into(), self.id.clone()).map_err(AssetError::from)?;
             state.cursor = Some(cursor.clone());
             state.generation = local.generation;
-            Ok(HeadBaseline { state, checkpoint: baseline.checkpoint })
+            Ok(HeadBaseline { state, tip: baseline.tip, checkpoint: baseline.checkpoint })
         };
         match checked() {
             Ok(state) => {
@@ -78,7 +89,13 @@ impl S3Connection {
             }
         }
     }
-    pub(crate) fn remember_head_baseline(&self, outcome: &Outcome, checkpoint: Option<CheckpointRef>, cancel: &AtomicBool) -> Result<()> {
+    pub(crate) fn remember_head_baseline(
+        &self,
+        outcome: &Outcome,
+        tip: RecordRef,
+        checkpoint: Option<CheckpointRef>,
+        cancel: &AtomicBool,
+    ) -> Result<()> {
         cancelled(cancel)?;
         // Polling an unchanged cursor does not rewrite a large cache body.
         if matches!(outcome, Outcome::Unchanged { .. }) || self.fresh_history() {
@@ -88,10 +105,11 @@ impl S3Connection {
         let mut remote = outcome.state().clone();
         remote.proofs.clear();
         let baseline = Baseline {
-            version: 1,
+            version: 2,
             destination: crate::cloud_traffic::destination(self),
             cursor: position.cursor().to_owned(),
             generation: position.generation(),
+            tip,
             checkpoint,
             remote,
         };
@@ -135,6 +153,13 @@ mod tests {
         state.acknowledge(&state.pending.keys().cloned().collect(), "a".repeat(64), 1).unwrap();
         state
     }
+    fn tip(state: &SyncState) -> RecordRef {
+        RecordRef {
+            key: format!("library/catalog/changes/{}.json", state.cursor.as_deref().unwrap()),
+            hash: lightcraft_catalog::assets::BlobId(state.cursor.clone().unwrap()),
+            size: 1,
+        }
+    }
     fn outcome(state: &SyncState) -> Outcome {
         Outcome::head(state.portable(), HeadPosition::new(state.cursor.clone().unwrap(), state.generation).unwrap(), Default::default())
     }
@@ -143,7 +168,7 @@ mod tests {
         let fixture = Fixture::new();
         let cancel = AtomicBool::new(false);
         let remote = state();
-        fixture.connection().remember_head_baseline(&outcome(&remote), None, &cancel).unwrap();
+        fixture.connection().remember_head_baseline(&outcome(&remote), tip(&remote), None, &cancel).unwrap();
         let mut local = remote.clone();
         let base = local.winning("photo:one", "rating").map(|(stamp, _)| stamp);
         local.enqueue(vec![Change { entity: "photo:one".into(), field: "rating".into(), base, value: json!(5) }]).unwrap();
@@ -180,11 +205,11 @@ mod tests {
         let mut newer = local.clone();
         newer.cursor = Some("b".repeat(64));
         newer.generation = 2;
-        fixture.connection().remember_head_baseline(&outcome(&newer), None, &cancel).unwrap();
+        fixture.connection().remember_head_baseline(&outcome(&newer), tip(&newer), None, &cancel).unwrap();
         assert!(fixture.connection().head_baseline(&local, &cancel).unwrap().is_none());
         assert_eq!(local, snapshot);
         let connection = fixture.connection();
-        connection.remember_head_baseline(&outcome(&local), None, &cancel).unwrap();
+        connection.remember_head_baseline(&outcome(&local), tip(&local), None, &cancel).unwrap();
         let position = HeadPosition::new(local.cursor.clone().unwrap(), local.generation).unwrap();
         let cache = connection.metadata.cache.as_ref().unwrap();
         let id = identity(&connection, &local.library, &position);
@@ -193,7 +218,7 @@ mod tests {
         value["remote"]["library"] = json!("other");
         cache.save(&id, &serde_json::to_vec(&value).unwrap(), &cancel).unwrap();
         assert!(connection.head_baseline(&local, &cancel).unwrap().is_none());
-        connection.remember_head_baseline(&outcome(&local), None, &cancel).unwrap();
+        connection.remember_head_baseline(&outcome(&local), tip(&local), None, &cancel).unwrap();
         let filename = id.iter().map(|byte| format!("{byte:02x}")).collect::<String>() + ".body";
         std::fs::write(fixture.0.join(&filename), b"truncated").unwrap();
         assert!(fixture.connection().head_baseline(&local, &cancel).unwrap().is_none());

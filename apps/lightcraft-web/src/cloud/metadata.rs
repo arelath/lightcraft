@@ -1,4 +1,4 @@
-//! Disposable append bodies in one atomically replaced bounded snapshot. Concurrent
+//! Disposable immutable history bodies in one atomically replaced bounded snapshot. Concurrent
 //! cancelled workers can lose cache entries, never grow an unindexed body directory.
 use super::{Connection, Provider};
 use crate::backend::Backend;
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, collections::BTreeMap};
 const ENTRIES: usize = 128;
 const BYTES: usize = 8 << 20;
-const BODY: usize = 1 << 20;
+const BODY: usize = 2 << 20;
 const FILE: &str = "cloud/append-metadata-v1.json";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,7 +59,11 @@ impl Cache {
         Ok(index)
     }
     pub async fn read(&self, key: &str, max: usize) -> Result<Option<Vec<u8>>, CloudFailure> {
-        let mut index = self.index().await?;
+        if self.state.borrow().is_none() {
+            self.index().await?;
+        }
+        let mut state = self.state.borrow_mut();
+        let index = state.as_mut().ok_or_else(|| CloudFailure::local("metadata cache unavailable"))?;
         let id = sha256(key.as_bytes()).0;
         let Some(entry) = index.entries.get_mut(&id) else { return Ok(None) };
         if entry.bytes.len() > max || sha256(&entry.bytes).0 != entry.hash {
@@ -68,7 +72,6 @@ impl Cache {
         index.tick = index.tick.saturating_add(1);
         entry.tick = index.tick;
         let bytes = entry.bytes.clone();
-        *self.state.borrow_mut() = Some(index);
         Ok(Some(bytes))
     }
     pub async fn save(&self, key: &str, bytes: &[u8]) -> Result<(), CloudFailure> {
@@ -124,5 +127,36 @@ impl Provider {
             let _ = cache.save(key, &reply.bytes).await;
         }
         Ok((value, reply.bytes.len()))
+    }
+}
+
+impl Provider {
+    /// Immutable bytes are reusable only under this complete reference. Callers
+    /// still decode the record and validate its scoped schema/causal contents.
+    pub(super) async fn catalog_record(&self, reference: &lightcraft_engine::cloud_records::RecordRef, max: usize) -> Result<Vec<u8>, CloudFailure> {
+        self.check_cancelled()?;
+        self.connection.validate_key(&reference.key)?;
+        let check = |bytes: &[u8]| bytes.len() <= max && bytes.len() as u64 == reference.size && sha256(bytes) == reference.hash;
+        if !self.fresh_history
+            && let Some(cache) = &self.metadata
+            && let Ok(Some(bytes)) = cache.read(&reference.key, max).await
+            && check(&bytes)
+        {
+            return Ok(bytes);
+        }
+        let reply = self.request("GET", &reference.key, None, None, None, max).await?;
+        if reply.status == 404 {
+            return Err(CloudFailure::integrity("immutable catalog history record is missing"));
+        }
+        if reply.status != 200 {
+            return Err(CloudFailure::http("catalog object", reply.status));
+        }
+        if !check(&reply.bytes) {
+            return Err(CloudFailure::integrity("remote catalog object failed SHA-256/length verification"));
+        }
+        if let Some(cache) = &self.metadata {
+            let _ = cache.save(&reference.key, &reply.bytes).await;
+        }
+        Ok(reply.bytes)
     }
 }

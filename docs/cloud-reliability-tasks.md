@@ -5,9 +5,9 @@ Created: 2026-10-14. Check an item only after implementation and relevant verifi
 record evidence and remaining limitations below it. Historical acceptance does not verify
 this checkout. Work in the order below, preserving unrelated changes.
 
-Current status (2026-10-21): CR.1–CR.42, CR.46–CR.85 are complete.
+Current status (2026-10-21): CR.1–CR.42, CR.46–CR.86 are complete.
 CR.43–CR.45 remain open.
-CR.86 is open: reduce browser provider traffic without weakening synchronization or media integrity.
+The B2 traffic-reduction work CR.76–CR.86 is complete with local acceptance; live-provider acceptance remains separate.
 Dated verification notes below
 describe their original snapshots; current operational limits remain in
 [cloud-storage-implementation.md](cloud-storage-implementation.md).
@@ -26,9 +26,9 @@ Source: supplied review of `9aae8b53`. Its request/day and download-byte example
 - [x] CR.83 — Add provider-validated upload checksum admission where supported. Verify the provider's single-part and multipart checksum/completion guarantees before enabling a bandwidth-saving path. Admit only independently justified checksum/version evidence; retain full readback for uncertain writes, unsupported capabilities and explicit integrity audits. Test corrupt payloads, forged metadata, mismatched response/version and compatibility fallback. This task depends on verified provider guarantees, not an assumption that a successful upload proves bytes.
 - [x] CR.84 — Share quota suspension and throttling across remote workers. Scope recognized account caps to affected credentials/account or destination, stop new requests across sync, uploads, offline copies and rendition fallback, and leave untouched items queued and cached data usable. Resume through explicit retry or a controlled reset probe. Share Retry-After/cooldown policy across S3 metadata/media and native B2 control. Test one cap response stops subsequent queued work except already in-flight requests; preserve per-item failures versus account-wide refusals and uncertain-write reconciliation.
 - [x] CR.85 — Batch ready uploads through one per-library publisher. Let media workers complete independently, gather bounded ready imports, and synchronize/publicize using a fresh catalog snapshot. Preserve per-import durable acknowledgement, dependency waiting, cancellation and restart. Share immutable control-body proof while retaining fresh deletion/maintenance admission during long batches. Assert per-photo/per-batch request counts and unchanged queue/progress behavior.
-- [ ] CR.86 — Make browser conditional-head polling incremental. Check verified authority/cursor before downloading unchanged checkpoint/tail data; use the shared verified immutable cache and an acknowledged baseline separate from pending local changes. Avoid duplicate traversal/replay reads and retain OPFS/IndexedDB durability, quota recovery and causal proofs. Assert unchanged polls fetch no checkpoint/tail once verified state is available, and cover concurrent edits, reload, lost responses and rejoin. Also bind the complete cached history tip (key/hash/size) in both native and browser baseline reuse; a changed reference at the same cursor must not become a newly published parent.
+- [x] CR.86 — Make browser conditional-head polling incremental. Check verified authority/cursor before downloading unchanged checkpoint/tail data; use the shared verified immutable cache and an acknowledged baseline separate from pending local changes. Avoid duplicate traversal/replay reads and retain OPFS/IndexedDB durability, quota recovery and causal proofs. Assert unchanged polls fetch no checkpoint/tail once verified state is available, and cover concurrent edits, reload, lost responses and rejoin. Also bind the complete cached history tip (key/hash/size) in both native and browser baseline reuse; a changed reference at the same cursor must not become a newly published parent.
 
-Remaining priority: CR.86 for browser incremental reads. CR.76–CR.85 are complete. Integrity, deletion barriers, maintenance fencing and exact durable acknowledgement remain acceptance requirements throughout. A successful cached read does not prove the remote object still exists; only a fresh remote verification establishes that at the time checked.
+CR.76–CR.86 are complete. Remaining open acceptance is CR.43–CR.45; the absent AWS test bucket and live-provider limits remain documented below. Integrity, deletion barriers, maintenance fencing and exact durable acknowledgement remain acceptance requirements throughout. A successful cached read does not prove the remote object still exists; only a fresh remote verification establishes that at the time checked.
 
 ## Original reliability checklist
 
@@ -2261,3 +2261,93 @@ blob verification and lost future-reader provenance; both are corrected. One eng
 process exited abnormally; its 45 asset tests passed with one and four threads, and a
 copied engine binary passed 1,212 tests while excluding only a stale test assertion.
 Final verification: `target/cloud-cr85-ci-verified.log` passed all eight CI steps (formatting, strict native Clippy, HEIF, workspace tests, parity, layers, assets and WebAssembly), including the final active-file and current-stream progress regressions. The native acceptance logs above use the final source. CR.85 is complete; CR.86 and the separately tracked live-provider acceptance CR.43–CR.45 remain open. No catalog or remote wire format changed.
+
+
+2026-10-21 — CR.86: browser conditional-head synchronization now uses a disposable
+pure remote baseline, distinct from pending local effects, bound to destination,
+library, durable cursor/generation, full tip key/hash/size and checkpoint anchor.
+Current authority, capability, legacy intake and causal checks still run before an
+outcome or publication. New batches replay incrementally; missing/damaged/foreign/ahead
+or obsolete baseline envelopes use verified bootstrap. Both native and browser caches
+now bind the full history reference, including incremental ancestor boundaries. Native
+v1 baselines become misses rather than hash-only proof.
+
+Browser traversal retains an oldest-prefix encoded-body window capped at 4,096 records
+and 64 MiB of body bytes, with bounded references/decoding overhead; forward replay does
+not download those bodies again. Longer history uses authenticated prefix checkpoints.
+Cancellation yields every 64 records. The shared disposable browser metadata index
+remains 128 entries / 8 MiB serialized, now accepting bodies up to 2 MiB. Every reuse
+checks the complete reference and typed record contents. A baseline is at most 64 MiB;
+auxiliary storage preserves catalog headroom. No cache write is an acknowledgement.
+The existing catalog-save / ACK-file / receipt-finalization sequence is unchanged.
+
+Local real-browser acceptance (`target/cloud-cr86-browser-final.log` and
+`target/cloud-cr86/browser-results.json`) passed all six OPFS/IndexedDB flows:
+
+| Backend | Existing marker batches | Cold join GETs per marker | Old checkpoint/tail GETs over 20 unchanged polls | Old history GETs after reload | Old marker GETs for a competing, response-lost edit | New change-object GETs for that edit |
+|---|---:|---:|---:|---:|---:|---:|
+| OPFS | 10 | 1 | 0 | 0 | 0 | 6 |
+| OPFS | 100 | 1 | 0 | 0 | 0 | 6 |
+| OPFS | 1,000 | 1 | 0 | 0 | 0 | 6 |
+| IndexedDB | 10 | 1 | 0 | 0 | 0 | 6 |
+| IndexedDB | 100 | 1 | 0 | 0 | 0 | 6 |
+| IndexedDB | 1,000 | 1 | 0 | 0 | 0 | 6 |
+
+The six new-object GETs include B2 immutable-write existence/readback checks for two
+candidates, the competing marker, and successful-head confirmation. They are not duplicate
+backward/forward replay reads. Before the change, the same 10-marker cold-join assertion
+observed four GETs per marker (`target/cloud-cr86-before.log`). These are local measured
+request counts, not estimates of live account usage or a throughput benchmark.
+
+Both 10-marker storage flows rejected changed tip keys and lengths at the same cursor,
+with and without pending edits, retaining the exact pending count/cursor/generation and
+issuing no PUT. Foreign, ahead, obsolete and damaged baseline recovery passed. Injected
+catalog write refusal stopped fresh verification before network I/O; pending work survived.
+Fresh verification bypassed known bytes: OPFS corruption and IndexedDB missing history
+were detected, stayed latched across cached sync, and cleared only after restoration and
+successful fresh verification. The missing-history case exposed a 404 classification
+issue during acceptance; it now reports integrity failure instead of an ordinary HTTP
+miss. Published edit IDs were acknowledged exactly once after competing CAS and a lost
+successful head response.
+
+Fresh verification completed the 10-marker flows with 15 change-object GETs. The 100-
+and 1,000-marker flows each stopped at 62 change-object GETs, with no second body GET,
+within the existing 128 total request budget including authorization and authority reads.
+They correctly reported partial verification and preserved pending edits/cursor/generation.
+Fresh head verification still does not resume across budget slices; checkpoint maintenance
+must shorten a tail that cannot fit a slice. CR.86 does not claim to close that limitation.
+
+Additional current-bundle regressions passed: both-backend existing head-to-append
+migration/reload (`target/cloud-cr86-browser-migration.log`); the CR.78 96-idle-poll,
+known-history, fresh damage, durable-budget and save-before-network browser checks
+(`target/cloud-cr86-browser-append.log`); and upgraded B2 local-contract scenarios for
+unsupported signers/login/throttling/future heads, interrupted activation, unsafe cancel,
+late original-author input, rejoin/reload, same-head rebase, lease renewal/takeover,
+competing upgrades and historical forks (`target/cloud-cr86-browser-b2-upgrade.log`).
+All provider fixtures used local servers or intercepted signed requests; no live cloud
+library was used for these checks.
+
+Native focused checks passed: two baseline-cache tests, the bounded BodyWindow regression,
+and the real-binary full-tip test's four clean/pending × changed-key/size cases
+(`target/cloud-cr86-baseline-unit.log`, `target/cloud-cr86-body-unit.log`,
+`target/cloud-cr86-native-tip.log`). Browser bundle build passed. Popup screenshots for
+both 1,000-marker backends were viewed, and `ui.inspect` was saved. Captured frame/update
+readouts were 1–3 ms, but maximum updates ranged 1,497–8,169 ms across bootstrap/control
+work; these results establish request correctness, not responsiveness or scale parity.
+
+Full CI passed all eight steps in `target/cloud-cr86-ci-rebuilt.log`: formatting,
+strict native Clippy, HEIF, workspace tests, parity, layers, assets and WebAssembly.
+An earlier run was deliberately interrupted for the missing-history fix; its incremental
+engine test artifacts subsequently produced an MSVC linker failure. The successful full
+run used `CARGO_INCREMENTAL=0`, rebuilding without those artifacts, with no product or
+test weakening.
+
+The current native app build and real Resume Syncing acceptance also passed
+(`target/cloud-cr86-native-build.log`, `target/cloud-cr86-native-acceptance.log`):
+a saved offline rating over 1,000 acknowledged batches published after reopening with
+zero old-batch GETs and zero old-history response bytes. The saved mutation digest was
+acknowledged exactly, its pending set cleared, and the Up to date popup screenshot was
+viewed (`target/cloud-cr86-native/head-baseline/popup.png`). Captured frame time was
+1.270 ms, update/max-update 30.865 ms and last render 3.911 ms; this is a single-photo
+correctness check, not a responsiveness benchmark. CR.86 is complete. CR.43–CR.45 remain
+open; no live-provider acceptance or catalog/remote wire-format change is claimed.

@@ -452,3 +452,23 @@ impl Provider {
         Ok(reply.bytes)
     }
 }
+
+impl Provider {
+    pub(super) fn check_cancelled(&self) -> Result<(), CloudFailure> {
+        if self.cancel.load(Ordering::Relaxed) { Err(network_error(&self.cancel)) } else { Ok(()) }
+    }
+    /// Cached replay must still give UI cancellation and browser tasks a turn.
+    pub(super) async fn history_turn(&self) -> Result<(), CloudFailure> {
+        self.check_cancelled()?;
+        let promise = js_sys::Promise::new(&mut |resolve, reject| {
+            let result = web_sys::window()
+                .ok_or(JsValue::from_str("browser window unavailable"))
+                .and_then(|window| window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0));
+            if let Err(reason) = result {
+                let _ = reject.call1(&JsValue::UNDEFINED, &reason);
+            }
+        });
+        JsFuture::from(promise).await.map_err(|_| CloudFailure::local("could not schedule browser history replay"))?;
+        self.check_cancelled()
+    }
+}

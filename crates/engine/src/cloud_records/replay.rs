@@ -103,3 +103,78 @@ mod tests {
         }
     }
 }
+
+/// Browser replay retains the oldest verified prefix in a bounded byte window.
+/// No second download is needed, including explicit fresh verification. A longer
+/// tail uses the existing authenticated prefix-checkpoint recovery path.
+pub struct BodyWindow {
+    records: VecDeque<(RecordRef, Vec<u8>)>,
+    bytes: usize,
+    count: u64,
+    limit: usize,
+}
+impl Default for BodyWindow {
+    fn default() -> Self {
+        Self { records: VecDeque::new(), bytes: 0, count: 0, limit: 64 << 20 }
+    }
+}
+impl BodyWindow {
+    pub fn push(&mut self, reference: &RecordRef, bytes: Vec<u8>) -> Result<(), String> {
+        if bytes.len() > 2 << 20
+            || reference.size != bytes.len() as u64
+            || serde_json::to_vec(reference).map_err(|e| e.to_string())?.len() > MAX_REFERENCE_BYTES
+        {
+            return Err("history body/reference exceeds its bounded size".into());
+        }
+        self.count = self.count.checked_add(1).ok_or("history length exhausted")?;
+        self.bytes = self.bytes.checked_add(bytes.len()).ok_or("history byte window exhausted")?;
+        self.records.push_back((reference.clone(), bytes));
+        while self.records.len() > WINDOW_BATCHES as usize || self.bytes > self.limit {
+            let Some((_, bytes)) = self.records.pop_front() else { break };
+            self.bytes = self.bytes.saturating_sub(bytes.len());
+        }
+        if self.records.is_empty() {
+            return Err("history object cannot fit its replay window".into());
+        }
+        Ok(())
+    }
+    pub fn pop_oldest(&mut self) -> Option<(RecordRef, Vec<u8>)> {
+        let value = self.records.pop_back()?;
+        self.bytes = self.bytes.saturating_sub(value.1.len());
+        Some(value)
+    }
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+    pub fn retained(&self) -> u64 {
+        self.records.len() as u64
+    }
+}
+#[cfg(test)]
+mod body_tests {
+    use super::*;
+    #[test]
+    fn byte_and_record_limits_retain_the_oldest_replay_prefix_without_duplicate_reads() {
+        let mut window = BodyWindow { limit: 10, ..Default::default() };
+        for n in 0..100 {
+            window.push(&RecordRef { key: format!("library/{n}"), hash: BlobId(format!("{n:064x}")), size: 3 }, vec![n; 3]).unwrap();
+        }
+        assert_eq!(window.count(), 100);
+        assert_eq!(window.retained(), 3);
+        assert_eq!(window.bytes, 9);
+        for n in (97..100).rev() {
+            let (r, b) = window.pop_oldest().unwrap();
+            assert_eq!(r.key, format!("library/{n}"));
+            assert_eq!(b, vec![n; 3]);
+        }
+        assert_eq!(window.bytes, 0);
+        assert!(window.pop_oldest().is_none());
+        let mut records = BodyWindow::default();
+        for n in 0..10_000 {
+            records.push(&RecordRef { key: format!("library/{n}"), hash: BlobId(format!("{n:064x}")), size: 0 }, Vec::new()).unwrap();
+        }
+        assert_eq!(records.retained(), WINDOW_BATCHES);
+        assert_eq!(records.count(), 10_000);
+        assert!(records.push(&RecordRef { key: "x".into(), hash: BlobId("a".repeat(64)), size: 1 }, vec![]).is_err());
+    }
+}

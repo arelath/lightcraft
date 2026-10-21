@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~14 points and ~340–600 h away
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-21 · **Change:** minor (CR.85: bounded ready-upload publication and fresh owner snapshots; CR.84: shared native quota suspension and throttling; CR.83: qualified AWS upload checksum admission; CR.82: version-bound native media verification receipts; CR.81: operation-scoped B2 authority and immutable metadata reuse; CR.80: certified native remote baselines and pending overlays; CR.79: bounded native conditional-history byte reuse; CR.78: separate incremental sync and durable budgeted verification; CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified; RAW decoding 77%) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-21 · **Change:** minor (CR.86: incremental browser head baselines and complete tip binding; CR.85: bounded ready-upload publication and fresh owner snapshots; CR.84: shared native quota suspension and throttling; CR.83: qualified AWS upload checksum admission; CR.82: version-bound native media verification receipts; CR.81: operation-scoped B2 authority and immutable metadata reuse; CR.80: certified native remote baselines and pending overlays; CR.79: bounded native conditional-history byte reuse; CR.78: separate incremental sync and durable budgeted verification; CR.77: durable verified native history bodies; CR.76: native cloud request and body-byte accounting; CR.75: distinguish B2 account download caps from rejected keys; EOS R5 Mark II CR3 verified; RAW decoding 77%) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 One-page summary of how close LightCraft is to Adobe Lightroom. Agents: read this, then pick work
 from [docs/gaps.md](docs/gaps.md). The full assessment, method and evidence are in
@@ -161,6 +161,7 @@ Ranked toward beta; detail in [docs/roadmap.md](docs/roadmap.md), gaps in [docs/
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-21 | minor | CR.86: Browser head polls reuse a destination/cursor-bound pure remote baseline and bounded verified batch bodies; native and browser baselines bind the complete tip reference. Pending edits, fresh verification and durable acknowledgement remain separate. Cloud is OOS and parity counts are unchanged |
 | 2026-10-21 | minor | CR.85: Four media workers prepare bounded 32-import batches for one per-library publisher using a fresh durable owner snapshot; exact import acknowledgements and control checks remain. Cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.84: Native metadata, media and B2 control share credential-scoped quota suspension and Retry-After; cached reads remain usable and untouched work stays queued. Cloud is OOS and parity counts are unchanged |
 | 2026-10-20 | minor | CR.83: Native qualified AWS uploads can use validated SHA-256 and exact-version admission instead of media readback; B2, unknown, uncertain and fresh-verification paths retain readback. Cloud is OOS and parity counts are unchanged |

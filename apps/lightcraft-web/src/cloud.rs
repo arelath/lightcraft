@@ -128,6 +128,8 @@ pub fn verify_blob(blob: &Blob, bytes: &[u8]) -> Result<(), String> {
 
 #[cfg(target_arch = "wasm32")]
 mod append;
+#[cfg(target_arch = "wasm32")]
+mod baseline;
 pub mod cache;
 pub mod durability;
 #[cfg(target_arch = "wasm32")]

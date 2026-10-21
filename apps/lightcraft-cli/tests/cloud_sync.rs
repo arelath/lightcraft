@@ -908,3 +908,50 @@ fn compacted_history_bootstrap_fetches_each_archive_node_once_at_small_and_large
     }
     assert_eq!(counts[1] - counts[0], 6, "proof traffic grows with tree depth, not history length");
 }
+
+#[test]
+fn certified_baselines_bind_the_complete_tip_before_unchanged_or_pending_publication() {
+    for pending in [false, true] {
+        for field in ["key", "size"] {
+            let f = Fixture::new();
+            let library = f.dir.join("tip-binding");
+            f.import(&library, false);
+            success(&f, &library, &[("cloud.upload", json!({})), ("cloud.sync", json!({}))]);
+            if pending {
+                success(&f, &library, &[("photo.rate", json!({"ids":[1],"rating":4}))]);
+            }
+            let before = saved_catalog(&library).sync_state().unwrap().clone();
+            let mut storage = f.state.lock().unwrap();
+            let mut head: Value = serde_json::from_slice(&storage.objects["/photos/library/catalog/head.json"]).unwrap();
+            if field == "key" {
+                let original = format!("/photos/{}", head["tip"]["key"].as_str().unwrap());
+                let replacement = format!("library/catalog/epochs/2/changes/{}.json", head["tip"]["hash"].as_str().unwrap());
+                assert_ne!(head["tip"]["key"], replacement);
+                let bytes = storage.objects[&original].clone();
+                storage.objects.insert(format!("/photos/{replacement}"), bytes);
+                head["tip"]["key"] = json!(replacement);
+                head["control"]["epoch"] = json!(2);
+                head["control"]["activeMetadataRoot"] = json!("catalog/epochs/2");
+            } else {
+                head["tip"]["size"] = json!(head["tip"]["size"].as_u64().unwrap() + 1);
+            }
+            let checked = lightcraft_engine::cloud_records::Head::decode(&serde_json::to_vec(&head).unwrap()).unwrap();
+            checked.validate_scope("library", &before.library).unwrap();
+            let changed = serde_json::to_vec(&head).unwrap();
+            storage.objects.insert("/photos/library/catalog/head.json".into(), changed.clone());
+            storage.requests.clear();
+            drop(storage);
+            let (output, rows) = f.run(&library, &[("cloud.sync", json!({}))]);
+            assert!(!output.status.success(), "pending={pending}, field={field}: {rows:?}");
+            assert_eq!(saved_catalog(&library).sync_state().unwrap(), &before);
+            let storage = f.state.lock().unwrap();
+            assert_eq!(storage.objects["/photos/library/catalog/head.json"], changed);
+            assert!(
+                storage.requests.iter().all(|(method, _)| method == "GET" || method == "HEAD"),
+                "no unverified parent may be published: {:?}",
+                storage.requests
+            );
+            assert_eq!(storage.signature_errors, 0);
+        }
+    }
+}

@@ -60,15 +60,15 @@ active operations are protected from detail eviction. If all operation slots are
 Destination detail is bounded to 32 identities plus an overflow bucket. The current
 connection-name lookup is limited to 32 bindings, with an explicit truncation flag. No cache,
 publication proof, upload verification or polling policy changes are implied by these
-diagnostics. Native immutable-body reuse is described below; further traffic reductions
-remain tracked by CR.83–CR.86.
+diagnostics. Native immutable-body reuse is described below; traffic-reduction contracts
+for CR.80–CR.86 are described below.
 
 ## Native immutable history cache
 
 Native filesystem libraries reuse verified append operation/checkpoint and receipt-archive
 bodies in `<library>/sync-record-cache-v1/`. The disposable cache is independent of the
 movable original-media cache; moving media storage does not move history bodies. No cache
-binding is serialized into a connection, upload receipt or cloud record. In-memory catalogs retain their existing adapters. Browser append-body reuse is described below. Native conditional-head batch replay uses the operation-local spool described below; browser replay remains CR.86.
+binding is serialized into a connection, upload receipt or cloud record. In-memory catalogs retain their existing adapters. Browser append-body reuse is described below. Native conditional-head batch replay uses the operation-local spool described below; browser replay uses the bounded byte window and remote baseline described under CR.86.
 
 Entries bind the canonical destination (connection ID, bucket, region, prefix and endpoint),
 exact immutable key including its content identity, verified actual byte length and body
@@ -225,14 +225,14 @@ continuing; read-only callers walk successive windows. An acknowledged cursor wi
 pending edits can seed a byte/record-limited prefix without repeating its initial scan.
 Separate recovery walks, CAS retries and publication confirmation can reread records.
 The spool is neither a durable cache nor progress across verification budget slices.
-Browser conditional-head replay still downloads traversal/replay bodies separately (CR.86).
+Browser conditional-head replay also retains verified bodies for forward replay (CR.86), using a bounded in-memory byte window.
 
 ## Native acknowledged remote baselines
 
 Ordinary native conditional-head synchronization separates a certified remote snapshot
 from this device's pending overlay. A successful outcome may cache its pure remote
 `Portable` in `sync-record-cache-v1/`, bound to the complete destination, library, durable
-catalog cursor and generation. These derived entries share the existing 4,096-entry /
+catalog cursor/generation, complete tip key/hash/size and exact checkpoint anchor. These derived entries share the existing 4,096-entry /
 256 MiB cache budget and have a 64 MiB body limit. Loading checks the envelope hash,
 length, binding and state schema. Missing, evicted, damaged, oversized or mismatched
 entries fall back to full verified replay. There is no catalog or remote format change.
@@ -341,7 +341,7 @@ traversal/replay reuses each verified batch within that read, halving its histor
 the spool does not survive a request/byte-budget slice or restart. A head history too large
 for one slice still cannot complete verification until checkpoint maintenance reduces its
 tail. Cross-slice head verification progress remains future work. Native incremental
-baseline separation is implemented; CR.86 covers browser replay. Append verification
+baseline separation and browser incremental replay are implemented (CR.80/CR.86). Append verification
 already resumes at its saved key.
 
 Cached/known-key discovery intentionally delays detection of corruption or disappearance
@@ -352,15 +352,14 @@ the retained remote listing provide their integrity evidence. All newly discover
 is verified before acceptance; no cached identity grants authority or acknowledges pending
 work.
 
-Browser append bodies use one atomic `cloud/append-metadata-v1.json` snapshot, separate
+Browser immutable history bodies use one atomic `cloud/append-metadata-v1.json` snapshot, separate
 from pinned media. It binds the physical bucket root/origin, connection ID, prefix and exact
 key; login tokens and signer URLs are not cache identity. At most 128 bodies of at most
-1 MiB fit in an 8 MiB serialized snapshot (plus its atomic replacement). Oversized records,
+2 MiB fit in an 8 MiB serialized snapshot (plus its atomic replacement). Oversized records,
 cache damage or failed writes fall back to remote verification. Original content/key/schema
 checks run again on reuse; fresh verification bypasses the snapshot. Auxiliary storage
 admission preserves catalog headroom and pinned media. A concurrent stale cache writer can
-lose reusable entries, but cannot accumulate unindexed body files. Browser conditional-head
-cache/replay work remains CR.86.
+lose reusable entries, but cannot accumulate unindexed body files. Browser conditional-head reads share these verified bodies and use the separately bounded baseline described under CR.86.
 
 Checkpoint maintenance now archives exact historical receipt proofs in bounded Merkle forests. Full current-head, tombstone and pending contexts remain live; retired author clocks and published remote objects remain retained. See [cloud-history-compaction-design.md](cloud-history-compaction-design.md) for the implemented native/browser contract and remaining capacity limits.
 
@@ -1213,3 +1212,38 @@ workers in a task may already have issued requests. Four upload tasks remain the
 existing upper bound. Per-task byte progress aggregates the bounded current worker streams independently
 from cumulative request-byte accounting; per-photo queue
 counts remain catalog-derived. No remote schema or publication guarantee changes.
+
+
+### Incremental browser head history and full-tip baselines (CR.86, 2026-10-21)
+
+Ordinary browser head synchronization first reads current authority and validates its
+publication capability. A disposable pure remote baseline is usable only for the same
+destination, library and durable cursor/generation. Local pending effects never seed
+remote reads. Matching authority reuses that baseline without downloading its checkpoint
+or old tail; advancing authority fetches only new batches when its checkpoint anchor and
+complete ancestor reference agree. A changed checkpoint requires certified bootstrap.
+Missing, damaged, obsolete, foreign or ahead cache envelopes fall back to history.
+
+Both native and browser baseline version 2 bind the complete tip key, SHA-256 and size,
+not only its hash. A different reference at the same cursor is an integrity failure,
+including pending publication. Old native version 1 baselines are optimization misses.
+Mutable authority/control checks, epoch fencing, causal certification and legacy intake
+remain authoritative. A cache write cannot remove pending work or replace the browser's
+catalog-save, ACK-file and receipt-finalization durability sequence.
+
+Browser backward traversal now retains verified encoded bodies in an oldest-prefix
+window bounded to 4,096 references and 64 MiB of body bytes (plus bounded reference and
+decoding overhead). Forward replay uses those bytes without a second GET. Longer tails
+use authenticated prefix recovery; cancellation yields to the browser every 64 records.
+The shared disposable metadata index remains bounded to 128 entries and 8 MiB serialized;
+its per-body bound is 2 MiB. All reused bytes undergo complete reference and typed record
+validation. Baselines are at most 64 MiB and auxiliary writes preserve catalog headroom;
+cache storage failure only removes an optimization, while catalog-save failure still
+prevents network publication.
+
+Fresh remote verification and frozen migration reads bypass both baseline and immutable
+body reuse. Ordinary cached sync can therefore delay detecting disappearance or corruption
+of old remote objects until fresh verification. The existing fresh head-verification
+slice limit still applies: tails larger than one request/byte slice cannot complete fresh
+verification until checkpoint maintenance reduces the tail. CR.86 does not add resumable
+fresh head verification across slices. No catalog or remote wire format changed.

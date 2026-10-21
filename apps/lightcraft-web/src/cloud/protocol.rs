@@ -7,7 +7,7 @@ use lightcraft_engine::assets::sha256;
 use lightcraft_engine::catalog::assets::Asset;
 use lightcraft_engine::catalog::replication::{Mutation, Portable, SyncState};
 use lightcraft_engine::cloud_outcome::Publication;
-use lightcraft_engine::cloud_records::replay::{AUTO_CHECKPOINT_BATCHES, Cycle, WINDOW_BATCHES, Window};
+use lightcraft_engine::cloud_records::replay::{AUTO_CHECKPOINT_BATCHES, BodyWindow, Cycle};
 use lightcraft_engine::cloud_records::{Batch, Checkpoint, CheckpointRef, Head, RecordRef};
 use lightcraft_engine::cloud_status::{CloudFailure, FailureKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,7 +18,7 @@ pub(super) struct Remote {
     pub(super) head: Option<(Head, String)>,
     pub(super) state: SyncState,
     tail_records: u64,
-    recovery: Option<(RecordRef, u64)>,
+    pub(super) recovery: Option<(RecordRef, u64)>,
 }
 pub(super) fn encode(value: &impl serde::Serialize, max: usize) -> Result<Vec<u8>, CloudFailure> {
     let bytes = serde_json::to_vec(value).map_err(CloudFailure::from)?;
@@ -31,14 +31,7 @@ pub(super) fn encode(value: &impl serde::Serialize, max: usize) -> Result<Vec<u8
     Ok(bytes)
 }
 pub(super) async fn object(provider: &Provider, reference: &RecordRef, max: usize) -> Result<Vec<u8>, CloudFailure> {
-    let reply = provider.request("GET", &reference.key, None, None, None, max).await?;
-    if reply.status != 200 {
-        return Err(CloudFailure::http("catalog object", reply.status));
-    }
-    if reply.bytes.len() as u64 != reference.size || sha256(&reply.bytes) != reference.hash {
-        return Err(CloudFailure::integrity("remote catalog object failed SHA-256/length verification"));
-    }
-    Ok(reply.bytes)
+    provider.catalog_record(reference, max).await
 }
 pub(super) async fn read(
     provider: &Provider,
@@ -46,67 +39,116 @@ pub(super) async fn read(
     segmented: bool,
     proofs: &mut lightcraft_engine::catalog::replication::archive::Witness,
 ) -> Result<Remote, CloudFailure> {
+    let fresh = provider.fresh_provider();
+    read_cached(&fresh, library, segmented, proofs, None).await
+}
+async fn read_cached(
+    provider: &Provider,
+    library: &str,
+    segmented: bool,
+    proofs: &mut lightcraft_engine::catalog::replication::archive::Witness,
+    baseline: Option<&super::baseline::Baseline>,
+) -> Result<Remote, CloudFailure> {
+    let observed = read_head(provider, library).await?;
+    let Some((head, etag)) = observed else {
+        return Ok(Remote {
+            head: None,
+            state: SyncState::new(library.into(), "remote".into(), provider.connection.id.clone()).map_err(CloudFailure::from)?,
+            tail_records: 0,
+            recovery: None,
+        });
+    };
+    let seed = if !provider.fresh_history { baseline } else { None };
+    if let Some(known) = seed {
+        let state = known.state(provider)?;
+        if head.generation < state.generation {
+            return Err(CloudFailure::integrity("remote catalog rolled back below the acknowledged generation"));
+        }
+        if head.tip.hash == known.tip.hash && (head.tip != known.tip || head.generation != state.generation || head.checkpoint != known.checkpoint) {
+            return Err(CloudFailure::integrity("remote history reference changed at the acknowledged head; local work retained"));
+        }
+        if head.checkpoint == known.checkpoint
+            && let Some(remote) = replay_observed(provider, library, &head, &etag, segmented, proofs, Some(known)).await?
+        {
+            return Ok(remote);
+        }
+    }
+    replay_observed(provider, library, &head, &etag, segmented, proofs, None)
+        .await?
+        .ok_or_else(|| CloudFailure::integrity("checkpoint boundary missing from history"))
+}
+async fn replay_observed(
+    provider: &Provider,
+    library: &str,
+    head: &Head,
+    etag: &str,
+    segmented: bool,
+    proofs: &mut lightcraft_engine::catalog::replication::archive::Witness,
+    baseline: Option<&super::baseline::Baseline>,
+) -> Result<Option<Remote>, CloudFailure> {
     let state = SyncState::new(library.into(), "remote".into(), provider.connection.id.clone()).map_err(CloudFailure::from)?;
-    let mut remote = Remote { head: None, state, tail_records: 0, recovery: None };
-    let Some((head, etag)) = read_head(provider, library).await? else { return Ok(remote) };
+    let mut remote = Remote {
+        head: Some((head.clone(), etag.into())),
+        state,
+        tail_records: head.generation.saturating_sub(head.checkpoint.as_ref().map_or(0, |c| c.generation)),
+        recovery: None,
+    };
     let mut boundary = None;
-    if let Some(reference) = &head.checkpoint {
+    if let Some(known) = baseline {
+        remote.state = known.state(provider)?;
+        boundary = Some(known.tip.clone());
+    } else if let Some(reference) = &head.checkpoint {
         let checkpoint: Checkpoint =
             serde_json::from_slice(&object(provider, &reference.object, 64 << 20).await?).map_err(|_| "malformed checkpoint")?;
         if checkpoint.version != 1
             || checkpoint.generation != reference.generation
             || checkpoint.covers != reference.covers
-            || checkpoint.imports.len() > 100_000
-            || checkpoint.imports.iter().any(|(id, digest)| {
-                !lightcraft_engine::catalog::assets::identifier(id)
-                    || digest.len() != 64
-                    || !digest.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
-            })
+            || !checkpoint.imports.is_empty()
         {
-            return Err("invalid checkpoint generation or import receipts".into());
-        }
-        if !checkpoint.imports.is_empty() {
-            return Err("obsolete pre-release import checkpoint; use a fresh catalog and storage prefix; local data retained".into());
+            return Err(CloudFailure::integrity("invalid or obsolete checkpoint; local data retained"));
         }
         let verified = super::history::certify(provider, &remote.state, &checkpoint.state, proofs).await?;
         remote.state.merge(&verified).map_err(CloudFailure::from)?;
         boundary = Some(reference.covers.clone());
     }
-    let mut first = true;
     loop {
         let mut next = Some(head.tip.clone());
         let mut seen = Cycle::default();
-        let mut window = Window::default();
+        let mut window = BodyWindow::default();
         loop {
             let Some(reference) = next.take() else {
                 if boundary.is_some() {
-                    return Err("checkpoint boundary missing from history".into());
+                    return if baseline.is_some() { Ok(None) } else { Err(CloudFailure::integrity("checkpoint boundary missing from history")) };
                 }
                 break;
             };
-            if boundary.as_ref().is_some_and(|boundary| boundary.hash == reference.hash) {
+            if boundary.as_ref().is_some_and(|b| b.hash == reference.hash) {
                 if boundary.as_ref() != Some(&reference) {
-                    return Err("checkpoint boundary reference changed".into());
+                    return Err(CloudFailure::integrity("history boundary reference changed"));
                 }
                 break;
             }
             seen.visit(&reference.hash)?;
-            window.push(&reference)?;
-            let batch: Batch = serde_json::from_slice(&object(provider, &reference, 2 << 20).await?).map_err(|_| "malformed change batch")?;
+            let bytes = object(provider, &reference, 2 << 20).await?;
+            let batch: Batch = serde_json::from_slice(&bytes).map_err(|_| "malformed change batch")?;
             batch.validate_at(&provider.connection.prefix, library, &reference)?;
             next = batch.parent;
+            window.push(&reference, bytes)?;
+            if window.count() % 64 == 0 {
+                provider.history_turn().await?;
+            }
         }
-        if first {
-            remote.tail_records = window.count();
-            first = false;
-        }
-        let budget = window.count().min(WINDOW_BATCHES);
-        for _ in 0..budget {
-            let reference = window.pop_oldest().ok_or("history ended before its verified prefix")?;
-            let batch: Batch = serde_json::from_slice(&object(provider, &reference, 2 << 20).await?).map_err(|_| "malformed change batch")?;
+        let budget = window.retained();
+        let count = window.count();
+        for index in 0..budget {
+            if index % 64 == 0 {
+                provider.history_turn().await?;
+            }
+            let (reference, bytes) = window.pop_oldest().ok_or("history ended before its verified prefix")?;
+            let batch: Batch = serde_json::from_slice(&bytes).map_err(|_| "malformed spooled change batch")?;
             batch.validate_at(&provider.connection.prefix, library, &reference)?;
             if batch.parent != boundary {
-                return Err("history parent changed during replay".into());
+                return Err(CloudFailure::integrity("history parent changed during replay"));
             }
             boundary = Some(reference);
             for mutation in batch.mutations {
@@ -117,22 +159,23 @@ pub(super) async fn read(
                 }
             }
         }
-        if budget >= window.count() {
+        if budget >= count {
             break;
         }
         if segmented {
+            let minimum = baseline.map_or(head.checkpoint.as_ref().map_or(0, |c| c.generation), |known| known.generation());
             let generation = head
                 .generation
-                .checked_sub(window.count() - budget)
-                .filter(|generation| *generation > 0)
+                .checked_sub(count - budget)
+                .filter(|g| *g > minimum)
                 .ok_or("history generation does not cover its recovery prefix")?;
             remote.recovery = Some((boundary.ok_or("recovery prefix has no boundary")?, generation));
             break;
         }
     }
-    remote.head = Some((head, etag));
-    Ok(remote)
+    Ok(Some(remote))
 }
+
 pub(super) async fn read_head(provider: &Provider, library: &str) -> Result<Option<(Head, String)>, CloudFailure> {
     if b2_enabled(provider).await? {
         let snapshot = provider
@@ -244,7 +287,7 @@ pub(super) async fn dependencies(provider: &Provider, mutations: &[Mutation]) ->
 }
 pub async fn synchronize(
     provider: &Provider,
-    _backend: &Backend,
+    backend: &Backend,
     local: &SyncState,
     checkpoint_requested: bool,
     audit: bool,
@@ -271,9 +314,10 @@ pub async fn synchronize(
     local.validate().map_err(CloudFailure::from)?;
     let mut verified = BTreeSet::new();
     let mut archive_proofs = lightcraft_engine::catalog::replication::archive::Witness::new();
+    let mut baseline = if checkpoint_requested { None } else { super::baseline::Baseline::load(backend, provider, local).await };
     let mut legacy_attempted = false;
     for _ in 0..64 {
-        let mut remote = read(provider, &local.library, true, &mut archive_proofs).await?;
+        let mut remote = read_cached(provider, &local.library, true, &mut archive_proofs, baseline.as_ref()).await?;
         if local.require_existing && remote.head.is_none() {
             return Err("cannot join: remote library is absent; verify its destination and library ID; local work retained".into());
         }
@@ -302,6 +346,9 @@ pub async fn synchronize(
         }
         let checkpoint_needed = checkpoint_requested || remote.tail_records >= AUTO_CHECKPOINT_BATCHES;
         super::history::hydrate(provider, &mut remote.state, local, &mut archive_proofs).await?;
+        if !checkpoint_requested && !provider.fresh_history {
+            baseline = super::baseline::Baseline::observed(provider, &remote);
+        }
         let mut pending = Vec::new();
         for mutation in local.pending.values() {
             if let Some(receipt) = remote.state.received.get(&mutation.revision.id()) {
@@ -319,6 +366,9 @@ pub async fn synchronize(
             let (head, _) = remote.head.ok_or("empty remote library; initial metadata must be queued")?;
             let state = super::history::certify(provider, local, &remote.state.portable(), &mut archive_proofs).await?;
             let position = HeadPosition::new(head.tip.hash.0, head.generation)?;
+            if let Some(known) = &baseline {
+                known.save(backend).await;
+            }
             return Ok(
                 if local.pending.is_empty()
                     && !checkpoint_requested
@@ -336,6 +386,9 @@ pub async fn synchronize(
             let (head, _) = remote.head.ok_or_else(|| CloudFailure::from(blocked.clone()))?;
             let state = super::history::certify(provider, local, &remote.state.portable(), &mut archive_proofs).await?;
             let acknowledged = local.pending.keys().filter(|id| remote.state.received.contains_key(*id)).cloned().collect();
+            if let Some(known) = &baseline {
+                known.save(backend).await;
+            }
             return Ok(Outcome::head_blocked(state, HeadPosition::new(head.tip.hash.0, head.generation)?, acknowledged, blocked));
         }
         let count = pending.len();
